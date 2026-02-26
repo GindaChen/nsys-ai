@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>nsys-tui — Terminal UI for NVIDIA Nsight Systems</title>
+    <title>nsys-ai — Terminal UI for NVIDIA Nsight Systems</title>
     <meta name="description"
         content="Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles from your terminal.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,10 +48,70 @@
             padding: 0 24px;
         }
 
+        /* Top Nav */
+        .top-nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .nav-brand {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            font-size: 1rem;
+            color: var(--text);
+            text-decoration: none;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .nav-links a {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--text);
+        }
+
+        .github-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text) !important;
+            font-size: 0.9rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .github-btn:hover {
+            background: rgba(255, 255, 255, 0.12);
+            border-color: var(--accent);
+        }
+
+        .github-btn svg {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }
+
         /* Hero */
         .hero {
-            padding: 100px 0 80px;
-            text-align: center;
+            padding: 60px 0 80px;
             position: relative;
         }
 
@@ -59,12 +119,25 @@
             content: '';
             position: absolute;
             top: 0;
-            left: 50%;
+            left: 30%;
             transform: translateX(-50%);
             width: 600px;
             height: 600px;
             background: radial-gradient(circle, rgba(56, 189, 248, 0.08) 0%, transparent 70%);
             pointer-events: none;
+        }
+
+        .hero-layout {
+            display: grid;
+            grid-template-columns: 1fr 1.2fr;
+            gap: 48px;
+            align-items: center;
+        }
+
+        .hero-left {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
         }
 
         .hero-badge {
@@ -81,7 +154,7 @@
         }
 
         .hero h1 {
-            font-size: 3.5rem;
+            font-size: 3.2rem;
             font-weight: 800;
             letter-spacing: -0.03em;
             background: linear-gradient(135deg, #fff 0%, var(--accent) 50%, var(--accent2) 100%);
@@ -91,10 +164,14 @@
         }
 
         .hero p {
-            font-size: 1.25rem;
+            font-size: 1.15rem;
             color: var(--text-dim);
-            max-width: 560px;
-            margin: 0 auto 40px;
+            max-width: 480px;
+            margin: 0 0 32px;
+        }
+
+        .hero-right .terminal {
+            font-size: 0.72rem;
         }
 
         .install-box {
@@ -133,10 +210,10 @@
         }
 
         .badges {
-            margin-top: 24px;
+            margin-top: 20px;
             display: flex;
             gap: 8px;
-            justify-content: center;
+            justify-content: flex-start;
             flex-wrap: wrap;
         }
 
@@ -186,23 +263,6 @@
         }
 
         /* Terminal preview */
-        .terminal-section {
-            padding: 60px 0;
-        }
-
-        .terminal-section h2 {
-            font-size: 2rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 12px;
-        }
-
-        .terminal-section .subtitle {
-            text-align: center;
-            color: var(--text-dim);
-            margin-bottom: 40px;
-            font-size: 1rem;
-        }
 
         .terminal {
             background: var(--bg-code);
@@ -451,7 +511,24 @@
         }
 
         /* Responsive */
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            .hero-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .hero-left {
+                align-items: center;
+                text-align: center;
+            }
+
+            .hero p {
+                margin: 0 auto 32px;
+            }
+
+            .badges {
+                justify-content: center;
+            }
+
             .hero h1 {
                 font-size: 2.2rem;
             }
@@ -470,76 +547,96 @@
 
 <body>
 
+    <nav class="top-nav">
+        <a href="/" class="nav-brand">nsys-ai</a>
+        <div class="nav-links">
+            <a href="https://pypi.org/project/nsys-ai/">PyPI</a>
+            <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/01-cli-reference.md">Docs</a>
+            <a href="https://github.com/GindaChen/nsys-ai" class="github-btn">
+                <svg viewBox="0 0 16 16">
+                    <path
+                        d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                </svg>
+                GitHub
+            </a>
+        </div>
+    </nav>
+
     <section class="hero">
         <div class="container">
-            <div class="hero-badge">🔬 v0.1.5 — now on PyPI</div>
-            <h1>nsys-tui</h1>
-            <p>Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles — all from
-                your terminal.</p>
-            <div class="install-box"
-                onclick="navigator.clipboard.writeText('pip install nsys-tui').then(()=>{this.querySelector('.copy').textContent='Copied!'})">
-                <span class="dollar">$</span>
-                <span class="cmd">pip install nsys-tui</span>
-                <span class="copy">click to copy</span>
-            </div>
-            <div class="badges">
-                <a href="https://github.com/GindaChen/nsys-tui/actions"><img
-                        src="https://github.com/GindaChen/nsys-tui/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-                <a href="https://pypi.org/project/nsys-tui/"><img src="https://img.shields.io/pypi/v/nsys-tui"
-                        alt="PyPI"></a>
-                <img src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white" alt="Python">
-                <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT">
-            </div>
-        </div>
-    </section>
-
-    <section class="terminal-section">
-        <div class="container">
-            <h2>See It In Action</h2>
-            <p class="subtitle">Timeline TUI — Perfetto-style GPU kernel visualization in your terminal</p>
-            <div class="terminal">
-                <div class="terminal-bar">
-                    <div class="terminal-dot r"></div>
-                    <div class="terminal-dot y"></div>
-                    <div class="terminal-dot g"></div>
-                    <span class="terminal-title">nsys-tui timeline profile.sqlite --gpu 0 --trim 39 42</span>
+            <div class="hero-layout">
+                <div class="hero-left">
+                    <div class="hero-badge">🔬 v0.1.5 — now on PyPI</div>
+                    <h1>nsys-ai</h1>
+                    <p>Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles —
+                        all from
+                        your terminal.</p>
+                    <div class="install-box"
+                        onclick="navigator.clipboard.writeText('pip install nsys-ai').then(()=>this.querySelector('.copy').textContent='Copied!')">
+                        <span class="dollar">$</span>
+                        <span class="cmd">pip install nsys-ai</span>
+                        <span class="copy">click to copy</span>
+                    </div>
+                    <div class="badges">
+                        <a href="https://github.com/GindaChen/nsys-ai/actions"><img
+                                src="https://github.com/GindaChen/nsys-ai/actions/workflows/ci.yml/badge.svg"
+                                alt="CI"></a>
+                        <a href="https://pypi.org/project/nsys-ai/"><img src="https://img.shields.io/pypi/v/nsys-ai"
+                                alt="PyPI"></a>
+                        <img src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white"
+                            alt="Python">
+                        <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT">
+                    </div>
                 </div>
-                <div class="terminal-body"><span class="t-dim">GPU 0 | 39.0s – 42.0s</span> <span
-                        class="t-dim">39.127s</span> <span class="t-dim">39.532s</span> <span
-                        class="t-dim">39.937s</span>
+                <div class="hero-right">
+                    <div class="terminal">
+                        <div class="terminal-bar">
+                            <div class="terminal-dot r"></div>
+                            <div class="terminal-dot y"></div>
+                            <div class="terminal-dot g"></div>
+                            <span class="terminal-title">nsys-ai timeline profile.sqlite --gpu 0 --trim 39 42</span>
+                        </div>
+                        <div class="terminal-body"><span class="t-dim">GPU 0 | 39.0s – 42.0s</span> <span
+                                class="t-dim">39.127s</span> <span class="t-dim">39.532s</span> <span
+                                class="t-dim">39.937s</span>
 
-                    <span class="t-dim">N0</span> <span class="t-cyan">[───────── Iteration 142
-                        ──────────────────────────────────────────────────]</span>
-                    <span class="t-dim">N1</span> <span class="t-accent">[── forward ──────────]</span> <span
-                        class="t-accent">[── backward ─────────────────────────────────]</span>
-                    <span class="t-dim">N2</span> <span class="t-yellow">[Attn]</span> <span
-                        class="t-yellow">[MLP]</span> <span class="t-yellow">[Norm]</span> <span
-                        class="t-yellow">[Attn▸bwd]</span> <span class="t-yellow">[MLP▸bwd]</span> <span
-                        class="t-yellow">[AllReduce]</span>
-                    <span class="t-dim">───────────────────────────────────────────────────────</span>
-                    <span class="t-green t-bold">S7 </span> <span class="t-green">flash_fwd 26ms</span>
-                    <span class="t-green">████████</span><span class="t-dim">░░</span><span
-                        class="t-green">████████████</span><span class="t-dim">░</span><span
-                        class="t-green">██</span><span class="t-dim">░░░</span><span
-                        class="t-green">████████████████</span><span class="t-dim">░░</span><span
-                        class="t-green">██████████████████████</span>
+                            <span class="t-dim">N0</span> <span class="t-cyan">[───────── Iteration 142
+                                ──────────────────────────────────────────────────]</span>
+                            <span class="t-dim">N1</span> <span class="t-accent">[── forward ──────────]</span> <span
+                                class="t-accent">[── backward ─────────────────────────────────]</span>
+                            <span class="t-dim">N2</span> <span class="t-yellow">[Attn]</span> <span
+                                class="t-yellow">[MLP]</span> <span class="t-yellow">[Norm]</span> <span
+                                class="t-yellow">[Attn▸bwd]</span> <span class="t-yellow">[MLP▸bwd]</span> <span
+                                class="t-yellow">[AllReduce]</span>
+                            <span class="t-dim">───────────────────────────────────────────────────────</span>
+                            <span class="t-green t-bold">S7 </span> <span class="t-green">flash_fwd 26ms</span>
+                            <span class="t-green">████████</span><span class="t-dim">░░</span><span
+                                class="t-green">████████████</span><span class="t-dim">░</span><span
+                                class="t-green">██</span><span class="t-dim">░░░</span><span
+                                class="t-green">████████████████</span><span class="t-dim">░░</span><span
+                                class="t-green">██████████████████████</span>
 
-                    <span class="t-cyan">S12</span> <span class="t-cyan">██</span><span class="t-dim">░░</span><span
-                        class="t-cyan">████</span><span class="t-dim">░░░░░░░░</span><span class="t-cyan">██</span><span
-                        class="t-dim">░░░░░░</span><span class="t-cyan">████████</span><span
-                        class="t-dim">░░░░░░░░░░░░░░░</span><span class="t-cyan">██████</span>
+                            <span class="t-cyan">S12</span> <span class="t-cyan">██</span><span
+                                class="t-dim">░░</span><span class="t-cyan">████</span><span
+                                class="t-dim">░░░░░░░░</span><span class="t-cyan">██</span><span
+                                class="t-dim">░░░░░░</span><span class="t-cyan">████████</span><span
+                                class="t-dim">░░░░░░░░░░░░░░░</span><span class="t-cyan">██████</span>
 
-                    <span class="t-magenta">S15</span> <span class="t-magenta">█████████████████████████</span><span
-                        class="t-dim">░░░░░░░░░</span><span class="t-magenta">███████████████████████████████</span>
+                            <span class="t-magenta">S15</span> <span
+                                class="t-magenta">█████████████████████████</span><span
+                                class="t-dim">░░░░░░░░░</span><span
+                                class="t-magenta">███████████████████████████████</span>
 
-                    <span class="t-dim">───────────────────────────────────────────────────────</span>
-                    <span class="t-accent">39.128s→39.154s</span> │ <span class="t-green">26.2ms [S7]</span> │ <span
-                        class="t-dim">flash_fwd_splitkv_kernel</span>
+                            <span class="t-dim">───────────────────────────────────────────────────────</span>
+                            <span class="t-accent">39.128s→39.154s</span> │ <span class="t-green">26.2ms [S7]</span> │
+                            <span class="t-dim">flash_fwd_splitkv_kernel</span>
 
-                    <span class="t-dim">└─ 📁 Iteration 142</span>
-                    <span class="t-dim"> └─ 📁 forward</span>
-                    <span class="t-dim"> └─ ▸ Attention</span>
-                    <span class="t-green t-bold"> ▶ flash_fwd_splitkv_kernel 26.2ms</span>
+                            <span class="t-dim">└─ 📁 Iteration 142</span>
+                            <span class="t-dim"> └─ 📁 forward</span>
+                            <span class="t-dim"> └─ ▸ Attention</span>
+                            <span class="t-green t-bold"> ▶ flash_fwd_splitkv_kernel 26.2ms</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -625,29 +722,29 @@
             <h2>📚 Documentation</h2>
             <p class="subtitle">Comprehensive guides for Nsight Systems profiling</p>
             <div class="docs-grid">
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/01-cli-reference.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/01-cli-reference.md" class="doc-link">
                     <span class="doc-num">01</span><span class="doc-title">CLI Reference</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/02-sqlite-schema.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/02-sqlite-schema.md" class="doc-link">
                     <span class="doc-num">02</span><span class="doc-title">SQLite Schema</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/03-nvtx-annotations.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/03-nvtx-annotations.md" class="doc-link">
                     <span class="doc-num">03</span><span class="doc-title">NVTX Annotations</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/04-cuda-trace.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/04-cuda-trace.md" class="doc-link">
                     <span class="doc-num">04</span><span class="doc-title">CUDA Trace</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/05-nccl-tracing.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/05-nccl-tracing.md" class="doc-link">
                     <span class="doc-num">05</span><span class="doc-title">NCCL Tracing</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/06-python-pytorch.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/06-python-pytorch.md" class="doc-link">
                     <span class="doc-num">06</span><span class="doc-title">Python / PyTorch</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/07-container-profiling.md"
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/07-container-profiling.md"
                     class="doc-link">
                     <span class="doc-num">07</span><span class="doc-title">Container Profiling</span>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/blob/main/docs/08-focused-profiling.md" class="doc-link">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/08-focused-profiling.md" class="doc-link">
                     <span class="doc-num">08</span><span class="doc-title">Focused Profiling</span>
                 </a>
             </div>
@@ -663,7 +760,7 @@
                     <p>Interactive browser for the Nsight SQLite schema — tables, foreign keys, example queries, and
                         cross-highlighted concepts. Open right in your browser.</p>
                 </a>
-                <a href="https://github.com/GindaChen/nsys-tui/tree/main/examples" class="showcase-card">
+                <a href="https://github.com/GindaChen/nsys-ai/tree/main/examples" class="showcase-card">
                     <h3>📊 NVTX Stack Visualizations</h3>
                     <p>Pre-built interactive HTML exports showing NVTX call stacks — full trace and single-iteration
                         views with expandable nodes.</p>
@@ -675,8 +772,8 @@
     <footer>
         <div class="container">
             <p>
-                <a href="https://github.com/GindaChen/nsys-tui">GitHub</a> ·
-                <a href="https://pypi.org/project/nsys-tui/">PyPI</a> ·
+                <a href="https://github.com/GindaChen/nsys-ai">GitHub</a> ·
+                <a href="https://pypi.org/project/nsys-ai/">PyPI</a> ·
                 MIT License
             </p>
             <p style="margin-top:8px">Built for GPU performance engineers who live in the terminal.</p>
