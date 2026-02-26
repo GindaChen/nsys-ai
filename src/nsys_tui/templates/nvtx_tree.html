@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NVTX Stack Trace — $GPU_LABEL</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-dim: #8b949e;
+            --accent: #58a6ff;
+            --nvtx: #1f6feb;
+            --kernel: #238636;
+            --kernel-bg: #0d3117;
+            --heat-0: #238636;
+            --heat-25: #6fad3b;
+            --heat-50: #d4a72c;
+            --heat-75: #db6d28;
+            --heat-100: #da3633;
+            --nccl: #d2a8ff;
+            --memcpy: #f97583;
+            --bubble: #f8514966
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0
+        }
+
+        body {
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 13px;
+            background: var(--bg);
+            color: var(--text);
+            padding: 20px;
+            line-height: 1.6
+        }
+
+        h1 {
+            font-size: 16px;
+            color: var(--accent);
+            margin-bottom: 4px;
+            font-weight: 600
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 12px;
+            margin-bottom: 16px
+        }
+
+        /* Stats bar */
+        .stats {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+            padding: 10px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 12px
+        }
+
+        .stats span {
+            color: var(--text-dim)
+        }
+
+        .stats strong {
+            color: var(--text)
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            align-items: center
+        }
+
+        .controls button,
+        .controls select {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-family: inherit
+        }
+
+        .controls button:hover,
+        .controls select:hover {
+            border-color: var(--accent)
+        }
+
+        .controls button.active {
+            border-color: var(--accent);
+            background: #1a2332
+        }
+
+        .controls .sep {
+            width: 1px;
+            height: 20px;
+            background: var(--border);
+            margin: 0 6px
+        }
+
+        /* Tabs */
+        .tab-bar {
+            display: flex;
+            gap: 2px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 12px;
+            font-family: inherit;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px
+        }
+
+        .tab-btn:hover {
+            color: var(--text)
+        }
+
+        .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent)
+        }
+
+        .tab-panel {
+            display: none
+        }
+
+        .tab-panel.active {
+            display: block
+        }
+
+        /* Focus mode — hide all chrome, maximize tab panel */
+        body.focused>h1,
+        body.focused>.subtitle,
+        body.focused>.stats,
+        body.focused>.legend,
+        body.focused>.scope-bar,
+        body.focused>.tab-bar,
+        body.focused>.controls,
+        body.focused>.search {
+            display: none !important
+        }
+
+        body.focused>.tab-panel.active {
+            max-height: 100vh
+        }
+
+        body.focused #sv3Scroll,
+        body.focused #scanV2View>div:first-child {
+            max-height: calc(100vh - 20px) !important
+        }
+
+        .focus-exit {
+            display: none;
+            position: fixed;
+            top: 8px;
+            right: 8px;
+            z-index: 100;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            opacity: 0.6;
+            transition: opacity .2s;
+        }
+
+        .focus-exit:hover {
+            opacity: 1
+        }
+
+        body.focused .focus-exit {
+            display: block
+        }
+
+        /* Search */
+        .search {
+            margin-bottom: 12px
+        }
+
+        .search input {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 10px;
+            border-radius: 4px;
+            width: 300px;
+            font-size: 12px;
+            font-family: inherit
+        }
+
+        .search .regex-toggle {
+            font-size: 11px;
+            color: var(--text);
+            cursor: pointer;
+            margin-left: 8px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 4px 10px;
+            border-radius: 4px;
+            display: inline-block;
+            vertical-align: middle;
+            user-select: none
+        }
+
+        .search .regex-toggle:hover {
+            border-color: var(--accent)
+        }
+
+        .search .regex-toggle.active {
+            color: var(--accent);
+            border-color: var(--accent);
+            background: #1a2332
+        }
+
+        .highlight {
+            background: #463818;
+            border-radius: 2px
+        }
+
+        /* Tree view */
+        .node {
+            margin-left: 20px;
+            border-left: 1px solid var(--border);
+            padding-left: 12px
+        }
+
+        .node-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 0;
+            cursor: pointer;
+            user-select: none
+        }
+
+        .node-header:hover {
+            background: var(--surface);
+            border-radius: 3px
+        }
+
+        .toggle {
+            width: 16px;
+            text-align: center;
+            color: var(--text-dim);
+            flex-shrink: 0
+        }
+
+        .icon {
+            flex-shrink: 0
+        }
+
+        .name {
+            color: var(--text)
+        }
+
+        .nvtx .name {
+            color: var(--accent);
+            font-weight: 500
+        }
+
+        .kernel .name {
+            color: #7ee787
+        }
+
+        .dur {
+            color: var(--text-dim);
+            font-size: 11px;
+            white-space: nowrap
+        }
+
+        .stream {
+            color: #d2a8ff;
+            font-size: 11px
+        }
+
+        .children.collapsed {
+            display: none
+        }
+
+        /* Heat bar */
+        .heat-bar {
+            height: 4px;
+            min-width: 3px;
+            border-radius: 2px;
+            flex-shrink: 0;
+            transition: width .2s ease
+        }
+
+        .pct-label {
+            color: var(--text-dim);
+            font-size: 10px;
+            white-space: nowrap;
+            min-width: 36px;
+            text-align: right
+        }
+
+        /* Legend */
+        .legend {
+            display: none;
+            gap: 12px;
+            margin-bottom: 16px;
+            padding: 8px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 11px;
+            color: var(--text-dim);
+            align-items: center
+        }
+
+        .legend.visible {
+            display: flex
+        }
+
+        .legend-swatch {
+            width: 12px;
+            height: 4px;
+            border-radius: 2px;
+            display: inline-block;
+            margin-right: 4px;
+            vertical-align: middle
+        }
+
+        /* Context menu */
+        .ctx-menu {
+            position: fixed;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 0;
+            z-index: 9999;
+            min-width: 220px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+            font-size: 12px
+        }
+
+        .ctx-menu-item {
+            padding: 6px 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px
+        }
+
+        .ctx-menu-item:hover {
+            background: #1a2332
+        }
+
+        .ctx-menu-sep {
+            height: 1px;
+            background: var(--border);
+            margin: 4px 0
+        }
+
+        /* Kernel-only table */
+        .kernel-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px
+        }
+
+        .kernel-table th {
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 6px 10px;
+            text-align: left;
+            cursor: pointer;
+            user-select: none;
+            color: var(--text-dim)
+        }
+
+        .kernel-table th:hover {
+            color: var(--accent)
+        }
+
+        .kernel-table th.sorted-asc::after {
+            content: ' ▲'
+        }
+
+        .kernel-table th.sorted-desc::after {
+            content: ' ▼'
+        }
+
+        .kernel-table td {
+            padding: 4px 10px;
+            border-bottom: 1px solid #1c2230;
+            white-space: nowrap
+        }
+
+        .kernel-table tr:hover {
+            background: var(--surface)
+        }
+
+        .kernel-table .stream-badge {
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600
+        }
+
+        .stream-compute {
+            background: #0d3117;
+            color: #7ee787
+        }
+
+        .stream-nccl {
+            background: #1a1030;
+            color: #d2a8ff
+        }
+
+        .stream-memcpy {
+            background: #2a1520;
+            color: #f97583
+        }
+
+        /* Scan view */
+        .scan-container {
+            overflow-x: auto;
+            position: relative
+        }
+
+        .scan-row {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            margin-bottom: 2px
+        }
+
+        .scan-label {
+            min-width: 140px;
+            font-size: 11px;
+            color: var(--text-dim);
+            flex-shrink: 0;
+            padding-right: 8px;
+            text-align: right
+        }
+
+        .scan-block {
+            height: 20px;
+            min-width: 8px;
+            border-radius: 2px;
+            cursor: pointer;
+            position: relative;
+            margin: 0 1px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            color: rgba(255, 255, 255, .7);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap
+        }
+
+        .scan-block:hover {
+            outline: 1px solid var(--accent);
+            z-index: 1
+        }
+
+        .scan-block.bubble {
+            background: var(--bubble);
+            border: 1px dashed rgba(248, 81, 73, .3)
+        }
+
+        .scan-crossing {
+            position: absolute;
+            width: 1px;
+            background: rgba(255, 255, 255, .15);
+            top: 0;
+            bottom: 0;
+            z-index: 0
+        }
+
+        /* Scope selector */
+        .scope-bar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+            padding: 8px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 12px
+        }
+
+        .scope-bar select {
+            max-width: 300px
+        }
+
+        /* Aggregation dashboard */
+        .agg-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px
+        }
+
+        .agg-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px
+        }
+
+        .agg-card h3 {
+            font-size: 13px;
+            color: var(--accent);
+            margin-bottom: 8px
+        }
+
+        .bar-chart {
+            display: flex;
+            flex-direction: column;
+            gap: 3px
+        }
+
+        .bar-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px
+        }
+
+        .bar-fill {
+            height: 14px;
+            border-radius: 2px;
+            min-width: 2px;
+            transition: width .3s ease
+        }
+
+        .bar-label {
+            min-width: 100px;
+            text-align: right;
+            color: var(--text-dim);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap
+        }
+
+        .bar-value {
+            min-width: 60px;
+            color: var(--text)
+        }
+
+        /* Multi-stream */
+        .stream-compare {
+            display: flex;
+            flex-direction: column;
+            gap: 4px
+        }
+
+        /* AI sidebar */
+        .ai-sidebar {
+            position: fixed;
+            right: 0;
+            top: 0;
+            width: 380px;
+            height: 100%;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            z-index: 100;
+            display: none;
+            flex-direction: column
+        }
+
+        .ai-sidebar.open {
+            display: flex
+        }
+
+        .ai-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center
+        }
+
+        .ai-header h2 {
+            font-size: 14px;
+            color: var(--accent);
+            margin: 0
+        }
+
+        .ai-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 16px
+        }
+
+        .ai-msg {
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.5
+        }
+
+        .ai-msg.user {
+            background: #1a2332;
+            border: 1px solid var(--border)
+        }
+
+        .ai-msg.assistant {
+            background: #0d3117;
+            border: 1px solid #238636
+        }
+
+        .ai-input-area {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px
+        }
+
+        .ai-input-area input {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 12px
+        }
+
+        .ai-input-area button {
+            background: var(--accent);
+            border: none;
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px
+        }
+
+        /* Pattern badges */
+        .pattern-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-left: 8px
+        }
+
+        .badge-bubble {
+            background: #2a1520;
+            color: var(--memcpy)
+        }
+
+        .badge-anomaly {
+            background: #402010;
+            color: var(--heat-100)
+        }
+
+        .badge-straggler {
+            background: #1a1030;
+            color: var(--nccl)
+        }
+
+        /* Body shift when AI open */
+        body.ai-open {
+            padding-right: 400px
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: fixed;
+            background: #1c2333;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 11px;
+            z-index: 9998;
+            max-width: 400px;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .3)
+        }
+    </style>
+</head>
+
+<body>
+    <h1>NVTX Stack Trace</h1>
+    <div class="subtitle">$GPU_LABEL &nbsp;|&nbsp; Window: $TRIM_LABEL</div>
+    <div class="stats" id="stats"></div>
+
+    <div class="legend" id="legend">
+        <span style="margin-right:8px">Duration heat:</span>
+        <span><span class="legend-swatch" style="background:var(--heat-0)"></span>Fast</span>
+        <span><span class="legend-swatch" style="background:var(--heat-50)"></span>Medium</span>
+        <span><span class="legend-swatch" style="background:var(--heat-100)"></span>Slow</span>
+        <span style="margin-left:12px">Bar width = % of parent</span>
+    </div>
+
+    <!-- Scope selector -->
+    <div class="scope-bar" id="scopeBar" style="display:none">
+        <span>🎯 Scope:</span>
+        <select id="scopeSelect" onchange="applyScope()">
+            <option value="">All regions</option>
+        </select>
+        <button onclick="clearScope()">Clear</button>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchTab('tree')">🌲 Tree</button>
+        <button class="tab-btn" onclick="switchTab('kernels')">⚡ Kernels</button>
+        <button class="tab-btn" onclick="switchTab('scan')">📊 Scan</button>
+        <button class="tab-btn" onclick="switchTab('scanv2')">📐 ScanV2</button>
+        <button class="tab-btn" onclick="switchTab('scanv3')">🌳 ScanV3</button>
+        <button class="tab-btn" onclick="switchTab('streams')">🔀 Streams</button>
+        <button class="tab-btn" onclick="switchTab('aggregate')">📋 Aggregate</button>
+        <button class="tab-btn" onclick="switchTab('patterns')">🔮 Patterns</button>
+        <span style="flex:1"></span>
+        <button class="tab-btn" onclick="toggleFocus()" title="Focus mode (F)">⛶</button>
+    </div>
+    <button class="focus-exit" id="focusExit" onclick="toggleFocus()">Exit Focus (F)</button>
+
+    <!-- Controls -->
+    <div class="controls" id="treeControls">
+        <button onclick="expandAll()">Expand All</button>
+        <button onclick="collapseAll()">Collapse All</button>
+        <button onclick="expandToDepth(2)">Depth 2</button>
+        <button onclick="expandToDepth(4)">Depth 4</button>
+        <div class="sep"></div>
+        <button id="heatToggle" onclick="toggleHeat()">🌡️ Heat</button>
+        <button id="scopeToggle" onclick="toggleScopeBar()">🎯 Scope</button>
+        <button id="demangledToggle" onclick="toggleDemangled()">📛 Demangled</button>
+        <div class="sep"></div>
+        <button onclick="toggleAI()">🤖 AI</button>
+    </div>
+
+    <div class="search" id="searchBar">
+        <input type="text" id="search" placeholder="Path glob: sample_0/**/flash*" oninput="filterTree()">
+        <span class="regex-toggle active" id="regexToggle" onclick="cycleSearchMode()">path</span>
+        <span style="color:var(--text-dim);font-size:10px;margin-left:6px" id="searchHint">glob path:
+            sample_0/**/flash*</span>
+    </div>
+
+    <!-- Tab panels -->
+    <div class="tab-panel active" id="panel-tree">
+        <div class="tree" id="tree"></div>
+    </div>
+    <div class="tab-panel" id="panel-kernels">
+        <div id="kernelView"></div>
+    </div>
+    <div class="tab-panel" id="panel-scan">
+        <div id="scanView"></div>
+    </div>
+    <div class="tab-panel" id="panel-scanv2">
+        <div id="scanV2Controls"></div>
+        <div id="scanV2View"></div>
+    </div>
+    <div class="tab-panel" id="panel-streams">
+        <div id="streamView"></div>
+    </div>
+    <div class="tab-panel" id="panel-aggregate">
+        <div id="aggView"></div>
+    </div>
+    <div class="tab-panel" id="panel-patterns">
+        <div id="patternView"></div>
+    </div>
+
+    <!-- Context menu -->
+    <div class="ctx-menu" id="ctxMenu" style="display:none"></div>
+
+    <!-- AI sidebar -->
+    <div class="ai-sidebar" id="aiSidebar">
+        <div class="ai-header">
+            <h2>🤖 AI Profiler</h2><button onclick="toggleAI()"
+                style="background:transparent;border:none;color:var(--text);cursor:pointer;font-size:16px">✕</button>
+        </div>
+        <div class="ai-messages" id="aiMessages">
+            <div class="ai-msg assistant">I can analyze your GPU profile. Try asking:<br>• "What's the bottleneck?"<br>•
+                "Why is kernel X slow?"<br>• "Compare streams 21 and 56"<br><br><em
+                    style="color:var(--text-dim)">Configure LLM endpoint in settings to enable.</em></div>
+        </div>
+        <div class="ai-input-area">
+            <input type="text" id="aiInput" placeholder="Ask about this profile..."
+                onkeydown="if(event.key==='Enter')sendAI()">
+            <button onclick="sendAI()">Send</button>
+        </div>
+    </div>
+
+    <!-- Tooltip -->
+    <div class="tooltip" id="tooltip" style="display:none"></div>
+
+    <script>
+        const DATA = $DATA;
+        let heatEnabled = false, demangledMode = false, searchMode = 'path', currentTab = 'tree', scopeActive = false, scopedData = null;
+        // searchMode: 'name' (substring), 'regex' (JS regex), 'path' (glob on NVTX path)
+
+        // ══════════════ Utilities ══════════════
+        function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
+        function fmtDur(ms) { return ms >= 1 ? ms.toFixed(1) + 'ms' : (ms * 1000).toFixed(0) + 'μs' }
+        function fmtNs(ns) { return (ns / 1e6).toFixed(3) + 'ms' }
+        function heatColor(h) { if (h <= .25) return 'var(--heat-0)'; if (h <= .5) return 'var(--heat-25)'; if (h <= .75) return 'var(--heat-50)'; if (h <= .9) return 'var(--heat-75)'; return 'var(--heat-100)' }
+        function streamClass(s) { if (s === undefined) return ''; const n = String(s); return n.includes('nccl') ? 'stream-nccl' : 'stream-compute' }
+
+        // ══════════════ Data extraction ══════════════
+        function collectAll(nodes, arr) { arr = arr || []; nodes.forEach(n => { arr.push(n); if (n.children) collectAll(n.children, arr) }); return arr }
+        function collectKernels(nodes) { return collectAll(nodes).filter(n => n.type === 'kernel') }
+        function collectNVTX(nodes) { return collectAll(nodes).filter(n => n.type === 'nvtx') }
+        function collectStreams(nodes) { const k = collectKernels(nodes); const m = {}; k.forEach(e => { const s = e.stream !== undefined ? e.stream : '?'; if (!m[s]) m[s] = []; m[s].push(e) }); return m }
+        function countNodes(nodes) { let nvtx = 0, kern = 0, totalMs = 0; function walk(n) { if (n.type === 'kernel') { kern++; totalMs += n.duration_ms } else nvtx++; (n.children || []).forEach(walk) } nodes.forEach(walk); return { nvtx, kern, totalMs } }
+        function getTopNVTX(nodes, depth) { const r = []; nodes.forEach(n => { if (n.type === 'nvtx') { r.push({ name: n.name, path: n.path, start_ns: n.start_ns, end_ns: n.end_ns, duration_ms: n.duration_ms }); if (depth > 0 && n.children) r.push(...getTopNVTX(n.children, depth - 1)) } }); return r }
+
+        function activeData() { return scopedData || DATA }
+
+        // ══════════════ Tab switching ══════════════
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', b.textContent.includes({ 'tree': 'Tree', 'kernels': 'Kernels', 'scan': 'Scan', 'scanv2': 'ScanV2', 'streams': 'Streams', 'aggregate': 'Aggregate', 'patterns': 'Patterns' }[tab])));
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
+            document.getElementById('treeControls').style.display = tab === 'tree' ? 'flex' : 'none';
+            document.getElementById('searchBar').style.display = (tab === 'tree' || tab === 'kernels') ? 'block' : 'none';
+            if (tab === 'kernels') renderKernelView();
+            if (tab === 'scan') renderScanView();
+            if (tab === 'scanv2') renderScanV2();
+            if (tab === 'streams') renderStreamView();
+            if (tab === 'aggregate') renderAggView();
+            if (tab === 'patterns') renderPatternView();
+        }
+
+        // ══════════════ Tree view ══════════════
+        function renderNode(node, depth) {
+            const hasC = node.children && node.children.length > 0, isK = node.type === 'kernel', cls = isK ? 'kernel' : 'nvtx';
+            const icon = isK ? '⚡' : '📦', toggle = hasC ? '▶' : ' ';
+            const displayName = (demangledMode && isK && node.demangled) ? node.demangled : node.name;
+            const stream = node.stream !== undefined ? '<span class="stream">[stream ' + node.stream + ']</span>' : '';
+            const dur = '<span class="dur">' + fmtDur(node.duration_ms) + '</span>';
+            const heat = node.heat !== undefined ? node.heat : 0, relPct = node.relative_pct !== undefined ? node.relative_pct : 100;
+            const barW = Math.max(3, Math.min(120, relPct * 1.2)), barC = heatColor(heat);
+            const heatBar = '<span class="heat-bar" style="width:' + barW + 'px;background:' + barC + ';display:' + (heatEnabled ? 'inline-block' : 'none') + '" title="' + relPct.toFixed(1) + '% of parent"></span>';
+            const pctLabel = '<span class="pct-label" style="display:' + (heatEnabled ? 'inline' : 'none') + '">' + relPct.toFixed(0) + '%</span>';
+            let h = '<div class="node ' + cls + '" data-depth="' + depth + '" data-name="' + escHtml(node.name) + '" data-demangled="' + escHtml(node.demangled || '') + '" data-path="' + escHtml(node.path || '') + '" data-dur="' + node.duration_ms + '" data-stream="' + (node.stream || '') + '" oncontextmenu="showCtx(event,this)">';
+            h += '<div class="node-header" onclick="toggleNode(this)">';
+            h += '<span class="toggle">' + toggle + '</span><span class="icon">' + icon + '</span>';
+            h += '<span class="name">' + escHtml(displayName) + '</span>' + stream + dur + ' ' + heatBar + pctLabel + '</div>';
+            if (hasC) { h += '<div class="children' + (depth > 1 ? ' collapsed' : '') + '">'; node.children.forEach(c => h += renderNode(c, depth + 1)); h += '</div>' }
+            h += '</div>'; return h;
+        }
+        function toggleNode(hdr) { const c = hdr.nextElementSibling; if (!c || !c.classList.contains('children')) return; c.classList.toggle('collapsed'); hdr.querySelector('.toggle').textContent = c.classList.contains('collapsed') ? '▶' : '▼' }
+        function expandAll() { document.querySelectorAll('.children').forEach(c => { c.classList.remove('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▼' }) }
+        function collapseAll() { document.querySelectorAll('.children').forEach(c => { c.classList.add('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▶' }) }
+        function expandToDepth(mx) { document.querySelectorAll('.node').forEach(n => { const d = parseInt(n.dataset.depth), c = n.querySelector(':scope > .children'); if (!c) return; const t = n.querySelector(':scope > .node-header .toggle'); if (d < mx) { c.classList.remove('collapsed'); t.textContent = '▼' } else { c.classList.add('collapsed'); t.textContent = '▶' } }) }
+        function toggleHeat() { heatEnabled = !heatEnabled; document.getElementById('heatToggle').classList.toggle('active', heatEnabled); document.getElementById('legend').classList.toggle('visible', heatEnabled); document.querySelectorAll('.heat-bar').forEach(b => b.style.display = heatEnabled ? 'inline-block' : 'none'); document.querySelectorAll('.pct-label').forEach(l => l.style.display = heatEnabled ? 'inline' : 'none') }
+        function toggleDemangled() {
+            demangledMode = !demangledMode;
+            document.getElementById('demangledToggle').classList.toggle('active', demangledMode);
+            // Swap names in place without re-rendering the whole tree
+            document.querySelectorAll('#tree .node.kernel').forEach(n => {
+                const nameEl = n.querySelector(':scope > .node-header .name');
+                const short = n.dataset.name, demangled = n.dataset.demangled;
+                if (demangled) nameEl.textContent = demangledMode ? demangled : short;
+            });
+        }
+
+        // ══════════════ Search modes: name / regex / path ══════════════
+        function cycleSearchMode() {
+            const modes = ['name', 'regex', 'path'];
+            const hints = { name: 'substring match', regex: 'JavaScript regex', path: 'glob path: sample_0/**/flash*' };
+            const placeholders = { name: 'Filter by name...', regex: 'Regex pattern...', path: 'Path glob: sample_0/**/flash*' };
+            searchMode = modes[(modes.indexOf(searchMode) + 1) % modes.length];
+            const toggle = document.getElementById('regexToggle');
+            toggle.textContent = searchMode;
+            toggle.classList.toggle('active', searchMode !== 'name');
+            document.getElementById('searchHint').textContent = hints[searchMode];
+            document.getElementById('search').placeholder = placeholders[searchMode];
+            filterTree();
+        }
+        function globToRegex(glob) {
+            // Convert glob pattern to regex: * = one segment, ** = any depth
+            // Path separator is ' > '
+            let parts = glob.split('/');
+            let re = parts.map(p => {
+                if (p === '**') return '(?:.*)';
+                return p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^>]*');
+            }).join(' > ');
+            return new RegExp(re, 'i');
+        }
+        function matchesFilter(name, path, q) {
+            if (!q) return true;
+            if (searchMode === 'name') return name.toLowerCase().includes(q.toLowerCase());
+            if (searchMode === 'regex') { try { return new RegExp(q, 'i').test(name) } catch { return false } }
+            if (searchMode === 'path') { try { return globToRegex(q).test(path || name) } catch { return false } }
+            return false;
+        }
+        function filterTree() {
+            const q = document.getElementById('search').value.trim();
+            document.querySelectorAll('#tree .node').forEach(n => {
+                const nameEl = n.querySelector(':scope > .node-header .name');
+                const text = nameEl.textContent;
+                const path = n.dataset.path || text;
+                if (!q) { n.style.display = ''; nameEl.innerHTML = escHtml(text); return }
+                const match = matchesFilter(text, path, q);
+                if (match) {
+                    n.style.display = '';
+                    if (searchMode === 'name') { const idx = text.toLowerCase().indexOf(q.toLowerCase()); if (idx >= 0) nameEl.innerHTML = escHtml(text.slice(0, idx)) + '<span class="highlight">' + escHtml(text.slice(idx, idx + q.length)) + '</span>' + escHtml(text.slice(idx + q.length)); else nameEl.innerHTML = escHtml(text) }
+                    else { nameEl.innerHTML = escHtml(text) }
+                    let p = n.parentElement; while (p && p.classList.contains('children')) { p.classList.remove('collapsed'); p.previousElementSibling.querySelector('.toggle').textContent = '▼'; p = p.parentElement?.parentElement }
+                } else {
+                    const hasMatch = [...n.querySelectorAll('.node')].some(child => matchesFilter(child.querySelector(':scope > .node-header .name')?.textContent || '', child.dataset.path || '', q));
+                    n.style.display = hasMatch ? '' : 'none';
+                    nameEl.innerHTML = escHtml(text);
+                }
+            });
+        }
+
+        // ══════════════ Context menu ══════════════
+        function showCtx(ev, nodeEl) {
+            ev.preventDefault(); const menu = document.getElementById('ctxMenu');
+            const name = nodeEl.dataset.name, path = nodeEl.dataset.path, dur = nodeEl.dataset.dur, stream = nodeEl.dataset.stream;
+            const isK = nodeEl.classList.contains('kernel');
+            let h = '';
+            h += '<div class="ctx-menu-item" onclick="copyText(\'' + escHtml(name) + '\')">📋 Copy name</div>';
+            if (path) h += '<div class="ctx-menu-item" onclick="copyText(\'' + escHtml(path) + '\')">📋 Copy NVTX path</div>';
+            h += '<div class="ctx-menu-item" onclick="copyText(\'' + name + ' | ' + fmtDur(parseFloat(dur)) + (stream ? ' | stream ' + stream : '') + '\')">📋 Copy info</div>';
+            h += '<div class="ctx-menu-sep"></div>';
+            if (isK) { h += '<div class="ctx-menu-item" onclick="findAllInvocations(\'' + escHtml(name) + '\')">🔍 Find all invocations</div>' }
+            h += '<div class="ctx-menu-item" onclick="filterByName(\'' + escHtml(name) + '\')">🔎 Filter to this</div>';
+            if (isK) h += '<div class="ctx-menu-item" onclick="showInKernelView(\'' + escHtml(name) + '\')">⚡ Show in kernel view</div>';
+            menu.innerHTML = h; menu.style.display = 'block'; menu.style.left = ev.clientX + 'px'; menu.style.top = ev.clientY + 'px';
+            const rect = menu.getBoundingClientRect(); if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
+            if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
+        }
+        document.addEventListener('click', () => document.getElementById('ctxMenu').style.display = 'none');
+        function copyText(t) { navigator.clipboard.writeText(t).catch(() => { }) }
+        function filterByName(n) { document.getElementById('search').value = n; filterTree() }
+        function findAllInvocations(n) { switchTab('kernels'); setTimeout(() => { document.getElementById('search').value = n; renderKernelView() }, 50) }
+        function showInKernelView(n) { switchTab('kernels'); setTimeout(() => { document.getElementById('search').value = n; renderKernelView() }, 50) }
+
+        // ══════════════ NVTX Scoping ══════════════
+        function toggleScopeBar() { const bar = document.getElementById('scopeBar'); const show = bar.style.display === 'none'; bar.style.display = show ? 'flex' : 'none'; document.getElementById('scopeToggle').classList.toggle('active', show); if (show) populateScope() }
+        function populateScope() { const sel = document.getElementById('scopeSelect'); sel.innerHTML = '<option value="">All regions</option>'; const nvtx = getTopNVTX(DATA, 2); nvtx.forEach((n, i) => { sel.innerHTML += '<option value="' + i + '">' + escHtml(n.name) + ' (' + fmtDur(n.duration_ms) + ')</option>' }) }
+        function applyScope() { const sel = document.getElementById('scopeSelect'); const idx = sel.value; if (idx === '') { scopedData = null; scopeActive = false } else { const nvtx = getTopNVTX(DATA, 2); const chosen = nvtx[parseInt(idx)]; scopedData = findSubtree(DATA, chosen.path); scopeActive = true } refreshCurrentView() }
+        function clearScope() { document.getElementById('scopeSelect').value = ''; scopedData = null; scopeActive = false; refreshCurrentView() }
+        function findSubtree(nodes, path) { for (const n of nodes) { if (n.path === path) return n.children || [n]; if (n.children) { const r = findSubtree(n.children, path); if (r) return r } } return null }
+        function refreshCurrentView() { if (currentTab === 'tree') { const s = countNodes(activeData()); document.getElementById('stats').innerHTML = '<span>NVTX: <strong>' + s.nvtx + '</strong></span><span>Kernels: <strong>' + s.kern + '</strong></span><span>Total GPU: <strong>' + s.totalMs.toFixed(1) + 'ms</strong></span>'; let h = ''; activeData().forEach(n => h += renderNode(n, 0)); document.getElementById('tree').innerHTML = h } else switchTab(currentTab) }
+
+        // ══════════════ Kernel-only view ══════════════
+        let kernelSort = { col: 'start_ns', dir: 'asc' };
+        function renderKernelView() {
+            const kernels = collectKernels(activeData()); const q = document.getElementById('search').value.trim().toLowerCase();
+            let filtered = q ? kernels.filter(k => matchesFilter(k.name, k.path, q)) : kernels;
+            filtered.sort((a, b) => { let va = a[kernelSort.col], vb = b[kernelSort.col]; if (typeof va === 'string') return kernelSort.dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va); return kernelSort.dir === 'asc' ? va - vb : vb - va });
+            let h = '<table class="kernel-table"><thead><tr>';
+            ['name', 'start_ns', 'end_ns', 'duration_ms', 'stream', 'path'].forEach(c => {
+                const cls = kernelSort.col === c ? (kernelSort.dir === 'asc' ? 'sorted-asc' : 'sorted-desc') : '';
+                h += '<th class="' + cls + '" onclick="sortKernels(\'' + c + '\')">' + { name: 'Kernel', start_ns: 'Start', end_ns: 'End', duration_ms: 'Duration', stream: 'Stream', path: 'NVTX Path' }[c] + '</th>'
+            });
+            h += '</tr></thead><tbody>';
+            filtered.slice(0, 500).forEach(k => {
+                const sc = k.stream !== undefined ? (String(k.name).toLowerCase().includes('nccl') ? 'stream-nccl' : 'stream-compute') : '';
+                h += '<tr oncontextmenu="showKernelCtx(event,this)" data-name="' + escHtml(k.name) + '" data-path="' + escHtml(k.path || '') + '">';
+                h += '<td style="color:#7ee787">' + escHtml(k.name) + '</td>';
+                h += '<td>' + fmtNs(k.start_ns) + '</td><td>' + fmtNs(k.end_ns) + '</td>';
+                h += '<td>' + fmtDur(k.duration_ms) + '</td>';
+                h += '<td><span class="stream-badge ' + sc + '">' + (k.stream !== undefined ? k.stream : '?') + '</span></td>';
+                h += '<td style="color:var(--text-dim);font-size:11px">' + escHtml(k.path || '') + '</td></tr>'
+            });
+            h += '</tbody></table>';
+            h += '<div style="margin-top:8px;color:var(--text-dim);font-size:11px">Showing ' + Math.min(filtered.length, 500) + ' of ' + filtered.length + ' kernels</div>';
+            document.getElementById('kernelView').innerHTML = h;
+        }
+        function sortKernels(col) { if (kernelSort.col === col) kernelSort.dir = kernelSort.dir === 'asc' ? 'desc' : 'asc'; else { kernelSort.col = col; kernelSort.dir = 'asc' } renderKernelView() }
+        function showKernelCtx(ev, tr) { ev.preventDefault(); const menu = document.getElementById('ctxMenu'); const name = tr.dataset.name, path = tr.dataset.path; menu.innerHTML = '<div class="ctx-menu-item" onclick="copyText(\'' + escHtml(name) + '\')">📋 Copy name</div><div class="ctx-menu-item" onclick="copyText(\'' + escHtml(path) + '\')">📋 Copy path</div><div class="ctx-menu-sep"></div><div class="ctx-menu-item" onclick="findAllInvocations(\'' + escHtml(name) + '\')">🔍 Find all invocations</div>'; menu.style.display = 'block'; menu.style.left = ev.clientX + 'px'; menu.style.top = ev.clientY + 'px' }
+
+        // ══════════════ Scan view (logical event sequence) ══════════════
+        function renderScanView() {
+            const streams = collectStreams(activeData()); const sids = Object.keys(streams).sort((a, b) => a - b);
+            if (!sids.length) { document.getElementById('scanView').innerHTML = '<div style="color:var(--text-dim)">No kernel data for scan view</div>'; return }
+            // Get all events sorted by start
+            const allEvents = []; sids.forEach(s => streams[s].forEach(k => allEvents.push({ ...k, sid: s })));
+            allEvents.sort((a, b) => a.start_ns - b.start_ns);
+            const maxDur = Math.max(...allEvents.map(e => e.duration_ms), 0.001);
+            // Detect bubbles per stream
+            const bubbles = {}; sids.forEach(s => { bubbles[s] = []; const sorted = streams[s].sort((a, b) => a.start_ns - b.start_ns); for (let i = 1; i < sorted.length; i++) { const gap = sorted[i].start_ns - sorted[i - 1].end_ns; if (gap > 0) bubbles[s].push({ start_ns: sorted[i - 1].end_ns, end_ns: sorted[i].start_ns, duration_ms: gap / 1e6, gap: true }) } });
+            // Assign logical positions
+            const eventOrder = allEvents.map(e => e.start_ns);
+            let h = '<div class="scan-container">';
+            sids.forEach(s => {
+                const isNccl = streams[s].some(k => k.name.toLowerCase().includes('nccl'));
+                const events = [...streams[s], ...(bubbles[s] || [])].sort((a, b) => a.start_ns - b.start_ns);
+                h += '<div class="scan-row"><div class="scan-label">Stream ' + s + (isNccl ? ' (NCCL)' : '') + '</div>';
+                events.forEach(e => {
+                    if (e.gap) { const intensity = Math.min(1, e.duration_ms / maxDur); const r = Math.round(200 + 55 * intensity); h += '<div class="scan-block bubble" style="opacity:' + (.3 + .7 * intensity) + '" title="Bubble: ' + fmtDur(e.duration_ms) + '"></div>' }
+                    else { const intensity = Math.min(1, e.duration_ms / maxDur); const color = isNccl ? 'var(--nccl)' : 'var(--kernel)'; const alpha = .3 + .7 * intensity; h += '<div class="scan-block" style="background:' + color + ';opacity:' + alpha + '" title="' + escHtml(e.name) + ' ' + fmtDur(e.duration_ms) + '" onclick="filterByName(\'' + escHtml(e.name) + '\')">' + escHtml(e.name.slice(0, 12)) + '</div>' }
+                });
+                h += '</div>'
+            });
+            h += '</div>';
+            h += '<div style="margin-top:12px;color:var(--text-dim);font-size:11px">Color intensity = relative duration. Red dashed blocks = idle bubbles. Click a block to filter.</div>';
+            document.getElementById('scanView').innerHTML = h;
+        }
+
+        // ══════════════ ScanV2 — Vertical logical event grid ══════════════
+        // Config persists across re-renders
+        const sv2 = {
+            colWidth: 180, heightScale: 5, heightMode: 'log',
+            globalThreshold: 10, streamBubbles: {}, streamThresholds: {},
+            inited: false
+        };
+
+        // Height: logistic curve — short kernels get minimum, longer grow then plateau
+        function sv2Height(dur_ms) {
+            if (sv2.heightMode === 'uniform') return 28;
+            const dur_us = dur_ms * 1000;
+            const MIN_H = 22, MAX_EXTRA = 60;
+            const k = 0.03 * sv2.heightScale;
+            const sig = 1 / (1 + Math.exp(-k * (Math.log1p(dur_us) - 4)));
+            return Math.round(MIN_H + MAX_EXTRA * sig);
+        }
+
+        function renderScanV2Controls(sids, isNccl) {
+            if (sv2.inited && document.getElementById('sv2ColWidth')) return;
+            sids.forEach((s, i) => {
+                if (sv2.streamBubbles[s] === undefined) sv2.streamBubbles[s] = !isNccl[i];
+                if (sv2.streamThresholds[s] === undefined) sv2.streamThresholds[s] = '';
+            });
+            let h = '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 14px;margin-bottom:10px;font-size:11px">';
+            h += '<label style="color:var(--text-dim);display:flex;align-items:center;gap:4px">W <input type="range" id="sv2ColWidth" min="80" max="400" value="' + sv2.colWidth + '" style="width:70px" oninput="sv2.colWidth=+this.value;document.getElementById(\'sv2ColVal\').textContent=this.value;renderScanV2Grid()"><span id="sv2ColVal" style="min-width:22px">' + sv2.colWidth + '</span></label>';
+            h += '<label style="color:var(--text-dim);display:flex;align-items:center;gap:4px">H <input type="range" id="sv2HeightScale" min="1" max="15" value="' + sv2.heightScale + '" style="width:70px" oninput="sv2.heightScale=+this.value;document.getElementById(\'sv2HVal\').textContent=this.value;renderScanV2Grid()"><span id="sv2HVal" style="min-width:14px">' + sv2.heightScale + '</span></label>';
+            h += '<select style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:3px;font-size:11px" onchange="sv2.heightMode=this.value;renderScanV2Grid()">';
+            h += '<option value="log"' + (sv2.heightMode === 'log' ? ' selected' : '') + '>Log</option>';
+            h += '<option value="uniform"' + (sv2.heightMode === 'uniform' ? ' selected' : '') + '>Uniform</option></select>';
+            h += '<span style="color:var(--border)">│</span>';
+            h += '<label style="color:var(--text-dim);display:flex;align-items:center;gap:4px">≥ <input type="number" value="' + sv2.globalThreshold + '" min="0" step="1" style="width:46px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 4px;border-radius:3px;font-size:11px" onchange="sv2.globalThreshold=+this.value;renderScanV2Grid()"> μs</label>';
+            h += '<div style="position:relative;display:inline-block">';
+            h += '<button id="sv2BubBtn" onclick="document.getElementById(\'sv2BubDrop\').classList.toggle(\'visible\')" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px">Streams ▾</button>';
+            h += '<div id="sv2BubDrop" style="display:none;position:absolute;top:100%;left:0;z-index:10;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;min-width:220px;box-shadow:0 4px 12px rgba(0,0,0,.4);margin-top:4px">';
+            sids.forEach((s, i) => {
+                const chk = sv2.streamBubbles[s] ? 'checked' : '', color = isNccl[i] ? 'var(--nccl)' : 'var(--accent)', thV = sv2.streamThresholds[s] || '';
+                h += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0">';
+                h += '<input type="checkbox" ' + chk + ' onchange="sv2.streamBubbles[\'' + s + '\']=this.checked;renderScanV2Grid()">';
+                h += '<span style="color:' + color + ';min-width:60px">S' + s + (isNccl[i] ? ' ⚡' : '') + '</span>';
+                h += '<input type="number" placeholder="μs" value="' + thV + '" min="0" step="1" style="width:46px;background:var(--bg);border:1px solid var(--border);color:var(--text-dim);padding:1px 4px;border-radius:3px;font-size:10px" onchange="sv2.streamThresholds[\'' + s + '\']=this.value?+this.value:\'\';renderScanV2Grid()">';
+                h += '</div>';
+            });
+            h += '</div></div></div>';
+            h += '<style>#sv2BubDrop.visible{display:block!important}</style>';
+            document.getElementById('scanV2Controls').innerHTML = h;
+            document.addEventListener('click', e => { if (!e.target.closest('#sv2BubBtn') && !e.target.closest('#sv2BubDrop')) { const d = document.getElementById('sv2BubDrop'); if (d) d.classList.remove('visible') } });
+            sv2.inited = true;
+        }
+
+        function renderScanV2() {
+            const streams = collectStreams(activeData());
+            const sids = Object.keys(streams).sort((a, b) => a - b);
+            if (!sids.length) { document.getElementById('scanV2View').innerHTML = '<div style="color:var(--text-dim)">No kernel data</div>'; return }
+
+            const isNccl = sids.map(s => streams[s].some(k => k.name.toLowerCase().includes('nccl')));
+            renderScanV2Controls(sids, isNccl);
+            renderScanV2Grid();
+        }
+
+        function renderScanV2Grid() {
+            const streams = collectStreams(activeData());
+            const sids = Object.keys(streams).sort((a, b) => a - b);
+            if (!sids.length) return;
+
+            sids.forEach(s => streams[s].sort((a, b) => a.start_ns - b.start_ns));
+
+            // Collect boundaries
+            const bSet = new Set();
+            sids.forEach(s => streams[s].forEach(k => { bSet.add(k.start_ns); bSet.add(k.end_ns) }));
+            const boundaries = [...bSet].sort((a, b) => a - b);
+
+            const slots = [];
+            for (let i = 0; i < boundaries.length - 1; i++) {
+                slots.push({ start: boundaries[i], end: boundaries[i + 1], dur_ns: boundaries[i + 1] - boundaries[i] });
+            }
+            if (!slots.length) return;
+
+            const maxSlotDur = Math.max(...slots.map(s => s.dur_ns));
+            const isNccl = sids.map(s => streams[s].some(k => k.name.toLowerCase().includes('nccl')));
+
+            // Build cell map with bubble filtering
+            const cellMap = sids.map((s, si) => {
+                const kernels = streams[s];
+                const cells = new Array(slots.length).fill(null);
+                kernels.forEach(k => {
+                    const startSlot = slots.findIndex(sl => sl.start >= k.start_ns);
+                    const endSlot = slots.findIndex(sl => sl.end >= k.end_ns);
+                    if (startSlot < 0 || endSlot < 0) return;
+                    for (let i = startSlot; i <= endSlot; i++) {
+                        cells[i] = { type: 'kernel', kernel: k, spanStart: startSlot, spanLen: endSlot - startSlot + 1 };
+                    }
+                });
+
+                // Bubble detection with threshold filtering
+                const bubblesEnabled = sv2.streamBubbles[s] !== false;
+                const threshold = (sv2.streamThresholds[s] !== '' && sv2.streamThresholds[s] !== undefined)
+                    ? sv2.streamThresholds[s] : sv2.globalThreshold;
+                const thresholdMs = threshold / 1000; // μs to ms
+
+                if (bubblesEnabled) {
+                    let lastKernelEnd = -1;
+                    for (let i = 0; i < cells.length; i++) {
+                        if (cells[i] && cells[i].type === 'kernel') {
+                            if (lastKernelEnd >= 0 && lastKernelEnd < i) {
+                                const bubbleDur = (slots[i - 1].end - slots[lastKernelEnd].start) / 1e6;
+                                if (bubbleDur >= thresholdMs) {
+                                    for (let j = lastKernelEnd; j < i; j++) {
+                                        cells[j] = { type: 'bubble', duration_ms: bubbleDur, spanStart: lastKernelEnd, spanLen: i - lastKernelEnd };
+                                    }
+                                }
+                            }
+                            lastKernelEnd = cells[i].spanStart + cells[i].spanLen;
+                        }
+                    }
+                }
+                return cells;
+            });
+
+            const cw = sv2.colWidth;
+
+            // Per-slot heights
+            const slotHeights = slots.map((sl, idx) => {
+                let maxDur = 0;
+                cellMap.forEach(cells => {
+                    const c = cells[idx];
+                    if (c && c.type === 'kernel' && c.spanStart === idx) maxDur = Math.max(maxDur, c.kernel.duration_ms);
+                    if (c && c.type === 'bubble' && c.spanStart === idx) maxDur = Math.max(maxDur, c.duration_ms);
+                });
+                return sv2Height(maxDur || sl.dur_ns / 1e6);
+            });
+
+            let h = '<div style="overflow:auto;max-height:80vh">';
+            h += '<table style="border-collapse:collapse;font-size:11px;table-layout:fixed">';
+            h += '<thead><tr style="position:sticky;top:0;z-index:2;background:var(--surface)">';
+            h += '<th style="padding:4px 6px;color:var(--text-dim);border-bottom:1px solid var(--border);width:70px">Slot</th>';
+            sids.forEach((s, i) => {
+                const color = isNccl[i] ? 'var(--nccl)' : 'var(--accent)';
+                h += '<th style="padding:4px 6px;text-align:center;color:' + color + ';border-bottom:1px solid var(--border);width:' + cw + 'px" title="Stream ' + s + '">S' + s + (isNccl[i] ? ' \u26a1' : '') + '</th>';
+            });
+            h += '</tr></thead><tbody>';
+            const rendered = sids.map(() => new Set());
+            const numCols = sids.length;
+
+            for (let row = 0; row < slots.length; row++) {
+                const rh = slotHeights[row];
+                h += '<tr style="height:' + rh + 'px">';
+                h += '<td style="padding:0 4px;color:var(--text-dim);text-align:right;font-size:9px;border-right:1px solid var(--border);vertical-align:top;white-space:nowrap">' + fmtNs(slots[row].start) + '</td>';
+
+                for (let col = 0; col < numCols; col++) {
+                    if (rendered[col].has(row)) continue;
+
+                    const cell = cellMap[col][row];
+                    if (!cell) {
+                        h += '<td style="border:1px solid #1c2230;padding:0"></td>';
+                        continue;
+                    }
+
+                    let span = 1;
+                    if (cell.type === 'kernel' || cell.type === 'bubble') {
+                        if (row === cell.spanStart) { span = cell.spanLen; } else { continue; }
+                        for (let r = row; r < row + span; r++) rendered[col].add(r);
+                    }
+                    let totalH = 0;
+                    for (let r = row; r < row + span; r++) totalH += slotHeights[r];
+
+                    if (cell.type === 'kernel') {
+                        const k = cell.kernel;
+                        const durI = Math.min(1, k.duration_ms / (maxSlotDur / 1e6));
+                        const bg = isNccl[col] ? 'rgba(210,168,255,' + (.15 + .6 * durI) + ')' : 'rgba(35,134,54,' + (.15 + .6 * durI) + ')';
+                        const brc = isNccl[col] ? 'rgba(210,168,255,0.4)' : 'rgba(126,231,135,0.4)';
+                        const tc = isNccl[col] ? 'var(--nccl)' : '#7ee787';
+                        h += '<td rowspan="' + span + '" style="border:1px solid ' + brc + ';background:' + bg + ';padding:2px 5px;vertical-align:top;cursor:pointer;max-width:' + cw + 'px;overflow:hidden;height:' + totalH + 'px" ';
+                        h += 'title="' + escHtml(k.name) + '\n' + fmtDur(k.duration_ms) + '" onclick="filterByName(\'' + escHtml(k.name) + '\')">';
+                        h += '<div style="display:flex;gap:4px;align-items:baseline;line-height:1.2"><span style="color:var(--text-dim);font-size:9px;white-space:nowrap;min-width:42px;text-align:right;flex-shrink:0">' + fmtDur(k.duration_ms) + '</span><span style="color:' + tc + ';font-weight:500;overflow:hidden;text-overflow:ellipsis">' + escHtml(k.name) + '</span></div></td>';
+                    } else if (cell.type === 'bubble') {
+                        const alpha = Math.min(0.8, 0.15 + 0.65 * Math.min(1, cell.duration_ms / (maxSlotDur / 1e6)));
+                        h += '<td rowspan="' + span + '" style="border:1px dashed rgba(248,81,73,0.3);background:rgba(248,81,73,' + alpha.toFixed(2) + ');padding:2px 5px;vertical-align:middle;text-align:center;max-width:' + cw + 'px;height:' + totalH + 'px"><span style="color:var(--memcpy);font-size:9px">\ud83d\udca8 ' + fmtDur(cell.duration_ms) + '</span></td>';
+                    }
+                }
+                h += '</tr>';
+            }
+
+            h += '</tbody></table></div>';
+            h += '<div style="margin-top:8px;color:var(--text-dim);font-size:10px">Height = logistic(duration). <b>Streams \u25be</b> for per-stream bubble config.</div>';
+            document.getElementById('scanV2View').innerHTML = h;
+        }
+
+        // ══════════════ Multi-stream comparison ══════════════
+        function renderStreamView() {
+            const streams = collectStreams(activeData()); const sids = Object.keys(streams).sort((a, b) => a - b);
+            if (sids.length < 1) { document.getElementById('streamView').innerHTML = '<div style="color:var(--text-dim)">No streams found</div>'; return }
+            let h = '<div class="agg-grid">';
+            sids.forEach(s => {
+                const kernels = streams[s].sort((a, b) => a.start_ns - b.start_ns);
+                const totalMs = kernels.reduce((a, k) => a + k.duration_ms, 0);
+                const gaps = []; for (let i = 1; i < kernels.length; i++) { const g = (kernels[i].start_ns - kernels[i - 1].end_ns) / 1e6; if (g > 0) gaps.push(g) }
+                const totalIdle = gaps.reduce((a, g) => a + g, 0);
+                const isNccl = kernels.some(k => k.name.toLowerCase().includes('nccl'));
+                h += '<div class="agg-card"><h3>Stream ' + s + (isNccl ? ' (NCCL)' : '') + '</h3>';
+                h += '<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">' + kernels.length + ' kernels | ' + totalMs.toFixed(1) + 'ms active | ' + totalIdle.toFixed(1) + 'ms idle</div>';
+                // Top 5 kernels bar chart
+                const grouped = {}; kernels.forEach(k => { if (!grouped[k.name]) grouped[k.name] = 0; grouped[k.name] += k.duration_ms });
+                const top = Object.entries(grouped).sort((a, b) => b[1] - a[1]).slice(0, 5);
+                const topMax = top[0] ? top[0][1] : 1;
+                h += '<div class="bar-chart">';
+                top.forEach(([name, ms]) => { const w = Math.round(100 * ms / topMax); h += '<div class="bar-row"><div class="bar-label" title="' + escHtml(name) + '">' + escHtml(name.slice(0, 20)) + '</div><div class="bar-fill" style="width:' + w + '%;background:' + (isNccl ? 'var(--nccl)' : 'var(--kernel)') + '"></div><div class="bar-value">' + ms.toFixed(1) + 'ms</div></div>' });
+                h += '</div></div>'
+            });
+            // Stall detection
+            h += '</div>';
+            h += '<div style="margin-top:12px;color:var(--text-dim);font-size:11px">Each card shows one stream with its top kernels by total duration.</div>';
+            document.getElementById('streamView').innerHTML = h;
+        }
+
+        // ══════════════ Kernel aggregation dashboard ══════════════
+        function renderAggView() {
+            const kernels = collectKernels(activeData()); if (!kernels.length) { document.getElementById('aggView').innerHTML = '<div style="color:var(--text-dim)">No kernels</div>'; return }
+            const grouped = {}; kernels.forEach(k => { if (!grouped[k.name]) grouped[k.name] = { count: 0, total: 0, min: Infinity, max: 0, streams: new Set() }; const g = grouped[k.name]; g.count++; g.total += k.duration_ms; g.min = Math.min(g.min, k.duration_ms); g.max = Math.max(g.max, k.duration_ms); if (k.stream !== undefined) g.streams.add(k.stream) });
+            const totalGpu = kernels.reduce((a, k) => a + k.duration_ms, 0);
+            const sorted = Object.entries(grouped).sort((a, b) => b[1].total - a[1].total);
+            const topMax = sorted[0] ? sorted[0][1].total : 1;
+            let h = '<div style="margin-bottom:12px;color:var(--text-dim);font-size:12px">Total GPU time: <strong style="color:var(--text)">' + totalGpu.toFixed(1) + 'ms</strong> across <strong style="color:var(--text)">' + kernels.length + '</strong> kernel invocations (<strong style="color:var(--text)">' + sorted.length + '</strong> unique)</div>';
+            h += '<table class="kernel-table"><thead><tr><th>Kernel</th><th>Count</th><th>Total</th><th>Avg</th><th>Min</th><th>Max</th><th>% GPU</th><th style="width:200px">Distribution</th></tr></thead><tbody>';
+            sorted.forEach(([name, g]) => {
+                const pct = (100 * g.total / totalGpu).toFixed(1); const avg = g.total / g.count; const barW = Math.round(100 * g.total / topMax);
+                h += '<tr><td style="color:#7ee787">' + escHtml(name) + '</td><td>' + g.count + '</td><td>' + g.total.toFixed(1) + 'ms</td><td>' + avg.toFixed(2) + 'ms</td><td>' + g.min.toFixed(2) + 'ms</td><td>' + g.max.toFixed(2) + 'ms</td><td>' + pct + '%</td><td><div class="bar-fill" style="width:' + barW + '%;background:var(--accent);height:10px"></div></td></tr>'
+            });
+            h += '</tbody></table>';
+            document.getElementById('aggView').innerHTML = h;
+        }
+
+        // ══════════════ Pattern detection engine ══════════════
+        function renderPatternView() {
+            const kernels = collectKernels(activeData()); const streams = collectStreams(activeData());
+            if (!kernels.length) { document.getElementById('patternView').innerHTML = '<div style="color:var(--text-dim)">No data for pattern detection</div>'; return }
+            let h = '';
+            // 1. Bubble detection
+            const sids = Object.keys(streams); let allBubbles = [];
+            sids.forEach(s => { const sk = streams[s].sort((a, b) => a.start_ns - b.start_ns); for (let i = 1; i < sk.length; i++) { const gapNs = sk[i].start_ns - sk[i - 1].end_ns; if (gapNs > 100000) { allBubbles.push({ stream: s, gapMs: gapNs / 1e6, afterKernel: sk[i - 1].name, beforeKernel: sk[i].name }) } } });
+            allBubbles.sort((a, b) => b.gapMs - a.gapMs);
+            h += '<div class="agg-card" style="margin-bottom:16px"><h3>💨 Idle Bubbles <span class="pattern-badge badge-bubble">' + allBubbles.length + ' found</span></h3>';
+            if (allBubbles.length) {
+                h += '<table class="kernel-table"><thead><tr><th>Stream</th><th>Gap</th><th>After</th><th>Before</th></tr></thead><tbody>';
+                allBubbles.slice(0, 20).forEach(b => { h += '<tr><td>' + b.stream + '</td><td>' + b.gapMs.toFixed(2) + 'ms</td><td style="color:#7ee787">' + escHtml(b.afterKernel) + '</td><td style="color:#7ee787">' + escHtml(b.beforeKernel) + '</td></tr>' });
+                h += '</tbody></table>'
+            } else h += '<div style="color:var(--text-dim)">No significant idle gaps detected.</div>';
+            h += '</div>';
+            // 2. Anomaly detection
+            const grouped = {}; kernels.forEach(k => { if (!grouped[k.name]) grouped[k.name] = []; grouped[k.name].push(k.duration_ms) });
+            const anomalies = []; Object.entries(grouped).forEach(([name, durs]) => { if (durs.length < 3) return; const avg = durs.reduce((a, v) => a + v, 0) / durs.length; durs.forEach((d, i) => { if (d > avg * 10) anomalies.push({ name, duration_ms: d, avg, ratio: (d / avg).toFixed(1) }) }) });
+            anomalies.sort((a, b) => b.ratio - a.ratio);
+            h += '<div class="agg-card" style="margin-bottom:16px"><h3>⚠️ Anomalous Kernels <span class="pattern-badge badge-anomaly">' + anomalies.length + ' found</span></h3>';
+            if (anomalies.length) {
+                h += '<table class="kernel-table"><thead><tr><th>Kernel</th><th>Duration</th><th>Avg</th><th>Ratio</th></tr></thead><tbody>';
+                anomalies.slice(0, 10).forEach(a => { h += '<tr><td style="color:#7ee787">' + escHtml(a.name) + '</td><td>' + fmtDur(a.duration_ms) + '</td><td>' + fmtDur(a.avg) + '</td><td style="color:var(--heat-100)">' + a.ratio + 'x</td></tr>' });
+                h += '</tbody></table>'
+            } else h += '<div style="color:var(--text-dim)">No anomalous durations found.</div>';
+            h += '</div>';
+            // 3. Straggler detection
+            const streamTotals = Object.entries(streams).map(([s, ks]) => ({ stream: s, total: ks.reduce((a, k) => a + k.duration_ms, 0), count: ks.length })).sort((a, b) => b.total - a.total);
+            h += '<div class="agg-card"><h3>🐢 Stream Load Balance <span class="pattern-badge badge-straggler">' + streamTotals.length + ' streams</span></h3>';
+            if (streamTotals.length > 1) {
+                const maxT = streamTotals[0].total; h += '<div class="bar-chart">';
+                streamTotals.forEach(s => { const w = Math.round(100 * s.total / maxT); const isMax = s.total === maxT; h += '<div class="bar-row"><div class="bar-label">Stream ' + s.stream + '</div><div class="bar-fill" style="width:' + w + '%;background:' + (isMax ? 'var(--heat-100)' : 'var(--accent)') + '"></div><div class="bar-value">' + s.total.toFixed(1) + 'ms (' + s.count + ')</div></div>' });
+                h += '</div>'
+            } else h += '<div style="color:var(--text-dim)">Only one stream detected.</div>';
+            h += '</div>';
+            document.getElementById('patternView').innerHTML = h;
+        }
+
+        // ══════════════ AI sidebar ══════════════
+        function toggleFocus() { document.body.classList.toggle('focused') }
+        document.addEventListener('keydown', e => { if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) { e.preventDefault(); toggleFocus() } });
+        function toggleAI() { const sb = document.getElementById('aiSidebar'); const open = !sb.classList.contains('open'); sb.classList.toggle('open', open); document.body.classList.toggle('ai-open', open) }
+        function sendAI() {
+            const input = document.getElementById('aiInput'); const q = input.value.trim(); if (!q) return;
+            const msgs = document.getElementById('aiMessages'); msgs.innerHTML += '<div class="ai-msg user">' + escHtml(q) + '</div>'; input.value = '';
+            // Build context
+            const stats = countNodes(activeData()); const kernels = collectKernels(activeData());
+            const topK = {}; kernels.forEach(k => { if (!topK[k.name]) topK[k.name] = 0; topK[k.name] += k.duration_ms });
+            const top5 = Object.entries(topK).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, ms]) => n + ': ' + ms.toFixed(1) + 'ms').join(', ');
+            // Local analysis (no LLM needed)
+            let response = '';
+            if (q.toLowerCase().includes('bottleneck')) { response = 'Based on this profile:<br>• <strong>' + stats.kern + '</strong> kernels, <strong>' + stats.totalMs.toFixed(1) + 'ms</strong> total GPU time<br>• Top kernels: ' + top5 + '<br><br>The top kernel accounts for <strong>' + ((Object.values(topK).sort((a, b) => b - a)[0] || 0) / stats.totalMs * 100).toFixed(0) + '%</strong> of GPU time.' }
+            else if (q.toLowerCase().includes('stream')) { const st = collectStreams(activeData()); const info = Object.entries(st).map(([s, ks]) => 'Stream ' + s + ': ' + ks.length + ' kernels, ' + ks.reduce((a, k) => a + k.duration_ms, 0).toFixed(1) + 'ms').join('<br>'); response = 'Stream breakdown:<br>' + info }
+            else { response = 'Profile summary:<br>• ' + stats.nvtx + ' NVTX regions, ' + stats.kern + ' kernels<br>• Total GPU: ' + stats.totalMs.toFixed(1) + 'ms<br>• Top kernels: ' + top5 + '<br><br><em>For deeper analysis, configure an LLM endpoint.</em>' }
+            msgs.innerHTML += '<div class="ai-msg assistant">' + response + '</div>'; msgs.scrollTop = msgs.scrollHeight;
+        }
+
+        // ══════════════ Initial render ══════════════
+        const stats = countNodes(DATA);
+        document.getElementById('stats').innerHTML = '<span>NVTX: <strong>' + stats.nvtx + '</strong></span><span>Kernels: <strong>' + stats.kern + '</strong></span><span>Total GPU: <strong>' + stats.totalMs.toFixed(1) + 'ms</strong></span>';
+        let html = ''; DATA.forEach(n => html += renderNode(n, 0)); document.getElementById('tree').innerHTML = html;
+    </script>
+</body>
+
+</html>

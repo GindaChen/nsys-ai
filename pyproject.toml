@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nsys-tui"
+version = "0.1.0"
+description = "Terminal UI for NVIDIA Nsight Systems profiles — timeline viewer, kernel navigator, NVTX hierarchy"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "GindaChen"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+]
+
+[project.scripts]
+nsys-tui = "nsys_tui.__main__:main"
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.20.0"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nsys_tui = ["templates/*.html"]
