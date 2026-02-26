@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nsys-tui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal UI for NVIDIA Nsight Systems profiles — timeline viewer, kernel navigator, NVTX hierarchy"
 readme = "README.md"
 license = {text = "MIT"}
