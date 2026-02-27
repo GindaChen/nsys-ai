@@ -4,9 +4,108 @@ profile.py — Open and query Nsight Systems SQLite databases.
 Provides a thin wrapper around the SQLite export with typed accessors
 for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
+import os
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, List
+
+
+class NsightSchema:
+    """
+    Lightweight schema/metadata helper for Nsight Systems SQLite exports.
+
+    Detects available tables, attempts to infer the Nsight Systems version,
+    and exposes canonical table choices (e.g., kernel activity table).
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.tables: List[str] = [
+            r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        ]
+        self.version: Optional[str] = self._detect_version()
+        self.kernel_table: Optional[str] = self._detect_kernel_table()
+
+    # ── Version detection ──────────────────────────────────────────────
+
+    def _read_kv_table(self, table: str) -> Dict[str, str]:
+        """
+        Best-effort reader for META_DATA_* style tables which may use
+        slightly different column names across Nsight versions.
+        """
+        if table not in self.tables:
+            return {}
+
+        cur = self._conn.execute(f"PRAGMA table_info({table})")
+        cols = [row[1] for row in cur.fetchall()]  # 1 = name
+        key_col = None
+        val_col = None
+
+        # Common patterns seen in Nsight exports
+        for cand in ("key", "Key", "NAME", "Name"):
+            if cand in cols:
+                key_col = cand
+                break
+        for cand in ("value", "Value", "VAL", "Val"):
+            if cand in cols:
+                val_col = cand
+                break
+
+        if not key_col or not val_col:
+            return {}
+
+        kv: Dict[str, str] = {}
+        cur = self._conn.execute(
+            f"SELECT {key_col}, {val_col} FROM {table}"
+        )
+        for k, v in cur.fetchall():
+            if k is not None and v is not None:
+                kv[str(k)] = str(v)
+        return kv
+
+    def _detect_version(self) -> Optional[str]:
+        """Try to infer Nsight Systems version from META_DATA tables."""
+        meta: Dict[str, str] = {}
+        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
+            meta.update(self._read_kv_table(table))
+
+        # Heuristic keys that might carry version information
+        for key in meta:
+            lk = key.lower()
+            if "nsight systems version" in lk or "exporter version" in lk:
+                return meta[key]
+        # Fallback: sometimes the value itself contains 'Nsight Systems X.Y'
+        for val in meta.values():
+            if "Nsight Systems" in val:
+                return val
+        return None
+
+    # ── Table detection ────────────────────────────────────────────────
+
+    def _detect_kernel_table(self) -> Optional[str]:
+        """
+        Pick an appropriate kernel activity table, if present.
+
+        Today this is usually CUPTI_ACTIVITY_KIND_KERNEL, but we keep
+        the detection logic resilient to future renames.
+        """
+        # Preferred legacy/known name
+        if "CUPTI_ACTIVITY_KIND_KERNEL" in self.tables:
+            return "CUPTI_ACTIVITY_KIND_KERNEL"
+
+        # Fallback: any non-enum table with KERNEL in the name
+        candidates = [
+            t for t in self.tables
+            if "KERNEL" in t.upper() and not t.upper().startswith("ENUM_")
+        ]
+        if candidates:
+            # Deterministic order
+            candidates.sort()
+            return candidates[0]
+
+        return None
 
 
 @dataclass
@@ -40,24 +139,38 @@ class Profile:
         self.path = path
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
+        self.schema = NsightSchema(self.conn)
         self.meta = self._discover()
 
     def _discover(self) -> ProfileMeta:
-        tables = [r[0] for r in self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")]
+        tables = self.schema.tables
+
+        if not self.schema.kernel_table:
+            ver_msg = f" (Nsight version: {self.schema.version})" if self.schema.version else ""
+            raise RuntimeError(
+                "This profile does not contain GPU kernel activity "
+                f"(no suitable KERNEL table found){ver_msg}. "
+                "It may have been captured without CUDA kernel tracing, "
+                "or exported with a schema layout this version of nsys-ai "
+                "does not yet understand."
+            )
+
+        kernel_table = self.schema.kernel_table
 
         devices = [r[0] for r in self.conn.execute(
-            "SELECT DISTINCT deviceId FROM CUPTI_ACTIVITY_KIND_KERNEL ORDER BY deviceId")]
+            f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId")]
 
         streams: dict[int, list[int]] = {}
         for r in self.conn.execute(
-            "SELECT DISTINCT deviceId, streamId FROM CUPTI_ACTIVITY_KIND_KERNEL ORDER BY deviceId, streamId"):
+            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} "
+            "ORDER BY deviceId, streamId"):
             streams.setdefault(r[0], []).append(r[1])
 
         tr = self.conn.execute(
-            "SELECT MIN(start), MAX([end]) FROM CUPTI_ACTIVITY_KIND_KERNEL").fetchone()
+            f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
 
-        kc = self.conn.execute("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL").fetchone()[0]
+        kc = self.conn.execute(
+            f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
         nc = self.conn.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0] if "NVTX_EVENTS" in tables else 0
 
         return ProfileMeta(
@@ -73,7 +186,7 @@ class Profile:
         # Kernel counts per device
         kcounts = {}
         for r in self.conn.execute(
-            "SELECT deviceId, COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL GROUP BY deviceId"):
+            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"):
             kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
@@ -103,9 +216,10 @@ class Profile:
         """All kernels on a device, optionally trimmed to a time window."""
         sql = """
             SELECT k.start, k.[end], k.streamId, k.correlationId, s.value as name
-            FROM CUPTI_ACTIVITY_KIND_KERNEL k
+            FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
             WHERE k.deviceId = ?"""
+        sql = sql.format(kernel_table=self.schema.kernel_table)
         params: list = [device]
         if trim:
             sql += " AND k.start >= ? AND k.[end] <= ?"
@@ -121,20 +235,20 @@ class Profile:
                 for r in self.conn.execute("""
                     SELECT k.start, k.[end], k.streamId, k.correlationId,
                            s.value as name, d.value as demangled
-                    FROM CUPTI_ACTIVITY_KIND_KERNEL k
+                    FROM {kernel_table} k
                     JOIN StringIds s ON k.shortName = s.id
                     JOIN StringIds d ON k.demangledName = d.id
                     WHERE k.deviceId = ?  ORDER BY k.start
-                """, (device,))}
+                """.format(kernel_table=self.schema.kernel_table), (device,))}
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
         return {r[0] for r in self.conn.execute("""
             SELECT DISTINCT r.globalTid
             FROM CUPTI_ACTIVITY_KIND_RUNTIME r
-            JOIN CUPTI_ACTIVITY_KIND_KERNEL k ON r.correlationId = k.correlationId
+            JOIN {kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
-        """, (device,))}
+        """.format(kernel_table=self.schema.kernel_table), (device,))}
 
     def runtime_index(self, threads: set[int],
                       window: tuple[int, int]) -> dict[int, list]:
@@ -164,4 +278,13 @@ class Profile:
 
 def open(path: str) -> Profile:
     """Open an Nsight Systems SQLite database."""
+    # Heuristic: if the given path is an empty .sqlite stub but a sibling
+    # file without the .sqlite suffix exists and is a non-empty SQLite DB,
+    # prefer the sibling. This helps when users accidentally point nsys-ai
+    # at a placeholder file instead of the real Nsight export.
+    if path.endswith(".sqlite") and not os.path.getsize(path):
+        base = path[:-7]
+        if os.path.exists(base) and os.path.getsize(base) > 0:
+            path = base
+
     return Profile(path)

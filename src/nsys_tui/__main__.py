@@ -150,165 +150,171 @@ def main():
     # Import here to avoid slow startup for --help
     from . import profile as _profile
 
-    if args.command == "info":
-        prof = _profile.open(args.profile)
-        m = prof.meta
-        print(f"Profile: {args.profile}")
-        print(f"  GPUs: {m.devices}")
-        print(f"  Kernels: {m.kernel_count}  |  NVTX: {m.nvtx_count}")
-        print(f"  Time: {m.time_range[0]/1e9:.3f}s – {m.time_range[1]/1e9:.3f}s")
-        print()
-        for dev, info in m.gpu_info.items():
-            print(f"  GPU {dev}: {info.name} | PCI={info.pci_bus} | "
-                  f"SMs={info.sm_count} | Mem={info.memory_bytes/1e9:.0f}GB | "
-                  f"Kernels={info.kernel_count} | Streams={info.streams}")
-        prof.close()
-
-    elif args.command == "summary":
-        from .summary import gpu_summary, format_text, auto_commentary
-        prof = _profile.open(args.profile)
-        trim = _parse_trim(args)
-        gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
-        for gpu in gpus:
-            s = gpu_summary(prof, gpu, trim)
-            print(format_text(s))
+    try:
+        if args.command == "info":
+            prof = _profile.open(args.profile)
+            m = prof.meta
+            print(f"Profile: {args.profile}")
+            if getattr(prof, "schema", None) and getattr(prof.schema, "version", None):
+                print(f"  Nsight version (heuristic): {prof.schema.version}")
+            print(f"  GPUs: {m.devices}")
+            print(f"  Kernels: {m.kernel_count}  |  NVTX: {m.nvtx_count}")
+            print(f"  Time: {m.time_range[0]/1e9:.3f}s – {m.time_range[1]/1e9:.3f}s")
             print()
-            print(auto_commentary(s))
-            print()
-        prof.close()
+            for dev, info in m.gpu_info.items():
+                print(f"  GPU {dev}: {info.name} | PCI={info.pci_bus} | "
+                      f"SMs={info.sm_count} | Mem={info.memory_bytes/1e9:.0f}GB | "
+                      f"Kernels={info.kernel_count} | Streams={info.streams}")
+            prof.close()
 
-    elif args.command == "overlap":
-        from .overlap import overlap_analysis, format_overlap
-        prof = _profile.open(args.profile)
-        print(format_overlap(overlap_analysis(prof, args.gpu, _parse_trim(args))))
-        prof.close()
+        elif args.command == "summary":
+            from .summary import gpu_summary, format_text, auto_commentary
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
+            gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
+            for gpu in gpus:
+                s = gpu_summary(prof, gpu, trim)
+                print(format_text(s))
+                print()
+                print(auto_commentary(s))
+                print()
+            prof.close()
 
-    elif args.command == "nccl":
-        from .overlap import nccl_breakdown, format_nccl
-        prof = _profile.open(args.profile)
-        print(format_nccl(nccl_breakdown(prof, args.gpu, _parse_trim(args))))
-        prof.close()
+        elif args.command == "overlap":
+            from .overlap import overlap_analysis, format_overlap
+            prof = _profile.open(args.profile)
+            print(format_overlap(overlap_analysis(prof, args.gpu, _parse_trim(args))))
+            prof.close()
 
-    elif args.command == "iters":
-        from .overlap import detect_iterations, format_iterations
-        prof = _profile.open(args.profile)
-        print(format_iterations(detect_iterations(prof, args.gpu, _parse_trim(args))))
-        prof.close()
+        elif args.command == "nccl":
+            from .overlap import nccl_breakdown, format_nccl
+            prof = _profile.open(args.profile)
+            print(format_nccl(nccl_breakdown(prof, args.gpu, _parse_trim(args))))
+            prof.close()
 
-    elif args.command == "tree":
-        from .tree import build_nvtx_tree, format_text
-        prof = _profile.open(args.profile)
-        roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
-        print(format_text(roots))
-        prof.close()
+        elif args.command == "iters":
+            from .overlap import detect_iterations, format_iterations
+            prof = _profile.open(args.profile)
+            print(format_iterations(detect_iterations(prof, args.gpu, _parse_trim(args))))
+            prof.close()
 
-    elif args.command == "markdown":
-        from .tree import build_nvtx_tree, format_markdown
-        prof = _profile.open(args.profile)
-        roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
-        print(format_markdown(roots))
-        prof.close()
+        elif args.command == "tree":
+            from .tree import build_nvtx_tree, format_text
+            prof = _profile.open(args.profile)
+            roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
+            print(format_text(roots))
+            prof.close()
 
-    elif args.command == "export":
-        from . import export
-        prof = _profile.open(args.profile)
-        trim = _parse_trim(args)
-        os.makedirs(args.output, exist_ok=True)
-        gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
-        for gpu in gpus:
-            events = export.gpu_trace(prof, gpu, trim)
-            if not events:
-                print(f"GPU {gpu}: no kernels, skipped")
-                continue
-            out = os.path.join(args.output, f"trace_gpu{gpu}.json")
-            export.write_json(events, out)
-            nk = sum(1 for e in events if e.get("cat") == "gpu_kernel")
-            nn = sum(1 for e in events if e.get("cat") == "nvtx_projected")
-            print(f"GPU {gpu}: {nk} kernels, {nn} NVTX → {out}")
-        prof.close()
+        elif args.command == "markdown":
+            from .tree import build_nvtx_tree, format_markdown
+            prof = _profile.open(args.profile)
+            roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
+            print(format_markdown(roots))
+            prof.close()
 
-    elif args.command == "search":
-        from .search import (search_kernels, search_nvtx,
-                             search_hierarchy, format_results)
-        prof = _profile.open(args.profile)
-        trim = _parse_trim(args)
+        elif args.command == "export":
+            from . import export
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
+            os.makedirs(args.output, exist_ok=True)
+            gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
+            for gpu in gpus:
+                events = export.gpu_trace(prof, gpu, trim)
+                if not events:
+                    print(f"GPU {gpu}: no kernels, skipped")
+                    continue
+                out = os.path.join(args.output, f"trace_gpu{gpu}.json")
+                export.write_json(events, out)
+                nk = sum(1 for e in events if e.get("cat") == "gpu_kernel")
+                nn = sum(1 for e in events if e.get("cat") == "nvtx_projected")
+                print(f"GPU {gpu}: {nk} kernels, {nn} NVTX → {out}")
+            prof.close()
 
-        if args.parent or args.type == "hierarchy":
-            if not args.gpu or not trim:
-                print("Error: hierarchical search requires --gpu and --trim")
-                prof.close()
-                return
-            results = search_hierarchy(prof, args.parent or "", args.query,
-                                       args.gpu, trim)
-            print(format_results(results, "hierarchy"))
-        elif args.type == "nvtx":
-            results = search_nvtx(prof, args.query, args.gpu, trim, args.limit)
-            print(format_results(results, "nvtx"))
-        else:
-            results = search_kernels(prof, args.query, args.gpu, trim, args.limit)
-            print(format_results(results, "kernel"))
-        prof.close()
+        elif args.command == "search":
+            from .search import (search_kernels, search_nvtx,
+                                 search_hierarchy, format_results)
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
 
-    elif args.command == "export-csv":
-        from .export_flat import to_csv
-        prof = _profile.open(args.profile)
-        trim = _parse_trim(args)
-        content = to_csv(prof, args.gpu, trim, args.output)
-        if not args.output:
-            print(content)
-        else:
-            print(f"CSV written to {args.output}")
-        prof.close()
+            if args.parent or args.type == "hierarchy":
+                if not args.gpu or not trim:
+                    print("Error: hierarchical search requires --gpu and --trim")
+                    prof.close()
+                    return
+                results = search_hierarchy(prof, args.parent or "", args.query,
+                                           args.gpu, trim)
+                print(format_results(results, "hierarchy"))
+            elif args.type == "nvtx":
+                results = search_nvtx(prof, args.query, args.gpu, trim, args.limit)
+                print(format_results(results, "nvtx"))
+            else:
+                results = search_kernels(prof, args.query, args.gpu, trim, args.limit)
+                print(format_results(results, "kernel"))
+            prof.close()
 
-    elif args.command == "export-json":
-        import json as _json
-        from .export_flat import to_json_flat, to_summary_json
-        prof = _profile.open(args.profile)
-        trim = _parse_trim(args)
-        if args.summary:
-            data = to_summary_json(prof, args.gpu, trim, args.output)
-        else:
-            data = to_json_flat(prof, args.gpu, trim, args.output)
-        if not args.output:
-            print(_json.dumps(data, indent=2))
-        else:
-            print(f"JSON written to {args.output}")
-        prof.close()
+        elif args.command == "export-csv":
+            from .export_flat import to_csv
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
+            content = to_csv(prof, args.gpu, trim, args.output)
+            if not args.output:
+                print(content)
+            else:
+                print(f"CSV written to {args.output}")
+            prof.close()
 
-    elif args.command == "viewer":
-        from .viewer import write_html
-        prof = _profile.open(args.profile)
-        write_html(prof, args.gpu, _parse_trim(args), args.output)
-        print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
-        prof.close()
+        elif args.command == "export-json":
+            import json as _json
+            from .export_flat import to_json_flat, to_summary_json
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
+            if args.summary:
+                data = to_summary_json(prof, args.gpu, trim, args.output)
+            else:
+                data = to_json_flat(prof, args.gpu, trim, args.output)
+            if not args.output:
+                print(_json.dumps(data, indent=2))
+            else:
+                print(f"JSON written to {args.output}")
+            prof.close()
 
-    elif args.command == "web":
-        from .web import serve
-        prof = _profile.open(args.profile)
-        serve(prof, args.gpu, _parse_trim(args),
-              port=args.port, open_browser=not args.no_browser)
+        elif args.command == "viewer":
+            from .viewer import write_html
+            prof = _profile.open(args.profile)
+            write_html(prof, args.gpu, _parse_trim(args), args.output)
+            print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
+            prof.close()
 
-    elif args.command == "perfetto":
-        from .web import serve_perfetto
-        prof = _profile.open(args.profile)
-        serve_perfetto(prof, args.gpu, _parse_trim(args),
-                       port=args.port, open_browser=not args.no_browser)
+        elif args.command == "web":
+            from .web import serve
+            prof = _profile.open(args.profile)
+            serve(prof, args.gpu, _parse_trim(args),
+                  port=args.port, open_browser=not args.no_browser)
 
-    elif args.command == "timeline-web":
-        from .web import serve_timeline
-        prof = _profile.open(args.profile)
-        serve_timeline(prof, args.gpu, _parse_trim(args),
-                       port=args.port, open_browser=not args.no_browser)
+        elif args.command == "perfetto":
+            from .web import serve_perfetto
+            prof = _profile.open(args.profile)
+            serve_perfetto(prof, args.gpu, _parse_trim(args),
+                           port=args.port, open_browser=not args.no_browser)
 
-    elif args.command == "tui":
-        from .tui import run_tui
-        run_tui(args.profile, args.gpu, _parse_trim(args),
-                max_depth=args.depth, min_ms=args.min_ms)
+        elif args.command == "timeline-web":
+            from .web import serve_timeline
+            prof = _profile.open(args.profile)
+            serve_timeline(prof, args.gpu, _parse_trim(args),
+                           port=args.port, open_browser=not args.no_browser)
 
-    elif args.command == "timeline":
-        from .tui_timeline import run_timeline
-        run_timeline(args.profile, args.gpu, _parse_trim(args),
-                     min_ms=args.min_ms)
+        elif args.command == "tui":
+            from .tui import run_tui
+            run_tui(args.profile, args.gpu, _parse_trim(args),
+                    max_depth=args.depth, min_ms=args.min_ms)
+
+        elif args.command == "timeline":
+            from .tui_timeline import run_timeline
+            run_timeline(args.profile, args.gpu, _parse_trim(args),
+                         min_ms=args.min_ms)
+    except RuntimeError as e:
+        # Surface schema/validation issues without a full Python traceback.
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":

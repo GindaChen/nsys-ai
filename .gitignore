@@ -4,3 +4,4 @@ __pycache__/
 dist/
 .pytest_cache/
 .DS_Store
+.venv/
