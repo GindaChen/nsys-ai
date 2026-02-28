@@ -12,8 +12,9 @@
             --border: #30363d;
             --text: #e6edf3;
             --text-dim: #8b949e;
-            --accent: #58a6ff;
-            --nvtx: #1f6feb;
+            --accent: #79b8ff;
+            --accent-dim: #58a6ff;
+            --nvtx: #4a6fa5;
             --kernel: #238636;
             --nccl: #d2a8ff;
             --heat-0: #238636;
@@ -361,9 +362,9 @@
         const MIN_BLOCK_W = 2;
         const DPR = window.devicePixelRatio || 1;
 
-        // ── Colors ──
-        const STREAM_COLORS = ['#238636', '#1f6feb', '#d2a8ff', '#f97583', '#d4a72c', '#58a6ff', '#7ee787'];
-        const NVTX_COLORS = ['#1f6feb', '#8957e5', '#1a7f37', '#bf4b8a', '#d4a72c', '#58a6ff'];
+        // ── Colors (vivid so bars stand out on dark background; background unchanged) ──
+        const STREAM_COLORS = ['#3fb950', '#58a6ff', '#bc8cff', '#ff7b7b', '#d4a72c', '#79b8ff', '#56d364'];
+        const NVTX_COLORS = ['#5b8dc9', '#8b7ab8', '#3d9b6e', '#c76b7a', '#b89b4d', '#6b9bc4'];
 
         function streamColor(idx) { return STREAM_COLORS[idx % STREAM_COLORS.length]; }
         function nvtxColor(depth) { return NVTX_COLORS[depth % NVTX_COLORS.length]; }
@@ -438,13 +439,13 @@
 
             // Label
             ctx.textAlign = 'right';
-            ctx.fillStyle = '#58a6ff';
+            ctx.fillStyle = '#8b949e';
             ctx.fillText('Time', LABEL_W - 6, RULER_H - 7);
         }
 
         function drawNVTX(W) {
             const baseY = RULER_H;
-            ctx.fillStyle = 'rgba(22. 27, 34, 0.6)';
+            ctx.fillStyle = 'rgba(22, 27, 34, 0.85)';
             ctx.fillRect(0, baseY, W, nvtxAreaH());
 
             for (const span of nvtxSpans) {
@@ -457,11 +458,11 @@
                 const h = NVTX_ROW_H - 2;
 
                 ctx.fillStyle = nvtxColor(span.depth);
-                ctx.globalAlpha = 0.25;
+                ctx.globalAlpha = 0.82;
                 ctx.fillRect(x1, y, w, h);
                 ctx.globalAlpha = 1;
                 ctx.strokeStyle = nvtxColor(span.depth);
-                ctx.globalAlpha = 0.5;
+                ctx.globalAlpha = 0.95;
                 ctx.strokeRect(x1 + 0.5, y + 0.5, w - 1, h - 1);
                 ctx.globalAlpha = 1;
 
@@ -507,12 +508,12 @@
 
                 // Background
                 if (isSelected) {
-                    ctx.fillStyle = 'rgba(38, 79, 120, 0.3)';
+                    ctx.fillStyle = 'rgba(55, 65, 85, 0.5)';
                     ctx.fillRect(0, y, W, STREAM_H);
                 }
 
                 // Stream label
-                ctx.fillStyle = isSelected ? '#58a6ff' : '#8b949e';
+                ctx.fillStyle = isSelected ? '#79b8ff' : '#8b949e';
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'middle';
                 const isNccl = ks.some(k => k.name.toLowerCase().includes('nccl'));
@@ -533,19 +534,26 @@
                     const isSel = k === selectedKernel;
                     const isNcclK = k.name.toLowerCase().includes('nccl');
 
-                    // Color
+                    // Color (higher base alpha so blocks are clearly visible on dark bg)
                     let fillColor = isNcclK ? '#d2a8ff' : color;
-                    let alpha = 0.6 + 0.4 * (k.heat || 0);
-                    if (searchQuery && !isMatch) alpha = 0.12;
-                    if (isSel) { fillColor = '#58a6ff'; alpha = 1; }
+                    let alpha = 0.78 + 0.22 * (k.heat || 0);
+                    if (searchQuery && !isMatch) alpha = 0.2;
+                    if (isSel) { fillColor = '#79b8ff'; alpha = 1; }
 
                     ctx.globalAlpha = alpha;
                     ctx.fillStyle = fillColor;
                     ctx.fillRect(x1, bY, w, bH);
                     ctx.globalAlpha = 1;
+                    // Subtle border so blocks don't blend into background
+                    if (!isSel) {
+                        ctx.strokeStyle = fillColor;
+                        ctx.globalAlpha = 0.5;
+                        ctx.strokeRect(x1 + 0.5, bY + 0.5, w - 1, bH - 1);
+                        ctx.globalAlpha = 1;
+                    }
 
                     if (isSel) {
-                        ctx.strokeStyle = '#58a6ff';
+                        ctx.strokeStyle = '#79b8ff';
                         ctx.lineWidth = 2;
                         ctx.strokeRect(x1, bY, w, bH);
                         ctx.lineWidth = 1;

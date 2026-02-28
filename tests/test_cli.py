@@ -24,5 +24,5 @@ def test_subcommands():
         [sys.executable, "-m", "nsys_tui", "--help"],
         capture_output=True, text=True)
     for cmd in ['info', 'summary', 'overlap', 'tree', 'tui', 'timeline',
-                'search', 'export', 'viewer', 'web', 'perfetto', 'timeline-web']:
+                'search', 'export', 'viewer', 'timeline-html', 'web', 'perfetto', 'timeline-web']:
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"

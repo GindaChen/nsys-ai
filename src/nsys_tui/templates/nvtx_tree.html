@@ -105,6 +105,10 @@
             background: #1a2332
         }
 
+        .controls button.has-scope {
+            color: var(--accent)
+        }
+
         .controls .sep {
             width: 1px;
             height: 20px;
@@ -510,8 +514,42 @@
             font-size: 12px
         }
 
+        .scope-bar.scope-bar--active {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 12%, var(--surface))
+        }
+
         .scope-bar select {
-            max-width: 300px
+            min-width: 120px;
+            max-width: min(420px, 100%);
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text);
+            font-size: 12px;
+            text-overflow: ellipsis
+        }
+
+        .scope-bar select:focus {
+            outline: none;
+            border-color: var(--accent)
+        }
+
+        .scope-bar .scope-clear {
+            padding: 4px 10px;
+            font-size: 11px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-dim);
+            cursor: pointer;
+            white-space: nowrap
+        }
+
+        .scope-bar .scope-clear:hover {
+            color: var(--text);
+            border-color: var(--text-dim)
         }
 
         /* Aggregation dashboard */
@@ -722,10 +760,10 @@
     <!-- Scope selector -->
     <div class="scope-bar" id="scopeBar" style="display:none">
         <span>🎯 Scope:</span>
-        <select id="scopeSelect" onchange="applyScope()">
+        <select id="scopeSelect" onchange="applyScope()" title="">
             <option value="">All regions</option>
         </select>
-        <button onclick="clearScope()">Clear</button>
+        <button type="button" class="scope-clear" id="scopeClearBtn" onclick="clearScope()" style="display:none">Clear</button>
     </div>
 
     <!-- Tab bar -->
@@ -745,16 +783,16 @@
 
     <!-- Controls -->
     <div class="controls" id="treeControls">
-        <button onclick="expandAll()">Expand All</button>
-        <button onclick="collapseAll()">Collapse All</button>
-        <button onclick="expandToDepth(2)">Depth 2</button>
-        <button onclick="expandToDepth(4)">Depth 4</button>
+        <button id="expandAllBtn" onclick="expandAll()">Expand All</button>
+        <button id="collapseAllBtn" onclick="collapseAll()">Collapse All</button>
+        <button id="depth2Btn" onclick="expandToDepth(2)">Depth 2</button>
+        <button id="depth4Btn" onclick="expandToDepth(4)">Depth 4</button>
         <div class="sep"></div>
         <button id="heatToggle" onclick="toggleHeat()">🌡️ Heat</button>
         <button id="scopeToggle" onclick="toggleScopeBar()">🎯 Scope</button>
         <button id="demangledToggle" onclick="toggleDemangled()">📛 Demangled</button>
         <div class="sep"></div>
-        <button onclick="toggleAI()">🤖 AI</button>
+        <button id="aiToggleBtn" onclick="toggleAI()">🤖 AI</button>
     </div>
 
     <div class="search" id="searchBar">
@@ -814,7 +852,9 @@
 
     <script>
         const DATA = $DATA;
-        let heatEnabled = false, demangledMode = false, searchMode = 'path', currentTab = 'tree', scopeActive = false, scopedData = null;
+        let heatEnabled = false, demangledMode = false, searchMode = 'path', currentTab = 'tree', scopeActive = false, scopedData = null, scopePath = null;
+        // Tree expand state: null (mixed/initial), 'all', 'none', 2, 4 — used to show active button
+        let treeExpandState = null;
         // searchMode: 'name' (substring), 'regex' (JS regex), 'path' (glob on NVTX path)
 
         // ══════════════ Utilities ══════════════
@@ -868,9 +908,15 @@
             h += '</div>'; return h;
         }
         function toggleNode(hdr) { const c = hdr.nextElementSibling; if (!c || !c.classList.contains('children')) return; c.classList.toggle('collapsed'); hdr.querySelector('.toggle').textContent = c.classList.contains('collapsed') ? '▶' : '▼' }
-        function expandAll() { document.querySelectorAll('.children').forEach(c => { c.classList.remove('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▼' }) }
-        function collapseAll() { document.querySelectorAll('.children').forEach(c => { c.classList.add('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▶' }) }
-        function expandToDepth(mx) { document.querySelectorAll('.node').forEach(n => { const d = parseInt(n.dataset.depth), c = n.querySelector(':scope > .children'); if (!c) return; const t = n.querySelector(':scope > .node-header .toggle'); if (d < mx) { c.classList.remove('collapsed'); t.textContent = '▼' } else { c.classList.add('collapsed'); t.textContent = '▶' } }) }
+        function updateTreeExpandButtons() {
+            document.getElementById('expandAllBtn').classList.toggle('active', treeExpandState === 'all');
+            document.getElementById('collapseAllBtn').classList.toggle('active', treeExpandState === 'none');
+            document.getElementById('depth2Btn').classList.toggle('active', treeExpandState === 2);
+            document.getElementById('depth4Btn').classList.toggle('active', treeExpandState === 4);
+        }
+        function expandAll() { treeExpandState = 'all'; document.querySelectorAll('.children').forEach(c => { c.classList.remove('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▼' }); updateTreeExpandButtons(); }
+        function collapseAll() { treeExpandState = 'none'; document.querySelectorAll('.children').forEach(c => { c.classList.add('collapsed'); c.previousElementSibling.querySelector('.toggle').textContent = '▶' }); updateTreeExpandButtons(); }
+        function expandToDepth(mx) { treeExpandState = mx; document.querySelectorAll('.node').forEach(n => { const d = parseInt(n.dataset.depth), c = n.querySelector(':scope > .children'); if (!c) return; const t = n.querySelector(':scope > .node-header .toggle'); if (d < mx) { c.classList.remove('collapsed'); t.textContent = '▼' } else { c.classList.add('collapsed'); t.textContent = '▶' } }); updateTreeExpandButtons(); }
         function toggleHeat() { heatEnabled = !heatEnabled; document.getElementById('heatToggle').classList.toggle('active', heatEnabled); document.getElementById('legend').classList.toggle('visible', heatEnabled); document.querySelectorAll('.heat-bar').forEach(b => b.style.display = heatEnabled ? 'inline-block' : 'none'); document.querySelectorAll('.pct-label').forEach(l => l.style.display = heatEnabled ? 'inline' : 'none') }
         function toggleDemangled() {
             demangledMode = !demangledMode;
@@ -958,10 +1004,11 @@
         function showInKernelView(n) { switchTab('kernels'); setTimeout(() => { document.getElementById('search').value = n; renderKernelView() }, 50) }
 
         // ══════════════ NVTX Scoping ══════════════
-        function toggleScopeBar() { const bar = document.getElementById('scopeBar'); const show = bar.style.display === 'none'; bar.style.display = show ? 'flex' : 'none'; document.getElementById('scopeToggle').classList.toggle('active', show); if (show) populateScope() }
-        function populateScope() { const sel = document.getElementById('scopeSelect'); sel.innerHTML = '<option value="">All regions</option>'; const nvtx = getTopNVTX(DATA, 2); nvtx.forEach((n, i) => { sel.innerHTML += '<option value="' + i + '">' + escHtml(n.name) + ' (' + fmtDur(n.duration_ms) + ')</option>' }) }
-        function applyScope() { const sel = document.getElementById('scopeSelect'); const idx = sel.value; if (idx === '') { scopedData = null; scopeActive = false } else { const nvtx = getTopNVTX(DATA, 2); const chosen = nvtx[parseInt(idx)]; scopedData = findSubtree(DATA, chosen.path); scopeActive = true } refreshCurrentView() }
-        function clearScope() { document.getElementById('scopeSelect').value = ''; scopedData = null; scopeActive = false; refreshCurrentView() }
+        function toggleScopeBar() { const bar = document.getElementById('scopeBar'); const show = bar.style.display === 'none'; bar.style.display = show ? 'flex' : 'none'; document.getElementById('scopeToggle').classList.toggle('active', show); if (show) populateScope(); updateScopeUI() }
+        function populateScope() { const sel = document.getElementById('scopeSelect'); sel.innerHTML = '<option value="">All regions</option>'; const nvtx = getTopNVTX(DATA, 2); nvtx.forEach((n, i) => { const label = escHtml(n.name) + ' (' + fmtDur(n.duration_ms) + ')'; sel.innerHTML += '<option value="' + i + '" title="' + escHtml(label) + '">' + label + '</option>' }); if (scopePath) { const idx = nvtx.findIndex(n => n.path === scopePath); if (idx >= 0) sel.value = String(idx) } updateScopeUI() }
+        function updateScopeUI() { const bar = document.getElementById('scopeBar'); const sel = document.getElementById('scopeSelect'); const clearBtn = document.getElementById('scopeClearBtn'); const hasScope = sel.value !== ''; bar.classList.toggle('scope-bar--active', hasScope); clearBtn.style.display = hasScope ? '' : 'none'; sel.title = sel.selectedIndex >= 0 ? (sel.options[sel.selectedIndex].title || sel.options[sel.selectedIndex].textContent) : ''; document.getElementById('scopeToggle').classList.toggle('has-scope', scopeActive) }
+        function applyScope() { const sel = document.getElementById('scopeSelect'); const idx = sel.value; if (idx === '') { scopedData = null; scopeActive = false; scopePath = null } else { const nvtx = getTopNVTX(DATA, 2); const chosen = nvtx[parseInt(idx)]; scopePath = chosen.path; scopedData = findSubtree(DATA, chosen.path); scopeActive = true } updateScopeUI(); refreshCurrentView() }
+        function clearScope() { document.getElementById('scopeSelect').value = ''; scopedData = null; scopeActive = false; scopePath = null; updateScopeUI(); refreshCurrentView() }
         function findSubtree(nodes, path) { for (const n of nodes) { if (n.path === path) return n.children || [n]; if (n.children) { const r = findSubtree(n.children, path); if (r) return r } } return null }
         function refreshCurrentView() { if (currentTab === 'tree') { const s = countNodes(activeData()); document.getElementById('stats').innerHTML = '<span>NVTX: <strong>' + s.nvtx + '</strong></span><span>Kernels: <strong>' + s.kern + '</strong></span><span>Total GPU: <strong>' + s.totalMs.toFixed(1) + 'ms</strong></span>'; let h = ''; activeData().forEach(n => h += renderNode(n, 0)); document.getElementById('tree').innerHTML = h } else switchTab(currentTab) }
 
@@ -1295,7 +1342,7 @@
         // ══════════════ AI sidebar ══════════════
         function toggleFocus() { document.body.classList.toggle('focused') }
         document.addEventListener('keydown', e => { if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) { e.preventDefault(); toggleFocus() } });
-        function toggleAI() { const sb = document.getElementById('aiSidebar'); const open = !sb.classList.contains('open'); sb.classList.toggle('open', open); document.body.classList.toggle('ai-open', open) }
+        function toggleAI() { const sb = document.getElementById('aiSidebar'); const open = !sb.classList.contains('open'); sb.classList.toggle('open', open); document.body.classList.toggle('ai-open', open); document.getElementById('aiToggleBtn').classList.toggle('active', open); }
         function sendAI() {
             const input = document.getElementById('aiInput'); const q = input.value.trim(); if (!q) return;
             const msgs = document.getElementById('aiMessages'); msgs.innerHTML += '<div class="ai-msg user">' + escHtml(q) + '</div>'; input.value = '';

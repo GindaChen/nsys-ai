@@ -62,3 +62,9 @@ def generate_timeline_html(prof, device: int, trim: tuple[int, int]) -> str:
         GPU_LABEL=gpu_label,
         TRIM_LABEL=f"{trim[0]/1e9:.1f}s – {trim[1]/1e9:.1f}s",
     )
+
+
+def write_timeline_html(prof, device: int, trim: tuple[int, int], path: str):
+    """Generate and write the timeline HTML viewer to a file."""
+    with open(path, "w") as f:
+        f.write(generate_timeline_html(prof, device, trim))
