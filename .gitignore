@@ -5,3 +5,12 @@ dist/
 .pytest_cache/
 .DS_Store
 .venv/
+
+# Generated outputs (use `out/` for viewer/timeline-html/export -o)
+out/
+trace.json
+traces_test/
+megatron_viewer_test.html
+nvtx_viewer.html
+timeline_test.html
+timeline_viewer.html

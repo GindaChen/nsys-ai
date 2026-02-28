@@ -13,7 +13,8 @@ Commands:
     export-csv <profile.sqlite> --gpu N --trim S E  Export flat CSV
     export-json <profile.sqlite> --gpu N --trim S E Export flat JSON
     export     <profile.sqlite> [--gpu N] -o DIR    Export Perfetto JSON traces
-    viewer     <profile.sqlite> --gpu N -o FILE     Generate interactive HTML viewer
+    viewer       <profile.sqlite> --gpu N --trim S E -o FILE     Generate interactive HTML viewer
+    timeline-html <profile.sqlite> --gpu N --trim S E -o FILE    Generate horizontal timeline HTML
     web        <profile.sqlite> --gpu N --trim S E  Serve viewer in browser (local HTTP)
     perfetto   <profile.sqlite> --gpu N --trim S E  Open in Perfetto UI (via local trace server)
     timeline-web <profile.sqlite> --gpu N --trim S E Horizontal timeline in browser
@@ -112,6 +113,11 @@ def main():
     p = sub.add_parser("viewer", help="Generate interactive HTML viewer")
     _add_gpu_trim(p)
     p.add_argument("-o", "--output", default="nvtx_tree.html", help="Output HTML file")
+
+    # ── timeline-html ──
+    p = sub.add_parser("timeline-html", help="Generate horizontal timeline HTML")
+    _add_gpu_trim(p)
+    p.add_argument("-o", "--output", default="timeline.html", help="Output HTML file")
 
     # ── web ──
     p = sub.add_parser("web", help="Serve interactive viewer in browser")
@@ -282,6 +288,13 @@ def main():
             from .viewer import write_html
             prof = _profile.open(args.profile)
             write_html(prof, args.gpu, _parse_trim(args), args.output)
+            print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
+            prof.close()
+
+        elif args.command == "timeline-html":
+            from .viewer import write_timeline_html
+            prof = _profile.open(args.profile)
+            write_timeline_html(prof, args.gpu, _parse_trim(args), args.output)
             print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
             prof.close()
 
