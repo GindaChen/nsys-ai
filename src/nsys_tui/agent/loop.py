@@ -5,6 +5,9 @@ The Agent takes a profile, selects relevant skills, executes them,
 and produces a structured analysis report. Works without LLM by default
 (keyword-based skill selection + template reporting). With the [agent]
 extra installed, can delegate to an LLM for natural language analysis.
+
+Supports conversation mode for follow-up questions — the Agent maintains
+a message history so the LLM has full context of prior Q&A.
 """
 import sqlite3
 from typing import Optional
@@ -19,6 +22,10 @@ class Agent:
         agent = Agent("profile.sqlite")
         report = agent.analyze()         # auto-report
         answer = agent.ask("why slow?")  # targeted question
+
+        # Conversation mode (follow-up questions):
+        answer1 = agent.ask("what are the top kernels?")
+        answer2 = agent.ask("tell me more about the slowest one")
     """
 
     # Keywords → skills mapping for non-LLM skill selection
@@ -52,11 +59,18 @@ class Agent:
         "table": ["schema_inspect"],
         "mfu": ["top_kernels"],
         "flops": ["top_kernels"],
+        "iteration": ["top_kernels", "gpu_idle_gaps", "nvtx_kernel_map"],
+        "iter": ["top_kernels", "gpu_idle_gaps", "nvtx_kernel_map"],
+        "latency": ["kernel_launch_overhead", "gpu_idle_gaps"],
+        "bottleneck": ["top_kernels", "gpu_idle_gaps", "thread_utilization"],
+        "communication": ["nccl_breakdown"],
+        "bandwidth": ["memory_transfers"],
     }
 
     def __init__(self, profile_path: str):
         self.path = profile_path
         self.conn = sqlite3.connect(profile_path)
+        self._conversation: list[dict] = []  # LLM message history
 
     def close(self):
         self.conn.close()
@@ -105,7 +119,8 @@ class Agent:
         runs them, and presents the raw output.
 
         With [agent] extra: delegates to LLM with the full system prompt
-        and skill results as context.
+        and skill results as context. Maintains conversation history so
+        follow-up questions have full context.
 
         Args:
             question: Natural language question (e.g. "why is iteration 3 slow?")
@@ -120,22 +135,25 @@ class Agent:
             # Default to overview skills
             selected = ["top_kernels", "gpu_idle_gaps"]
 
-        sections = [f"Question: {question}\n"]
-
+        # Gather evidence from skills
+        evidence_parts = []
         for skill_name in selected:
             try:
                 result = run_skill(skill_name, self.conn)
-                sections.append(result)
-                sections.append("")
+                evidence_parts.append(result)
             except Exception as e:
-                sections.append(f"({skill_name}: skipped — {e})\n")
+                evidence_parts.append(f"({skill_name}: skipped — {e})")
 
-        # Try LLM synthesis if available
-        llm_answer = self._try_llm_synthesis(question, sections)
+        evidence_text = "\n\n".join(evidence_parts)
+
+        # Try LLM synthesis if available (with conversation history)
+        llm_answer = self._try_llm_synthesis(question, evidence_text)
         if llm_answer:
-            sections.append("\n── AI Analysis ──")
-            sections.append(llm_answer)
+            return llm_answer
 
+        # Fallback: return raw skill output
+        sections = [f"Question: {question}\n"]
+        sections.append(evidence_text)
         return "\n".join(sections)
 
     def run_skill(self, name: str, **kwargs) -> str:
@@ -151,8 +169,12 @@ class Agent:
                 selected.update(skill_names)
         return sorted(selected)
 
-    def _try_llm_synthesis(self, question: str, evidence_sections: list[str]) -> Optional[str]:
-        """Try to use an LLM to synthesize an answer. Returns None if no LLM available."""
+    def _try_llm_synthesis(self, question: str, evidence: str) -> Optional[str]:
+        """Try to use an LLM to synthesize an answer. Returns None if no LLM available.
+
+        Maintains conversation history in self._conversation so follow-up
+        questions have full context of prior Q&A.
+        """
         try:
             import anthropic
         except ImportError:
@@ -166,21 +188,37 @@ class Agent:
         try:
             from .persona import build_system_prompt
             client = anthropic.Anthropic(api_key=api_key)
-            evidence = "\n".join(evidence_sections)
+
+            user_content = (
+                f"Here is data from an Nsight Systems profile analysis:\n\n"
+                f"{evidence}\n\n"
+                f"Based on this data, answer the following question:\n{question}"
+            )
+
+            # Add to conversation history
+            self._conversation.append({"role": "user", "content": user_content})
 
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048,
                 system=build_system_prompt(),
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Here is data from an Nsight Systems profile analysis:\n\n"
-                        f"{evidence}\n\n"
-                        f"Based on this data, answer the following question:\n{question}"
-                    ),
-                }],
+                messages=self._conversation,
             )
-            return message.content[0].text
+
+            assistant_text = message.content[0].text
+
+            # Store assistant response for follow-up context
+            self._conversation.append({"role": "assistant", "content": assistant_text})
+
+            return assistant_text
         except Exception as e:
             return f"(LLM synthesis failed: {e})"
+
+    @property
+    def has_conversation(self) -> bool:
+        """Whether there is an active conversation with prior exchanges."""
+        return len(self._conversation) > 0
+
+    def reset_conversation(self):
+        """Clear conversation history to start fresh."""
+        self._conversation.clear()

@@ -168,6 +168,13 @@ def main():
     _add_gpu_trim(p)
     p.add_argument("--min-ms", type=float, default=0, help="Min duration to show (ms)")
 
+    # ── ask ──
+    p = sub.add_parser("ask", help="Ask a natural language question about a profile")
+    p.add_argument("question", help="Natural language question (e.g. 'why is iteration 3 slow?')")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    p.add_argument("--follow-up", "-f", action="store_true",
+                   help="Enter conversation mode for follow-up questions")
+
     # ── skill ──
     p = sub.add_parser("skill", help="List or run analysis skills")
     skill_sub = p.add_subparsers(dest="skill_action")
@@ -411,6 +418,27 @@ def main():
             from .tui_timeline import run_timeline
             run_timeline(args.profile, args.gpu, _parse_trim(args),
                          min_ms=args.min_ms)
+
+        elif args.command == "ask":
+            from .agent.loop import Agent
+            agent = Agent(_profile.resolve_profile_path(args.profile))
+            try:
+                print(agent.ask(args.question))
+                if args.follow_up:
+                    print("\n(Conversation mode — type your follow-up, or 'quit' to exit)\n")
+                    while True:
+                        try:
+                            follow_up = input("follow-up> ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            print()
+                            break
+                        if not follow_up or follow_up.lower() in ("quit", "exit", "q"):
+                            break
+                        print()
+                        print(agent.ask(follow_up))
+                        print()
+            finally:
+                agent.close()
 
         elif args.command == "skill":
             from .skills.registry import list_skills, all_skills, run_skill as _run_skill

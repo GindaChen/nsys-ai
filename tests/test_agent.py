@@ -67,3 +67,53 @@ def test_agent_run_skill():
         assert isinstance(result, str)
     finally:
         agent.close()
+
+
+def test_agent_ask_returns_string():
+    """Agent.ask() should return a string answer (no LLM needed)."""
+    from nsys_tui.agent.loop import Agent
+    agent = Agent(":memory:")
+    try:
+        result = agent.ask("what tables are in this profile?")
+        assert isinstance(result, str)
+        assert len(result) > 0
+    finally:
+        agent.close()
+
+
+def test_agent_conversation_tracking():
+    """Agent should track conversation state for follow-ups."""
+    from nsys_tui.agent.loop import Agent
+    agent = Agent(":memory:")
+    try:
+        assert not agent.has_conversation
+
+        # Without LLM, conversation won't get messages appended
+        # (they only accumulate via _try_llm_synthesis success),
+        # but the property and reset should still work.
+        agent._conversation.append({"role": "user", "content": "test"})
+        assert agent.has_conversation
+
+        agent.reset_conversation()
+        assert not agent.has_conversation
+    finally:
+        agent.close()
+
+
+def test_agent_skill_selection_new_keywords():
+    """Agent should select skills for iteration/bottleneck keywords."""
+    from nsys_tui.agent.loop import Agent
+    agent = Agent(":memory:")
+    try:
+        selected = agent._select_skills("why is iteration 142 slow?")
+        assert "top_kernels" in selected
+        assert "gpu_idle_gaps" in selected
+
+        selected = agent._select_skills("what is the bottleneck?")
+        assert "top_kernels" in selected
+        assert "thread_utilization" in selected
+
+        selected = agent._select_skills("check the communication overhead")
+        assert "nccl_breakdown" in selected
+    finally:
+        agent.close()
