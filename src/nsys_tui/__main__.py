@@ -1,27 +1,29 @@
 """
 CLI entry point: python -m nsys_tui <command> [options]
 
+Profile: path to .sqlite or .nsys-rep (open/analyze/etc accept both; .nsys-rep is converted when nsys is on PATH).
+
 Commands:
-    info       <profile.sqlite>                     Show GPU hardware and profile metadata
-    analyze    <profile.sqlite> --gpu N --trim S E  Full auto-report (bottlenecks, overlap, iters, NVTX)
-    summary    <profile.sqlite> [--gpu N]           GPU kernel summary with top kernels
-    overlap    <profile.sqlite> --gpu N --trim S E  Compute/NCCL overlap analysis
-    nccl       <profile.sqlite> --gpu N --trim S E  NCCL collective breakdown
-    iters      <profile.sqlite> --gpu N --trim S E  Detect training iterations
-    tree       <profile.sqlite> --gpu N --trim S E  NVTX hierarchy as text
-    markdown   <profile.sqlite> --gpu N --trim S E  NVTX hierarchy as markdown
-    search     <profile.sqlite> --query Q           Search kernels/NVTX by name
-    export-csv <profile.sqlite> --gpu N --trim S E  Export flat CSV
-    export-json <profile.sqlite> --gpu N --trim S E Export flat JSON
-    export     <profile.sqlite> [--gpu N] -o DIR    Export Perfetto JSON traces
-    viewer       <profile.sqlite> --gpu N --trim S E -o FILE     Generate interactive HTML viewer
-    timeline-html <profile.sqlite> --gpu N --trim S E -o FILE    Generate horizontal timeline HTML
-    web        <profile.sqlite> --gpu N --trim S E  Serve viewer in browser (local HTTP)
-    open       <profile> [--gpu N] [--trim S E]     One-click: Perfetto / web / TUI (auto-detect .sqlite|.nsys-rep)
-    perfetto   <profile.sqlite> --gpu N --trim S E  Open in Perfetto UI (via local trace server)
-    timeline-web <profile.sqlite> --gpu N --trim S E Horizontal timeline in browser
-    tui        <profile.sqlite> --gpu N --trim S E  Terminal tree view
-    timeline   <profile.sqlite> --gpu N --trim S E  Horizontal timeline (Perfetto-style)
+    info       <profile>                            Show GPU hardware and profile metadata
+    analyze    <profile> --gpu N --trim S E         Full auto-report (bottlenecks, overlap, iters, NVTX)
+    summary    <profile> [--gpu N]                  GPU kernel summary with top kernels
+    overlap    <profile> --gpu N --trim S E         Compute/NCCL overlap analysis
+    nccl       <profile> --gpu N --trim S E         NCCL collective breakdown
+    iters      <profile> --gpu N --trim S E         Detect training iterations
+    tree       <profile> --gpu N --trim S E         NVTX hierarchy as text
+    markdown   <profile> --gpu N --trim S E         NVTX hierarchy as markdown
+    search     <profile> --query Q                  Search kernels/NVTX by name
+    export-csv <profile> --gpu N --trim S E         Export flat CSV
+    export-json <profile> --gpu N --trim S E       Export flat JSON
+    export     <profile> [--gpu N] -o DIR           Export Perfetto JSON traces
+    viewer     <profile> --gpu N --trim S E -o FILE Generate interactive HTML viewer
+    timeline-html <profile> --gpu N --trim S E -o FILE Generate horizontal timeline HTML
+    web        <profile> --gpu N --trim S E        Serve viewer in browser (local HTTP)
+    open       <profile> [--gpu N] [--trim S E]     One-click: Perfetto / web / TUI (auto .sqlite|.nsys-rep)
+    perfetto   <profile> --gpu N --trim S E        Open in Perfetto UI (via local trace server)
+    timeline-web <profile> --gpu N --trim S E      Horizontal timeline in browser
+    tui        <profile> --gpu N --trim S E        Terminal tree view
+    timeline   <profile> --gpu N --trim S E        Horizontal timeline (Perfetto-style)
 """
 import sys
 import os
@@ -30,7 +32,7 @@ import argparse
 
 def _add_gpu_trim(p, gpu_required=True, trim_required=True):
     """Add standard --gpu and --trim arguments to a subparser."""
-    p.add_argument("profile", help="Path to .sqlite file")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument("--gpu", type=int, required=gpu_required,
                    default=None, help="GPU device ID")
     p.add_argument("--trim", nargs=2, type=float,
@@ -57,7 +59,7 @@ def main():
 
     # ── info ──
     p = sub.add_parser("info", help="Show profile metadata and GPU info")
-    p.add_argument("profile", help="Path to .sqlite file")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
 
     # ── analyze ──
     p = sub.add_parser("analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy")
@@ -90,7 +92,7 @@ def main():
 
     # ── search ──
     p = sub.add_parser("search", help="Search kernels/NVTX by name")
-    p.add_argument("profile", help="Path to .sqlite file")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument("--query", "-q", required=True, help="Search query (substring)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID")
     p.add_argument("--trim", nargs=2, type=float, metavar=("START_S", "END_S"),
@@ -134,7 +136,7 @@ def main():
 
     # ── open ──
     p = sub.add_parser("open", help="One-click open: pick Perfetto, web viewer, or TUI (auto .sqlite/.nsys-rep)")
-    p.add_argument("profile", help="Path to .sqlite or .nsys-rep file")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: first GPU in profile)")
     p.add_argument("--trim", nargs=2, type=float, metavar=("START_S", "END_S"), default=None,
                    help="Time window in seconds (default: full profile)")

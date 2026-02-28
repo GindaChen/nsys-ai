@@ -24,12 +24,16 @@ from .export import gpu_trace
 
 def _run_server(server, url, open_url, prof, port: int):
     """Run an HTTPServer with browser-open and graceful shutdown."""
-    print(f"Serving at {url}")
+    actual_port = server.server_address[1]
+    actual_url = f"http://127.0.0.1:{actual_port}"
+    print(f"Serving at {actual_url}")
     if os.environ.get("SSH_CONNECTION"):
-        print(f"  Remote/SSH: on your local machine run:  ssh -L {port}:127.0.0.1:{port} <host>  then open the URL in your local browser.")
+        print(f"  Remote/SSH: on your local machine run:  ssh -L {actual_port}:127.0.0.1:{actual_port} <host>  then open the URL in your local browser.")
     print("Press Ctrl-C to stop.")
     if open_url:
-        threading.Timer(0.3, webbrowser.open, args=(open_url,)).start()
+        # Use actual server URL when caller passed a localhost URL (so port=0 works).
+        open_target = actual_url if (open_url and open_url.startswith("http://127.0.0.1:")) else open_url
+        threading.Timer(0.3, webbrowser.open, args=(open_target,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

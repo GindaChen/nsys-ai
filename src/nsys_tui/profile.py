@@ -7,7 +7,7 @@ for kernels, NVTX events, CUDA runtime calls, and metadata.
 import os
 import shutil
 import sqlite3
-import subprocess  # used only to invoke system nsys for .nsys-rep conversion
+import subprocess  # nosec B404 — only for nsys export .nsys-rep→.sqlite, list args no shell
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
@@ -305,8 +305,8 @@ def resolve_profile_path(path: str) -> str:
         )
 
     try:
-        # path/out passed as list args to nsys, no shell; arguments are controlled by the caller.
-        subprocess.run(
+        # path/out passed as list args to nsys, no shell; caller-controlled paths only
+        result = subprocess.run(  # nosec B603
             [nsys_exe, "export", "--type", "sqlite", "-o", out, "--force-overwrite", "true", path],
             check=True,
             capture_output=True,
@@ -324,6 +324,14 @@ def resolve_profile_path(path: str) -> str:
         raise RuntimeError(
             f"nsys export failed: {e.stderr or e.stdout or str(e)}. "
             "Export manually: nsys export --type sqlite -o <out.sqlite> --force-overwrite true <file.nsys-rep>"
+        )
+    if not (os.path.exists(out) and os.path.getsize(out) > 0):
+        stdout = getattr(result, "stdout", None) or "(empty)"
+        stderr = getattr(result, "stderr", None) or "(empty)"
+        raise RuntimeError(
+            f"nsys export completed without error but did not produce a usable SQLite file at '{out}'. "
+            "This may indicate that nsys wrote output elsewhere or hit an unexpected condition.\n"
+            f"nsys stdout:\n{stdout}\nnsys stderr:\n{stderr}"
         )
     return out
 

@@ -33,10 +33,14 @@ def test_resolve_nsys_rep_success(monkeypatch, tmp_path: Path):
 
     def fake_run(args, check, capture_output, text, timeout):
         calls["args"] = args
-        # Do not actually create files; just pretend export succeeded.
+        # Simulate nsys producing the output file so postcondition passes.
+        if "-o" in args:
+            o_idx = args.index("-o")
+            if o_idx + 1 < len(args):
+                Path(args[o_idx + 1]).write_bytes(b"x")
         class Result:
-            pass
-
+            stdout = ""
+            stderr = ""
         return Result()
 
     monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
