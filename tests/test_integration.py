@@ -23,7 +23,7 @@ def _profile_path():
 
 
 def _test_gpu_trim():
-    """Return (gpu, trim_start_s, trim_end_s) from env or profile metadata. (None, None, None) if no profile."""
+    """Return (gpu, trim_start_s, trim_end_s) from env or profile metadata."""
     path = _profile_path()
     if path is None:
         return None, None, None
@@ -36,7 +36,13 @@ def _test_gpu_trim():
     from nsys_tui.profile import open as profile_open
     prof = profile_open(path)
     try:
-        gpu = int(gpu_env) if gpu_env is not None else prof.meta.devices[0]
+        if gpu_env is not None:
+            gpu = int(gpu_env)
+        else:
+            devices = getattr(prof.meta, "devices", []) or []
+            if not devices:
+                pytest.skip("No GPU devices in profile for integration tests")
+            gpu = devices[0]
         if trim_env is not None:
             parts = trim_env.split()
             if len(parts) >= 2:

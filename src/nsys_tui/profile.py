@@ -7,7 +7,7 @@ for kernels, NVTX events, CUDA runtime calls, and metadata.
 import os
 import shutil
 import sqlite3
-import subprocess  # nosec B404 — used only to invoke system nsys for .nsys-rep conversion
+import subprocess  # used only to invoke system nsys for .nsys-rep conversion
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
@@ -286,20 +286,38 @@ def resolve_profile_path(path: str) -> str:
     """
     if not path.lower().endswith(".nsys-rep"):
         return path
+
+    # Reuse an existing up-to-date SQLite export if possible.
+    out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
+    if (
+        os.path.exists(out)
+        and os.path.getsize(out) > 0
+        and os.path.getmtime(out) >= os.path.getmtime(path)
+    ):
+        return out
+
     nsys_exe = shutil.which("nsys")
     if not nsys_exe:
         raise RuntimeError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
             "Install Nsight Systems or export manually: nsys export --type sqlite -o out.sqlite <file.nsys-rep>"
         )
-    out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
+
     try:
-        # path/out passed as list args to nsys, no shell; B603
-        subprocess.run(  # nosec B603
+        # path/out passed as list args to nsys, no shell; arguments are controlled by the caller.
+        subprocess.run(
             [nsys_exe, "export", "--type", "sqlite", "-o", out, "-f", "true", path],
             check=True,
             capture_output=True,
             text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "nsys export timed out after 300 seconds. This may indicate that nsys is waiting "
+            "for interactive input (for example, a license prompt) or that the .nsys-rep file "
+            "is corrupted. Try running the export manually to see the full output:\n"
+            f"  nsys export --type sqlite -o {out} {path}\n"
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
