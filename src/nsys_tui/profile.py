@@ -5,7 +5,9 @@ Provides a thin wrapper around the SQLite export with typed accessors
 for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
 import os
+import shutil
 import sqlite3
+import subprocess  # nosec B404 — used only to invoke system nsys for .nsys-rep conversion
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
@@ -284,19 +286,20 @@ def resolve_profile_path(path: str) -> str:
     """
     if not path.lower().endswith(".nsys-rep"):
         return path
-    import subprocess
-    out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
-    try:
-        subprocess.run(
-            ["nsys", "export", "--type", "sqlite", "-o", out, "-f", "true", path],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
+    nsys_exe = shutil.which("nsys")
+    if not nsys_exe:
         raise RuntimeError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
             "Install Nsight Systems or export manually: nsys export --type sqlite -o out.sqlite <file.nsys-rep>"
+        )
+    out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
+    try:
+        # path/out passed as list args to nsys, no shell; B603
+        subprocess.run(  # nosec B603
+            [nsys_exe, "export", "--type", "sqlite", "-o", out, "-f", "true", path],
+            check=True,
+            capture_output=True,
+            text=True,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
