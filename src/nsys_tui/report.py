@@ -7,7 +7,6 @@ optional markdown output. Aligns with Nsight Systems practice of focused
 profiling (trim window) and post-processing SQLite results into a report.
 """
 import statistics
-from typing import Optional
 
 from .profile import Profile
 from .summary import gpu_summary, format_text, auto_commentary
@@ -53,12 +52,15 @@ def _iteration_regression_flags(iters: list[dict]) -> list[str]:
         return []
     durs = [it["duration_ms"] for it in iters]
     med = statistics.median(durs)
+    if med <= 0:
+        return []
     flags = []
     for it in iters:
         if it["duration_ms"] > 1.5 * med:
+            pct = 100 * it["duration_ms"] / med
             flags.append(
                 f"  ⚠ iter {it['iteration']}: {it['duration_ms']:.1f}ms "
-                f"(~{100 * it['duration_ms'] / med:.0f}% of median {med:.1f}ms)"
+                f"(~{pct:.0f}% of median {med:.1f}ms)"
             )
     return flags
 

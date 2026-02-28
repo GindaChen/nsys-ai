@@ -166,19 +166,21 @@ def main():
         if args.command == "analyze":
             from .report import run_analyze, format_report_terminal, format_report_markdown
             prof = _profile.open(args.profile)
-            trim = _parse_trim(args)
-            data = run_analyze(prof, args.gpu, trim)
-            print(format_report_terminal(data))
-            if args.output:
-                md = format_report_markdown(data, args.profile, trim)
-                out_path = args.output
-                out_dir = os.path.dirname(out_path)
-                if out_dir:
-                    os.makedirs(out_dir, exist_ok=True)
-                with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(md)
-                print(f"Markdown report written to {out_path}")
-            prof.close()
+            try:
+                trim = _parse_trim(args)
+                data = run_analyze(prof, args.gpu, trim)
+                print(format_report_terminal(data))
+                if args.output:
+                    md = format_report_markdown(data, args.profile, trim)
+                    out_path = args.output
+                    out_dir = os.path.dirname(out_path)
+                    if out_dir:
+                        os.makedirs(out_dir, exist_ok=True)
+                    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(md)
+                    print(f"Markdown report written to {out_path}")
+            finally:
+                prof.close()
 
         elif args.command == "info":
             prof = _profile.open(args.profile)
