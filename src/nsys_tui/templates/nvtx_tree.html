@@ -768,14 +768,14 @@
 
     <!-- Tab bar -->
     <div class="tab-bar">
-        <button class="tab-btn active" onclick="switchTab('tree')">🌲 Tree</button>
-        <button class="tab-btn" onclick="switchTab('kernels')">⚡ Kernels</button>
-        <button class="tab-btn" onclick="switchTab('scan')">📊 Scan</button>
-        <button class="tab-btn" onclick="switchTab('scanv2')">📐 ScanV2</button>
-        <button class="tab-btn" onclick="switchTab('scanv3')">🌳 ScanV3</button>
-        <button class="tab-btn" onclick="switchTab('streams')">🔀 Streams</button>
-        <button class="tab-btn" onclick="switchTab('aggregate')">📋 Aggregate</button>
-        <button class="tab-btn" onclick="switchTab('patterns')">🔮 Patterns</button>
+        <button class="tab-btn active" data-tab="tree" onclick="switchTab('tree')">🌲 Tree</button>
+        <button class="tab-btn" data-tab="kernels" onclick="switchTab('kernels')">⚡ Kernels</button>
+        <button class="tab-btn" data-tab="scan" onclick="switchTab('scan')">📊 Scan</button>
+        <button class="tab-btn" data-tab="scanv2" onclick="switchTab('scanv2')">📐 ScanV2</button>
+        <button class="tab-btn" data-tab="scanv3" onclick="switchTab('scanv3')">🌳 ScanV3</button>
+        <button class="tab-btn" data-tab="streams" onclick="switchTab('streams')">🔀 Streams</button>
+        <button class="tab-btn" data-tab="aggregate" onclick="switchTab('aggregate')">📋 Aggregate</button>
+        <button class="tab-btn" data-tab="patterns" onclick="switchTab('patterns')">🔮 Patterns</button>
         <span style="flex:1"></span>
         <button class="tab-btn" onclick="toggleFocus()" title="Focus mode (F)">⛶</button>
     </div>
@@ -877,7 +877,11 @@
         // ══════════════ Tab switching ══════════════
         function switchTab(tab) {
             currentTab = tab;
-            document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', b.textContent.includes({ 'tree': 'Tree', 'kernels': 'Kernels', 'scan': 'Scan', 'scanv2': 'ScanV2', 'streams': 'Streams', 'aggregate': 'Aggregate', 'patterns': 'Patterns' }[tab])));
+            // Activate only the tab button whose data-tab matches.
+            document.querySelectorAll('.tab-btn').forEach((b) => {
+                const key = b.dataset.tab;
+                b.classList.toggle('active', key === tab);
+            });
             document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
             document.getElementById('treeControls').style.display = tab === 'tree' ? 'flex' : 'none';
             document.getElementById('searchBar').style.display = (tab === 'tree' || tab === 'kernels') ? 'block' : 'none';

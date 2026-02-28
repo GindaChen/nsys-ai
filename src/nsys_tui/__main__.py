@@ -3,6 +3,7 @@ CLI entry point: python -m nsys_tui <command> [options]
 
 Commands:
     info       <profile.sqlite>                     Show GPU hardware and profile metadata
+    analyze    <profile.sqlite> --gpu N --trim S E  Full auto-report (bottlenecks, overlap, iters, NVTX)
     summary    <profile.sqlite> [--gpu N]           GPU kernel summary with top kernels
     overlap    <profile.sqlite> --gpu N --trim S E  Compute/NCCL overlap analysis
     nccl       <profile.sqlite> --gpu N --trim S E  NCCL collective breakdown
@@ -56,6 +57,11 @@ def main():
     # ── info ──
     p = sub.add_parser("info", help="Show profile metadata and GPU info")
     p.add_argument("profile", help="Path to .sqlite file")
+
+    # ── analyze ──
+    p = sub.add_parser("analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy")
+    _add_gpu_trim(p)
+    p.add_argument("-o", "--output", default=None, help="Write markdown report to file (default: terminal only)")
 
     # ── summary ──
     p = sub.add_parser("summary", help="GPU kernel summary with top kernels")
@@ -157,7 +163,24 @@ def main():
     from . import profile as _profile
 
     try:
-        if args.command == "info":
+        if args.command == "analyze":
+            from .report import run_analyze, format_report_terminal, format_report_markdown
+            prof = _profile.open(args.profile)
+            trim = _parse_trim(args)
+            data = run_analyze(prof, args.gpu, trim)
+            print(format_report_terminal(data))
+            if args.output:
+                md = format_report_markdown(data, args.profile, trim)
+                out_path = args.output
+                out_dir = os.path.dirname(out_path)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(md)
+                print(f"Markdown report written to {out_path}")
+            prof.close()
+
+        elif args.command == "info":
             prof = _profile.open(args.profile)
             m = prof.meta
             print(f"Profile: {args.profile}")
