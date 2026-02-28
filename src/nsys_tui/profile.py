@@ -307,7 +307,7 @@ def resolve_profile_path(path: str) -> str:
     try:
         # path/out passed as list args to nsys, no shell; caller-controlled paths only
         result = subprocess.run(  # nosec B603
-            [nsys_exe, "export", "--type", "sqlite", "-o", out, "--force-overwrite", "true", path],
+            [nsys_exe, "export", "--type=sqlite", "-o", out, "--force-overwrite=true", path],
             check=True,
             capture_output=True,
             text=True,
