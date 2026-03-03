@@ -1,5 +1,6 @@
 name: CI
 on: [push, pull_request]
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -22,6 +23,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e '.[dev]'
-      - run: python -m nsys_tui --help
-      - run: pytest tests/ -v --tb=short
+
+      # Install with TUI + dev extras (includes textual>=8.0, pytest-textual-snapshot, pytest-asyncio)
+      - name: Install dependencies
+        run: pip install -e '.[tui,dev]'
+
+      # Sanity check
+      - name: CLI smoke test
+        run: python -m nsys_tui --help
+
+      # Tier 1: pure logic tests (no display needed)
+      - name: Logic unit tests
+        run: pytest tests/test_tree_logic.py tests/test_timeline_logic.py -v --tb=short
+
+      # Tier 2: Pilot headless app tests (no display needed)
+      - name: Headless app tests
+        run: pytest tests/test_tui_tree_app.py tests/test_tui_timeline_app.py -v --tb=short
+
+      # Tier 3: all other tests
+      - name: Full test suite
+        run: pytest tests/ -v --tb=short
+
+      # Upload snapshot diff report on visual test failure
+      - name: Upload snapshot report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: snapshot-report-py${{ matrix.python-version }}
+          path: snapshot_report.html

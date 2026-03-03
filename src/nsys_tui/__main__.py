@@ -260,14 +260,14 @@ def _cmd_timeline_web(args, _profile):
 
 def _cmd_tui(args, _profile):
     # run_tui opens its own SQLite connection internally.
-    from .tui import run_tui
+    from .tree import run_tui  # Textual tree TUI (replaces curses tui.py)
     run_tui(args.profile, args.gpu, _parse_trim(args),
             max_depth=args.depth, min_ms=args.min_ms)
 
 
 def _cmd_timeline(args, _profile):
     # run_timeline opens its own SQLite connection internally.
-    from .tui_timeline import run_timeline
+    from .timeline import run_timeline  # Textual timeline TUI (replaces curses tui_timeline.py)
     run_timeline(args.profile, args.gpu, _parse_trim(args), min_ms=args.min_ms)
 
 

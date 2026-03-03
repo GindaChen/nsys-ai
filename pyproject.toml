@@ -32,9 +32,10 @@ nsys-tui = "nsys_tui.__main__:main"
 [project.optional-dependencies]
 agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
 ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
-chat = ["litellm>=1.0.0", "textual>=0.80.0"]  # Textual AI chat TUI
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
-all = ["nsys-ai[agent,chat]"]
+tui = ["textual>=8.0.0"]                        # Textual TUI (tree + timeline + chat)
+chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (requires tui)
+dev = ["pytest>=7.0", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.23"]
+all = ["nsys-ai[agent,tui,chat]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -54,6 +55,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]  # long fixture strings are acceptable in tests
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.bandit]
 # B110: try_except_pass; B608: param to run(); B404/B603: suppressed at call site in profile.py via # nosec
