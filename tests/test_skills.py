@@ -1,5 +1,6 @@
 """Tests for the skills system — registry, loading, and execution."""
 import sqlite3
+
 import pytest
 
 
@@ -75,7 +76,7 @@ def test_all_skills_have_required_fields():
     """Every skill must have name, title, description, category, sql."""
     from nsys_tui.skills.registry import all_skills
     for skill in all_skills():
-        assert skill.name, f"Skill missing name"
+        assert skill.name, "Skill missing name"
         assert skill.title, f"Skill {skill.name} missing title"
         assert skill.description, f"Skill {skill.name} missing description"
         assert skill.category, f"Skill {skill.name} missing category"

@@ -54,7 +54,7 @@ Profiles are `.sqlite` files from NVIDIA Nsight Systems. Key tables: `CUPTI_ACTI
 - `overlap.py` — Compute/NCCL overlap analysis
 - `export.py` / `export_flat.py` — HTML viewer and CSV/JSON export
 - `viewer.py` — Perfetto JSON trace export
-- `web.py` — Flask-based web UI server
+- `web.py` — Local HTTP server (stdlib `http.server` + custom `_ThreadPoolMixIn`; no Flask/Jinja2)
 
 ### Skill System (`src/nsys_tui/skills/`)
 

@@ -15,9 +15,6 @@ All inserted annotations use the gate.py mechanism — they're no-ops
 unless NSIGHT_AI=1 is set in the environment.
 """
 import ast
-import textwrap
-from typing import Optional
-
 
 # ── The import line we inject at the top of files ──────────────────
 
@@ -82,7 +79,7 @@ def annotate_function_calls(source: str, target_func: str,
 # ── AST-based function body annotation ─────────────────────────────
 
 def annotate_function_body(source: str, func_name: str,
-                           class_name: Optional[str] = None) -> str:
+                           class_name: str | None = None) -> str:
     """
     Wrap the entire body of a function with nsight_range().
 

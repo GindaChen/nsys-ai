@@ -8,16 +8,16 @@ profiling (trim window) and post-processing SQLite results into a report.
 """
 import statistics
 
-from .profile import Profile
-from .summary import gpu_summary, format_text, auto_commentary
 from .overlap import (
-    overlap_analysis,
-    format_overlap,
-    nccl_breakdown,
-    format_nccl,
     detect_iterations,
     format_iterations,
+    format_nccl,
+    format_overlap,
+    nccl_breakdown,
+    overlap_analysis,
 )
+from .profile import Profile
+from .summary import auto_commentary, format_text, gpu_summary
 from .tree import build_nvtx_tree
 
 
@@ -40,8 +40,7 @@ def _walk_nodes(nodes):
     """Yield all nodes in tree (roots + descendants)."""
     for node in nodes:
         yield node
-        for child in _walk_nodes(node.get("children", [])):
-            yield child
+        yield from _walk_nodes(node.get("children", []))
 
 
 def _iteration_regression_flags(iters: list[dict]) -> list[str]:

@@ -15,7 +15,7 @@ import queue
 import socketserver
 import threading
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
 
 # Bounded thread pool: fixed worker count, request queue with max size.
@@ -64,9 +64,8 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
     """Concurrent chat requests via bounded thread pool; workers released after each request."""
     daemon_threads = True
 
-from .viewer import generate_html, generate_timeline_html
-from .export import gpu_trace
-
+from .export import gpu_trace  # noqa: E402
+from .viewer import generate_html, generate_timeline_html  # noqa: E402
 
 # ── Shared helpers ───────────────────────────────────────────────
 

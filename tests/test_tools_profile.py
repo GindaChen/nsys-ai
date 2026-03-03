@@ -2,8 +2,6 @@
 import json
 import sqlite3
 
-import pytest
-
 
 def test_query_profile_db_readonly_guardrail():
     """query_profile_db rejects INSERT/UPDATE/DELETE/DROP/ALTER/CREATE."""
@@ -19,7 +17,7 @@ def test_query_profile_db_readonly_guardrail():
 
 def test_query_profile_db_limit_enforced():
     """query_profile_db enforces LIMIT; adaptive limit applies based on column count."""
-    from nsys_tui.tools_profile import query_profile_db, DEFAULT_MAX_LIMIT
+    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(id INT, name TEXT, val REAL, extra TEXT)")
     conn.executemany("INSERT INTO t VALUES(?,?,?,?)", [(i, f"k{i}", float(i), "x") for i in range(200)])
@@ -72,7 +70,7 @@ def test_get_profile_schema_in_memory():
 
 def test_get_profile_schema_cached_reuses_cache():
     """get_profile_schema_cached returns same result without querying DB again (§11.7.7)."""
-    from nsys_tui.tools_profile import get_profile_schema_cached, _schema_cache
+    from nsys_tui.tools_profile import _schema_cache, get_profile_schema_cached
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT)")
     path = "/tmp/test_cache_path_unique_12345.sqlite"
@@ -127,7 +125,7 @@ def test_query_profile_db_empty_query():
 
 def test_adaptive_limit_narrow_query():
     """Single-column queries get up to 2× base limit (§11.9 Phase 2.1)."""
-    from nsys_tui.tools_profile import query_profile_db, DEFAULT_MAX_LIMIT
+    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(name TEXT)")
     for i in range(200):
@@ -142,7 +140,7 @@ def test_adaptive_limit_narrow_query():
 
 def test_adaptive_limit_wide_query():
     """Queries with 4+ columns get a reduced limit (§11.9 Phase 2.1)."""
-    from nsys_tui.tools_profile import query_profile_db, DEFAULT_MAX_LIMIT
+    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(a TEXT, b TEXT, c TEXT, d TEXT, e TEXT)")
     for i in range(100):
@@ -157,7 +155,7 @@ def test_adaptive_limit_wide_query():
 
 def test_query_profile_db_truncates_large_results():
     """query_profile_db truncates JSON output beyond DEFAULT_MAX_JSON_CHARS (§11.7.6)."""
-    from nsys_tui.tools_profile import query_profile_db, DEFAULT_MAX_JSON_CHARS
+    from nsys_tui.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     # Create rows with long string values to exceed the JSON char limit
     conn.execute("CREATE TABLE t(v TEXT)")

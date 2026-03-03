@@ -31,71 +31,22 @@ Keybindings:
 import curses
 import os
 import threading
-from typing import Optional
 
 from . import chat as chat_mod
 from . import tui_actions
-
-def _fmt_dur(ms: float) -> str:
-    if ms >= 1000:
-        return f"{ms / 1000:.2f}s"
-    if ms >= 1:
-        return f"{ms:.1f}ms"
-    return f"{ms * 1000:.0f}μs"
-
-
-def _fmt_ns(ns) -> str:
-    if ns is None:
-        return "?"
-    return f"{ns / 1e9:.3f}s"
-
-
-def _fmt_relative(ns_offset) -> str:
-    """Format as +0.5s, +1.0s etc."""
-    s = ns_offset / 1e9
-    if s < 0.001:
-        return "+0"
-    return f"+{s:.1f}s" if s >= 0.1 else f"+{s * 1000:.0f}ms"
-
-
-def _short_kernel_name(name: str) -> str:
-    """Shorten kernel name for inline display."""
-    for prefix in ('void ', 'at::native::', 'at::cuda::', 'cutlass::',
-                   'cublasLt', 'cublas', 'sm90_', 'sm80_'):
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-    if '<' in name:
-        name = name[:name.index('<')]
-    if name.endswith('_kernel'):
-        name = name[:-7]
-    return name if name else '?'
-
-
-class KernelEvent:
-    __slots__ = ('name', 'demangled', 'start_ns', 'end_ns', 'duration_ms',
-                 'stream', 'heat', 'nvtx_path', 'is_nccl')
-
-    def __init__(self, json_node: dict, path: str = ''):
-        self.name = json_node.get('name', '?')
-        self.demangled = json_node.get('demangled', '')
-        self.start_ns = json_node.get('start_ns', 0)
-        self.end_ns = json_node.get('end_ns', 0)
-        self.duration_ms = json_node.get('duration_ms', 0)
-        self.stream = str(json_node.get('stream', '?'))
-        self.heat = json_node.get('heat', 0)
-        self.nvtx_path = path
-        self.is_nccl = 'nccl' in self.name.lower()
-
-
-class NvtxSpan:
-    __slots__ = ('name', 'start_ns', 'end_ns', 'depth', 'path')
-
-    def __init__(self, name: str, start_ns: int, end_ns: int, depth: int, path: str):
-        self.name = name
-        self.start_ns = start_ns
-        self.end_ns = end_ns
-        self.depth = depth
-        self.path = path
+from .formatting import fmt_dur as _fmt_dur
+from .formatting import fmt_ns as _fmt_ns
+from .formatting import fmt_relative as _fmt_relative
+from .tui_models import (  # re-exported for any existing external imports
+    KernelEvent,
+    NvtxSpan,
+)
+from .tui_models import (
+    collect_kernels as _collect_kernels,
+)
+from .tui_models import (
+    short_kernel_name as _short_kernel_name,
+)
 
 
 class TimelineTUI:
@@ -173,11 +124,11 @@ class TimelineTUI:
         # -- Bookmarks --
         self.bookmarks: list[dict] = []
         self.bookmark_idx = -1
-        self.range_start_ns: Optional[int] = None
+        self.range_start_ns: int | None = None
         self.bookmark_mode = False
         self.bookmark_input = ''
         self.bookmark_list_mode = False
-        self.prev_position: Optional[dict] = None  # {cursor_ns, stream} for jump-back
+        self.prev_position: dict | None = None  # {cursor_ns, stream} for jump-back
 
         # Config panel state
         self.config_items = [
@@ -222,7 +173,7 @@ class TimelineTUI:
                   (k.demangled and ft in k.demangled.lower())]
         return ks
 
-    def _kernel_at_time(self, stream: str, ns: int) -> Optional[KernelEvent]:
+    def _kernel_at_time(self, stream: str, ns: int) -> KernelEvent | None:
         """Find the kernel containing or nearest to the given timestamp."""
         ks = self._get_stream_kernels(stream)
         if not ks:
@@ -292,7 +243,6 @@ class TimelineTUI:
             self._last_timeline_w = timeline_w
 
             stream = self.streams[self.selected_stream] if self.streams else '?'
-            sk = self._get_stream_kernels(stream)
 
             # Auto-center viewport
             self._center_viewport(timeline_w)
@@ -385,8 +335,6 @@ class TimelineTUI:
                     break
                 stream_y_map.append((cur_y, rh, si))
                 cur_y += rh
-            streams_show_count = len(stream_y_map)
-
             for start_y_s, row_h, si in stream_y_map:
                 s = self.streams[si]
                 is_sel = (si == self.selected_stream)
@@ -446,7 +394,7 @@ class TimelineTUI:
                     if 'kernel_name' in bm:
                         extra = f"  [{_short_kernel_name(bm['kernel_name'])}]"
                     if 'range_start_ns' in bm:
-                        extra += f"  ↔ range"
+                        extra += "  ↔ range"
                     marker = " ◀" if bi == self.bookmark_idx else ""
                     bm_lines.append(f"  {num}  {name}  {ts}{extra}{marker}")
                 start_y = max(height - len(bm_lines) - 2, 3)
@@ -865,7 +813,7 @@ class TimelineTUI:
                     pass
 
     def _draw_bottom_panel(self, stdscr, panel_y: int, width: int, height: int,
-                           stream: str, sel_k: Optional[KernelEvent]):
+                           stream: str, sel_k: KernelEvent | None):
         """Draw detail bar + NVTX hierarchy in bottom panel."""
         if panel_y >= height - 2:
             return
@@ -1264,19 +1212,20 @@ def run_timeline(db_path: str, device: int, trim: tuple[int, int],
     from . import profile as _profile
     from .tree import build_nvtx_tree, to_json
 
-    prof = _profile.open(db_path)
-    roots = build_nvtx_tree(prof, device, trim)
-    json_roots = to_json(roots)
-
-    gpu_name = f"GPU {device}"
-    try:
-        gpus = prof.gpus()
-        for g in gpus:
-            if g.get("id") == device or g.get("deviceId") == device:
-                gpu_name = g.get("name", gpu_name)
-                break
-    except Exception:
-        pass
+    # Close the profile connection before entering curses so the DB is not
+    # held open during the TUI session.
+    with _profile.open(db_path) as prof:
+        roots = build_nvtx_tree(prof, device, trim)
+        json_roots = to_json(roots)
+        gpu_name = f"GPU {device}"
+        try:
+            gpus = prof.gpus()
+            for g in gpus:
+                if g.get("id") == device or g.get("deviceId") == device:
+                    gpu_name = g.get("name", gpu_name)
+                    break
+        except Exception:
+            pass
 
     trim_label = f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s"
     title = f"{gpu_name}  |  {trim_label}"
@@ -1299,10 +1248,4 @@ def run_timeline(db_path: str, device: int, trim: tuple[int, int],
     curses.wrapper(tui.run)
 
 
-def _collect_kernels(roots: list[dict], out: list, path: str = ''):
-    for n in roots:
-        np = f"{path} > {n['name']}" if path else n['name']
-        if n.get('type') == 'kernel':
-            out.append(KernelEvent(n, path))
-        if n.get('children'):
-            _collect_kernels(n['children'], out, np)
+# _collect_kernels is imported from tui_models and available under that name.

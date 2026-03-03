@@ -21,7 +21,7 @@ nsys-ai/
 │   ├── export_flat.py     # CSV/JSON flat export
 │   ├── projection.py      # Time-range projection
 │   ├── viewer.py          # Perfetto JSON export
-│   ├── web.py             # Flask web UI server
+│   ├── web.py             # Local HTTP server (stdlib HTTPServer + ThreadPool)
 │   ├── skills/            # 🧩 Analysis skill system
 │   │   ├── base.py        # Skill dataclass + execution
 │   │   ├── registry.py    # Auto-discovery + lookup
@@ -30,7 +30,7 @@ nsys-ai/
 │   │   ├── persona.py     # System prompt + identity
 │   │   └── loop.py        # Analysis loop + skill selection
 │   ├── ai/                # AI module (NVTX annotation, convergence)
-│   └── templates/         # HTML templates (Jinja2)
+│   └── templates/         # HTML templates (string.Template — no Jinja2)
 ├── tests/                 # pytest test suite
 ├── docs/                  # Documentation (8 guides + root causes)
 │   ├── root-causes/       # 📖 Book of Root Causes

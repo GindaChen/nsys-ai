@@ -24,7 +24,6 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 
-
 # ---------------------------------------------------------------------------
 # Profile helper — load top kernels without importing the full Profile class.
 # ---------------------------------------------------------------------------
@@ -390,7 +389,7 @@ class NsysChatApp(App):
         Imports chat module lazily so the rest of the app works without litellm installed.
         """
         try:
-            from .chat import _get_model_and_key, stream_agent_loop, distill_history
+            from .chat import _get_model_and_key, distill_history, stream_agent_loop
         except ImportError as e:
             self.call_from_thread(
                 self._on_system_event, f"chat module unavailable: {e}"

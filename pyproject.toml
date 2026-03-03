@@ -33,7 +33,7 @@ nsys-tui = "nsys_tui.__main__:main"
 agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
 ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
 chat = ["litellm>=1.0.0", "textual>=0.80.0"]  # Textual AI chat TUI
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.4.0"]
 all = ["nsys-ai[agent,chat]"]
 
 [tool.setuptools.packages.find]
@@ -41,6 +41,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 nsys_tui = ["templates/*.html"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, UP: pyupgrade
+select = ["E", "W", "F", "I", "UP"]
+ignore = [
+    "E501",  # line-too-long — handled by formatter, not hard error
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]  # long fixture strings are acceptable in tests
 
 [tool.bandit]
 # B110: try_except_pass; B608: param to run(); B404/B603: suppressed at call site in profile.py via # nosec

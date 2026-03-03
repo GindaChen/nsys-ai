@@ -7,7 +7,6 @@ The core algorithm:
 3. The projected span = [min(kernel_starts), max(kernel_ends)].
 4. Track nesting depth for proper Perfetto layering.
 """
-from typing import Optional
 
 
 def _compute_depth(stacks: dict, tid: int, start: int, end: int) -> int:
@@ -67,7 +66,8 @@ def project_nvtx(profile, device: int,
             if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
                 k = kmap.get(rt["correlationId"])
                 if k:
-                    gs.append(k["start"]); ge.append(k["end"])
+                    gs.append(k["start"])
+                    ge.append(k["end"])
 
         if gs:
             ps, pe = min(gs), max(ge)

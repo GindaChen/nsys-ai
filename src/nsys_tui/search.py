@@ -7,15 +7,13 @@ Supports:
   - Hierarchical search: find kernels under a specific NVTX path
     (e.g. "sample_0 > flash_attention_forward")
 """
-import re
-from typing import Optional
 from .profile import Profile
 from .tree import build_nvtx_tree
 
 
 def search_kernels(prof: Profile, query: str,
-                   device: Optional[int] = None,
-                   trim: Optional[tuple[int, int]] = None,
+                   device: int | None = None,
+                   trim: tuple[int, int] | None = None,
                    limit: int = 200) -> list[dict]:
     """
     Search kernel names (case-insensitive substring match).
@@ -41,8 +39,8 @@ def search_kernels(prof: Profile, query: str,
 
 
 def search_nvtx(prof: Profile, query: str,
-                device: Optional[int] = None,
-                trim: Optional[tuple[int, int]] = None,
+                device: int | None = None,
+                trim: tuple[int, int] | None = None,
                 limit: int = 200) -> list[dict]:
     """
     Search NVTX annotation text (case-insensitive substring match).

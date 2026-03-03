@@ -129,9 +129,9 @@ def query_profile_db(
                 DEFAULT_MAX_JSON_CHARS,
             )
             json_str = json_str[: DEFAULT_MAX_JSON_CHARS] + (
-                "...[Truncated - result exceeds %d chars] "
+                f"...[Truncated - result exceeds {DEFAULT_MAX_JSON_CHARS} chars] "
                 "Please refine your query: SELECT only essential columns "
-                "(e.g. start, [end], shortName) or reduce the LIMIT." % DEFAULT_MAX_JSON_CHARS
+                "(e.g. start, [end], shortName) or reduce the LIMIT."
             )
         return json_str
     except sqlite3.Error as e:

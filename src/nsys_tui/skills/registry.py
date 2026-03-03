@@ -7,7 +7,6 @@ Also supports loading skills from external directories.
 import importlib
 import pkgutil
 import sqlite3
-from typing import Optional
 
 from .base import Skill
 
@@ -43,7 +42,7 @@ def list_skills() -> list[str]:
     return sorted(_SKILLS.keys())
 
 
-def get_skill(name: str) -> Optional[Skill]:
+def get_skill(name: str) -> Skill | None:
     """Look up a skill by name. Returns None if not found."""
     _load_builtins()
     return _SKILLS.get(name)

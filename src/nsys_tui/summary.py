@@ -5,12 +5,12 @@ Produces a structured overview of a GPU profile: hardware, kernel stats,
 NVTX breakdown, stream utilization, and NCCL timing. Designed for both
 agent consumption and human reading.
 """
-from typing import Optional
+
 from .profile import Profile
 
 
 def gpu_summary(prof: Profile, device: int,
-                trim: Optional[tuple[int, int]] = None) -> dict:
+                trim: tuple[int, int] | None = None) -> dict:
     """
     Generate a summary report for one GPU.
 

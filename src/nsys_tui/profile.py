@@ -9,7 +9,6 @@ import shutil
 import sqlite3
 import subprocess  # nosec B404 — only for nsys export .nsys-rep→.sqlite, list args no shell
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
 
 
 class NsightSchema:
@@ -22,17 +21,17 @@ class NsightSchema:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self.tables: List[str] = [
+        self.tables: list[str] = [
             r[0] for r in self._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         ]
-        self.version: Optional[str] = self._detect_version()
-        self.kernel_table: Optional[str] = self._detect_kernel_table()
+        self.version: str | None = self._detect_version()
+        self.kernel_table: str | None = self._detect_kernel_table()
 
     # ── Version detection ──────────────────────────────────────────────
 
-    def _read_kv_table(self, table: str) -> Dict[str, str]:
+    def _read_kv_table(self, table: str) -> dict[str, str]:
         """
         Best-effort reader for META_DATA_* style tables which may use
         slightly different column names across Nsight versions.
@@ -58,7 +57,7 @@ class NsightSchema:
         if not key_col or not val_col:
             return {}
 
-        kv: Dict[str, str] = {}
+        kv: dict[str, str] = {}
         cur = self._conn.execute(
             f"SELECT {key_col}, {val_col} FROM {table}"
         )
@@ -67,9 +66,9 @@ class NsightSchema:
                 kv[str(k)] = str(v)
         return kv
 
-    def _detect_version(self) -> Optional[str]:
+    def _detect_version(self) -> str | None:
         """Try to infer Nsight Systems version from META_DATA tables."""
-        meta: Dict[str, str] = {}
+        meta: dict[str, str] = {}
         for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
             meta.update(self._read_kv_table(table))
 
@@ -86,7 +85,7 @@ class NsightSchema:
 
     # ── Table detection ────────────────────────────────────────────────
 
-    def _detect_kernel_table(self) -> Optional[str]:
+    def _detect_kernel_table(self) -> str | None:
         """
         Pick an appropriate kernel activity table, if present.
 
@@ -214,7 +213,7 @@ class Profile:
                 streams=streams.get(dev, []))
         return info
 
-    def kernels(self, device: int, trim: Optional[tuple[int, int]] = None) -> list[dict]:
+    def kernels(self, device: int, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device, optionally trimmed to a time window."""
         sql = """
             SELECT k.start, k.[end], k.streamId, k.correlationId, s.value as name
@@ -234,23 +233,23 @@ class Profile:
         return {r["correlationId"]: dict(start=r["start"], end=r["end"],
                 stream=r["streamId"], name=r["name"],
                 demangled=r["demangled"])
-                for r in self.conn.execute("""
+                for r in self.conn.execute(f"""
                     SELECT k.start, k.[end], k.streamId, k.correlationId,
                            s.value as name, d.value as demangled
-                    FROM {kernel_table} k
+                    FROM {self.schema.kernel_table} k
                     JOIN StringIds s ON k.shortName = s.id
                     JOIN StringIds d ON k.demangledName = d.id
                     WHERE k.deviceId = ?  ORDER BY k.start
-                """.format(kernel_table=self.schema.kernel_table), (device,))}
+                """, (device,))}
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
-        return {r[0] for r in self.conn.execute("""
+        return {r[0] for r in self.conn.execute(f"""
             SELECT DISTINCT r.globalTid
             FROM CUPTI_ACTIVITY_KIND_RUNTIME r
-            JOIN {kernel_table} k ON r.correlationId = k.correlationId
+            JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
-        """.format(kernel_table=self.schema.kernel_table), (device,))}
+        """, (device,))}
 
     def runtime_index(self, threads: set[int],
                       window: tuple[int, int]) -> dict[int, list]:
@@ -276,6 +275,12 @@ class Profile:
 
     def close(self):
         self.conn.close()
+
+    def __enter__(self) -> "Profile":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
 
 def resolve_profile_path(path: str) -> str:

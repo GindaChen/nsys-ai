@@ -7,7 +7,6 @@ tree structure to determine which NVTX regions need finer-grained scoping.
 The convergence criterion: each innermost NVTX should contain exactly one
 GPU kernel. Regions with multiple kernels are candidates for refinement.
 """
-from typing import Optional
 
 
 def find_refinement_targets(tree_roots: list[dict],

@@ -1,6 +1,4 @@
 """Basic smoke tests for nsys-ai package."""
-import json
-import sqlite3
 import subprocess
 import sys
 
@@ -15,9 +13,11 @@ def test_help():
 
 
 def test_import():
-    """Package should be importable."""
+    """Package should be importable and expose __version__."""
     import nsys_tui
-    assert hasattr(nsys_tui, '__version__') or True  # just check import works
+    assert hasattr(nsys_tui, "__version__")
+    assert isinstance(nsys_tui.__version__, str)
+    assert nsys_tui.__version__  # non-empty
 
 
 def test_subcommands():

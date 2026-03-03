@@ -7,9 +7,6 @@ main_page.py — The entry point for nsys-ai.
 import curses
 import glob
 import os
-import sys
-from typing import Optional
-
 
 BANNER = r"""
   ┌─────────────────────────────────────────────┐
@@ -227,7 +224,7 @@ def _run_simple_mode(profiles: list[str]):
     for i, p in enumerate(profiles, 1):
         size_kb = os.path.getsize(p) // 1024
         print(f"    [{i}] {p}  ({size_kb:,} KB)")
-    print(f"\n    [q] Quit\n")
+    print("\n    [q] Quit\n")
 
     try:
         choice = input("  Select profile: ").strip()
@@ -244,7 +241,7 @@ def _run_simple_mode(profiles: list[str]):
     print(f"\n  Profile: {profile}\n  Actions:\n")
     for i, (cmd, icon, desc) in enumerate(ACTIONS, 1):
         print(f"    [{i}] {icon} {desc}")
-    print(f"\n    [q] Quit\n")
+    print("\n    [q] Quit\n")
 
     try:
         choice = input("  Select action: ").strip()
@@ -303,14 +300,15 @@ def _launch_action(cmd: str, profile: str):
     from . import profile as _profile
 
     if cmd == "skill":
-        from .skills.registry import all_skills, run_skill
         import sqlite3
 
+        from .skills.registry import all_skills, run_skill
+
         skills = all_skills()
-        print(f"\n  Available skills:\n")
+        print("\n  Available skills:\n")
         for i, s in enumerate(skills, 1):
             print(f"    [{i}] {s.name:<25s}  {s.description[:55]}")
-        print(f"\n    [q] Back\n")
+        print("\n    [q] Back\n")
 
         try:
             choice = input("  Select skill: ").strip()
@@ -356,7 +354,7 @@ def _launch_action(cmd: str, profile: str):
         prof.close()
 
     elif cmd == "summary":
-        from .summary import gpu_summary, format_text, auto_commentary
+        from .summary import auto_commentary, format_text, gpu_summary
         s = gpu_summary(prof, gpu, trim)
         print()
         print(format_text(s))

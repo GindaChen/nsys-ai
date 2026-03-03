@@ -7,9 +7,8 @@ and produces a structured analysis report. Works without LLM by default
 extra installed, can delegate to an LLM for natural language analysis.
 """
 import sqlite3
-from typing import Optional
 
-from ..skills.registry import all_skills, get_skill, run_skill
+from ..skills.registry import run_skill
 
 
 class Agent:
@@ -151,7 +150,7 @@ class Agent:
                 selected.update(skill_names)
         return sorted(selected)
 
-    def _try_llm_synthesis(self, question: str, evidence_sections: list[str]) -> Optional[str]:
+    def _try_llm_synthesis(self, question: str, evidence_sections: list[str]) -> str | None:
         """Try to use an LLM to synthesize an answer. Returns None if no LLM available."""
         try:
             import anthropic

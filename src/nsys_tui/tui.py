@@ -28,53 +28,12 @@ Keybindings:
 import curses
 import os
 import threading
-from typing import Optional
 
 from . import chat as chat_mod
 from . import tui_actions
-
-def _fmt_dur(ms: float) -> str:
-    if ms >= 1000:
-        return f"{ms / 1000:.2f}s"
-    if ms >= 1:
-        return f"{ms:.1f}ms"
-    return f"{ms * 1000:.0f}μs"
-
-
-def _fmt_ns(ns) -> str:
-    """Format nanoseconds as seconds with 3 decimal places."""
-    if ns is None:
-        return "?"
-    return f"{ns / 1e9:.3f}s"
-
-
-class TreeNode:
-    """Flat representation of a tree node for display."""
-    __slots__ = ('name', 'type', 'depth', 'duration_ms', 'heat', 'stream',
-                 'relative_pct', 'path', 'demangled', 'children_count',
-                 'kernel_count', 'nvtx_count', 'expanded', 'has_children',
-                 'start_ns', 'end_ns', 'json_node', '_bubble_us')
-
-    def __init__(self, json_node: dict, depth: int):
-        self.json_node = json_node
-        self.name = json_node.get('name', '?')
-        self.type = json_node.get('type', '')
-        self.depth = depth
-        self.duration_ms = json_node.get('duration_ms', 0)
-        self.heat = json_node.get('heat', 0)
-        self.stream = json_node.get('stream', '?')
-        self.relative_pct = json_node.get('relative_pct', 100)
-        self.path = json_node.get('path', '')
-        self.demangled = json_node.get('demangled', '')
-        self.start_ns = json_node.get('start_ns')
-        self.end_ns = json_node.get('end_ns')
-        children = json_node.get('children', [])
-        self.has_children = len(children) > 0
-        self.kernel_count = sum(1 for c in children if c.get('type') == 'kernel')
-        self.nvtx_count = sum(1 for c in children if c.get('type') == 'nvtx')
-        self.children_count = len(children)
-        self.expanded = depth < 2  # Default: expand top 2 levels
-        self._bubble_us = 0
+from .formatting import fmt_dur as _fmt_dur
+from .formatting import fmt_ns as _fmt_ns
+from .tui_models import TreeNode  # re-exported for any existing external imports
 
 
 class InteractiveTUI:
@@ -1162,10 +1121,10 @@ def render_tree(roots: list[dict], title: str = "NVTX Tree",
                 width: int = None):
     """Non-interactive render (fallback for piped output)."""
     from rich.console import Console
-    from rich.tree import Tree
     from rich.panel import Panel
-    from rich.text import Text
     from rich.table import Table
+    from rich.text import Text
+    from rich.tree import Tree
 
     console = Console(width=width)
     total_nvtx = total_kernels = 0
@@ -1247,19 +1206,20 @@ def run_tui(db_path: str, device: int, trim: tuple[int, int],
     from . import profile as _profile
     from .tree import build_nvtx_tree, to_json
 
-    prof = _profile.open(db_path)
-    roots = build_nvtx_tree(prof, device, trim)
-    json_roots = to_json(roots)
-
-    gpu_name = f"GPU {device}"
-    try:
-        gpus = prof.gpus()
-        for g in gpus:
-            if g.get("id") == device or g.get("deviceId") == device:
-                gpu_name = g.get("name", gpu_name)
-                break
-    except Exception:
-        pass
+    # Load profile and build JSON tree, then close the connection before
+    # entering the curses session so the DB is not held open during the TUI.
+    with _profile.open(db_path) as prof:
+        roots = build_nvtx_tree(prof, device, trim)
+        json_roots = to_json(roots)
+        gpu_name = f"GPU {device}"
+        try:
+            gpus = prof.gpus()
+            for g in gpus:
+                if g.get("id") == device or g.get("deviceId") == device:
+                    gpu_name = g.get("name", gpu_name)
+                    break
+        except Exception:
+            pass
 
     trim_label = f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s"
     title = f"{gpu_name}  |  {trim_label}"
@@ -1269,7 +1229,7 @@ def run_tui(db_path: str, device: int, trim: tuple[int, int],
         render_tree(json_roots, title=title, max_depth=max_depth, min_ms=min_ms)
         return
 
-    # Interactive mode
+    # Interactive mode — curses.wrapper handles terminal restore on exit/crash.
     tui = InteractiveTUI(json_roots, title=title, db_path=db_path,
                          device=device, trim=trim)
     if max_depth >= 0:

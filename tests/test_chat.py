@@ -3,8 +3,6 @@ import json
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from nsys_tui import chat as chat_mod
 
 

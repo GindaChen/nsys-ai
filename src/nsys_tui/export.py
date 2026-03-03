@@ -3,7 +3,9 @@ export.py — Generate Perfetto-compatible JSON traces from profiles.
 
 Combines kernel events + projected NVTX into chrome://tracing format.
 """
-import json, os
+import json
+import os
+
 from . import profile as _profile
 from .projection import project_nvtx
 

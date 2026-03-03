@@ -5,15 +5,15 @@ Replaces Nsight's complex query interface with simple, script-friendly
 formats that users can load in pandas, Excel, or custom tools.
 """
 import csv
-import json
 import io
-from typing import Optional
+import json
+
 from .profile import Profile
 from .tree import build_nvtx_tree
 
 
 def _kernel_rows(prof: Profile, device: int,
-                 trim: Optional[tuple[int, int]] = None,
+                 trim: tuple[int, int] | None = None,
                  include_nvtx_path: bool = True) -> list[dict]:
     """Build flat rows with optional NVTX path context."""
     kernels = prof.kernels(device, trim)
@@ -51,8 +51,8 @@ def _collect_paths(nodes: list, path: list[str],
 
 
 def to_csv(prof: Profile, device: int,
-           trim: Optional[tuple[int, int]] = None,
-           output: Optional[str] = None) -> str:
+           trim: tuple[int, int] | None = None,
+           output: str | None = None) -> str:
     """
     Export kernel data as CSV.
 
@@ -84,8 +84,8 @@ def to_csv(prof: Profile, device: int,
 
 
 def to_json_flat(prof: Profile, device: int,
-                 trim: Optional[tuple[int, int]] = None,
-                 output: Optional[str] = None) -> list[dict]:
+                 trim: tuple[int, int] | None = None,
+                 output: str | None = None) -> list[dict]:
     """
     Export kernel data as a flat JSON list.
 
@@ -103,8 +103,8 @@ def to_json_flat(prof: Profile, device: int,
 
 
 def to_summary_json(prof: Profile, device: int,
-                    trim: Optional[tuple[int, int]] = None,
-                    output: Optional[str] = None) -> dict:
+                    trim: tuple[int, int] | None = None,
+                    output: str | None = None) -> dict:
     """
     Export a structured summary JSON combining hardware, kernels, and timing.
 

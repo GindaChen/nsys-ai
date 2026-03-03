@@ -8,7 +8,6 @@ Key design: builds the tree from the PRIMARY CPU thread for the target GPU
 (the thread with the most correlated kernel launches on that device).
 Mixing threads breaks containment-based nesting.
 """
-from .projection import _compute_depth
 
 
 def _find_primary_thread(profile, device: int) -> int:
@@ -227,8 +226,8 @@ def format_markdown(roots, depth=0) -> str:
             lines.append("")
 
             if kern_children:
-                lines.append(f"| Kernel | Stream | Duration |")
-                lines.append(f"|--------|--------|----------|")
+                lines.append("| Kernel | Stream | Duration |")
+                lines.append("|--------|--------|----------|")
                 for k in kern_children:
                     k_dur = (k["end"] - k["start"]) / 1e6
                     lines.append(f"| {k['name']} | {k.get('stream', '?')} | {k_dur:.3f}ms |")

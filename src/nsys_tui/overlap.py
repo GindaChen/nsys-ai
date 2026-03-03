@@ -4,10 +4,9 @@ overlap.py — Compute/communication overlap analysis and NCCL breakdown.
 Quantifies how much GPU compute overlaps with NCCL communication,
 detects training iterations, and breaks down collective operations.
 """
-from typing import Optional
 from collections import defaultdict
-from .profile import Profile
 
+from .profile import Profile
 
 # ── NCCL kernel classification ──────────────────────────────────────
 
@@ -34,7 +33,7 @@ def classify_kernel(name: str) -> str:
 # ── Compute/Communication overlap ──────────────────────────────────
 
 def overlap_analysis(prof: Profile, device: int,
-                     trim: Optional[tuple[int, int]] = None) -> dict:
+                     trim: tuple[int, int] | None = None) -> dict:
     """
     Quantify compute vs communication overlap on a GPU.
 
@@ -94,7 +93,7 @@ def overlap_analysis(prof: Profile, device: int,
 # ── NCCL collective breakdown ──────────────────────────────────────
 
 def nccl_breakdown(prof: Profile, device: int,
-                   trim: Optional[tuple[int, int]] = None) -> list[dict]:
+                   trim: tuple[int, int] | None = None) -> list[dict]:
     """
     Break down NCCL operations by collective type.
 
@@ -133,7 +132,7 @@ def nccl_breakdown(prof: Profile, device: int,
 # ── Iteration detection ────────────────────────────────────────────
 
 def detect_iterations(prof: Profile, device: int,
-                      trim: Optional[tuple[int, int]] = None,
+                      trim: tuple[int, int] | None = None,
                       marker: str = "sample_0") -> list[dict]:
     """
     Detect repeating training iterations using a top-level NVTX marker.
@@ -151,7 +150,7 @@ def detect_iterations(prof: Profile, device: int,
 
     pad = int(5e9)
     t = trim or prof.meta.time_range
-    nvtx_rows = prof.conn.execute("""
+    prof.conn.execute("""
         SELECT text, start, [end] FROM NVTX_EVENTS
         WHERE text LIKE ? AND [end] > start
           AND globalTid IN ({})

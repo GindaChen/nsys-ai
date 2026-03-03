@@ -60,16 +60,16 @@ def _main():
         sys.exit(1)
 
     try:
-        from nsys_tui.tools_profile import (
-            open_profile_readonly,
-            get_profile_schema,
-            query_profile_db,
-        )
         from nsys_tui.chat import (
-            _tools_openai,
             _build_system_prompt,
             _get_model_and_key,
+            _tools_openai,
             run_agent_loop,
+        )
+        from nsys_tui.tools_profile import (
+            get_profile_schema,
+            open_profile_readonly,
+            query_profile_db,
         )
     except ImportError as e:
         print(f"Import error: {e}. Install: pip install -e '.[ai]'", file=sys.stderr)

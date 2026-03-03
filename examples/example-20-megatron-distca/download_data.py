@@ -10,8 +10,8 @@ Downloads the pre-converted .sqlite file so you can immediately use nsys-ai
 without needing nsys or Modal installed.
 """
 import os
-import sys
 import subprocess
+import sys
 
 HF_REPO = "GindaChen/nsys-hero"
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -35,7 +35,7 @@ def main():
     if os.path.exists(sqlite_path):
         size_mb = os.path.getsize(sqlite_path) / 1e6
         print(f"✓ SQLite already exists: {LOCAL_SQLITE} ({size_mb:.1f} MB)")
-        print(f"  Ready to use:")
+        print("  Ready to use:")
         print(f"  nsys-ai info output/{LOCAL_SQLITE}")
         return
 
@@ -78,7 +78,7 @@ def main():
         return
     except Exception as e:
         print(f"⚠  SQLite not available on HuggingFace: {e}")
-        print(f"   Falling back to .nsys-rep download...")
+        print("   Falling back to .nsys-rep download...")
 
     # Fallback: download .nsys-rep
     print(f"↓ Downloading .nsys-rep from {HF_REPO}...")
