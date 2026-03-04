@@ -30,7 +30,7 @@ jobs:
 
       # Sanity check
       - name: CLI smoke test
-        run: python -m nsys_tui --help
+        run: python -m nsys_ai --help
 
       # Tier 1: pure logic tests (no display needed)
       - name: Logic unit tests
