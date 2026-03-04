@@ -1,9 +1,9 @@
-"""Unit tests for nsys_tui.chat (AI Brain + Navigator)."""
+"""Unit tests for nsys_ai.chat (AI Brain + Navigator)."""
 import json
 import sys
 from unittest.mock import MagicMock, patch
 
-from nsys_tui import chat as chat_mod
+from nsys_ai import chat as chat_mod
 
 
 def test_get_model_and_key_none(monkeypatch):

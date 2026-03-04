@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nsys-ai"
 version = "0.2.1"
-description = "Terminal UI for NVIDIA Nsight Systems profiles — timeline viewer, kernel navigator, NVTX hierarchy"
+description = "AI-powered analysis for NVIDIA Nsight Systems profiles — web viewer, timeline, kernel navigator, NVTX hierarchy"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -26,8 +26,7 @@ classifiers = [
 ]
 
 [project.scripts]
-nsys-ai = "nsys_tui.__main__:main"
-nsys-tui = "nsys_tui.__main__:main"
+nsys-ai = "nsys_ai.__main__:main"
 
 [project.optional-dependencies]
 agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
@@ -41,7 +40,7 @@ all = ["nsys-ai[agent,tui,chat]"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-nsys_tui = ["templates/*.html"]
+nsys_ai = ["templates/*.html"]
 
 [tool.ruff]
 line-length = 100

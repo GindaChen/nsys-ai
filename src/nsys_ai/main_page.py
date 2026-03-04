@@ -19,13 +19,13 @@ BANNER = r"""
 """
 
 ACTIONS = [
+    ("timeline-web", "🌐", "Web Timeline  — Multi-GPU browser viewer (default)"),
     ("timeline", "🕐", "Timeline TUI  — Perfetto-style horizontal view"),
     ("tui",      "🌲", "Tree TUI      — NVTX hierarchy browser"),
     ("summary",  "📊", "Summary       — Kernel stats & auto-commentary"),
     ("info",     "ℹ️ ", "Info          — Profile metadata & GPU hardware"),
     ("skill",    "🧩", "Skills        — Run analysis skills"),
     ("agent",    "🤖", "Agent         — AI auto-analysis"),
-    ("web",      "🌐", "Web UI        — Browser-based viewer"),
 ]
 
 
@@ -371,6 +371,12 @@ def _launch_action(cmd: str, profile: str):
         prof.close()
         from .tui import run_tui
         run_tui(profile, gpu, trim)
+
+    elif cmd == "timeline-web":
+        from .web import serve_timeline
+        devices = meta.devices if meta.devices else [0]
+        serve_timeline(prof, devices, None,
+                       port=8144, open_browser=True)
 
     elif cmd == "web":
         from .web import serve

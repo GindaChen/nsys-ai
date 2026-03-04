@@ -4,9 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>nsys-ai — Terminal UI for NVIDIA Nsight Systems</title>
+    <title>nsys-ai — AI-Powered GPU Profile Viewer</title>
     <meta name="description"
-        content="Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles from your terminal.">
+        content="Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles from your browser or terminal.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
@@ -569,8 +569,8 @@
                     <div class="hero-badge">🔬 v0.2.1 — now on PyPI</div>
                     <h1>nsys-ai</h1>
                     <p>Navigate GPU kernel timelines, explore NVTX hierarchies, and analyze Nsight Systems profiles —
-                        all from
-                        your terminal.</p>
+                        from your
+                        browser or terminal.</p>
                     <div class="install-box"
                         onclick="navigator.clipboard.writeText('pip install nsys-ai').then(()=>this.querySelector('.copy').textContent='Copied!')">
                         <span class="dollar">$</span>
@@ -594,7 +594,7 @@
                             <div class="terminal-dot r"></div>
                             <div class="terminal-dot y"></div>
                             <div class="terminal-dot g"></div>
-                            <span class="terminal-title">nsys-ai timeline profile.sqlite --gpu 0 --trim 39 42</span>
+                            <span class="terminal-title">nsys-ai timeline-web profile.nsys-rep</span>
                         </div>
                         <div class="terminal-body"><span class="t-dim">GPU 0 | 39.0s – 42.0s</span> <span
                                 class="t-dim">39.127s</span> <span class="t-dim">39.532s</span> <span
@@ -665,11 +665,11 @@
                     <span class="t-dim"># 3. Explore — profile overview</span>
                     <span class="t-green">$</span> nsys-ai info output/megatron_distca.sqlite
 
-                    <span class="t-dim"># 4. Interactive timeline TUI (the main attraction!)</span>
-                    <span class="t-green">$</span> nsys-ai timeline output/megatron_distca.sqlite --gpu 4 --trim 39 42
+                    <span class="t-dim"># 4. Web viewer — opens in browser (the main attraction!)</span>
+                    <span class="t-green">$</span> nsys-ai output/megatron_distca.nsys-rep
 
-                    <span class="t-dim"># 5. Web viewer — opens in browser</span>
-                    <span class="t-green">$</span> nsys-ai web output/megatron_distca.sqlite --gpu 4 --trim 39 42
+                    <span class="t-dim"># 5. Or use the terminal TUI</span>
+                    <span class="t-green">$</span> nsys-ai timeline output/megatron_distca.sqlite --gpu 4 --trim 39 42
                 </div>
             </div>
         </div>
@@ -683,6 +683,12 @@
     <section class="features">
         <div class="container">
             <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Web Timeline</h3>
+                    <p>Multi-GPU browser viewer with progressive rendering, NVTX hierarchy bars, pinch-to-zoom,
+                        trackpad pan, and an AI chat sidebar. No --trim required.</p>
+                </div>
                 <div class="feature-card">
                     <div class="feature-icon">🖥️</div>
                     <h3>Timeline TUI</h3>
@@ -814,7 +820,7 @@
                 <a href="https://pypi.org/project/nsys-ai/">PyPI</a> ·
                 MIT License
             </p>
-            <p style="margin-top:8px">Built for GPU performance engineers who live in the terminal.</p>
+            <p style="margin-top:8px">Built for GPU performance engineers.</p>
         </div>
     </footer>
 

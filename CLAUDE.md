@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 nsys-ai is an AI-powered terminal UI for analyzing NVIDIA Nsight Systems GPU profiles (`.sqlite` files). It provides curses-based TUI viewers, HTML export, a skill-based analysis system, and an LLM agent for automated GPU performance diagnosis.
 
-**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_tui` (historical). Both `nsys-ai` and `nsys-tui` CLI commands work.
+**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). Both `nsys-ai` and `nsys-ai` CLI commands work.
 
 ## Build & Development Commands
 
@@ -20,7 +20,7 @@ pip install -e '.[all]'      # Everything
 pytest tests/ -v --tb=short
 
 # Smoke test
-python -m nsys_tui --help
+python -m nsys_ai --help
 
 # Run the app
 nsys-ai <command> <profile.sqlite>
@@ -39,7 +39,7 @@ Core has **zero runtime dependencies** — only Python stdlib (sqlite3, curses, 
 
 ### Entry Point
 
-`src/nsys_tui/__main__.py` — argparse CLI with ~20 subcommands. Two entry points registered in pyproject.toml: `nsys-ai` and `nsys-tui`, both point to `nsys_tui.__main__:main`.
+`src/nsys_ai/__main__.py` — argparse CLI with ~20 subcommands. Two entry points registered in pyproject.toml: `nsys-ai` and `nsys-ai`, both point to `nsys_ai.__main__:main`.
 
 ### Core Data Model
 
@@ -56,7 +56,7 @@ Profiles are `.sqlite` files from NVIDIA Nsight Systems. Key tables: `CUPTI_ACTI
 - `viewer.py` — Perfetto JSON trace export
 - `web.py` — Local HTTP server (stdlib `http.server` + custom `_ThreadPoolMixIn`; no Flask/Jinja2)
 
-### Skill System (`src/nsys_tui/skills/`)
+### Skill System (`src/nsys_ai/skills/`)
 
 Skills are self-contained SQL-based analysis units that don't require an LLM. Each skill in `skills/builtins/` defines a SQL query template + formatter:
 
@@ -71,14 +71,14 @@ Skills are self-contained SQL-based analysis units that don't require an LLM. Ea
 
 `skills/base.py` defines the `Skill` dataclass; `skills/registry.py` handles auto-discovery.
 
-### Agent System (`src/nsys_tui/agent/`)
+### Agent System (`src/nsys_ai/agent/`)
 
 - `persona.py` — System prompt defining the agent as a CUDA ML Systems Performance Expert
 - `loop.py` — `Agent` class that orchestrates skill selection and LLM-based analysis
 - Workflow: ORIENT → IDENTIFY → HYPOTHESIZE → INVESTIGATE → DIAGNOSE → RECOMMEND → VERIFY
 - Requires `anthropic` SDK (`pip install -e '.[agent]'`)
 
-### AI Module (`src/nsys_tui/ai/`)
+### AI Module (`src/nsys_ai/ai/`)
 
 - `analyzer.py` — LLM-based NVTX analysis
 - `annotator.py` — NVTX annotation utilities

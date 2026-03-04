@@ -9,8 +9,8 @@ tests/__snapshots__/ and should be updated with:
 """
 from __future__ import annotations
 
-from nsys_tui.timeline.app import NsysTimelineApp
-from nsys_tui.tree.app import NsysTreeApp
+from nsys_ai.timeline.app import NsysTimelineApp
+from nsys_ai.tree.app import NsysTreeApp
 
 
 def test_tree_snapshot(snap_compare, minimal_nsys_db_path):

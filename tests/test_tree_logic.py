@@ -5,7 +5,7 @@ All pure-function tests: no Textual, no curses, no display required.
 Run with: pytest tests/test_tree_logic.py -v
 """
 
-from nsys_tui.tree.logic import (
+from nsys_ai.tree.logic import (
     build_nodes,
     compute_summary,
     find_kernel_occurrence,

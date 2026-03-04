@@ -18,7 +18,7 @@ import ast
 
 # ── The import line we inject at the top of files ──────────────────
 
-IMPORT_LINE = "from nsys_tui.ai.gate import nsight_range  # auto-inserted by nsight-ai"
+IMPORT_LINE = "from nsys_ai.ai.gate import nsight_range  # auto-inserted by nsight-ai"
 
 
 # ── Simple text-based annotation (no AST rewrite) ─────────────────

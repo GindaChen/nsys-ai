@@ -6,7 +6,7 @@ Run with: pytest tests/test_timeline_logic.py -v
 """
 import pytest
 
-from nsys_tui.timeline.logic import (
+from nsys_ai.timeline.logic import (
     build_stream_kernels,
     center_viewport,
     collect_streams,

@@ -5,7 +5,7 @@ Run with: pytest tests/test_tui_timeline_app.py -v
 """
 import pytest
 
-from nsys_tui.timeline.app import NsysTimelineApp
+from nsys_ai.timeline.app import NsysTimelineApp
 
 SAMPLE_JSON = [
     {

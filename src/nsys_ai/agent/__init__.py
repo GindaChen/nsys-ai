@@ -1,5 +1,5 @@
 """
-nsys_tui.agent — The nsys-ai agent: a CUDA ML systems performance expert.
+nsys_ai.agent — The nsys-ai agent: a CUDA ML systems performance expert.
 
 This package provides:
     persona.py  — Agent identity, system prompt, knowledge layers

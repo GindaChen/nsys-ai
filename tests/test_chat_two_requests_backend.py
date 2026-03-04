@@ -69,7 +69,7 @@ def run_two_requests():
         print("Set GEMINI_API_KEY to run this test.", file=sys.stderr)
         return 2
 
-    from nsys_tui import chat
+    from nsys_ai import chat
 
     model = "gemini/gemini-2.5-flash"
 

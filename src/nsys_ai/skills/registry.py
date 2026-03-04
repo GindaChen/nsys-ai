@@ -16,14 +16,14 @@ _LOADED = False
 
 
 def _load_builtins():
-    """Import all modules in nsys_tui.skills.builtins and register their SKILL."""
+    """Import all modules in nsys_ai.skills.builtins and register their SKILL."""
     global _LOADED
     if _LOADED:
         return
 
     from . import builtins
     for _importer, modname, _ispkg in pkgutil.iter_modules(builtins.__path__):
-        mod = importlib.import_module(f".builtins.{modname}", package="nsys_tui.skills")
+        mod = importlib.import_module(f".builtins.{modname}", package="nsys_ai.skills")
         skill = getattr(mod, "SKILL", None)
         if isinstance(skill, Skill):
             _SKILLS[skill.name] = skill

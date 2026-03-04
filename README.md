@@ -4,7 +4,7 @@
 
 **AI-powered analysis for NVIDIA Nsight Systems profiles**
 
-Navigate GPU kernel timelines, diagnose performance bottlenecks with AI, and explore NVTX hierarchies — from your terminal or browser.
+Navigate GPU kernel timelines, diagnose performance bottlenecks with AI, and explore NVTX hierarchies — from your browser or terminal.
 
 > **Mission:** Build an intelligent agent that truly understands GPU performance from first principles. An agent that can identify pipeline bubbles, calculate MFU, assess arithmetic intensity, and diagnose the root causes that cost millions of dollars in GPU hours — turning months of expert debugging into minutes.
 
@@ -35,6 +35,12 @@ nsys-ai reads `.nsys-rep` or `.sqlite` profile exports from [NVIDIA Nsight Syste
 <tr>
 <td width="25%" align="center">
 
+### 🌐 Web Timeline
+Multi-GPU browser viewer with progressive rendering
+
+</td>
+<td width="25%" align="center">
+
 ### 🖥️ Timeline TUI
 Perfetto-style horizontal timeline in your terminal
 
@@ -47,18 +53,21 @@ Interactive NVTX hierarchy browser with kernel details
 </td>
 <td width="25%" align="center">
 
-### 🌐 Web Timeline
-Multi-GPU browser viewer with progressive rendering
-
-</td>
-<td width="25%" align="center">
-
 ### 📄 HTML Export
 Exportable interactive visualizations for sharing
 
 </td>
 </tr>
 <tr>
+<td>
+
+Browser-based viewer:<br>
+• Multi-GPU stacked streams<br>
+• NVTX hierarchy bars<br>
+• Pinch-to-zoom, trackpad pan<br>
+• AI chat sidebar
+
+</td>
 <td>
 
 ```
@@ -79,15 +88,6 @@ S60 ░░░██████░░░░░██
       ■ flash_fwd  26ms
       ■ flash_bwd  63ms
 ```
-
-</td>
-<td>
-
-Browser-based viewer:<br>
-• Multi-GPU stacked streams<br>
-• NVTX hierarchy bars<br>
-• Pinch-to-zoom, trackpad pan<br>
-• AI chat sidebar
 
 </td>
 <td>
@@ -121,21 +121,24 @@ python download_data.py
 ### 2. Explore it
 
 ```bash
-# Quick overview
-nsys-ai info my_training.nsys-rep
+# One command — opens the web timeline in your browser
+nsys-ai my_training.nsys-rep
 
-# Interactive timeline in your terminal
-nsys-ai timeline my_training.nsys-rep --gpu 0 --trim 39 42
-
-# Interactive web timeline (multi-GPU, progressive rendering)
+# Or explicitly:
 nsys-ai timeline-web my_training.nsys-rep
 
-# Interactive tree browser
-nsys-ai tui my_training.nsys-rep --gpu 0 --trim 39 42
+# Quick overview
+nsys-ai info my_training.nsys-rep
 
 # GPU kernel summary
 nsys-ai summary my_training.nsys-rep --gpu 0
 ```
+
+> **Prefer a terminal?** nsys-ai also has full TUI support:
+> ```bash
+> nsys-ai timeline my_training.nsys-rep --gpu 0 --trim 39 42  # horizontal timeline
+> nsys-ai tui my_training.nsys-rep --gpu 0 --trim 39 42       # tree browser
+> ```
 
 ### 3. Export & share
 
@@ -152,9 +155,49 @@ nsys-ai export-csv my_training.sqlite --gpu 0 --trim 39 42 -o kernels.csv
 
 ---
 
+## 🌐 Web Timeline
+
+The web timeline is a **browser-based multi-GPU viewer** with progressive rendering — no `--trim` required. This is the **default view** when you run `nsys-ai <profile>`.
+
+```bash
+# Just give it a profile — opens in your browser
+nsys-ai my_training.nsys-rep
+
+# Or explicitly with GPU selection:
+nsys-ai timeline-web my_training.nsys-rep --gpu 0 1 2 3
+```
+
+### Features
+
+- **Multi-GPU stacked view** — all GPUs shown simultaneously with color-coded separators
+- **Progressive rendering** — pre-builds full NVTX tree at startup, then serves tiles instantly (~1ms per tile)
+- **NVTX hierarchy** — layered bars (L0–L5) showing annotation nesting per GPU
+- **AI chat sidebar** — press `A` to ask questions about the profile
+- **Kernel search** — press `/` to search by kernel name
+
+### Navigation
+
+| Input | Action |
+|:-----:|--------|
+| **Swipe left/right** | Pan through time |
+| **Swipe up/down** | Scroll through GPU streams |
+| **Pinch** | Zoom in / out |
+| `Shift+scroll` | Zoom in / out |
+| `h` `l` or `←` `→` | Pan left / right |
+| `j` `k` or `↑` `↓` | Select stream |
+| `+` `-` | Zoom in / out |
+| `f` or `0` | Fit all (full time range) |
+| `Tab` | Next kernel |
+| `/` | Search kernels |
+| `n` | Toggle NVTX |
+| `a` | AI Chat |
+| `?` | Help overlay |
+
+---
+
 ## ⌨️ Timeline TUI
 
-The timeline is a **Perfetto-style** horizontal viewer with per-stream kernel visualization, NVTX hierarchy bars, and a time-cursor navigation model.
+Prefer working in the terminal? The timeline TUI is a **Perfetto-style** horizontal viewer with per-stream kernel visualization, NVTX hierarchy bars, and a time-cursor navigation model.
 
 ### Navigation
 
@@ -196,46 +239,6 @@ Tweak settings live with ↑/↓ to select and ←/→ to adjust:
 - Time tick density (2-20)
 - NVTX depth levels (0-8)
 - Min kernel duration filter
-
----
-
-## 🌐 Web Timeline
-
-The web timeline is a **browser-based multi-GPU viewer** with progressive rendering — no `--trim` required.
-
-```bash
-# Launch for all GPUs — opens in your browser
-nsys-ai timeline-web my_training.nsys-rep
-
-# Specify GPUs
-nsys-ai timeline-web my_training.nsys-rep --gpu 0 1 2 3
-```
-
-### Features
-
-- **Multi-GPU stacked view** — all GPUs shown simultaneously with color-coded separators
-- **Progressive rendering** — pre-builds full NVTX tree at startup, then serves tiles instantly (~1ms per tile)
-- **NVTX hierarchy** — layered bars (L0–L5) showing annotation nesting per GPU
-- **AI chat sidebar** — press `A` to ask questions about the profile
-- **Kernel search** — press `/` to search by kernel name
-
-### Navigation
-
-| Input | Action |
-|:-----:|--------|
-| **Swipe left/right** | Pan through time |
-| **Swipe up/down** | Scroll through GPU streams |
-| **Pinch** | Zoom in / out |
-| `Shift+scroll` | Zoom in / out |
-| `h` `l` or `←` `→` | Pan left / right |
-| `j` `k` or `↑` `↓` | Select stream |
-| `+` `-` | Zoom in / out |
-| `f` or `0` | Fit all (full time range) |
-| `Tab` | Next kernel |
-| `/` | Search kernels |
-| `n` | Toggle NVTX |
-| `a` | AI Chat |
-| `?` | Help overlay |
 
 ---
 
@@ -373,5 +376,5 @@ pytest tests/ -v
 MIT — see [LICENSE](LICENSE).
 
 <div align="center">
-<sub>Built for GPU performance engineers who live in the terminal.</sub>
+<sub>Built for GPU performance engineers.</sub>
 </div>

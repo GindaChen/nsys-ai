@@ -1,5 +1,5 @@
 """
-CLI entry point: python -m nsys_tui <command> [options]
+CLI entry point: python -m nsys_ai <command> [options]
 
 Profile: path to .sqlite or .nsys-rep (open/analyze/etc accept both;
 .nsys-rep is converted when nsys is on PATH).
@@ -58,7 +58,7 @@ def _parse_trim(args):
 # ---------------------------------------------------------------------------
 # Command handlers — one function per subcommand.
 # Each handler receives (args, _profile) where _profile is the lazily-imported
-# nsys_tui.profile module.  Handlers that do not open a profile ignore it.
+# nsys_ai.profile module.  Handlers that do not open a profile ignore it.
 # ---------------------------------------------------------------------------
 
 def _cmd_info(args, _profile):
@@ -512,6 +512,22 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
+        # Check if the user passed a profile path directly: nsys-ai <profile>
+        # This happens when argv[1] exists but isn't a known subcommand.
+        remaining = sys.argv[1:]
+        if remaining and not remaining[0].startswith("-"):
+            candidate = remaining[0]
+            if (candidate.endswith(".sqlite") or candidate.endswith(".nsys-rep")
+                    or candidate.endswith(".nsys-rep.zst")):
+                # Default action: open the web timeline viewer
+                from . import profile as _profile
+                from .web import serve_timeline
+                with _profile.open(candidate) as prof:
+                    devices = prof.meta.devices if prof.meta.devices else [0]
+                    serve_timeline(prof, devices, None,
+                                   port=8144, open_browser=True)
+                return
+
         from .main_page import run_main_page
         run_main_page()
         return

@@ -29,7 +29,7 @@
 2. **Lazy/streaming build**: Build GPU trees in background threads, serve each GPU as it becomes ready
    - Frontend shows "GPU 1 ready" → "GPU 2 ready" incrementally
 
-3. **Pre-built at profile time**: `nsys-tui prebuild <profile>` writes cache, then `timeline-web` always uses it
+3. **Pre-built at profile time**: `nsys-ai prebuild <profile>` writes cache, then `timeline-web` always uses it
 
 4. **Memory-mapped binary**: Use Arrow or a flat binary format that can be mmap'd without parsing
 

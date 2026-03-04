@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from nsys_tui import chat as chat_mod
+from nsys_ai import chat as chat_mod
 
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL_25_FLASH = "gemini/gemini-2.5-flash"

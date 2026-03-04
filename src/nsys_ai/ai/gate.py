@@ -7,7 +7,7 @@ This makes it safe to leave annotations in source code permanently —
 zero overhead when not profiling.
 
 Usage:
-    from nsys_tui.ai.gate import nsight_range
+    from nsys_ai.ai.gate import nsight_range
 
     with nsight_range("MyModel.forward.attention"):
         y = self.attention(x)

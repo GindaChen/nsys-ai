@@ -8,7 +8,7 @@ This document is the onboarding guide for AI agents working on `nsys-ai`.
 
 ```
 nsys-ai/
-├── src/nsys_tui/          # Main Python package
+├── src/nsys_ai/          # Main Python package
 │   ├── __main__.py        # CLI entry point (argparse-based)
 │   ├── profile.py         # SQLite profile loader
 │   ├── tui.py             # Tree TUI (curses)
@@ -114,10 +114,10 @@ Branch naming: `feat/issue-3-ask-command`, `fix/issue-9-multi-gpu`, etc.
 
 ### 4. Implement
 
-- Code lives in `src/nsys_tui/`
+- Code lives in `src/nsys_ai/`
 - Add tests in `tests/`
 - Follow existing code style (no formatter configured — match surrounding code)
-- The package name is `nsys_tui` internally (Python module), `nsys-ai` externally (PyPI)
+- The package name is `nsys_ai` internally (Python module), `nsys-ai` externally (PyPI)
 
 ### 5. Test before pushing
 
@@ -126,7 +126,7 @@ Branch naming: `feat/issue-3-ask-command`, `fix/issue-9-multi-gpu`, etc.
 pip install -e '.[dev]'
 
 # Smoke test CLI
-python -m nsys_tui --help
+python -m nsys_ai --help
 
 # Run test suite
 pytest tests/ -v --tb=short
@@ -168,7 +168,7 @@ gh pr merge <PR_NUM> -R GindaChen/nsys-ai --squash --delete-branch
 
 Before raising a PR, verify:
 
-- [ ] `python -m nsys_tui --help` — CLI loads without error
+- [ ] `python -m nsys_ai --help` — CLI loads without error
 - [ ] `pytest tests/ -v --tb=short` — all tests pass
 - [ ] If you added a new CLI command, add a smoke test in `tests/test_cli.py`
 - [ ] If you modified `site/`, check the page renders (`open site/index.html`)
@@ -192,7 +192,7 @@ Before raising a PR, verify:
 
 ## Key Design Decisions
 
-- **Internal module = `nsys_tui`**, external package = `nsys-ai` (historical rename)
+- **Internal module = `nsys_ai`**, external package = `nsys-ai` (historical rename)
 - **No runtime dependencies** for core TUI — only stdlib (`curses`, `sqlite3`, `json`)
 - **Optional deps**: `anthropic` for AI features (`pip install nsys-ai[ai]`), `pytest` for dev
 - **Profiles are `.sqlite` files** exported from NVIDIA Nsight Systems (`.nsys-rep` → `.sqlite`)

@@ -25,4 +25,4 @@ nsys-ai is a terminal-based tool for analyzing NVIDIA Nsight Systems GPU profile
 | Agent playbook | [`../AGENTS.md`](../AGENTS.md) |
 | Roadmap | [`../ROADMAP.md`](../ROADMAP.md) |
 | Nsight reference docs | [`../docs/`](../docs/) |
-| AI module source | [`../src/nsys_tui/ai/`](../src/nsys_tui/ai/) |
+| AI module source | [`../src/nsys_ai/ai/`](../src/nsys_ai/ai/) |

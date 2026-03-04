@@ -143,9 +143,9 @@ def test_trajectory(traj: dict) -> None:
 
     # --- 3. Import agent components ------------------------------------
     try:
-        from nsys_tui.chat import run_agent_loop
-        from nsys_tui.chat_tools import _build_system_prompt
-        from nsys_tui.tools_profile import (
+        from nsys_ai.chat import run_agent_loop
+        from nsys_ai.chat_tools import _build_system_prompt
+        from nsys_ai.tools_profile import (
             get_profile_schema_cached,
             open_profile_readonly,
             query_profile_db,

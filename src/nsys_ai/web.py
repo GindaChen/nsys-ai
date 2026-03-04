@@ -137,7 +137,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/models":
             try:
-                import nsys_tui.chat as chat_mod
+                import nsys_ai.chat as chat_mod
                 options = chat_mod.get_available_models()
                 default = chat_mod.get_default_model()
             except Exception:

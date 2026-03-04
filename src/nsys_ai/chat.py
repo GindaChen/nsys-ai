@@ -39,7 +39,7 @@ from .tools_profile import (
 )
 
 _log = logging.getLogger(__name__)
-_telemetry_log = logging.getLogger("nsys_tui.telemetry")
+_telemetry_log = logging.getLogger("nsys_ai.telemetry")
 
 # ---------------------------------------------------------------------------
 # Agent-loop constants
@@ -629,7 +629,7 @@ def chat_completion_stream(body_bytes: bytes):
         pass
     except Exception as e:
         err_msg = str(e)
-        print(f"[nsys-tui] stream_agent_loop error (model={model!r}): {err_msg}", file=sys.stderr)
+        print(f"[nsys-ai] stream_agent_loop error (model={model!r}): {err_msg}", file=sys.stderr)
         try:
             yield _sse_event("text", {"chunk": f"Stream error: {err_msg}"})
             yield _sse_event("done", {"error": err_msg})
@@ -650,7 +650,7 @@ def _db_agent_flag_enabled() -> bool:
 def _friendly_error(model: str, exc: Exception) -> str:
     """Convert a raw LiteLLM exception into a user-friendly message."""
     err = str(exc)
-    print(f"[nsys-tui] LiteLLM error (model={model!r}): {err}", file=sys.stderr)
+    print(f"[nsys-ai] LiteLLM error (model={model!r}): {err}", file=sys.stderr)
     if "429" in err or "RateLimitError" in type(exc).__name__ or "quota" in err.lower():
         return "Quota exceeded (429). Try a different model or check API billing."
     return err

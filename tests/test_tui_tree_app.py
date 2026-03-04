@@ -8,7 +8,7 @@ Run with: pytest tests/test_tui_tree_app.py -v
 """
 import pytest
 
-from nsys_tui.tree.app import NsysTreeApp
+from nsys_ai.tree.app import NsysTreeApp
 
 # ---------------------------------------------------------------------------
 # Shared fixture: app with synthetic in-memory data
@@ -225,7 +225,7 @@ async def test_scroll_to_nonexistent_kernel_shows_notification(tree_app):
 async def test_toggle_chat_panel(tree_app):
     """'a' opens the chat panel; Escape closes it."""
     async with tree_app.run_test(size=(120, 40)) as pilot:
-        from nsys_tui.tree.chat import ChatPanel
+        from nsys_ai.tree.chat import ChatPanel
         cp = tree_app.query_one("#chat-panel", ChatPanel)
         assert "-active" not in cp.classes
 

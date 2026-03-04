@@ -5,7 +5,7 @@ import sqlite3
 
 def test_query_profile_db_readonly_guardrail():
     """query_profile_db rejects INSERT/UPDATE/DELETE/DROP/ALTER/CREATE."""
-    from nsys_tui.tools_profile import query_profile_db
+    from nsys_ai.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(id INT)")
     for bad in ("INSERT INTO t VALUES(1)", "UPDATE t SET id=1", "DELETE FROM t",
@@ -17,7 +17,7 @@ def test_query_profile_db_readonly_guardrail():
 
 def test_query_profile_db_limit_enforced():
     """query_profile_db enforces LIMIT; adaptive limit applies based on column count."""
-    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
+    from nsys_ai.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(id INT, name TEXT, val REAL, extra TEXT)")
     conn.executemany("INSERT INTO t VALUES(?,?,?,?)", [(i, f"k{i}", float(i), "x") for i in range(200)])
@@ -34,7 +34,7 @@ def test_query_profile_db_limit_enforced():
 
 def test_query_profile_db_rejects_select_star():
     """query_profile_db rejects SELECT * with a clear error (§11.7.3, §11.8.4 Stage 2)."""
-    from nsys_tui.tools_profile import query_profile_db
+    from nsys_ai.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(a INT, b INT)")
     out = query_profile_db(conn, "SELECT * FROM t LIMIT 10")
@@ -45,7 +45,7 @@ def test_query_profile_db_rejects_select_star():
 
 def test_query_profile_db_valid_select():
     """query_profile_db returns JSON array of rows for valid SELECT."""
-    from nsys_tui.tools_profile import query_profile_db
+    from nsys_ai.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE k(name TEXT, start INT)")
@@ -58,7 +58,7 @@ def test_query_profile_db_valid_select():
 
 def test_get_profile_schema_in_memory():
     """get_profile_schema returns DDL for requested tables."""
-    from nsys_tui.tools_profile import get_profile_schema
+    from nsys_ai.tools_profile import get_profile_schema
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(start INT, name TEXT)")
     conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT)")
@@ -70,7 +70,7 @@ def test_get_profile_schema_in_memory():
 
 def test_get_profile_schema_cached_reuses_cache():
     """get_profile_schema_cached returns same result without querying DB again (§11.7.7)."""
-    from nsys_tui.tools_profile import _schema_cache, get_profile_schema_cached
+    from nsys_ai.tools_profile import _schema_cache, get_profile_schema_cached
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT)")
     path = "/tmp/test_cache_path_unique_12345.sqlite"
@@ -89,7 +89,7 @@ def test_get_profile_schema_cached_reuses_cache():
 
 def test_get_profile_schema_cached_no_path():
     """get_profile_schema_cached with path=None always calls get_profile_schema."""
-    from nsys_tui.tools_profile import get_profile_schema_cached
+    from nsys_ai.tools_profile import get_profile_schema_cached
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE NVTX_EVENTS(col INT)")
     schema = get_profile_schema_cached(conn, None)
@@ -99,7 +99,7 @@ def test_get_profile_schema_cached_no_path():
 
 def test_open_profile_readonly_for_worker_returns_connection(tmp_path):
     """open_profile_readonly_for_worker returns a usable read-only connection (§11.7.5)."""
-    from nsys_tui.tools_profile import open_profile_readonly_for_worker
+    from nsys_ai.tools_profile import open_profile_readonly_for_worker
     db = tmp_path / "test.sqlite"
     # Create a DB with one table
     setup = sqlite3.connect(str(db))
@@ -116,7 +116,7 @@ def test_open_profile_readonly_for_worker_returns_connection(tmp_path):
 
 def test_query_profile_db_empty_query():
     """query_profile_db rejects empty or whitespace-only queries."""
-    from nsys_tui.tools_profile import query_profile_db
+    from nsys_ai.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     assert "Error" in query_profile_db(conn, "")
     assert "Error" in query_profile_db(conn, "   ")
@@ -125,7 +125,7 @@ def test_query_profile_db_empty_query():
 
 def test_adaptive_limit_narrow_query():
     """Single-column queries get up to 2× base limit (§11.9 Phase 2.1)."""
-    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
+    from nsys_ai.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(name TEXT)")
     for i in range(200):
@@ -140,7 +140,7 @@ def test_adaptive_limit_narrow_query():
 
 def test_adaptive_limit_wide_query():
     """Queries with 4+ columns get a reduced limit (§11.9 Phase 2.1)."""
-    from nsys_tui.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
+    from nsys_ai.tools_profile import DEFAULT_MAX_LIMIT, query_profile_db
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE t(a TEXT, b TEXT, c TEXT, d TEXT, e TEXT)")
     for i in range(100):
@@ -155,7 +155,7 @@ def test_adaptive_limit_wide_query():
 
 def test_query_profile_db_truncates_large_results():
     """query_profile_db truncates JSON output beyond DEFAULT_MAX_JSON_CHARS (§11.7.6)."""
-    from nsys_tui.tools_profile import query_profile_db
+    from nsys_ai.tools_profile import query_profile_db
     conn = sqlite3.connect(":memory:")
     # Create rows with long string values to exceed the JSON char limit
     conn.execute("CREATE TABLE t(v TEXT)")

@@ -33,7 +33,7 @@ def _test_gpu_trim():
         parts = trim_env.split()
         if len(parts) >= 2:
             return int(gpu_env), float(parts[0]), float(parts[1])
-    from nsys_tui.profile import open as profile_open
+    from nsys_ai.profile import open as profile_open
     prof = profile_open(path)
     try:
         if gpu_env is not None:
@@ -58,7 +58,7 @@ def _test_gpu_trim():
 def test_info():
     path = _profile_path()
     r = subprocess.run(
-        [sys.executable, "-m", "nsys_tui", "info", path],
+        [sys.executable, "-m", "nsys_ai", "info", path],
         capture_output=True, text=True, timeout=30)
     assert r.returncode == 0
     assert "GPU" in r.stdout or "Kernels" in r.stdout
@@ -68,7 +68,7 @@ def test_info():
 def test_summary():
     path = _profile_path()
     r = subprocess.run(
-        [sys.executable, "-m", "nsys_tui", "summary", path],
+        [sys.executable, "-m", "nsys_ai", "summary", path],
         capture_output=True, text=True, timeout=60)
     assert r.returncode == 0
 
@@ -78,7 +78,7 @@ def test_analyze():
     path = _profile_path()
     gpu, t0, t1 = _test_gpu_trim()
     r = subprocess.run(
-        [sys.executable, "-m", "nsys_tui", "analyze", path, "--gpu", str(gpu), "--trim", str(t0), str(t1)],
+        [sys.executable, "-m", "nsys_ai", "analyze", path, "--gpu", str(gpu), "--trim", str(t0), str(t1)],
         capture_output=True, text=True, timeout=30)
     assert r.returncode == 0
     assert "Span:" in r.stdout or "Kernels:" in r.stdout
@@ -92,7 +92,7 @@ def test_analyze_markdown_output():
         out = f.name
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "nsys_tui", "analyze", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", out],
+            [sys.executable, "-m", "nsys_ai", "analyze", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", out],
             capture_output=True, text=True, timeout=30)
         assert r.returncode == 0
         assert os.path.getsize(out) > 100
@@ -106,7 +106,7 @@ def test_export_perfetto_json():
     gpu, t0, t1 = _test_gpu_trim()
     with tempfile.TemporaryDirectory() as d:
         r = subprocess.run(
-            [sys.executable, "-m", "nsys_tui", "export", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", d],
+            [sys.executable, "-m", "nsys_ai", "export", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", d],
             capture_output=True, text=True, timeout=60)
         assert r.returncode == 0
         assert any(f.startswith("trace_gpu") and f.endswith(".json") for f in os.listdir(d))
@@ -120,7 +120,7 @@ def test_export_csv():
         out = f.name
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "nsys_tui", "export-csv", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", out],
+            [sys.executable, "-m", "nsys_ai", "export-csv", path, "--gpu", str(gpu), "--trim", str(t0), str(t1), "-o", out],
             capture_output=True, text=True, timeout=30)
         assert r.returncode == 0
         assert os.path.getsize(out) > 50

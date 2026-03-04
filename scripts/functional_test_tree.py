@@ -42,7 +42,7 @@ def check(name: str, passed: bool, detail: str = "") -> None:
 
 
 async def run_tree_tests():
-    from nsys_tui.tree.app import NsysTreeApp
+    from nsys_ai.tree.app import NsysTreeApp
     from textual.widgets import DataTable
 
     print("\n── NsysTreeApp functional test ──────────────────────────────────\n")
@@ -183,7 +183,7 @@ async def run_tree_tests():
         check("zoom_to_time_range updates trim", True, "no crash")
 
         # ── Chat panel ─────────────────────────────────────────────────────
-        from nsys_tui.tree.chat import ChatPanel
+        from nsys_ai.tree.chat import ChatPanel
         cp = app.query_one("#chat-panel", ChatPanel)
         check("Chat panel initially hidden", "-active" not in cp.classes)
 
@@ -233,10 +233,10 @@ async def run_tree_tests():
 
 
 async def run_timeline_tests():
-    from nsys_tui.timeline.app import NsysTimelineApp
-    from nsys_tui.timeline.canvas import TimelineCanvas
-    from nsys_tui.tree.chat import ChatPanel
-    from nsys_tui.timeline.widgets import ConfigPanel, TimelineBookmarkPanel
+    from nsys_ai.timeline.app import NsysTimelineApp
+    from nsys_ai.timeline.canvas import TimelineCanvas
+    from nsys_ai.tree.chat import ChatPanel
+    from nsys_ai.timeline.widgets import ConfigPanel, TimelineBookmarkPanel
 
     SAMPLE = [
         {"name": "forward", "type": "nvtx", "duration_ms": 100.0, "heat": 0.5,

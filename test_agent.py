@@ -21,7 +21,7 @@ import threading
 
 def _resolve_profile(path: str) -> str:
     """Return .sqlite path; convert .nsys-rep via resolve_profile_path when needed."""
-    from nsys_tui.profile import resolve_profile_path
+    from nsys_ai.profile import resolve_profile_path
     return resolve_profile_path(path)
 
 
@@ -60,13 +60,13 @@ def _main():
         sys.exit(1)
 
     try:
-        from nsys_tui.chat import (
+        from nsys_ai.chat import (
             _build_system_prompt,
             _get_model_and_key,
             _tools_openai,
             run_agent_loop,
         )
-        from nsys_tui.tools_profile import (
+        from nsys_ai.tools_profile import (
             get_profile_schema,
             open_profile_readonly,
             query_profile_db,

@@ -1,5 +1,5 @@
 """
-nsys_tui.skills — Standardized SQL query skills for GPU profile analysis.
+nsys_ai.skills — Standardized SQL query skills for GPU profile analysis.
 
 Skills are self-contained analysis units: each bundles a SQL query template,
 parameter definitions, result formatting, and documentation. They work

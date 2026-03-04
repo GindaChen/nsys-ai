@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nsys_tui import profile as profile_mod
+from nsys_ai import profile as profile_mod
 
 
 def test_resolve_non_nsys_rep_passthrough(tmp_path: Path):
