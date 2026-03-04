@@ -345,21 +345,55 @@ def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
 
     # Pre-build full NVTX tree for all GPUs (progressive mode)
     if trim is None:
-        t0 = _time.monotonic()
-        full_range = prof.meta.time_range
-        print(f"Pre-building NVTX tree for {len(devices)} GPU(s) "
-              f"({full_range[0]/1e9:.1f}s–{full_range[1]/1e9:.1f}s)...", flush=True)
-        prebuilt = []
-        for dev in devices:
-            dt = _time.monotonic()
-            roots = build_nvtx_tree(prof, dev, full_range)
-            tree_json = to_json(roots)
-            elapsed_dev = _time.monotonic() - dt
-            print(f"  GPU {dev}: {len(tree_json)} roots, {elapsed_dev:.1f}s", flush=True)
-            prebuilt.append({"id": dev, "data": tree_json})
-        elapsed = _time.monotonic() - t0
-        print(f"Pre-build complete in {elapsed:.1f}s", flush=True)
-        _ViewerHandler._prebuilt_data = prebuilt
+        import os, hashlib
+        db_path = prof.path if hasattr(prof, 'path') else ''
+        cache_path = db_path + '.timeline-cache.json' if db_path else ''
+        cache_valid = False
+
+        # Try loading from disk cache
+        if cache_path and os.path.exists(cache_path):
+            try:
+                src_mtime = os.path.getmtime(db_path)
+                cache_mtime = os.path.getmtime(cache_path)
+                if cache_mtime >= src_mtime:
+                    t0 = _time.monotonic()
+                    print(f"Loading cached NVTX tree from {os.path.basename(cache_path)}...", flush=True)
+                    with open(cache_path, 'r') as f:
+                        prebuilt = json.loads(f.read())
+                    elapsed = _time.monotonic() - t0
+                    print(f"Cache loaded in {elapsed:.2f}s ({os.path.getsize(cache_path) // 1024}KB)", flush=True)
+                    _ViewerHandler._prebuilt_data = prebuilt
+                    cache_valid = True
+            except Exception as e:
+                print(f"Cache load failed: {e}, rebuilding...", flush=True)
+
+        if not cache_valid:
+            t0 = _time.monotonic()
+            full_range = prof.meta.time_range
+            print(f"Pre-building NVTX tree for {len(devices)} GPU(s) "
+                  f"({full_range[0]/1e9:.1f}s–{full_range[1]/1e9:.1f}s)...", flush=True)
+            prebuilt = []
+            for dev in devices:
+                dt = _time.monotonic()
+                roots = build_nvtx_tree(prof, dev, full_range)
+                tree_json = to_json(roots)
+                elapsed_dev = _time.monotonic() - dt
+                print(f"  GPU {dev}: {len(tree_json)} roots, {elapsed_dev:.1f}s", flush=True)
+                prebuilt.append({"id": dev, "data": tree_json})
+            elapsed = _time.monotonic() - t0
+            print(f"Pre-build complete in {elapsed:.1f}s", flush=True)
+            _ViewerHandler._prebuilt_data = prebuilt
+
+            # Save to disk cache
+            if cache_path:
+                try:
+                    t0 = _time.monotonic()
+                    with open(cache_path, 'w') as f:
+                        f.write(json.dumps(prebuilt))
+                    sz = os.path.getsize(cache_path)
+                    print(f"Saved cache to {os.path.basename(cache_path)} ({sz // 1024}KB, {_time.monotonic() - t0:.1f}s)", flush=True)
+                except Exception as e:
+                    print(f"Cache save failed: {e}", flush=True)
 
     server = _ThreadedHTTPServer(("127.0.0.1", port), _ViewerHandler)
     actual_url = f"http://127.0.0.1:{server.server_address[1]}"
