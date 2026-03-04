@@ -1073,7 +1073,7 @@
 
                     // Kernel name label
                     if (w > 30) {
-                        ctx.fillStyle = isSel ? '#fff' : (searchQuery && !isMatch ? '#555' : '#e6edf3');
+                        ctx.fillStyle = isSel ? '#fff' : (searchQuery && !isMatch ? '#555' : '#1c1c1c');
                         ctx.textAlign = 'left';
                         ctx.textBaseline = 'middle';
                         ctx.save();
@@ -1305,11 +1305,24 @@
 
         canvas.addEventListener('wheel', e => {
             e.preventDefault();
-            const rect = canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left;
-            const ns = xToNs(mx);
-            const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-            zoomAt(factor, ns);
+            if (e.shiftKey) {
+                // Shift+scroll = zoom
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const ns = xToNs(mx);
+                const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+                zoomAt(factor, ns);
+            } else {
+                // Plain scroll = pan (trackpad swipe)
+                const span = viewEnd - viewStart;
+                const dx = e.deltaX * span * 0.001;
+                viewStart += dx; viewEnd += dx;
+                // Vertical scroll moves canvas scroll position
+                wrap.scrollTop += e.deltaY;
+                clampView();
+                draw();
+                afterViewChange();
+            }
         }, { passive: false });
 
         // ── Keyboard ──
