@@ -82,37 +82,36 @@ def generate_timeline_html(prof, device, trim: tuple[int, int] | None = None) ->
     from typing import Sequence
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
 
+    # Build GPU info list (for dropdown) and compact label
+    gpu_details = []
+    gpu_type = "GPU"
+    for dev in devices:
+        gpu_info = prof.meta.gpu_info.get(dev)
+        detail = {"id": dev, "name": "Unknown", "pci": "", "sms": 0, "mem_gb": 0}
+        if gpu_info:
+            detail["name"] = gpu_info.name
+            detail["pci"] = gpu_info.pci_bus
+            detail["sms"] = gpu_info.sm_count
+            detail["mem_gb"] = round(gpu_info.memory_bytes / 1e9)
+            gpu_type = gpu_info.name
+        gpu_details.append(detail)
+    gpu_info_json = json.dumps(gpu_details)
+    gpu_label = f"{len(devices)}× {gpu_type}" if len(devices) > 1 else gpu_type
+
     if trim is not None:
         # Full data baked into HTML
         gpu_entries = []
-        gpu_labels = []
         for dev in devices:
             roots = build_nvtx_tree(prof, dev, trim)
             tree_json = to_json(roots)
             gpu_entries.append({"id": dev, "data": tree_json})
-            gpu_info = prof.meta.gpu_info.get(dev)
-            label = f"GPU {dev}"
-            if gpu_info:
-                label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
-                          f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
-            gpu_labels.append(label)
 
         data_json = json.dumps({"gpus": gpu_entries})
-        gpu_label = " | ".join(gpu_labels) if len(gpu_labels) > 1 else gpu_labels[0]
         trim_label = f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s"
         progressive = ""
     else:
         # Progressive mode: no data baked in
         data_json = "null"
-        gpu_labels = []
-        for dev in devices:
-            gpu_info = prof.meta.gpu_info.get(dev)
-            label = f"GPU {dev}"
-            if gpu_info:
-                label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
-                          f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
-            gpu_labels.append(label)
-        gpu_label = " | ".join(gpu_labels) if len(gpu_labels) > 1 else gpu_labels[0]
         trim_label = "Progressive"
         progressive = "1"
 
@@ -120,6 +119,7 @@ def generate_timeline_html(prof, device, trim: tuple[int, int] | None = None) ->
     return tmpl.safe_substitute(
         DATA=data_json,
         GPU_LABEL=gpu_label,
+        GPU_INFO_JSON=gpu_info_json,
         TRIM_LABEL=trim_label,
         PROGRESSIVE=progressive,
     )

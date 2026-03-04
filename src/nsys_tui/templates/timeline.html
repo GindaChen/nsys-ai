@@ -402,13 +402,21 @@
         <h1>⏱ Timeline</h1>
         <span class="sub">$GPU_LABEL &nbsp;|&nbsp; $TRIM_LABEL</span>
         <span class="stats" id="stats"></span>
+        <button onclick="toggleGpuInfo()"
+            style="background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:8px"
+            id="gpuInfoBtn">🖥 GPU Info</button>
     </header>
+    <div id="gpuInfoPanel"
+        style="display:none;position:absolute;top:36px;right:10px;z-index:100;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;max-width:400px;font-size:11px;color:#8b949e;font-family:monospace">
+        <div id="gpuInfoContent"></div>
+    </div>
     <div class="toolbar" id="toolbar">
         <button onclick="zoomIn()" title="+">＋ Zoom</button>
         <button onclick="zoomOut()" title="-">－ Zoom</button>
         <button onclick="fitAll()" title="Home">⌂ Fit</button>
         <div class="sep"></div>
         <button onclick="toggleNVTX()" id="nvtxBtn" class="active">NVTX</button>
+        <button onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
         <div class="sep"></div>
         <input type="text" id="searchInput" placeholder="/ to search kernels..." oninput="onSearch()">
         <span class="hint" id="searchHint"></span>
@@ -497,6 +505,7 @@
         const INITIAL_DATA = $DATA;
         const PROGRESSIVE = '$PROGRESSIVE' === '1';
         const TILE_WINDOW_S = 5;  // seconds per tile
+        const GPU_INFO = $GPU_INFO_JSON;
 
         const canvas = document.getElementById('c');
         const ctx = canvas.getContext('2d');
@@ -764,6 +773,9 @@
         let searchQuery = '';
         let searchMatches = new Set();
         let isDragging = false, dragStartX = 0, dragViewStart = 0, dragViewEnd = 0;
+        let isSelecting = false, selectStartX = 0, selectStartNs = 0, selectEndNs = 0;
+        let bookmarks = [];
+        let hiddenStreams = new Set();  // stream keys to hide
 
         // ── Layout constants ──
         const LABEL_W = isMultiGPU ? 110 : 90;
@@ -994,6 +1006,7 @@
 
             for (let si = 0; si < streamIds.length; si++) {
                 const sid = streamIds[si];
+                if (hiddenStreams.has(sid)) continue;  // skip hidden streams
                 const ks = streamMap[sid];
                 const y = streamY(si) + (isMultiGPU && gpuBands[0].startIdx === 0 ? GPU_SEP_H : 0);
                 const isSelected = si === selectedStreamIdx;
@@ -1186,10 +1199,12 @@
             const sid = streamIds[selectedStreamIdx];
             const ks = streamMap[sid];
             if (!ks || !ks.length) return;
-            if (!selectedKernel || selectedKernel.stream !== undefined && String(selectedKernel.stream) !== sid) {
+            // Find current kernel in this stream using _streamKey
+            if (!selectedKernel || selectedKernel._streamKey !== sid) {
                 selectKernel(ks[0]); ensureVisible(ks[0]); return;
             }
             const idx = ks.indexOf(selectedKernel);
+            if (idx === -1) { selectKernel(ks[0]); ensureVisible(ks[0]); return; }
             const next = idx + dir;
             if (next >= 0 && next < ks.length) {
                 selectKernel(ks[next]); ensureVisible(ks[next]);
@@ -1202,14 +1217,140 @@
                 const center = (k.start_ns + k.end_ns) / 2;
                 viewStart = center - span / 2;
                 viewEnd = center + span / 2;
+                clampView();
                 draw();
+                afterViewChange();
             }
+        }
+
+        // ── GPU Info dropdown ──
+        function toggleGpuInfo() {
+            const panel = document.getElementById('gpuInfoPanel');
+            if (panel.style.display === 'none') {
+                let html = '<table style="border-collapse:collapse;width:100%">';
+                html += '<tr style="color:#58a6ff"><th style="text-align:left;padding:2px 6px">GPU</th><th style="text-align:left;padding:2px 6px">Name</th><th style="text-align:right;padding:2px 6px">SMs</th><th style="text-align:right;padding:2px 6px">Mem</th><th style="text-align:left;padding:2px 6px">PCI</th></tr>';
+                GPU_INFO.forEach(g => {
+                    html += `<tr><td style="padding:2px 6px;color:#7ee787">${g.id}</td><td style="padding:2px 6px">${g.name}</td><td style="padding:2px 6px;text-align:right">${g.sms}</td><td style="padding:2px 6px;text-align:right">${g.mem_gb}GB</td><td style="padding:2px 6px;color:#8b949e">${g.pci}</td></tr>`;
+                });
+                html += '</table>';
+                document.getElementById('gpuInfoContent').innerHTML = html;
+                panel.style.display = 'block';
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
+        // ── Bookmarks ──
+        function saveBookmark() {
+            const k = selectedKernel;
+            const time_ns = k ? (k.start_ns + k.end_ns) / 2 : (viewStart + viewEnd) / 2;
+            const bm = {
+                label: k ? k.name.slice(0, 30) : `@${(time_ns / 1e9).toFixed(2)}s`,
+                time_ns,
+                nvtx_path: k ? (k._path || '') : '',
+                nvtx_index: k ? nvtxSpans.findIndex(s => time_ns >= s.start && time_ns <= s.end) : -1,
+                kernel_index: k ? kernels.indexOf(k) : -1,
+                kernel_name: k ? k.name : '',
+                stream: k ? (k._streamKey || '') : '',
+                gpu: k ? (k._gpu ?? '') : '',
+            };
+            bookmarks.push(bm);
+            showToast(`Bookmark #${bookmarks.length}: ${bm.label}`);
+            draw();
+        }
+
+        function jumpToBookmark(idx) {
+            if (idx < 0 || idx >= bookmarks.length) return;
+            const bm = bookmarks[idx];
+            const span = viewEnd - viewStart;
+            viewStart = bm.time_ns - span / 2;
+            viewEnd = bm.time_ns + span / 2;
+            clampView();
+            draw();
+            afterViewChange();
+            // Try to select the kernel if we have an index
+            if (bm.kernel_index >= 0 && bm.kernel_index < kernels.length) {
+                selectKernel(kernels[bm.kernel_index]);
+            }
+            showToast(`→ Bookmark #${idx + 1}: ${bm.label}`);
+        }
+
+        function toggleBookmarkList() {
+            const panel = document.getElementById('gpuInfoPanel');
+            if (bookmarks.length === 0) { showToast('No bookmarks. Press B to save one.'); return; }
+            let html = '<div style="color:#58a6ff;margin-bottom:4px;font-weight:600">📌 Bookmarks</div>';
+            html += '<table style="border-collapse:collapse;width:100%">';
+            bookmarks.forEach((bm, i) => {
+                const ts = (bm.time_ns / 1e9).toFixed(3) + 's';
+                html += `<tr style="cursor:pointer" onclick="jumpToBookmark(${i});document.getElementById('gpuInfoPanel').style.display='none'"><td style="padding:2px 4px;color:#7ee787">${i + 1}</td><td style="padding:2px 4px">${bm.label}</td><td style="padding:2px 4px;color:#8b949e">${ts}</td><td style="padding:2px 4px;color:#8b949e">${bm.nvtx_path ? bm.nvtx_path.split(' > ').pop() : ''}</td></tr>`;
+            });
+            html += '</table>';
+            document.getElementById('gpuInfoContent').innerHTML = html;
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function showToast(msg) {
+            let toast = document.getElementById('toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toast';
+                toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#21262d;color:#e6edf3;padding:6px 16px;border-radius:6px;border:1px solid #30363d;font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s';
+                document.body.appendChild(toast);
+            }
+            toast.textContent = msg;
+            toast.style.opacity = '1';
+            setTimeout(() => { toast.style.opacity = '0'; }, 2000);
         }
 
         function toggleNVTX() {
             showNVTX = !showNVTX;
             document.getElementById('nvtxBtn').classList.toggle('active', showNVTX);
             draw();
+        }
+
+        function toggleStreamFilter() {
+            const panel = document.getElementById('gpuInfoPanel');
+            let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Visibility</div>';
+            // Group streams by GPU
+            const gpuStreams = {};
+            streamIds.forEach(sid => {
+                const parts = sid.split(':');
+                const gpuId = isMultiGPU ? parts[0] : 'all';
+                if (!gpuStreams[gpuId]) gpuStreams[gpuId] = [];
+                gpuStreams[gpuId].push(sid);
+            });
+            for (const [gpuId, streams] of Object.entries(gpuStreams)) {
+                const label = gpuId === 'all' ? 'Streams' : `GPU ${gpuId}`;
+                html += `<div style="margin-top:4px;color:#7ee787;font-size:10px">${label} ` +
+                    `<a href="#" onclick="setGpuStreams('${gpuId}',true);return false" style="color:#58a6ff;text-decoration:none;margin-left:4px">All</a> ` +
+                    `<a href="#" onclick="setGpuStreams('${gpuId}',false);return false" style="color:#58a6ff;text-decoration:none">None</a></div>`;
+                for (const sid of streams) {
+                    const checked = !hiddenStreams.has(sid) ? 'checked' : '';
+                    const streamLabel = isMultiGPU ? sid.split(':')[1] : sid;
+                    const count = (streamMap[sid] || []).length;
+                    html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStream('${sid}')" style="margin-right:4px">${streamLabel} <span style="color:#484f58">(${count})</span></label>`;
+                }
+            }
+            document.getElementById('gpuInfoContent').innerHTML = html;
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleStream(sid) {
+            if (hiddenStreams.has(sid)) hiddenStreams.delete(sid);
+            else hiddenStreams.add(sid);
+            resize();
+        }
+
+        function setGpuStreams(gpuId, visible) {
+            streamIds.forEach(sid => {
+                const gid = isMultiGPU ? sid.split(':')[0] : 'all';
+                if (gid === gpuId) {
+                    if (visible) hiddenStreams.delete(sid);
+                    else hiddenStreams.add(sid);
+                }
+            });
+            toggleStreamFilter(); // refresh checkboxes
+            resize();
         }
 
         function toggleHelp() {
@@ -1243,11 +1384,20 @@
                 if (hit.kernel) { selectKernel(hit.kernel); return; }
             }
 
-            isDragging = true;
-            dragStartX = e.clientX;
-            dragViewStart = viewStart;
-            dragViewEnd = viewEnd;
-            canvas.style.cursor = 'grabbing';
+            // Shift+drag = pan (old behavior), plain drag = select time range
+            if (e.shiftKey) {
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragViewStart = viewStart;
+                dragViewEnd = viewEnd;
+                canvas.style.cursor = 'grabbing';
+            } else {
+                isSelecting = true;
+                selectStartX = mx;
+                selectStartNs = xToNs(mx);
+                selectEndNs = selectStartNs;
+                canvas.style.cursor = 'col-resize';
+            }
         });
 
         canvas.addEventListener('mousemove', e => {
@@ -1263,6 +1413,23 @@
                 clampView();
                 afterViewChange();
                 draw();
+                return;
+            }
+
+            if (isSelecting) {
+                selectEndNs = xToNs(Math.max(LABEL_W, Math.min(mx, canvas.width / DPR)));
+                draw();
+                // Draw selection overlay
+                const x1 = Math.max(LABEL_W, nsToX(Math.min(selectStartNs, selectEndNs)));
+                const x2 = Math.min(canvas.width / DPR, nsToX(Math.max(selectStartNs, selectEndNs)));
+                ctx.fillStyle = 'rgba(88, 166, 255, 0.15)';
+                ctx.fillRect(x1, 0, x2 - x1, canvas.height / DPR);
+                ctx.strokeStyle = '#58a6ff';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath(); ctx.moveTo(x1, 0); ctx.lineTo(x1, canvas.height / DPR); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(x2, 0); ctx.lineTo(x2, canvas.height / DPR); ctx.stroke();
+                ctx.setLineDash([]);
                 return;
             }
 
@@ -1286,9 +1453,27 @@
             }
         });
 
-        canvas.addEventListener('mouseup', () => { isDragging = false; canvas.style.cursor = 'crosshair'; });
-        canvas.addEventListener('mouseleave', () => {
+        canvas.addEventListener('mouseup', () => {
+            if (isSelecting) {
+                isSelecting = false;
+                canvas.style.cursor = 'crosshair';
+                // Zoom to selection if it's wide enough
+                const sNs = Math.min(selectStartNs, selectEndNs);
+                const eNs = Math.max(selectStartNs, selectEndNs);
+                if (eNs - sNs > 1000) {
+                    viewStart = sNs; viewEnd = eNs;
+                    clampView();
+                    draw();
+                    afterViewChange();
+                } else {
+                    draw();  // redraw to clear selection overlay
+                }
+                return;
+            }
             isDragging = false; canvas.style.cursor = 'crosshair';
+        });
+        canvas.addEventListener('mouseleave', () => {
+            isDragging = false; isSelecting = false; canvas.style.cursor = 'crosshair';
             document.getElementById('tooltip').style.display = 'none';
         });
 
@@ -1343,11 +1528,22 @@
                     searchQuery = ''; searchMatches.clear();
                     document.getElementById('searchInput').value = '';
                     document.getElementById('searchHint').textContent = '';
+                    document.getElementById('gpuInfoPanel').style.display = 'none';
                     draw(); break;
                 case 'n': case 'N': toggleNVTX(); break;
                 case 'a': case 'A': toggleChat(); break;
                 case 'f': case 'F': fitAll(); break;
+                case 'b': saveBookmark(); break;
+                case 'B': toggleBookmarkList(); break;
+                case 's': case 'S': toggleStreamFilter(); break;
                 case '?': toggleHelp(); break;
+                default:
+                    // 1-9 jump to bookmark
+                    if (e.key >= '1' && e.key <= '9') {
+                        const bi = parseInt(e.key) - 1;
+                        if (bi < bookmarks.length) { jumpToBookmark(bi); }
+                    }
+                    break;
             }
         });
 
@@ -1499,12 +1695,13 @@
 
             } catch (err) {
                 aiDiv.innerHTML = formatChatContent('Connection error: ' + err.message);
+            } finally {
+                aiDiv.classList.remove('chat-streaming');
+                chatStreaming = false;
+                sendBtn.disabled = false;
+                sendBtn.textContent = 'Send';
+                input.focus();
             }
-
-            aiDiv.classList.remove('chat-streaming');
-            chatStreaming = false;
-            sendBtn.disabled = false;
-            sendBtn.textContent = 'Send';
         }
 
         function executeAIAction(action) {
