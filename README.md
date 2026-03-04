@@ -4,7 +4,7 @@
 
 **AI-powered analysis for NVIDIA Nsight Systems profiles**
 
-Navigate GPU kernel timelines, diagnose performance bottlenecks with AI, and explore NVTX hierarchies — all from your terminal.
+Navigate GPU kernel timelines, diagnose performance bottlenecks with AI, and explore NVTX hierarchies — from your terminal or browser.
 
 > **Mission:** Build an intelligent agent that truly understands GPU performance from first principles. An agent that can identify pipeline bubbles, calculate MFU, assess arithmetic intensity, and diagnose the root causes that cost millions of dollars in GPU hours — turning months of expert debugging into minutes.
 
@@ -29,25 +29,31 @@ That's it. No system dependencies, no CUDA required. Just Python 3.10+.
 
 ## 🎯 What It Does
 
-nsys-ai reads `.sqlite` profile exports from [NVIDIA Nsight Systems](https://developer.nvidia.com/nsight-systems) and gives you **three ways** to explore them:
+nsys-ai reads `.nsys-rep` or `.sqlite` profile exports from [NVIDIA Nsight Systems](https://developer.nvidia.com/nsight-systems) and gives you **four ways** to explore them:
 
 <table>
 <tr>
-<td width="33%" align="center">
+<td width="25%" align="center">
 
 ### 🖥️ Timeline TUI
 Perfetto-style horizontal timeline in your terminal
 
 </td>
-<td width="33%" align="center">
+<td width="25%" align="center">
 
 ### 🌲 Tree TUI
 Interactive NVTX hierarchy browser with kernel details
 
 </td>
-<td width="33%" align="center">
+<td width="25%" align="center">
 
-### 🌐 HTML Viewer
+### 🌐 Web Timeline
+Multi-GPU browser viewer with progressive rendering
+
+</td>
+<td width="25%" align="center">
+
+### 📄 HTML Export
 Exportable interactive visualizations for sharing
 
 </td>
@@ -77,6 +83,15 @@ S60 ░░░██████░░░░░██
 </td>
 <td>
 
+Browser-based viewer:<br>
+• Multi-GPU stacked streams<br>
+• NVTX hierarchy bars<br>
+• Pinch-to-zoom, trackpad pan<br>
+• AI chat sidebar
+
+</td>
+<td>
+
 Interactive HTML exports:<br>
 • NVTX stack viewer<br>
 • SQLite schema explorer<br>
@@ -95,28 +110,31 @@ Interactive HTML exports:<br>
 ```bash
 # Option A: Profile your own PyTorch training
 nsys profile -o my_training python train.py
-# → produces my_training.sqlite
+# → produces my_training.nsys-rep  (or .sqlite via --export sqlite)
 
 # Option B: Download an example profile
 cd examples/example-20-megatron-distca
 python download_data.py
-# → downloads output/megatron_distca.sqlite
+# → downloads output/megatron_distca.nsys-rep
 ```
 
 ### 2. Explore it
 
 ```bash
 # Quick overview
-nsys-ai info my_training.sqlite
+nsys-ai info my_training.nsys-rep
 
-# Interactive timeline (the main attraction)
-nsys-ai timeline my_training.sqlite --gpu 0 --trim 39 42
+# Interactive timeline in your terminal
+nsys-ai timeline my_training.nsys-rep --gpu 0 --trim 39 42
+
+# Interactive web timeline (multi-GPU, progressive rendering)
+nsys-ai timeline-web my_training.nsys-rep
 
 # Interactive tree browser
-nsys-ai tui my_training.sqlite --gpu 0 --trim 39 42
+nsys-ai tui my_training.nsys-rep --gpu 0 --trim 39 42
 
 # GPU kernel summary
-nsys-ai summary my_training.sqlite --gpu 0
+nsys-ai summary my_training.nsys-rep --gpu 0
 ```
 
 ### 3. Export & share
@@ -181,6 +199,46 @@ Tweak settings live with ↑/↓ to select and ←/→ to adjust:
 
 ---
 
+## 🌐 Web Timeline
+
+The web timeline is a **browser-based multi-GPU viewer** with progressive rendering — no `--trim` required.
+
+```bash
+# Launch for all GPUs — opens in your browser
+nsys-ai timeline-web my_training.nsys-rep
+
+# Specify GPUs
+nsys-ai timeline-web my_training.nsys-rep --gpu 0 1 2 3
+```
+
+### Features
+
+- **Multi-GPU stacked view** — all GPUs shown simultaneously with color-coded separators
+- **Progressive rendering** — pre-builds full NVTX tree at startup, then serves tiles instantly (~1ms per tile)
+- **NVTX hierarchy** — layered bars (L0–L5) showing annotation nesting per GPU
+- **AI chat sidebar** — press `A` to ask questions about the profile
+- **Kernel search** — press `/` to search by kernel name
+
+### Navigation
+
+| Input | Action |
+|:-----:|--------|
+| **Swipe left/right** | Pan through time |
+| **Swipe up/down** | Scroll through GPU streams |
+| **Pinch** | Zoom in / out |
+| `Shift+scroll` | Zoom in / out |
+| `h` `l` or `←` `→` | Pan left / right |
+| `j` `k` or `↑` `↓` | Select stream |
+| `+` `-` | Zoom in / out |
+| `f` or `0` | Fit all (full time range) |
+| `Tab` | Next kernel |
+| `/` | Search kernels |
+| `n` | Toggle NVTX |
+| `a` | AI Chat |
+| `?` | Help overlay |
+
+---
+
 ## 📚 Documentation
 
 The `docs/` directory includes comprehensive guides for Nsight Systems profiling:
@@ -219,6 +277,7 @@ The [`docs/sqlite-explorer/`](docs/sqlite-explorer/) contains an **interactive H
 | `tree` | NVTX hierarchy as text |
 | `tui` | **Interactive tree TUI** |
 | `timeline` | **Interactive timeline TUI** |
+| `timeline-web` | **Web-based multi-GPU timeline** (progressive rendering) |
 | `search` | Search kernels / NVTX by name |
 | `export` | Perfetto JSON traces |
 | `export-csv` | Flat CSV for spreadsheets |
