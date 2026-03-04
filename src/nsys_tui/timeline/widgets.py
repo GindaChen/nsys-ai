@@ -27,17 +27,30 @@ class BottomPanel(Widget):
 
     DEFAULT_CSS = """
     BottomPanel {
-        height: 4;
+        height: auto;
+        min-height: 4;
+        max-height: 12;
         dock: bottom;
         background: $surface-darken-2;
         border-top: solid $primary-darken-2;
     }
     """
 
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._path_mode: str = "breadcrumb"  # "breadcrumb" or "hierarchy"
+        self._nvtx_spans: list = []
+
     def compose(self) -> ComposeResult:
         yield Static("", id="bp-kernel")
         yield Static("", id="bp-nvtx")
         yield Static("", id="bp-stats")
+
+    def toggle_path_mode(self) -> None:
+        self._path_mode = "hierarchy" if self._path_mode == "breadcrumb" else "breadcrumb"
+
+    def set_nvtx_spans(self, spans: list) -> None:
+        self._nvtx_spans = spans
 
     def update(  # type: ignore[override]
         self,
@@ -68,7 +81,10 @@ class BottomPanel(Widget):
         k_w.update(k_info)
 
         if kernel.nvtx_path:
-            n_w.update(Text(f" ⌂ {kernel.nvtx_path}", style="blue dim"))
+            if self._path_mode == "hierarchy":
+                n_w.update(self._render_hierarchy(kernel.nvtx_path))
+            else:
+                n_w.update(Text(f" ⌂ {kernel.nvtx_path}", style="bright_cyan"))
         else:
             n_w.update("")
 
@@ -79,6 +95,21 @@ class BottomPanel(Widget):
         e_pos = min(bar_w, max(s_pos + 1, int((kernel.end_ns - time_start) / span * bar_w)))
         bar = "─" * s_pos + "█" * (e_pos - s_pos) + "─" * (bar_w - e_pos)
         s_w.update(Text(f" [{_fmt_ns(time_start)}] {bar} [{_fmt_ns(time_end)}]", style="yellow dim"))
+
+    def _render_hierarchy(self, nvtx_path: str) -> Text:
+        """Render NVTX path as indented hierarchy with timing from spans."""
+        parts = [p.strip() for p in nvtx_path.split(" > ") if p.strip()]
+        lines: list[str] = []
+        for i, part in enumerate(parts):
+            indent = "  " * (i + 1)
+            # Try to find matching NVTX span for timing info
+            timing = ""
+            for s in self._nvtx_spans:
+                if s.name == part and s.depth == i:
+                    timing = f"  {_fmt_dur((s.end_ns - s.start_ns) / 1e6)}  [{_fmt_ns(s.start_ns)}→{_fmt_ns(s.end_ns)}]"
+                    break
+            lines.append(f"{indent}📂 {part}{timing}")
+        return Text("\n".join(lines), style="bright_cyan") if lines else Text("")
 
 
 class ConfigPanel(Widget):
@@ -114,14 +145,14 @@ class ConfigPanel(Widget):
     _ITEMS = [
         ("selected_rows", "Selected stream rows", 1, 5),
         ("default_rows", "Other stream rows", 1, 3),
-        ("nvtx_depth", "NVTX depth", 0, 8),
+        ("nvtx_depth", "NVTX depth (0=hide)", 0, 99),
     ]
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
-        self.selected_rows = 2
+        self.selected_rows = 3
         self.default_rows = 1
-        self.nvtx_depth = 4
+        self.nvtx_depth = 99  # 99 = show all available levels
         self._cursor = 0
 
     def compose(self) -> ComposeResult:

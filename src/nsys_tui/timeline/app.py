@@ -99,8 +99,8 @@ class NsysTimelineApp(App):
         Binding("shift+right", "page_right", "⇒", show=False),
         Binding("up,k", "prev_stream", "↑ stream", show=False),
         Binding("down,j", "next_stream", "↓ stream", show=False),
-        Binding("tab", "next_kernel", "Next kernel"),
-        Binding("shift+tab", "prev_kernel", "Prev kernel"),
+        Binding("tab", "next_kernel", "Next kernel", priority=True),
+        Binding("shift+tab", "prev_kernel", "Prev kernel", priority=True),
         Binding("plus,equals_sign", "zoom_in", "Zoom in"),
         Binding("minus,underscore", "zoom_out", "Zoom out"),
         Binding("a", "toggle_time_mode", "Abs/rel time"),
@@ -118,6 +118,7 @@ class NsysTimelineApp(App):
         Binding("/", "open_filter", "Filter"),
         Binding("n", "clear_filter", "Clear filter"),
         Binding("m", "open_min_dur", "Min dur"),
+        Binding("P", "toggle_path_mode", "Path mode"),
         Binding("T", "toggle_tick_density", "Ticks", show=False),
         Binding("home", "jump_start", "Start", show=False),
         Binding("end", "jump_end", "End", show=False),
@@ -217,6 +218,11 @@ class NsysTimelineApp(App):
             self.notify(f"Failed to load profile: {e}", severity="error")
             return
         self._load_from_json(json_roots)
+        # Push NVTX spans to bottom panel for hierarchy view
+        if self._is_mounted:
+            self.query_one("#bottom-panel", BottomPanel).set_nvtx_spans(
+                getattr(self, "_nvtx_spans", [])
+            )
         self._push_canvas_state()
         self._update_title()
 
@@ -248,6 +254,10 @@ class NsysTimelineApp(App):
         if not self._kernels and self._db_path:
             self._load_from_db()
         else:
+            # Push NVTX spans to bottom panel for hierarchy view
+            self.query_one("#bottom-panel", BottomPanel).set_nvtx_spans(
+                getattr(self, "_nvtx_spans", [])
+            )
             self._push_canvas_state()
             self._update_title()
         # Focus the canvas so App-level key bindings work.
@@ -370,16 +380,40 @@ class NsysTimelineApp(App):
     def action_next_kernel(self) -> None:
         stream = self._streams[self.selected_stream_idx] if self._streams else "?"
         ks = self._stream_kernels.get(stream, [])
+        if not ks:
+            return
         ki = kernel_index_at_time(ks, self.cursor_ns)
-        if ki >= 0 and ki + 1 < len(ks):
-            self.cursor_ns = ks[ki + 1].start_ns
+        if ki < 0:
+            return
+        # If cursor is already on this kernel, go to next; otherwise snap to it first
+        if ks[ki].start_ns <= self.cursor_ns <= ks[ki].end_ns:
+            if ki + 1 < len(ks):
+                self.cursor_ns = ks[ki + 1].start_ns
+        else:
+            # Cursor is between kernels — snap to the nearest one ahead
+            if self.cursor_ns < ks[ki].start_ns:
+                self.cursor_ns = ks[ki].start_ns
+            elif ki + 1 < len(ks):
+                self.cursor_ns = ks[ki + 1].start_ns
 
     def action_prev_kernel(self) -> None:
         stream = self._streams[self.selected_stream_idx] if self._streams else "?"
         ks = self._stream_kernels.get(stream, [])
+        if not ks:
+            return
         ki = kernel_index_at_time(ks, self.cursor_ns)
-        if ki > 0:
-            self.cursor_ns = ks[ki - 1].start_ns
+        if ki < 0:
+            return
+        # If cursor is on this kernel, go to previous; otherwise snap to it first
+        if ks[ki].start_ns <= self.cursor_ns <= ks[ki].end_ns:
+            if ki > 0:
+                self.cursor_ns = ks[ki - 1].start_ns
+        else:
+            # Cursor is between kernels — snap to the nearest one behind
+            if self.cursor_ns > ks[ki].end_ns:
+                self.cursor_ns = ks[ki].start_ns
+            elif ki > 0:
+                self.cursor_ns = ks[ki - 1].start_ns
 
     def action_zoom_in(self) -> None:
         self.ns_per_col = zoom_ns_per_col(self.ns_per_col, -1, self._time_span)
@@ -410,6 +444,14 @@ class NsysTimelineApp(App):
         self._push_canvas_state()
         self._update_title()
         self.notify(f"Mode: {'LOGICAL (NVTX hidden)' if self._logical_mode else 'TIME'}", timeout=2)
+
+    def action_toggle_path_mode(self) -> None:
+        """Toggle NVTX path display between breadcrumb and hierarchy ('P' key)."""
+        bp = self.query_one("#bottom-panel", BottomPanel)
+        bp.toggle_path_mode()
+        self._update_bottom_panel()
+        mode = bp._path_mode
+        self.notify(f"Path: {mode}", timeout=2)
 
     def action_toggle_demangled(self) -> None:
         self._show_demangled = not self._show_demangled

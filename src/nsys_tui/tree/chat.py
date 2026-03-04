@@ -134,8 +134,10 @@ class ChatPanel(Widget):
 
     def _on_text_chunk(self, chunk: str) -> None:
         stream_label = self.query_one("#chat-stream", Static)
-        current = str(stream_label.renderable)
-        stream_label.update(current + chunk)
+        if not hasattr(self, "_stream_buffer"):
+            self._stream_buffer = ""
+        self._stream_buffer += chunk
+        stream_label.update(self._stream_buffer)
 
     def _on_system_event(self, content: str) -> None:
         self.query_one("#chat-log", RichLog).write(
@@ -148,6 +150,7 @@ class ChatPanel(Widget):
         if final_content:
             log.write(f"[bold green]AI:[/bold green] {final_content}")
         stream_label.update("")
+        self._stream_buffer = ""
         with self._lock:
             if final_content:
                 self._history.append({"role": "assistant", "content": final_content})

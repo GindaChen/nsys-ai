@@ -192,7 +192,16 @@ class TimelineCanvas(Widget):
             s_col = max(0, int((span.start_ns - self.viewport_start_ns) / max(self.ns_per_col, 1)))
             e_col = min(timeline_w - 1, int((span.end_ns - self.viewport_start_ns) / max(self.ns_per_col, 1)))
             span_w = max(1, e_col - s_col + 1)
-            content = f"[{span.name}]" if span_w >= len(span.name) + 2 else "█" * span_w
+            if span_w >= len(span.name) + 2:
+                content = f"[{span.name}]"
+            elif span_w >= 5:
+                # Truncated name with ellipsis: [na…]
+                inner = span_w - 3  # room for [ … ]
+                content = f"[{span.name[:inner]}…]"
+            elif span_w >= 2:
+                content = f"[{']' if span_w == 2 else span.name[:span_w - 2] + ']'}"
+            else:
+                content = "│"  # thin marker instead of fat block
             for ci, ch in enumerate(content[:span_w]):
                 if s_col + ci < timeline_w:
                     cells[s_col + ci] = ch
@@ -212,21 +221,32 @@ class TimelineCanvas(Widget):
     ) -> Strip:
         from ..tui_models import short_kernel_name as _short_name
 
-        is_block_row = (within == row_h - 1)
         ci = self.stream_color_idx.get(stream, stream_idx % len(_STREAM_COLORS))
+        # Check if this stream is predominantly NCCL — match label color to kernel color
+        all_kernels = self.stream_kernels.get(stream, [])
+        is_nccl_stream = all_kernels and all_kernels[0].is_nccl
+        label_color = _NCCL_COLOR if is_nccl_stream else _STREAM_COLORS[ci % len(_STREAM_COLORS)]
         label_style = Style(
-            color=_STREAM_COLORS[ci % len(_STREAM_COLORS)],
+            color=label_color,
             bold=is_selected,
             dim=not is_selected,
         )
-        label_seg = Segment(f"S{stream}".ljust(label_w - 1), label_style)
+        # Only show stream label on the first sub-row
+        if within == 0:
+            label_seg = Segment(f"S{stream}".ljust(label_w - 1), label_style)
+        else:
+            label_seg = Segment(" " * (label_w - 1), Style())
 
         kernels = filter_kernels(
             self.stream_kernels.get(stream, []),
             self.filter_text,
             self.min_dur_us,
         )
-        cells = [(" ", Style())] * timeline_w  # (char, style)
+        cells = [(" ", Style())] * timeline_w
+
+        is_block_row = (within == row_h - 1)
+        # How many label rows do we have above the block row?
+        label_row_count = row_h - 1  # row_h=1 → 0 label rows, row_h=2 → 1, row_h=3 → 2, etc.
 
         for k in kernels:
             s_col = int((k.start_ns - self.viewport_start_ns) / max(self.ns_per_col, 1))
@@ -241,31 +261,56 @@ class TimelineCanvas(Widget):
             style = _stream_color(ci, is_at_cursor, k.heat, k.is_nccl)
 
             if is_block_row:
+                # Last row: block bars
                 char = "█"
                 for col in range(s_col, s_col + block_w):
                     if col < timeline_w:
                         cells[col] = (char, style)
-            else:
-                # Label row: kernel name + duration, respecting show_demangled
+            elif label_row_count > 0:
+                # Determine which label row this kernel belongs to.
+                # Row 0 (within=0): ONLY the focused/cursor kernel
+                # Rows 1+ (within=1..): other kernels distributed to minimize overlap
+                if is_at_cursor:
+                    target_row = 0
+                elif label_row_count >= 2:
+                    # Distribute non-focused kernels across rows 1..label_row_count-1
+                    # Use position-based assignment to spread them out
+                    target_row = 1 + (s_col % max(1, label_row_count - 1))
+                else:
+                    # Only 1 label row total — everything shares row 0
+                    target_row = 0
+
+                if within != target_row:
+                    continue
+
+                # Render kernel label with overflow
                 name_to_use = (k.demangled if self.show_demangled and k.demangled else k.name)
                 short = _short_name(name_to_use)
                 dur = _fmt_dur(k.duration_ms)
-                if block_w >= len(short) + len(dur) + 2:
+                if len(short) + len(dur) + 1 <= 40:
                     text = f"{short} {dur}"
-                elif block_w >= len(short):
-                    text = short[:block_w]
-                elif block_w >= 2:
-                    text = dur[:block_w]
                 else:
-                    text = ""
-                for ci2, ch in enumerate(text[:block_w]):
+                    text = short
+
+                # Calculate available space: extend rightward into empty cells
+                avail = block_w
+                for probe in range(s_col + block_w, min(s_col + len(text), timeline_w)):
+                    if cells[probe][0] == " ":
+                        avail += 1
+                    else:
+                        break
+
+                label_text = text[:avail] if avail >= 2 else ""
+                for ci2, ch in enumerate(label_text):
                     if s_col + ci2 < timeline_w:
                         cells[s_col + ci2] = (ch, style)
 
-        # Cursor line
+        # Cursor highlight — preserve the existing character, just change its style
         cursor_col = int((self.cursor_ns - self.viewport_start_ns) / max(self.ns_per_col, 1))
         if 0 <= cursor_col < timeline_w:
-            cells[cursor_col] = ("│", Style(color="yellow", bold=True))
+            existing_ch, _ = cells[cursor_col]
+            ch = existing_ch if existing_ch.strip() else "│"
+            cells[cursor_col] = (ch, Style(color="black", bgcolor="yellow", bold=True))
 
         segments: list[Segment] = [label_seg]
         # Compress runs of same style

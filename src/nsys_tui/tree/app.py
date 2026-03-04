@@ -215,10 +215,25 @@ class NsysTreeApp(App):
             bubble_threshold_us=self.bubble_threshold_us,
         )
 
-    def _refresh_table(self) -> None:
+    def _refresh_table(self, preserve_cursor: bool = True) -> None:
+        # Remember the currently selected node so we can restore position.
+        prev_node: TreeNode | None = None
+        if preserve_cursor and self._visible:
+            table = self.query_one("#tree-table", TreeTable)
+            row = table.cursor_row
+            if 0 <= row < len(self._visible):
+                prev_node = self._visible[row]
+
         self._visible = self._get_visible()
         table = self.query_one("#tree-table", TreeTable)
         table.populate(self._visible, self.view_mode, self.show_demangled)
+
+        # Restore cursor to the same node (or closest position).
+        if prev_node is not None:
+            new_idx = node_index_in_visible(self._visible, prev_node)
+            if new_idx is not None:
+                self.query_one(DataTable).move_cursor(row=new_idx)
+
         self._update_detail_bar()
 
     def _update_title(self) -> None:
