@@ -873,8 +873,8 @@
                 if (x < LABEL_W || x > W) continue;
                 ctx.strokeStyle = '#30363d';
                 ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, RULER_H); ctx.stroke();
-                const ms = (t - timeStart) / 1e6;
-                const label = ms >= 1000 ? (ms / 1000).toFixed(2) + 's' : ms >= 1 ? ms.toFixed(2) + 'ms' : (ms * 1000).toFixed(0) + 'μs';
+                const absS = t / 1e9;  // absolute seconds
+                const label = absS >= 1 ? absS.toFixed(2) + 's' : absS >= 0.001 ? (absS * 1000).toFixed(2) + 'ms' : (absS * 1e6).toFixed(0) + 'μs';
                 ctx.fillText(label, x, RULER_H - 7);
             }
 
@@ -1338,13 +1338,13 @@
             if (helpEl.style.display === 'block' && e.key !== '?') { helpEl.style.display = 'none'; return; }
 
             switch (e.key) {
-                case 'ArrowLeft': e.preventDefault(); panBy(-0.15); break;
-                case 'ArrowRight': e.preventDefault(); panBy(0.15); break;
-                case 'ArrowUp': e.preventDefault(); selectedStreamIdx = Math.max(0, selectedStreamIdx - 1); draw(); break;
-                case 'ArrowDown': e.preventDefault(); selectedStreamIdx = Math.min(streamIds.length - 1, selectedStreamIdx + 1); draw(); break;
+                case 'ArrowLeft': case 'h': e.preventDefault(); panBy(-0.15); break;
+                case 'ArrowRight': case 'l': e.preventDefault(); panBy(0.15); break;
+                case 'ArrowUp': case 'k': e.preventDefault(); selectedStreamIdx = Math.max(0, selectedStreamIdx - 1); draw(); break;
+                case 'ArrowDown': case 'j': e.preventDefault(); selectedStreamIdx = Math.min(streamIds.length - 1, selectedStreamIdx + 1); draw(); break;
                 case '+': case '=': zoomIn(); break;
                 case '-': case '_': zoomOut(); break;
-                case 'Home': fitAll(); break;
+                case 'Home': case '0': fitAll(); break;
                 case 'Tab': e.preventDefault(); nextKernel(e.shiftKey ? -1 : 1); break;
                 case '/': e.preventDefault(); document.getElementById('searchInput').focus(); break;
                 case 'Escape':
@@ -1355,10 +1355,7 @@
                     draw(); break;
                 case 'n': case 'N': toggleNVTX(); break;
                 case 'a': case 'A': toggleChat(); break;
-                case 'f': case 'F':
-                    document.getElementById('toolbar').style.display =
-                        document.getElementById('toolbar').style.display === 'none' ? 'flex' : 'none';
-                    resize(); break;
+                case 'f': case 'F': fitAll(); break;
                 case '?': toggleHelp(); break;
             }
         });
