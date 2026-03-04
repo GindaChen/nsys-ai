@@ -268,7 +268,8 @@ def _cmd_tui(args, _profile):
 def _cmd_timeline(args, _profile):
     # run_timeline opens its own SQLite connection internally.
     from .timeline import run_timeline  # Textual timeline TUI (replaces curses tui_timeline.py)
-    run_timeline(args.profile, args.gpu, _parse_trim(args), min_ms=args.min_ms)
+    gpu = args.gpu if args.gpu is not None else 0
+    run_timeline(args.profile, gpu, _parse_trim(args), min_ms=args.min_ms)
 
 
 def _cmd_chat(args, _profile):
@@ -464,7 +465,7 @@ def _build_parser():
 
     # ── timeline ──
     p = sub.add_parser("timeline", help="Horizontal timeline; press A for AI chat")
-    _add_gpu_trim(p)
+    _add_gpu_trim(p, gpu_required=False)
     p.add_argument("--min-ms", type=float, default=0, help="Min duration to show (ms)")
     p.set_defaults(handler=_cmd_timeline)
 

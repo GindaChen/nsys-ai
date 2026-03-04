@@ -14,27 +14,18 @@ import os
 # Anthropic 4.x, OpenAI 5.x, Gemini 2.5+ and 3.x only.
 # ---------------------------------------------------------------------------
 MODEL_OPTIONS: list[dict] = [
-    # Anthropic (Claude 4.x)
-    {"id": "anthropic/claude-opus-4-6-20260205",      "label": "Claude Opus 4.6"},
-    {"id": "anthropic/claude-sonnet-4-6",              "label": "Claude Sonnet 4.6"},
-    {"id": "anthropic/claude-sonnet-4-5-20250929",     "label": "Claude Sonnet 4.5"},
-    {"id": "anthropic/claude-opus-4-5-20251101",       "label": "Claude Opus 4.5"},
-    {"id": "anthropic/claude-haiku-4-5-20251001",      "label": "Claude Haiku 4.5"},
-    # OpenAI (GPT-5.x)
-    {"id": "gpt-5.2",                                  "label": "GPT-5.2"},
-    {"id": "gpt-5.2-pro",                              "label": "GPT-5.2 Pro"},
-    {"id": "gpt-5-mini",                               "label": "GPT-5 Mini"},
-    {"id": "gpt-5.3-codex",                            "label": "GPT-5.3 Codex"},
-    {"id": "gpt-4o",                                   "label": "GPT-4o"},
-    # Gemini (2.5+ and 3.x)
-    {"id": "gemini/gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
-    {"id": "gemini/gemini-2.5-pro-preview-05-20",      "label": "Gemini 2.5 Pro (preview)"},
-    {"id": "gemini/gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
-    {"id": "gemini/gemini-2.5-flash-lite",             "label": "Gemini 2.5 Flash Lite"},
-    {"id": "gemini/gemini-2.0-flash",                  "label": "Gemini 2.0 Flash"},
-    {"id": "gemini/gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro"},
-    {"id": "gemini/gemini-3-pro-preview",              "label": "Gemini 3 Pro"},
-    {"id": "gemini/gemini-3-flash-preview",            "label": "Gemini 3 Flash"},
+    # Anthropic
+    {"id": "anthropic/claude-sonnet-4-20250514",        "label": "Claude Sonnet 4"},
+    {"id": "anthropic/claude-3.5-sonnet",               "label": "Claude 3.5 Sonnet"},
+    {"id": "anthropic/claude-3-5-haiku-20241022",       "label": "Claude 3.5 Haiku"},
+    # OpenAI
+    {"id": "gpt-4o",                                    "label": "GPT-4o"},
+    {"id": "gpt-4o-mini",                               "label": "GPT-4o Mini"},
+    {"id": "o3-mini",                                   "label": "o3-mini"},
+    # Gemini
+    {"id": "gemini/gemini-2.5-flash",                   "label": "Gemini 2.5 Flash"},
+    {"id": "gemini/gemini-2.5-pro",                     "label": "Gemini 2.5 Pro"},
+    {"id": "gemini/gemini-2.0-flash",                   "label": "Gemini 2.0 Flash"},
 ]
 
 
@@ -72,9 +63,9 @@ def _get_model_and_key(
         if key_name and os.environ.get(key_name):
             return preferred, os.environ[key_name]
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic/claude-sonnet-4-5-20250929", os.environ["ANTHROPIC_API_KEY"]
+        return "anthropic/claude-sonnet-4-20250514", os.environ["ANTHROPIC_API_KEY"]
     if os.environ.get("OPENAI_API_KEY"):
-        return "gpt-5.2", os.environ["OPENAI_API_KEY"]
+        return "gpt-4o", os.environ["OPENAI_API_KEY"]
     if os.environ.get("GEMINI_API_KEY"):
         return "gemini/gemini-2.5-pro", os.environ["GEMINI_API_KEY"]
     return None, None

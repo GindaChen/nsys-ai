@@ -216,6 +216,176 @@
             min-width: 60px;
             display: inline-block
         }
+
+        /* ── Chat sidebar ── */
+        #appLayout {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #mainCol {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        #chatSidebar {
+            width: 380px;
+            flex-shrink: 0;
+            display: none;
+            flex-direction: column;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+        }
+
+        #chatSidebar.open {
+            display: flex;
+        }
+
+        #chatHeader {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        #chatHeader select {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-size: 10px;
+            font-family: inherit;
+            border-radius: 3px;
+            padding: 2px 4px;
+            margin-left: auto;
+        }
+
+        #chatHeader button {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 0 4px;
+        }
+
+        #chatMessages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 12px;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .chat-msg {
+            margin-bottom: 10px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            max-width: 95%;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .chat-msg.user {
+            background: #1a2332;
+            border: 1px solid #264f78;
+            margin-left: auto;
+            color: #79b8ff;
+        }
+
+        .chat-msg.ai {
+            background: #161b22;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+
+        .chat-msg.system {
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            font-size: 11px;
+            font-style: italic;
+            padding: 2px 0;
+        }
+
+        .chat-msg code {
+            background: #0d1117;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+
+        .chat-msg pre {
+            background: #0d1117;
+            padding: 6px 8px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 4px 0;
+            font-size: 11px;
+        }
+
+        #chatInputWrap {
+            padding: 8px 12px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 6px;
+        }
+
+        #chatInput {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: inherit;
+            outline: none;
+        }
+
+        #chatInput:focus {
+            border-color: var(--accent);
+        }
+
+        #chatSendBtn {
+            background: #238636;
+            border: none;
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-family: inherit;
+        }
+
+        #chatSendBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .chat-streaming {
+            border-color: var(--accent) !important;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
     </style>
 </head>
 
@@ -235,11 +405,29 @@
         <input type="text" id="searchInput" placeholder="/ to search kernels..." oninput="onSearch()">
         <span class="hint" id="searchHint"></span>
         <div class="sep"></div>
+        <button onclick="toggleChat()" id="chatBtn">💬 AI Chat</button>
+        <div class="sep"></div>
         <button onclick="toggleHelp()">? Help</button>
     </div>
-    <div id="canvasWrap"><canvas id="c"></canvas></div>
-    <div id="detail" class="empty">Click a kernel to see details. Keyboard: ←/→ pan, +/- zoom, ↑/↓ stream, / search, ?
-        help</div>
+    <div id="appLayout">
+        <div id="mainCol">
+            <div id="canvasWrap"><canvas id="c"></canvas></div>
+            <div id="detail" class="empty">Click a kernel to see details. Press A for AI chat. Keyboard: ←/→ pan, +/-
+                zoom, ↑/↓ stream, / search, ? help</div>
+        </div>
+        <div id="chatSidebar">
+            <div id="chatHeader">
+                <span>💬 AI Chat</span>
+                <select id="chatModel"></select>
+                <button onclick="toggleChat()" title="Close">✕</button>
+            </div>
+            <div id="chatMessages"></div>
+            <div id="chatInputWrap">
+                <input type="text" id="chatInput" placeholder="Ask about this profile..." />
+                <button id="chatSendBtn" onclick="sendChat()">Send</button>
+            </div>
+        </div>
+    </div>
     <div class="tooltip" id="tooltip" style="display:none"></div>
     <div class="help-overlay" id="helpOverlay">
         <h2>Keyboard Shortcuts</h2>
@@ -283,6 +471,10 @@
             <tr>
                 <td><span class="key">F</span></td>
                 <td>Toggle focus (hide toolbar)</td>
+            </tr>
+            <tr>
+                <td><span class="key">A</span></td>
+                <td>Toggle AI chat sidebar</td>
             </tr>
             <tr>
                 <td><span class="key">?</span></td>
@@ -798,6 +990,7 @@
                     document.getElementById('searchHint').textContent = '';
                     draw(); break;
                 case 'n': case 'N': toggleNVTX(); break;
+                case 'a': case 'A': toggleChat(); break;
                 case 'f': case 'F':
                     document.getElementById('toolbar').style.display =
                         document.getElementById('toolbar').style.display === 'none' ? 'flex' : 'none';
@@ -805,6 +998,226 @@
                 case '?': toggleHelp(); break;
             }
         });
+
+        // ── AI Chat ──
+        let chatHistory = [];  // [{role, content}]
+        let chatStreaming = false;
+
+        function toggleChat() {
+            const sidebar = document.getElementById('chatSidebar');
+            const btn = document.getElementById('chatBtn');
+            sidebar.classList.toggle('open');
+            btn.classList.toggle('active', sidebar.classList.contains('open'));
+            if (sidebar.classList.contains('open')) {
+                document.getElementById('chatInput').focus();
+            }
+            setTimeout(resize, 0);
+        }
+
+        function buildUIContext() {
+            return {
+                selected_kernel: selectedKernel ? {
+                    name: selectedKernel.name,
+                    duration_ms: selectedKernel.duration_ms,
+                    stream: selectedKernel.stream,
+                } : null,
+                view_state: {
+                    time_range_ns: [viewStart, viewEnd],
+                    visible_span_ms: (viewEnd - viewStart) / 1e6,
+                    mode: 'WEB',
+                },
+                stats: { kernel_count: kernels.length, stream_count: streamIds.length },
+            };
+        }
+
+        function appendChatMsg(role, content, cls) {
+            const msgs = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.className = 'chat-msg ' + (cls || role);
+            div.innerHTML = formatChatContent(content);
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+            return div;
+        }
+
+        function formatChatContent(text) {
+            // Simple markdown-ish rendering
+            return text
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+        }
+
+        async function sendChat() {
+            const input = document.getElementById('chatInput');
+            const msg = input.value.trim();
+            if (!msg || chatStreaming) return;
+            input.value = '';
+
+            appendChatMsg('user', msg);
+            chatHistory.push({ role: 'user', content: msg });
+
+            chatStreaming = true;
+            const sendBtn = document.getElementById('chatSendBtn');
+            sendBtn.disabled = true;
+            sendBtn.textContent = '...';
+
+            const aiDiv = appendChatMsg('ai', '');
+            aiDiv.classList.add('chat-streaming');
+            let fullContent = '';
+
+            try {
+                const modelSel = document.getElementById('chatModel');
+                const model = modelSel.value || undefined;
+                const body = {
+                    messages: chatHistory,
+                    model: model,
+                    stream: true,
+                    ui_context: buildUIContext(),
+                };
+
+                const resp = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.text();
+                    aiDiv.innerHTML = formatChatContent('Error: ' + err);
+                    aiDiv.classList.remove('chat-streaming');
+                    chatStreaming = false;
+                    sendBtn.disabled = false;
+                    sendBtn.textContent = 'Send';
+                    return;
+                }
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Parse SSE events
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const data = line.slice(6);
+                        if (data === '[DONE]') continue;
+                        try {
+                            const evt = JSON.parse(data);
+                            if (evt.type === 'text') {
+                                fullContent += evt.content;
+                                aiDiv.innerHTML = formatChatContent(fullContent);
+                                document.getElementById('chatMessages').scrollTop =
+                                    document.getElementById('chatMessages').scrollHeight;
+                            } else if (evt.type === 'system') {
+                                appendChatMsg('system', evt.content, 'system');
+                            } else if (evt.type === 'done') {
+                                fullContent = evt.content || fullContent;
+                                aiDiv.innerHTML = formatChatContent(fullContent);
+                            } else if (evt.type === 'action') {
+                                executeAIAction(evt);
+                            }
+                        } catch (e) { /* ignore parse errors in SSE */ }
+                    }
+                }
+
+                chatHistory.push({ role: 'assistant', content: fullContent });
+
+                // Check for inline actions in the response
+                parseAndExecuteActions(fullContent);
+
+            } catch (err) {
+                aiDiv.innerHTML = formatChatContent('Connection error: ' + err.message);
+            }
+
+            aiDiv.classList.remove('chat-streaming');
+            chatStreaming = false;
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send';
+        }
+
+        function executeAIAction(action) {
+            if (action.type === 'navigate_to_kernel' || (action.action_type === 'navigate_to_kernel')) {
+                const target = action.target_name || action.target;
+                if (target) {
+                    const k = kernels.find(k => k.name.includes(target));
+                    if (k) {
+                        const si = streamIds.indexOf(String(k.stream));
+                        if (si >= 0) selectedStreamIdx = si;
+                        selectKernel(k);
+                        ensureVisible(k);
+                        appendChatMsg('system', '→ Navigated to: ' + k.name.slice(0, 60), 'system');
+                    }
+                }
+            } else if (action.type === 'zoom_to_time_range' || (action.action_type === 'zoom_to_time_range')) {
+                const startS = action.start_s;
+                const endS = action.end_s;
+                if (startS !== undefined && endS !== undefined) {
+                    viewStart = startS * 1e9;
+                    viewEnd = endS * 1e9;
+                    draw();
+                    appendChatMsg('system', '→ Zoomed to ' + startS.toFixed(3) + 's – ' + endS.toFixed(3) + 's', 'system');
+                }
+            }
+        }
+
+        function parseAndExecuteActions(content) {
+            // Look for JSON action blocks in the response
+            const actionRe = /```json\s*({[^}]*"type"\s*:\s*"(navigate_to_kernel|zoom_to_time_range)"[^}]*})\s*```/g;
+            let match;
+            while ((match = actionRe.exec(content)) !== null) {
+                try {
+                    executeAIAction(JSON.parse(match[1]));
+                } catch (e) { /* ignore */ }
+            }
+        }
+
+        // Chat input: Enter to send
+        document.getElementById('chatInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChat();
+            }
+            if (e.key === 'Escape') {
+                e.target.blur();
+            }
+            e.stopPropagation();  // Don't trigger timeline shortcuts
+        });
+
+        // Load available models
+        async function loadModels() {
+            try {
+                const resp = await fetch('/api/models');
+                const data = await resp.json();
+                const sel = document.getElementById('chatModel');
+                if (data.options && data.options.length) {
+                    data.options.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.id;
+                        opt.textContent = m.label;
+                        if (m.id === data.default) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                } else {
+                    const opt = document.createElement('option');
+                    opt.textContent = 'No models configured';
+                    opt.disabled = true;
+                    sel.appendChild(opt);
+                }
+            } catch (e) {
+                console.warn('Failed to load models:', e);
+            }
+        }
+        loadModels();
 
         // ── Init ──
         setTimeout(resize, 0);
