@@ -100,7 +100,9 @@ def build_timeline_gpu_data(
 ) -> list[dict]:
     """Build per-GPU timeline payload with kernel rows plus optional NVTX annotations."""
     from collections.abc import Sequence
-    from .nvtx_tree import build_nvtx_tree as build_nvtx_tree_all_threads, to_json as nvtx_to_json
+
+    from .nvtx_tree import build_nvtx_tree as build_nvtx_tree_all_threads
+    from .nvtx_tree import to_json as nvtx_to_json
 
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
     gpu_entries: list[dict] = []

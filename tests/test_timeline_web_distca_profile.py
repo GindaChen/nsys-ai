@@ -1,11 +1,10 @@
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from nsys_ai.profile import Profile
 from nsys_ai.viewer import build_timeline_gpu_data
-
 
 DISTCA_SQLITE = (
     Path(__file__).resolve().parents[1]
