@@ -1304,6 +1304,52 @@
             }
         }
 
+        function ensureNvtxVisible(span) {
+            const spanNs = viewEnd - viewStart;
+            if (span.start < viewStart || span.end > viewEnd) {
+                const center = (span.start + span.end) / 2;
+                viewStart = center - spanNs / 2;
+                viewEnd = center + spanNs / 2;
+                clampView();
+                draw();
+                afterViewChange();
+            }
+        }
+
+        function nextNvtx(dir) {
+            const { spans } = activeNvtxLayout();
+            if (!spans.length) return false;
+            const ordered = spans
+                .slice()
+                .sort((a, b) => (a.start - b.start) || (a.end - b.end) || a.name.localeCompare(b.name));
+
+            if (!selectedNvtx || !selectedNvtx.key) {
+                const first = dir >= 0 ? ordered[0] : ordered[ordered.length - 1];
+                selectNvtx(first);
+                ensureNvtxVisible(first);
+                return true;
+            }
+
+            const currentIdx = ordered.findIndex(s => s._key === selectedNvtx.key);
+            if (currentIdx < 0) {
+                const first = dir >= 0 ? ordered[0] : ordered[ordered.length - 1];
+                selectNvtx(first);
+                ensureNvtxVisible(first);
+                return true;
+            }
+
+            const current = ordered[currentIdx];
+            const sameLevel = ordered.filter(s => s._lane === current._lane);
+            if (!sameLevel.length) return false;
+            const laneIdx = sameLevel.findIndex(s => s._key === current._key);
+            const nextIdx = laneIdx + dir;
+            if (nextIdx < 0 || nextIdx >= sameLevel.length) return false;
+            const target = sameLevel[nextIdx];
+            selectNvtx(target);
+            ensureNvtxVisible(target);
+            return true;
+        }
+
         function ensureVisible(k) {
             const span = viewEnd - viewStart;
             if (k.start_ns < viewStart || k.end_ns > viewEnd) {
@@ -1725,7 +1771,16 @@
                 case '+': case '=': zoomIn(); break;
                 case '-': case '_': zoomOut(); break;
                 case 'Home': case '0': fitAll(); break;
-                case 'Tab': e.preventDefault(); nextKernel(e.shiftKey ? -1 : 1); break;
+                case 'Tab':
+                    e.preventDefault();
+                    if (selectedNvtx) {
+                        if (!nextNvtx(e.shiftKey ? -1 : 1)) {
+                            showToast('No more NVTX at this level');
+                        }
+                    } else {
+                        nextKernel(e.shiftKey ? -1 : 1);
+                    }
+                    break;
                 case 'g': case 'G': e.preventDefault(); gotoTimePrompt(); break;
                 case 'v': case 'V': e.preventDefault(); gotoNvtxPrompt(); break;
                 case '/': e.preventDefault(); document.getElementById('searchInput').focus(); break;
