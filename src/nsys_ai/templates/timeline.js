@@ -445,6 +445,7 @@
             nvtxNonSelectedAlpha: 0.08,
             nvtxSelectedAlpha: 0.95,
             hierarchyLayout: 'horizontal',
+            rulerLabelMode: 'absolute',
         });
         const DEFAULT_RENDER_LOCK = Object.freeze({
             enabled: false,
@@ -494,6 +495,7 @@
                         parsed.nvtxSelectedAlpha, 0.1, 1.0, DEFAULT_RENDER_SETTINGS.nvtxSelectedAlpha
                     ),
                     hierarchyLayout: parsed.hierarchyLayout === 'vertical' ? 'vertical' : 'horizontal',
+                    rulerLabelMode: parsed.rulerLabelMode === 'anchored' ? 'anchored' : 'absolute',
                 };
             } catch (e) {
                 return { ...DEFAULT_RENDER_SETTINGS };
@@ -581,6 +583,8 @@
             bind('setNvtxSelected', 'setNvtxSelectedVal', 'nvtxSelectedAlpha');
             const hierarchySel = document.getElementById('setHierarchyLayout');
             if (hierarchySel) hierarchySel.value = renderSettings.hierarchyLayout || 'horizontal';
+            const rulerSel = document.getElementById('setRulerLabelMode');
+            if (rulerSel) rulerSel.value = renderSettings.rulerLabelMode || 'absolute';
             ensureRenderLockDefaults();
             const lockEnabled = document.getElementById('setRenderLockEnabled');
             const lockStart = document.getElementById('setRenderLockStart');
@@ -616,6 +620,14 @@
                     saveRenderSettings();
                     if (selectedNvtx) showDetail(selectedNvtx);
                     else if (selectedKernel) showDetail(selectedKernel);
+                });
+            }
+            const rulerSel = document.getElementById('setRulerLabelMode');
+            if (rulerSel) {
+                rulerSel.addEventListener('change', () => {
+                    renderSettings.rulerLabelMode = rulerSel.value === 'anchored' ? 'anchored' : 'absolute';
+                    saveRenderSettings();
+                    draw();
                 });
             }
             syncSettingsPanel();
@@ -856,6 +868,8 @@
             const rawInterval = viewSpan / (tw / 80);
             const mag = Math.pow(10, Math.floor(Math.log10(rawInterval)));
             const nice = [1, 2, 5, 10].find(n => n * mag >= rawInterval) * mag;
+            const mode = renderSettings.rulerLabelMode === 'anchored' ? 'anchored' : 'absolute';
+            const anchorNs = Math.floor(viewStart / 1e9) * 1e9;
             const rulerUnit = chooseRulerUnit(nice);
 
             ctx.fillStyle = '#161b22';
@@ -873,11 +887,12 @@
                 if (x < LABEL_W || x > W) continue;
                 ctx.strokeStyle = '#30363d';
                 ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, RULER_H); ctx.stroke();
+                const valueNs = mode === 'anchored' ? (t - anchorNs) : t;
                 let decimals = rulerUnit.decimals;
-                let label = formatTickValue(t, rulerUnit.div, decimals);
+                let label = formatTickValue(valueNs, rulerUnit.div, decimals);
                 while (prevLabel !== null && label === prevLabel && decimals < 7) {
                     decimals += 1;
-                    label = formatTickValue(t, rulerUnit.div, decimals);
+                    label = formatTickValue(valueNs, rulerUnit.div, decimals);
                 }
                 prevLabel = label;
                 ctx.fillText(label, x, RULER_H - 7);
@@ -886,7 +901,12 @@
             // Label
             ctx.textAlign = 'right';
             ctx.fillStyle = '#8b949e';
-            ctx.fillText(`Time (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            if (mode === 'anchored') {
+                const anchorLabel = formatTickValue(anchorNs, 1e9, 0);
+                ctx.fillText(`Time ${anchorLabel}s + (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            } else {
+                ctx.fillText(`Time (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            }
         }
 
         function chooseRulerUnit(stepNs) {
@@ -907,9 +927,12 @@
 
         function formatTickValue(ns, div, decimals) {
             const v = ns / div;
-            if (decimals <= 0) return Math.round(v).toString();
-            const out = v.toFixed(decimals);
-            return out.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+            const fmt = new Intl.NumberFormat(undefined, {
+                useGrouping: true,
+                minimumFractionDigits: 0,
+                maximumFractionDigits: Math.max(0, decimals),
+            });
+            return fmt.format(v);
         }
 
         function drawNVTX(W) {
