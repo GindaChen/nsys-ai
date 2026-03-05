@@ -122,6 +122,40 @@
             color: var(--text-dim)
         }
 
+        .toolbar .nvtx-loading {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            padding: 1px 7px;
+            border: 1px solid #8b6f25;
+            border-radius: 10px;
+            color: #d4a72c;
+            background: rgba(212, 167, 44, 0.08);
+            font-size: 10px;
+            line-height: 1.6;
+            white-space: nowrap;
+        }
+
+        .toolbar .nvtx-loading .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: #d4a72c;
+            display: inline-block;
+            animation: nvtxPulse 1.1s ease-in-out infinite;
+        }
+
+        @keyframes nvtxPulse {
+            0%, 100% {
+                opacity: 0.35;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 1;
+                transform: scale(1.15);
+            }
+        }
+
         #canvasWrap {
             flex: 1;
             overflow-x: hidden;
@@ -420,6 +454,7 @@
         <select id="nvtxThreadSel" onchange="onNvtxThreadChange()" style="width:180px" title="NVTX thread filter">
             <option value="auto">NVTX: Auto thread</option>
         </select>
+        <span class="nvtx-loading" id="nvtxLoading"><span class="dot"></span><span id="nvtxLoadingText">NVTX loading…</span></span>
         <button onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
         <div class="sep"></div>
         <input type="text" id="searchInput" placeholder="/ to search kernels..." oninput="onSearch()">
@@ -654,6 +689,7 @@
             const key = `${tileCache.key(startS, endS)}|gpu:${gpuId}`;
             if (tileCache.hasNvtx(startS, endS, gpuId) || nvtxInflight.has(key)) return;
             nvtxInflight.add(key);
+            updateNvtxLoadingIndicator();
             try {
                 const resp = await fetch(`/api/data?start_s=${startS}&end_s=${endS}&kernels=0&nvtx=1&gpu=${gpuId}`);
                 const data = await resp.json();
@@ -663,6 +699,18 @@
                 draw();
             } finally {
                 nvtxInflight.delete(key);
+                updateNvtxLoadingIndicator();
+            }
+        }
+
+        function updateNvtxLoadingIndicator() {
+            const el = document.getElementById('nvtxLoading');
+            const text = document.getElementById('nvtxLoadingText');
+            if (!el || !text) return;
+            const active = showNVTX && nvtxInflight.size > 0;
+            el.style.display = active ? 'inline-flex' : 'none';
+            if (active) {
+                text.textContent = `NVTX loading… (${nvtxInflight.size})`;
             }
         }
 
@@ -1517,6 +1565,7 @@
             showNVTX = !showNVTX;
             document.getElementById('nvtxBtn').classList.toggle('active', showNVTX);
             updateNvtxThreadOptions();
+            updateNvtxLoadingIndicator();
             draw();
             if (showNVTX) {
                 void ensureTilesForView(viewStart, viewEnd);
