@@ -11,6 +11,12 @@ from string import Template
 from .tree import build_nvtx_tree, to_json
 
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_CUDA_MEMCPY_KIND_LABELS = {
+    1: "H2D",
+    2: "D2H",
+    8: "D2D",
+    10: "P2P",
+}
 
 
 def _load_template(name: str) -> Template:
@@ -118,7 +124,7 @@ def build_timeline_gpu_data(
         kernels = []
         if include_kernels:
             # 1) Kernel-first: authoritative source for timeline rows.
-            sql = f"""
+            kernel_sql = f"""
                 SELECT k.start AS start_ns, k.[end] AS end_ns, k.streamId AS stream,
                        s.value AS name
                 FROM {prof.schema.kernel_table} k
@@ -127,7 +133,7 @@ def build_timeline_gpu_data(
                 ORDER BY k.start
             """
             with prof._lock:
-                rows = prof.conn.execute(sql, (dev, trim[0], trim[1])).fetchall()
+                rows = prof.conn.execute(kernel_sql, (dev, trim[0], trim[1])).fetchall()
 
             for r in rows:
                 start_ns = int(r["start_ns"])
@@ -141,6 +147,67 @@ def build_timeline_gpu_data(
                     "stream": r["stream"],
                     "path": "",
                 })
+
+            if "CUPTI_ACTIVITY_KIND_MEMCPY" in prof.schema.tables:
+                memcpy_sql = """
+                    SELECT m.start AS start_ns,
+                           m.[end] AS end_ns,
+                           m.streamId AS stream,
+                           m.copyKind AS copy_kind
+                    FROM CUPTI_ACTIVITY_KIND_MEMCPY m
+                    WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
+                    ORDER BY m.start
+                """
+                with prof._lock:
+                    memcpy_rows = prof.conn.execute(
+                        memcpy_sql, (dev, trim[0], trim[1])
+                    ).fetchall()
+
+                for r in memcpy_rows:
+                    start_ns = int(r["start_ns"])
+                    end_ns = int(r["end_ns"])
+                    copy_kind = int(r["copy_kind"])
+                    copy_kind_label = _CUDA_MEMCPY_KIND_LABELS.get(
+                        copy_kind, f"kind={copy_kind}"
+                    )
+                    kernels.append({
+                        "type": "memcpy",
+                        "name": f"[CUDA memcpy {copy_kind_label}]",
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                        "stream": r["stream"],
+                        "path": "",
+                    })
+
+            if "CUPTI_ACTIVITY_KIND_MEMSET" in prof.schema.tables:
+                memset_sql = """
+                    SELECT m.start AS start_ns,
+                           m.[end] AS end_ns,
+                           m.streamId AS stream
+                    FROM CUPTI_ACTIVITY_KIND_MEMSET m
+                    WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
+                    ORDER BY m.start
+                """
+                with prof._lock:
+                    memset_rows = prof.conn.execute(
+                        memset_sql, (dev, trim[0], trim[1])
+                    ).fetchall()
+
+                for r in memset_rows:
+                    start_ns = int(r["start_ns"])
+                    end_ns = int(r["end_ns"])
+                    kernels.append({
+                        "type": "memset",
+                        "name": "[CUDA memset]",
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                        "stream": r["stream"],
+                        "path": "",
+                    })
+
+            kernels.sort(key=lambda k: (k["start_ns"], k["end_ns"]))
 
         # 2) NVTX-only annotations + kernel->path labels.
         #    NVTX is advisory metadata; missing mapping must not drop kernels.
@@ -156,6 +223,9 @@ def build_timeline_gpu_data(
 
         if include_kernels:
             for k in kernels:
+                if k.get("type") != "kernel":
+                    k["path"] = k["name"]
+                    continue
                 key = (k["start_ns"], k["end_ns"], k["stream"], k["name"])
                 k["path"] = kernel_paths.get(key, k["name"])
 

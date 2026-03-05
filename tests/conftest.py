@@ -54,6 +54,28 @@ CREATE TABLE IF NOT EXISTS CUPTI_ACTIVITY_KIND_KERNEL (
     blockZ          INTEGER DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS CUPTI_ACTIVITY_KIND_MEMCPY (
+    globalPid       INTEGER DEFAULT 0,
+    deviceId        INTEGER DEFAULT 0,
+    streamId        INTEGER DEFAULT 0,
+    copyKind        INTEGER DEFAULT 0,
+    bytes           INTEGER DEFAULT 0,
+    srcKind         INTEGER DEFAULT 0,
+    dstKind         INTEGER DEFAULT 0,
+    start           INTEGER NOT NULL,
+    end             INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS CUPTI_ACTIVITY_KIND_MEMSET (
+    globalPid       INTEGER DEFAULT 0,
+    deviceId        INTEGER DEFAULT 0,
+    streamId        INTEGER DEFAULT 0,
+    bytes           INTEGER DEFAULT 0,
+    value           INTEGER DEFAULT 0,
+    start           INTEGER NOT NULL,
+    end             INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS CUPTI_ACTIVITY_KIND_RUNTIME (
     globalTid       INTEGER DEFAULT 0,
     correlationId   INTEGER DEFAULT 0,

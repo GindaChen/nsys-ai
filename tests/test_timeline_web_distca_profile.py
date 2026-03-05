@@ -23,7 +23,8 @@ def test_distca_timeline_web_contains_flash_backward_on_gpu3():
 
     with Profile(str(DISTCA_SQLITE)) as prof:
         gpu_payload = build_timeline_gpu_data(prof, gpu, trim)[0]
-        kernels = gpu_payload["kernels"]
+        events = gpu_payload["kernels"]
+        kernels = [e for e in events if e.get("type") == "kernel"]
 
     hit = [
         k for k in kernels
@@ -46,3 +47,49 @@ def test_distca_timeline_web_contains_flash_backward_on_gpu3():
         conn.close()
 
     assert len(kernels) == db_overlap_count
+
+
+@pytest.mark.skipif(not DISTCA_SQLITE.exists(), reason="distca example sqlite not found")
+def test_distca_timeline_web_includes_memcpy_memset_23s_to_24s():
+    trim = (int(23.0 * 1e9), int(24.0 * 1e9))
+
+    with Profile(str(DISTCA_SQLITE)) as prof:
+        devices = list(prof.meta.devices)
+        payload_by_gpu = {
+            gpu: build_timeline_gpu_data(prof, gpu, trim)[0]["kernels"]
+            for gpu in devices
+        }
+
+    conn = sqlite3.connect(str(DISTCA_SQLITE))
+    conn.row_factory = sqlite3.Row
+    try:
+        total_mem_events = 0
+        for gpu in devices:
+            events = payload_by_gpu[gpu]
+            memcpy_events = [e for e in events if e.get("type") == "memcpy"]
+            memset_events = [e for e in events if e.get("type") == "memset"]
+            total_mem_events += len(memcpy_events) + len(memset_events)
+
+            memcpy_count = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM CUPTI_ACTIVITY_KIND_MEMCPY
+                WHERE deviceId = ? AND [end] >= ? AND start <= ?
+                """,
+                (gpu, trim[0], trim[1]),
+            ).fetchone()["n"]
+            memset_count = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM CUPTI_ACTIVITY_KIND_MEMSET
+                WHERE deviceId = ? AND [end] >= ? AND start <= ?
+                """,
+                (gpu, trim[0], trim[1]),
+            ).fetchone()["n"]
+
+            assert len(memcpy_events) == memcpy_count
+            assert len(memset_events) == memset_count
+    finally:
+        conn.close()
+
+    assert total_mem_events > 0

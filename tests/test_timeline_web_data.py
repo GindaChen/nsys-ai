@@ -79,6 +79,41 @@ def test_timeline_web_can_build_nvtx_without_kernels(minimal_nsys_db_path):
         assert "thread" in entry["nvtx_spans"][0]
 
 
+def test_timeline_web_includes_memcpy_and_memset_events(minimal_nsys_db_path):
+    conn = sqlite3.connect(minimal_nsys_db_path)
+    conn.execute(
+        """
+        INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY
+        (globalPid, deviceId, streamId, copyKind, bytes, srcKind, dstKind, start, end)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (100, 0, 11, 1, 4096, 1, 3, 1_200_000, 1_350_000),
+    )
+    conn.execute(
+        """
+        INSERT INTO CUPTI_ACTIVITY_KIND_MEMSET
+        (globalPid, deviceId, streamId, bytes, value, start, end)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (100, 0, 12, 8192, 0, 3_200_000, 3_450_000),
+    )
+    conn.commit()
+    conn.close()
+
+    with Profile(minimal_nsys_db_path) as prof:
+        gpu_data = build_timeline_gpu_data(prof, 0, (1_000_000, 4_000_000))
+        events = gpu_data[0]["kernels"]
+        memcpy_events = [e for e in events if e["type"] == "memcpy"]
+        memset_events = [e for e in events if e["type"] == "memset"]
+
+    assert len(memcpy_events) == 1
+    assert len(memset_events) == 1
+    assert memcpy_events[0]["name"] == "[CUDA memcpy H2D]"
+    assert memcpy_events[0]["path"] == "[CUDA memcpy H2D]"
+    assert memset_events[0]["name"] == "[CUDA memset]"
+    assert memset_events[0]["path"] == "[CUDA memset]"
+
+
 def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     with Profile(minimal_nsys_db_path) as prof:
         html = generate_timeline_html(prof, [0], None)
