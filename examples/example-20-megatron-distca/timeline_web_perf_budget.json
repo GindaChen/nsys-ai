@@ -1,0 +1,9 @@
+{
+  "description": "Performance budget for timeline-web key phases on example-20 distca profile",
+  "max_seconds": {
+    "html_shell_s": 0.5,
+    "kernel_cache_build_full_s": 10.0,
+    "tile_filter_kernels_s": 0.5,
+    "tile_nvtx_gpu_s": 40.0
+  }
+}

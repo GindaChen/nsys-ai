@@ -95,5 +95,27 @@ This profile contains a Megatron-LM training run with Transformer Engine on 8 GP
 | File | Purpose |
 |------|---------|
 | `download_data.py` | Downloads `.sqlite` from HuggingFace |
+| `benchmark_timeline_web.py` | Benchmarks timeline-web cache/tile phases |
+| `timeline_web_perf_budget.json` | Performance budget for regression checks |
 | `.gitignore` | Ignores `output/` directory |
 | `output/` | Downloaded profile data (gitignored) |
+
+## Benchmark & Regression
+
+Run benchmark locally (prints JSON timings):
+
+```bash
+python benchmark_timeline_web.py --runs 1
+```
+
+Run with budget enforcement:
+
+```bash
+python benchmark_timeline_web.py --check
+```
+
+Run pytest regression test:
+
+```bash
+pytest tests/test_timeline_web_distca_benchmark.py -q
+```
