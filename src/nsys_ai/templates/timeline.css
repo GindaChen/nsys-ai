@@ -220,6 +220,57 @@
             white-space: nowrap
         }
 
+        .settings-panel {
+            position: absolute;
+            top: 70px;
+            right: 12px;
+            z-index: 10001;
+            width: 320px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+            font-size: 11px;
+            color: #8b949e;
+        }
+
+        .settings-panel .settings-title {
+            color: #79b8ff;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .settings-panel label {
+            display: grid;
+            grid-template-columns: 1fr 120px 42px;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .settings-panel label span {
+            line-height: 1.2;
+        }
+
+        .settings-panel input[type="range"] {
+            width: 100%;
+            accent-color: #58a6ff;
+        }
+
+        .settings-panel #settingsResetBtn {
+            margin-top: 4px;
+            width: 100%;
+            background: #21262d;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            font-family: inherit;
+        }
+
         .help-overlay {
             position: fixed;
             top: 50%;
@@ -420,4 +471,58 @@
             50% {
                 opacity: 0.7;
             }
+        }
+
+        .command-palette {
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+        }
+
+        .command-palette .cp-backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(1, 4, 9, 0.65);
+        }
+
+        .command-palette .cp-panel {
+            position: absolute;
+            top: 15%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: min(640px, calc(100vw - 32px));
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+            padding: 12px;
+        }
+
+        .command-palette .cp-title {
+            font-size: 11px;
+            color: #8b949e;
+            margin-bottom: 8px;
+        }
+
+        .command-palette #commandInput {
+            width: 100%;
+            background: #161b22;
+            border: 1px solid #30363d;
+            color: #e6edf3;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: inherit;
+            outline: none;
+        }
+
+        .command-palette #commandInput:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+        }
+
+        .command-palette .cp-hint {
+            margin-top: 8px;
+            font-size: 10px;
+            color: #6e7681;
         }

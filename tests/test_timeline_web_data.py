@@ -87,6 +87,18 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert "window.__TIMELINE_BOOTSTRAP__" in html
 
 
+def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
+    with Profile(minimal_nsys_db_path) as prof:
+        html = generate_timeline_html(prof, [0], None)
+    assert 'id="searchInput"' in html
+    assert "search kernels + NVTX" in html
+    assert 'id="commandPalette"' in html
+    assert 'id="commandInput"' in html
+    assert 'id="settingsBtn"' in html
+    assert 'id="settingsPanel"' in html
+    assert "Go to NVTX" in html
+
+
 def test_timeline_html_export_writes_sidecar_assets(minimal_nsys_db_path, tmp_path):
     out_html = tmp_path / "timeline.html"
     with Profile(minimal_nsys_db_path) as prof:

@@ -32,8 +32,9 @@
         </select>
         <span class="nvtx-loading" id="nvtxLoading"><span class="dot"></span><span id="nvtxLoadingText">NVTX loading…</span></span>
         <button onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
+        <button onclick="toggleSettingsMenu()" id="settingsBtn">⚙ Settings</button>
         <div class="sep"></div>
-        <input type="text" id="searchInput" placeholder="/ to search kernels..." oninput="onSearch()">
+        <input type="text" id="searchInput" placeholder="/ to search kernels + NVTX..." oninput="onSearch()">
         <span class="hint" id="searchHint"></span>
         <div class="sep"></div>
         <button onclick="toggleChat()" id="chatBtn">💬 AI Chat</button>
@@ -60,6 +61,35 @@
         </div>
     </div>
     <div class="tooltip" id="tooltip" style="display:none"></div>
+    <div class="settings-panel" id="settingsPanel" style="display:none">
+        <div class="settings-title">Render Alpha Settings</div>
+        <label>
+            <span>Kernel search non-match alpha</span>
+            <input id="setKernelSearchDim" type="range" min="0.03" max="0.9" step="0.01" />
+            <span id="setKernelSearchDimVal">0.16</span>
+        </label>
+        <label>
+            <span>Kernel when NVTX selected alpha</span>
+            <input id="setKernelWhenNvtxDim" type="range" min="0.03" max="0.9" step="0.01" />
+            <span id="setKernelWhenNvtxDimVal">0.08</span>
+        </label>
+        <label>
+            <span>NVTX while kernel selected alpha</span>
+            <input id="setNvtxWhenKernelDim" type="range" min="0.03" max="0.9" step="0.01" />
+            <span id="setNvtxWhenKernelDimVal">0.08</span>
+        </label>
+        <label>
+            <span>NVTX non-selected alpha</span>
+            <input id="setNvtxNonSelected" type="range" min="0.03" max="0.95" step="0.01" />
+            <span id="setNvtxNonSelectedVal">0.08</span>
+        </label>
+        <label>
+            <span>NVTX selected alpha</span>
+            <input id="setNvtxSelected" type="range" min="0.1" max="1.0" step="0.01" />
+            <span id="setNvtxSelectedVal">0.95</span>
+        </label>
+        <button onclick="resetRenderSettings()" id="settingsResetBtn">Reset defaults</button>
+    </div>
     <div class="help-overlay" id="helpOverlay">
         <h2>Keyboard Shortcuts</h2>
         <table>
@@ -80,6 +110,14 @@
                 <td>Fit all</td>
             </tr>
             <tr>
+                <td><span class="key">G</span></td>
+                <td>Go to time</td>
+            </tr>
+            <tr>
+                <td><span class="key">V</span></td>
+                <td>Go to NVTX</td>
+            </tr>
+            <tr>
                 <td><span class="key">Tab</span></td>
                 <td>Next kernel in stream</td>
             </tr>
@@ -89,7 +127,7 @@
             </tr>
             <tr>
                 <td><span class="key">/</span></td>
-                <td>Search kernels</td>
+                <td>Search kernels + NVTX</td>
             </tr>
             <tr>
                 <td><span class="key">Esc</span></td>
@@ -108,11 +146,23 @@
                 <td>Toggle AI chat sidebar</td>
             </tr>
             <tr>
+                <td><span class="key">⌘/Ctrl+K</span></td>
+                <td>Command prompt</td>
+            </tr>
+            <tr>
                 <td><span class="key">?</span></td>
                 <td>Toggle help</td>
             </tr>
         </table>
         <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Mouse: scroll=zoom, drag=pan, click=select
+        </div>
+    </div>
+    <div class="command-palette" id="commandPalette" style="display:none">
+        <div class="cp-backdrop" id="commandPaletteBackdrop"></div>
+        <div class="cp-panel">
+            <div class="cp-title">Command</div>
+            <input type="text" id="commandInput" placeholder="g 35.4s • n flash_bwd • k nccl • / dq_dv" />
+            <div class="cp-hint">Enter: run · Esc: close</div>
         </div>
     </div>
 
