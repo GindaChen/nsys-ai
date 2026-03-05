@@ -63,22 +63,28 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
 
     Each node: {name, start, end, type: "nvtx"|"kernel", stream?, children: [...]}
     """
-    # Load runtime calls for this thread
-    with profile._lock:
-        rt_rows = profile.conn.execute("""
-            SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
-            WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
-        """, (tid, trim[0] - pad, trim[1] + int(2e9))).fetchall()
-
     # Load NVTX for this thread only
     with profile._lock:
         nvtx_rows = profile.conn.execute("""
             SELECT text, start, [end] FROM NVTX_EVENTS
             WHERE text IS NOT NULL AND [end] > start
               AND globalTid = ?
-              AND start >= ? AND start <= ?
+              AND [end] >= ? AND start <= ?
             ORDER BY start
         """, (tid, trim[0] - pad, trim[1])).fetchall()
+    if not nvtx_rows:
+        return []
+
+    # Load runtime calls for this thread covering the discovered NVTX span set.
+    # Using NVTX-derived bounds keeps GPU projection (start/end/depth/path)
+    # stable across adjacent timeline tiles near boundaries.
+    rt_lo = min(int(n["start"]) for n in nvtx_rows)
+    rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
+    with profile._lock:
+        rt_rows = profile.conn.execute("""
+            SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+            WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
+        """, (tid, rt_lo, rt_hi)).fetchall()
 
     # Build projected entries: each NVTX span → projected GPU bounds + child kernels
     entries = []  # list of {name, gpu_start, gpu_end, cpu_start, cpu_end, kernels: [...]}
@@ -302,4 +308,3 @@ def format_markdown(roots, depth=0) -> str:
             lines.append(f"- ⚡ **{node['name']}** [stream {stream}] ({dur_ms:.3f}ms)")
 
     return "\n".join(lines)
-

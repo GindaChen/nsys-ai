@@ -93,3 +93,46 @@ def test_distca_timeline_web_includes_memcpy_memset_23s_to_24s():
         conn.close()
 
     assert total_mem_events > 0
+
+
+@pytest.mark.skipif(not DISTCA_SQLITE.exists(), reason="distca example sqlite not found")
+def test_distca_nvtx_path_depth_stable_across_adjacent_tiles():
+    gpu = 3
+    left_trim = (int(40.0 * 1e9), int(45.0 * 1e9))
+    right_trim = (int(45.0 * 1e9), int(50.0 * 1e9))
+
+    with Profile(str(DISTCA_SQLITE)) as prof:
+        left_spans = build_timeline_gpu_data(
+            prof, gpu, left_trim, include_kernels=False, include_nvtx=True
+        )[0]["nvtx_spans"]
+        right_spans = build_timeline_gpu_data(
+            prof, gpu, right_trim, include_kernels=False, include_nvtx=True
+        )[0]["nvtx_spans"]
+
+    # Boundary NVTX span we observed drifting from depth 1->0 when parent context
+    # was missing in one tile.
+    def _pick(spans):
+        for s in spans:
+            if (
+                s["name"] == "TransformerLayer._forward_attention.self_attention"
+                and 44.97e9 <= s["start"] <= 44.99e9
+                and 45.02e9 <= s["end"] <= 45.03e9
+            ):
+                return s
+        return None
+
+    left = _pick(left_spans)
+    right = _pick(right_spans)
+    assert left is not None and right is not None
+    assert left["depth"] == right["depth"]
+    assert left["path"] == right["path"]
+
+    right_bad_roots = [
+        s for s in right_spans
+        if (
+            s["name"] == "TransformerLayer._forward_attention.self_attention"
+            and s.get("depth", 0) == 0
+            and 44.97e9 <= s["start"] <= 44.99e9
+        )
+    ]
+    assert not right_bad_roots
