@@ -54,21 +54,97 @@ def write_html(prof, device: int, trim: tuple[int, int], path: str):
         f.write(generate_html(prof, device, trim))
 
 
+def _collect_nvtx_annotations(nodes: list[dict], spans: list[dict], kernel_paths: dict[tuple, str]) -> None:
+    """Collect flat NVTX spans and kernel-path annotations from a tree JSON."""
+    for node in nodes:
+        ntype = node.get("type")
+        if ntype == "nvtx":
+            path = node.get("path", "")
+            depth = max(len(path.split(" > ")) - 1, 0) if path else 0
+            spans.append({
+                "name": node.get("name", ""),
+                "start": node.get("start_ns", 0),
+                "end": node.get("end_ns", 0),
+                "depth": depth,
+                "path": path,
+                "dur": node.get("duration_ms", 0),
+            })
+        elif ntype == "kernel":
+            key = (
+                node.get("start_ns"),
+                node.get("end_ns"),
+                node.get("stream"),
+                node.get("name"),
+            )
+            kernel_paths[key] = node.get("path", "")
+
+        children = node.get("children") or []
+        if children:
+            _collect_nvtx_annotations(children, spans, kernel_paths)
+
+
+def build_timeline_gpu_data(prof, device, trim: tuple[int, int]) -> list[dict]:
+    """Build per-GPU timeline payload with kernel-first rows + optional NVTX annotations."""
+    from collections.abc import Sequence
+    from .nvtx_tree import build_nvtx_tree as build_nvtx_tree_all_threads, to_json as nvtx_to_json
+
+    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+    gpu_entries: list[dict] = []
+
+    for dev in devices:
+        # 1) Kernel-first: authoritative source for timeline rows.
+        sql = f"""
+            SELECT k.start AS start_ns, k.[end] AS end_ns, k.streamId AS stream,
+                   s.value AS name
+            FROM {prof.schema.kernel_table} k
+            JOIN StringIds s ON k.shortName = s.id
+            WHERE k.deviceId = ? AND k.[end] >= ? AND k.start <= ?
+            ORDER BY k.start
+        """
+        with prof._lock:
+            rows = prof.conn.execute(sql, (dev, trim[0], trim[1])).fetchall()
+
+        kernels = []
+        for r in rows:
+            start_ns = int(r["start_ns"])
+            end_ns = int(r["end_ns"])
+            kernels.append({
+                "type": "kernel",
+                "name": r["name"],
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+                "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                "stream": r["stream"],
+                "path": "",
+            })
+
+        # 2) NVTX-only annotations + kernel->path labels.
+        #    NVTX is advisory metadata; missing mapping must not drop kernels.
+        try:
+            roots = build_nvtx_tree_all_threads(prof, dev, trim)
+            tree_json = nvtx_to_json(roots)
+        except Exception:
+            tree_json = []
+
+        nvtx_spans: list[dict] = []
+        kernel_paths: dict[tuple, str] = {}
+        _collect_nvtx_annotations(tree_json, nvtx_spans, kernel_paths)
+
+        for k in kernels:
+            key = (k["start_ns"], k["end_ns"], k["stream"], k["name"])
+            k["path"] = kernel_paths.get(key, k["name"])
+
+        gpu_entries.append({"id": dev, "kernels": kernels, "nvtx_spans": nvtx_spans})
+
+    return gpu_entries
+
+
 def generate_timeline_data_json(prof, devices, trim: tuple[int, int]) -> str:
     """Return JSON string of per-GPU kernel/NVTX data for a time window.
 
     Called by the ``/api/data`` endpoint for on-demand tile loading.
     """
-    from collections.abc import Sequence
-    if not isinstance(devices, Sequence):
-        devices = [devices]
-
-    gpu_entries = []
-    for dev in devices:
-        roots = build_nvtx_tree(prof, dev, trim)
-        tree_json = to_json(roots)
-        gpu_entries.append({"id": dev, "data": tree_json})
-
+    gpu_entries = build_timeline_gpu_data(prof, devices, trim)
     return json.dumps({"gpus": gpu_entries})
 
 
@@ -99,13 +175,8 @@ def generate_timeline_html(prof, device, trim: tuple[int, int] | None = None) ->
     gpu_label = f"{len(devices)}× {gpu_type}" if len(devices) > 1 else gpu_type
 
     if trim is not None:
-        # Full data baked into HTML
-        gpu_entries = []
-        for dev in devices:
-            roots = build_nvtx_tree(prof, dev, trim)
-            tree_json = to_json(roots)
-            gpu_entries.append({"id": dev, "data": tree_json})
-
+        # Full data baked into HTML (kernel-first payload).
+        gpu_entries = build_timeline_gpu_data(prof, devices, trim)
         data_json = json.dumps({"gpus": gpu_entries})
         trim_label = f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s"
         progressive = ""

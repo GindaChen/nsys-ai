@@ -68,7 +68,7 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
     allow_reuse_address = True
 
 from .export import gpu_trace  # noqa: E402
-from .viewer import generate_html, generate_timeline_html  # noqa: E402
+from .viewer import build_timeline_gpu_data, generate_html, generate_timeline_html  # noqa: E402
 
 # ── Shared helpers ───────────────────────────────────────────────
 
@@ -200,8 +200,12 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             # Filter pre-built data by time window
             gpu_entries = []
             for gpu_data in prebuilt:
-                filtered = _filter_nodes_by_time(gpu_data["data"], start_ns, end_ns)
-                gpu_entries.append({"id": gpu_data["id"], "data": filtered})
+                if "kernels" in gpu_data:
+                    gpu_entries.append(_filter_timeline_gpu_entry(gpu_data, start_ns, end_ns))
+                else:
+                    # Backward-compatible fallback for older in-memory format.
+                    filtered = _filter_nodes_by_time(gpu_data["data"], start_ns, end_ns)
+                    gpu_entries.append({"id": gpu_data["id"], "data": filtered})
             data_json = json.dumps({"gpus": gpu_entries})
             body = data_json.encode("utf-8")
             elapsed = _time.monotonic() - t0
@@ -319,6 +323,19 @@ def _filter_nodes_by_time(nodes: list, start_ns: int, end_ns: int) -> list:
     return result
 
 
+def _filter_timeline_gpu_entry(gpu_entry: dict, start_ns: int, end_ns: int) -> dict:
+    """Filter kernel-first timeline payload to a time window."""
+    kernels = [
+        k for k in gpu_entry.get("kernels", [])
+        if k.get("end_ns", 0) >= start_ns and k.get("start_ns", 0) <= end_ns
+    ]
+    nvtx_spans = [
+        s for s in gpu_entry.get("nvtx_spans", [])
+        if s.get("end", 0) >= start_ns and s.get("start", 0) <= end_ns
+    ]
+    return {"id": gpu_entry.get("id"), "kernels": kernels, "nvtx_spans": nvtx_spans}
+
+
 def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
                    port: int = 8144, open_browser: bool = True):
     """Start a local HTTP server serving the horizontal timeline viewer.
@@ -328,7 +345,6 @@ def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
     """
     from collections.abc import Sequence
 
-    from .nvtx_tree import build_nvtx_tree, to_json
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
 
     # Store prof + devices on handler for /api/meta queries
@@ -344,11 +360,11 @@ def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
 
-    # Pre-build full NVTX tree for all GPUs (progressive mode)
+    # Pre-build full kernel-first timeline payload for all GPUs (progressive mode)
     if trim is None:
         import os
         db_path = prof.path if hasattr(prof, 'path') else ''
-        cache_path = db_path + '.timeline-cache.json' if db_path else ''
+        cache_path = db_path + '.timeline-cache-v2.json' if db_path else ''
         cache_valid = False
 
         # Try loading from disk cache
@@ -358,9 +374,16 @@ def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
                 cache_mtime = os.path.getmtime(cache_path)
                 if cache_mtime >= src_mtime:
                     t0 = _time.monotonic()
-                    print(f"Loading cached NVTX tree from {os.path.basename(cache_path)}...", flush=True)
+                    print(f"Loading cached timeline payload from {os.path.basename(cache_path)}...", flush=True)
                     with open(cache_path) as f:
                         prebuilt = json.loads(f.read())
+                    if not (
+                        isinstance(prebuilt, list)
+                        and prebuilt
+                        and isinstance(prebuilt[0], dict)
+                        and "kernels" in prebuilt[0]
+                    ):
+                        raise ValueError("stale timeline cache format")
                     elapsed = _time.monotonic() - t0
                     print(f"Cache loaded in {elapsed:.2f}s ({os.path.getsize(cache_path) // 1024}KB)", flush=True)
                     _ViewerHandler._prebuilt_data = prebuilt
@@ -371,16 +394,15 @@ def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
         if not cache_valid:
             t0 = _time.monotonic()
             full_range = prof.meta.time_range
-            print(f"Pre-building NVTX tree for {len(devices)} GPU(s) "
+            print(f"Pre-building kernel-first timeline payload for {len(devices)} GPU(s) "
                   f"({full_range[0]/1e9:.1f}s–{full_range[1]/1e9:.1f}s)...", flush=True)
-            prebuilt = []
-            for dev in devices:
-                dt = _time.monotonic()
-                roots = build_nvtx_tree(prof, dev, full_range)
-                tree_json = to_json(roots)
-                elapsed_dev = _time.monotonic() - dt
-                print(f"  GPU {dev}: {len(tree_json)} roots, {elapsed_dev:.1f}s", flush=True)
-                prebuilt.append({"id": dev, "data": tree_json})
+            prebuilt = build_timeline_gpu_data(prof, devices, full_range)
+            for gpu_entry in prebuilt:
+                print(
+                    f"  GPU {gpu_entry['id']}: {len(gpu_entry.get('kernels', []))} kernels, "
+                    f"{len(gpu_entry.get('nvtx_spans', []))} NVTX spans",
+                    flush=True,
+                )
             elapsed = _time.monotonic() - t0
             print(f"Pre-build complete in {elapsed:.1f}s", flush=True)
             _ViewerHandler._prebuilt_data = prebuilt

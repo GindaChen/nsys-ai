@@ -647,14 +647,33 @@
             }
         }
 
-        // Handle new multi-GPU format: {gpus: [{id, data}, ...]}
-        // and legacy single-GPU format: [node, ...]
+        // Handle kernel-first format: {gpus: [{id, kernels, nvtx_spans}, ...]}
+        // and legacy tree format: {gpus: [{id, data}, ...]} / [node, ...]
         function loadFromData(DATA) {
             if (!DATA) return;
             if (DATA.gpus) {
                 for (const gpuEntry of DATA.gpus) {
                     if (!gpuIds.includes(gpuEntry.id)) gpuIds.push(gpuEntry.id);
-                    extractData(gpuEntry.data, '', 0, gpuEntry.id);
+                    if (gpuEntry.kernels) {
+                        for (const k of gpuEntry.kernels) {
+                            const kk = { ...k, _gpu: gpuEntry.id, _depth: 0, _path: k.path || k.name || '' };
+                            allNodes.push(kk);
+                            kernels.push(kk);
+                        }
+                        for (const s of (gpuEntry.nvtx_spans || [])) {
+                            nvtxSpans.push({
+                                name: s.name,
+                                start: s.start,
+                                end: s.end,
+                                depth: s.depth || 0,
+                                path: s.path || '',
+                                dur: s.dur || 0,
+                                gpu: gpuEntry.id
+                            });
+                        }
+                    } else {
+                        extractData(gpuEntry.data, '', 0, gpuEntry.id);
+                    }
                 }
             } else if (Array.isArray(DATA)) {
                 if (!gpuIds.includes(0)) gpuIds.push(0);
