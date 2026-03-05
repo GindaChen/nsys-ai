@@ -141,7 +141,7 @@ git push -u origin feat/issue-<NUM>-<short-description>
 
 gh pr create -R GindaChen/nsys-ai \
   --title "<type>: <description>" \
-  --body "Closes #<NUM>\n\n<summary of changes>"
+  --body-file /tmp/pr_body.md
 ```
 
 Then update the label:
@@ -151,6 +151,17 @@ gh issue edit <NUM> -R GindaChen/nsys-ai \
   --remove-label "agent-in-progress" \
   --add-label "agent-review"
 ```
+
+### 6.1 Credential Safety (Mandatory)
+
+- Never pass PR text inline with `gh pr create --body "..."`.
+- Always write PR content to a file and use `--body-file` to avoid shell interpolation issues.
+- Never include environment variable values, API keys, tokens, or command output that may contain secrets in PR titles, bodies, comments, commit messages, or logs.
+- Never run commands that print secret-bearing values (for example key resolution or env dumps).
+- If any sensitive text is exposed:
+  1. Immediately sanitize/remove it from GitHub surfaces.
+  2. Revoke/rotate affected credentials.
+  3. Open a GitHub Support ticket for cache/notification redaction.
 
 ### 7. Wait for CI + review, then merge
 
