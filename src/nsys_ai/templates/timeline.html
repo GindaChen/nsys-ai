@@ -44,6 +44,7 @@
     <div id="appLayout">
         <div id="mainCol">
             <div id="canvasWrap"><canvas id="c"></canvas></div>
+            <div id="detailResizeHandle" title="Drag to resize details"></div>
             <div id="detail" class="empty">Click a kernel to see details. Press A for AI chat. Keyboard: ←/→ pan, +/-
                 zoom, ↑/↓ stream, / search, ? help</div>
         </div>
@@ -53,6 +54,22 @@
                 <select id="chatModel"></select>
                 <button onclick="toggleChat()" title="Close">✕</button>
             </div>
+            <details id="chatCapabilities" class="chat-capabilities">
+                <summary>AI capabilities and controls</summary>
+                <div class="cap-body">
+                    <div><strong>Supported UI actions</strong></div>
+                    <ul>
+                        <li><code>navigate_to_kernel(target_name)</code>: select and highlight a kernel.</li>
+                        <li><code>zoom_to_time_range(start_s, end_s)</code>: zoom timeline to a time window.</li>
+                        <li><code>fit_nvtx_range(...)</code>: fit an NVTX range to full width (by name or start/end).</li>
+                    </ul>
+                    <div><strong>How to control it</strong></div>
+                    <ul>
+                        <li>Natural language: ask directly, e.g. “go to kernel X”.</li>
+                        <li>Deterministic: ask explicitly for an action by name and exact target.</li>
+                    </ul>
+                </div>
+            </details>
             <div id="chatMessages"></div>
             <div id="chatInputWrap">
                 <input type="text" id="chatInput" placeholder="Ask about this profile..." />
@@ -88,6 +105,33 @@
             <input id="setNvtxSelected" type="range" min="0.1" max="1.0" step="0.01" />
             <span id="setNvtxSelectedVal">0.95</span>
         </label>
+        <label class="lock-row">
+            <span>Hierarchy layout</span>
+            <select id="setHierarchyLayout">
+                <option value="horizontal">Horizontal</option>
+                <option value="vertical">Vertical</option>
+            </select>
+            <span></span>
+        </label>
+        <div class="settings-subtitle">Render Lock Regime (seconds)</div>
+        <label class="lock-row">
+            <span>Enable lock</span>
+            <input id="setRenderLockEnabled" type="checkbox" />
+            <span id="setRenderLockState">off</span>
+        </label>
+        <label class="lock-row">
+            <span>Start (s)</span>
+            <input id="setRenderLockStart" type="number" step="0.001" />
+            <span></span>
+        </label>
+        <label class="lock-row">
+            <span>End (s)</span>
+            <input id="setRenderLockEnd" type="number" step="0.001" />
+            <span></span>
+        </label>
+        <div class="settings-actions">
+            <button onclick="applyRenderLockSettings()" id="settingsApplyLockBtn">Apply lock</button>
+        </div>
         <button onclick="resetRenderSettings()" id="settingsResetBtn">Reset defaults</button>
     </div>
     <div class="help-overlay" id="helpOverlay">
@@ -154,7 +198,7 @@
                 <td>Toggle help</td>
             </tr>
         </table>
-        <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Mouse: scroll=zoom, drag=pan, click=select
+        <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Mouse: scroll=zoom, drag=pan, click=select, double-click=fit/toggle
         </div>
     </div>
     <div class="command-palette" id="commandPalette" style="display:none">

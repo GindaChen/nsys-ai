@@ -67,6 +67,32 @@ def _tools_openai() -> list[dict]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "fit_nvtx_range",
+                "description": (
+                    "Fit an NVTX range to the viewport width. "
+                    "Prefer nvtx_name when possible; otherwise use explicit start/end seconds."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "nvtx_name": {
+                            "type": "string",
+                            "description": "NVTX name substring to find and fit.",
+                        },
+                        "occurrence_index": {
+                            "type": "integer",
+                            "description": "Which occurrence to fit (1-based). Default is 1.",
+                            "default": 1,
+                        },
+                        "start_s": {"type": "number", "description": "Start time in seconds"},
+                        "end_s": {"type": "number", "description": "End time in seconds"},
+                    },
+                },
+            },
+        },
         TOOL_QUERY_PROFILE_DB,
     ]
 
@@ -109,7 +135,8 @@ def _build_system_prompt(
         "1. When asked to explain a kernel or bottleneck, use the provided context. "
         "Be concise, professional, and use Markdown for formatting.\n"
         "2. If the user asks to go to, find, or locate a specific kernel or time range, "
-        "YOU MUST use the provided tools (`navigate_to_kernel` or `zoom_to_time_range`).\n"
+        "YOU MUST use the provided tools (`navigate_to_kernel`, `zoom_to_time_range`, "
+        "or `fit_nvtx_range`).\n"
         "3. When a PROFILE DATABASE SCHEMA is provided above, you MUST use the "
         "`query_profile_db` tool to answer whole-profile questions (e.g. first kernel, "
         "slowest kernel, counts, total GPU time, total kernel count). Run a SELECT; "
@@ -124,7 +151,7 @@ def _build_system_prompt(
         "4. TOOL USE RULES:\n"
         "   - Match kernel names exactly from `visible_kernels_summary` or `global_top_kernels`.\n"
         "   - Do NOT explain what you are about to do before calling a tool. Just call the tool.\n"
-        "   - For `navigate_to_kernel` and `zoom_to_time_range`: execution is immediate on the "
+        "   - For `navigate_to_kernel`, `zoom_to_time_range`, and `fit_nvtx_range`: execution is immediate on the "
         "client; you do not wait for a result. For `query_profile_db`: the backend runs the "
         "query and returns rows; use them in your answer.\n"
         "   - Do NOT output code blocks or JSON for navigation - use the actual tool call mechanism only.\n"
@@ -140,7 +167,7 @@ def _build_system_prompt(
 def _parse_tool_call(name: str, arguments: str) -> dict | None:
     """Parse a tool call into a UI action dict, or ``None`` if unrecognised.
 
-    Only ``navigate_to_kernel`` and ``zoom_to_time_range`` produce UI actions.
+    Only ``navigate_to_kernel``, ``zoom_to_time_range``, and ``fit_nvtx_range`` produce UI actions.
     ``query_profile_db`` is handled by the agent loop itself and returns None
     here (it is not a UI action).
     """
@@ -170,5 +197,19 @@ def _parse_tool_call(name: str, arguments: str) -> dict | None:
             "start_s": float(start_s),
             "end_s": float(end_s),
         }
+
+    if name == "fit_nvtx_range":
+        out = {"type": "fit_nvtx_range"}
+        if args.get("nvtx_name"):
+            out["nvtx_name"] = str(args.get("nvtx_name"))
+            out["occurrence_index"] = int(args.get("occurrence_index", 1))
+            return out
+        start_s = args.get("start_s")
+        end_s = args.get("end_s")
+        if start_s is None or end_s is None:
+            return None
+        out["start_s"] = float(start_s)
+        out["end_s"] = float(end_s)
+        return out
 
     return None

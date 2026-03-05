@@ -348,12 +348,13 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 for chunk in gen:
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                self.close_connection = True
                 return
             out = _handle_chat_request(body)
             if out is None:

@@ -168,8 +168,9 @@
             flex-shrink: 0;
             font-size: 12px;
             background: var(--surface);
-            cursor: pointer;
-            transition: height 0.15s;
+            cursor: default;
+            min-height: 48px;
+            max-height: 70vh;
         }
 
         #detail.collapsed {
@@ -201,9 +202,47 @@
             color: var(--accent)
         }
 
+        .detail-path.horizontal {
+            display: block;
+            white-space: normal;
+            word-break: normal;
+            overflow-wrap: anywhere;
+            max-width: none;
+        }
+
+        .detail-path.vertical {
+            display: block;
+            white-space: normal;
+        }
+
+        .detail-path .vline {
+            display: block;
+            line-height: 1.35;
+            margin-bottom: 1px;
+            overflow-wrap: anywhere;
+        }
+
+        .detail-path .node.current {
+            color: #e6edf3;
+            font-weight: 600;
+        }
+
         .detail-path .sep {
             color: var(--text-dim);
             margin: 0 4px
+        }
+
+        #detailResizeHandle {
+            height: 8px;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid #202833;
+            background: #0f141d;
+            cursor: ns-resize;
+            flex-shrink: 0;
+        }
+
+        #detailResizeHandle:hover {
+            background: #121a26;
         }
 
         .tooltip {
@@ -253,9 +292,66 @@
             line-height: 1.2;
         }
 
+        .settings-panel .settings-subtitle {
+            margin: 10px 0 8px;
+            padding-top: 8px;
+            border-top: 1px solid #30363d;
+            color: #79b8ff;
+            font-weight: 600;
+        }
+
         .settings-panel input[type="range"] {
             width: 100%;
             accent-color: #58a6ff;
+        }
+
+        .settings-panel label.lock-row {
+            grid-template-columns: 1fr 120px 42px;
+        }
+
+        .settings-panel label.lock-row input[type="number"] {
+            width: 100%;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #e6edf3;
+            border-radius: 4px;
+            padding: 3px 6px;
+            font-size: 11px;
+            font-family: inherit;
+        }
+
+        .settings-panel label.lock-row select {
+            width: 100%;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #e6edf3;
+            border-radius: 4px;
+            padding: 3px 6px;
+            font-size: 11px;
+            font-family: inherit;
+        }
+
+        .settings-panel label.lock-row input[type="checkbox"] {
+            justify-self: start;
+            accent-color: #58a6ff;
+        }
+
+        .settings-panel .settings-actions {
+            display: flex;
+            gap: 8px;
+            margin: 8px 0 4px;
+        }
+
+        .settings-panel .settings-actions button {
+            flex: 1;
+            background: #1a2332;
+            color: #e6edf3;
+            border: 1px solid #264f78;
+            border-radius: 4px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            font-family: inherit;
         }
 
         .settings-panel #settingsResetBtn {
@@ -368,6 +464,47 @@
             padding: 8px 12px;
             font-size: 12px;
             line-height: 1.5;
+        }
+
+        .chat-capabilities {
+            margin: 8px 12px 0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: #0f141d;
+            color: var(--text-dim);
+            font-size: 11px;
+        }
+
+        .chat-capabilities summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 6px 10px;
+            color: #79b8ff;
+            font-weight: 600;
+            user-select: none;
+        }
+
+        .chat-capabilities summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .chat-capabilities .cap-body {
+            border-top: 1px solid #202833;
+            padding: 8px 10px;
+            line-height: 1.4;
+        }
+
+        .chat-capabilities ul {
+            margin: 4px 0 8px 18px;
+            padding: 0;
+        }
+
+        .chat-capabilities code {
+            color: #e6edf3;
+            background: #0b1220;
+            padding: 0 4px;
+            border-radius: 3px;
+            font-size: 10px;
         }
 
         .chat-msg {

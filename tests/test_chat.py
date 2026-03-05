@@ -96,16 +96,20 @@ def test_build_system_prompt():
 
 
 def test_tools_openai():
-    """Three tools defined: navigate_to_kernel, zoom_to_time_range, query_profile_db."""
+    """Tools include navigate, zoom, NVTX fit, and query_profile_db."""
     tools = chat_mod._tools_openai()
-    assert len(tools) == 3
+    assert len(tools) == 4
     names = {t["function"]["name"] for t in tools}
-    assert names == {"navigate_to_kernel", "zoom_to_time_range", "query_profile_db"}
+    assert names == {"navigate_to_kernel", "zoom_to_time_range", "fit_nvtx_range", "query_profile_db"}
     nav = next(t for t in tools if t["function"]["name"] == "navigate_to_kernel")
     assert "target_name" in nav["function"]["parameters"]["properties"]
     zoom = next(t for t in tools if t["function"]["name"] == "zoom_to_time_range")
     assert "start_s" in zoom["function"]["parameters"]["properties"]
     assert "end_s" in zoom["function"]["parameters"]["properties"]
+    fit = next(t for t in tools if t["function"]["name"] == "fit_nvtx_range")
+    assert "nvtx_name" in fit["function"]["parameters"]["properties"]
+    assert "start_s" in fit["function"]["parameters"]["properties"]
+    assert "end_s" in fit["function"]["parameters"]["properties"]
 
 
 def test_parse_tool_call_navigate():
@@ -150,6 +154,36 @@ def test_parse_tool_call_zoom_missing():
     """zoom_to_time_range missing start_s or end_s returns None."""
     assert chat_mod._parse_tool_call("zoom_to_time_range", '{"start_s": 1}') is None
     assert chat_mod._parse_tool_call("zoom_to_time_range", '{"end_s": 1}') is None
+
+
+def test_parse_tool_call_fit_nvtx_by_name():
+    """fit_nvtx_range can target by NVTX name."""
+    action = chat_mod._parse_tool_call(
+        "fit_nvtx_range", '{"nvtx_name": "flash_fwd", "occurrence_index": 2}'
+    )
+    assert action == {
+        "type": "fit_nvtx_range",
+        "nvtx_name": "flash_fwd",
+        "occurrence_index": 2,
+    }
+
+
+def test_parse_tool_call_fit_nvtx_by_time_range():
+    """fit_nvtx_range can target by explicit start/end seconds."""
+    action = chat_mod._parse_tool_call(
+        "fit_nvtx_range", '{"start_s": 35.0, "end_s": 35.4}'
+    )
+    assert action == {
+        "type": "fit_nvtx_range",
+        "start_s": 35.0,
+        "end_s": 35.4,
+    }
+
+
+def test_parse_tool_call_fit_nvtx_missing():
+    """fit_nvtx_range without name or full time range returns None."""
+    assert chat_mod._parse_tool_call("fit_nvtx_range", "{}") is None
+    assert chat_mod._parse_tool_call("fit_nvtx_range", '{"start_s": 1}') is None
 
 
 def test_parse_tool_call_invalid_json():

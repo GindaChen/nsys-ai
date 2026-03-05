@@ -131,6 +131,14 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="commandInput"' in html
     assert 'id="settingsBtn"' in html
     assert 'id="settingsPanel"' in html
+    assert 'id="settingsApplyLockBtn"' in html
+    assert 'id="setRenderLockEnabled"' in html
+    assert 'id="setRenderLockStart"' in html
+    assert 'id="setRenderLockEnd"' in html
+    assert 'id="setHierarchyLayout"' in html
+    assert 'id="detailResizeHandle"' in html
+    assert 'id="chatCapabilities"' in html
+    assert "fit_nvtx_range" in html
     assert "Go to NVTX" in html
 
 

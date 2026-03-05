@@ -185,6 +185,7 @@
             const endTile = tileBounds(vEnd);
             const promises = [];
             for (let s = startTile[0]; s < endTile[1]; s += TILE_WINDOW_S) {
+                if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
                 if (!tileCache.has(s, s + TILE_WINDOW_S)) {
                     promises.push(fetchTile(s, s + TILE_WINDOW_S));
                 }
@@ -209,6 +210,7 @@
             const activeGpu = currentActiveGpuId();
             if (activeGpu === null || activeGpu === undefined) return;
             for (let s = startTile[0]; s < endTile[1]; s += TILE_WINDOW_S) {
+                if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
                 if (tileCache.has(s, s + TILE_WINDOW_S)) {
                     void fetchTileNvtx(s, s + TILE_WINDOW_S, activeGpu);
                 }
@@ -227,10 +229,10 @@
                 if (profileMeta) {
                     const pStartS = profileMeta.time_range_ns[0] / 1e9;
                     const pEndS = profileMeta.time_range_ns[1] / 1e9;
-                    if (before[0] >= pStartS && !tileCache.has(before[0], before[1])) {
+                    if (before[0] >= pStartS && renderLockIntersects(before[0], before[1]) && !tileCache.has(before[0], before[1])) {
                         fetchTile(before[0], before[1], { requestNvtx: false }).then(() => { rebuildDataFromCache(); draw(); });
                     }
-                    if (after[1] <= pEndS && !tileCache.has(after[0], after[1])) {
+                    if (after[1] <= pEndS && renderLockIntersects(after[0], after[1]) && !tileCache.has(after[0], after[1])) {
                         fetchTile(after[0], after[1], { requestNvtx: false }).then(() => { rebuildDataFromCache(); draw(); });
                     }
                 }
@@ -367,6 +369,7 @@
                 `<span>Kernels: <strong>${totalKernels}</strong></span> &nbsp; ` +
                 `<span>NVTX: <strong>${totalNVTX}</strong></span> &nbsp; ` +
                 `<span>GPU time: <strong>${totalMs.toFixed(1)}ms</strong></span>`;
+            ensureRenderLockDefaults();
             updateNvtxThreadOptions();
         }
 
@@ -430,17 +433,27 @@
         let searchNvtxMatches = new Set();
         let isDragging = false, dragStartX = 0, dragViewStart = 0, dragViewEnd = 0;
         let isSelecting = false, selectStartX = 0, selectStartNs = 0, selectEndNs = 0;
+        let isResizingDetail = false, detailResizeStartY = 0, detailResizeStartH = 0;
         let bookmarks = [];
         let hiddenStreams = new Set();  // stream keys to hide
         const RENDER_SETTINGS_KEY = 'timeline-render-settings-v1';
+        const RENDER_LOCK_KEY = 'timeline-render-lock-v1';
         const DEFAULT_RENDER_SETTINGS = Object.freeze({
             kernelSearchNonMatchAlpha: 0.16,
             kernelWhenNvtxSelectedAlpha: 0.08,
             nvtxWhenKernelSelectedAlpha: 0.08,
             nvtxNonSelectedAlpha: 0.08,
             nvtxSelectedAlpha: 0.95,
+            hierarchyLayout: 'horizontal',
+        });
+        const DEFAULT_RENDER_LOCK = Object.freeze({
+            enabled: false,
+            startNs: 0,
+            endNs: 0,
         });
         let renderSettings = loadRenderSettings();
+        let renderLock = loadRenderLock();
+        let fitZoomState = null;
 
         // ── Layout constants ──
         const LABEL_W = isMultiGPU ? 110 : 90;
@@ -480,6 +493,7 @@
                     nvtxSelectedAlpha: clampNum(
                         parsed.nvtxSelectedAlpha, 0.1, 1.0, DEFAULT_RENDER_SETTINGS.nvtxSelectedAlpha
                     ),
+                    hierarchyLayout: parsed.hierarchyLayout === 'vertical' ? 'vertical' : 'horizontal',
                 };
             } catch (e) {
                 return { ...DEFAULT_RENDER_SETTINGS };
@@ -490,6 +504,66 @@
             try {
                 localStorage.setItem(RENDER_SETTINGS_KEY, JSON.stringify(renderSettings));
             } catch (e) { }
+        }
+
+        function loadRenderLock() {
+            try {
+                const raw = localStorage.getItem(RENDER_LOCK_KEY);
+                if (!raw) return { ...DEFAULT_RENDER_LOCK };
+                const parsed = JSON.parse(raw);
+                const startNs = clampNum(parsed.startNs, 0, Number.MAX_SAFE_INTEGER, 0);
+                const endNs = clampNum(parsed.endNs, 0, Number.MAX_SAFE_INTEGER, 0);
+                return {
+                    enabled: parsed.enabled === true && endNs > startNs,
+                    startNs,
+                    endNs,
+                };
+            } catch (e) {
+                return { ...DEFAULT_RENDER_LOCK };
+            }
+        }
+
+        function saveRenderLock() {
+            try {
+                localStorage.setItem(RENDER_LOCK_KEY, JSON.stringify(renderLock));
+            } catch (e) { }
+        }
+
+        function renderLockIntersects(startS, endS) {
+            if (!renderLock.enabled) return true;
+            const lockStartS = renderLock.startNs / 1e9;
+            const lockEndS = renderLock.endNs / 1e9;
+            return endS > lockStartS && startS < lockEndS;
+        }
+
+        function profileMaxNs() {
+            if (profileMeta && Array.isArray(profileMeta.time_range_ns) && Number.isFinite(profileMeta.time_range_ns[1])) {
+                return profileMeta.time_range_ns[1];
+            }
+            return Number.isFinite(timeEnd) ? timeEnd : 0;
+        }
+
+        function ensureRenderLockDefaults() {
+            const maxNs = profileMaxNs();
+            if (!Number.isFinite(maxNs) || maxNs <= 0) return;
+            let changed = false;
+            if (renderLock.startNs < 0) {
+                renderLock.startNs = 0;
+                changed = true;
+            }
+            if (renderLock.endNs <= 0) {
+                renderLock.endNs = maxNs;
+                changed = true;
+            }
+            if (renderLock.endNs > maxNs) {
+                renderLock.endNs = maxNs;
+                changed = true;
+            }
+            if (renderLock.enabled && renderLock.endNs <= renderLock.startNs) {
+                renderLock.enabled = false;
+                changed = true;
+            }
+            if (changed) saveRenderLock();
         }
 
         function syncSettingsPanel() {
@@ -505,6 +579,17 @@
             bind('setNvtxWhenKernelDim', 'setNvtxWhenKernelDimVal', 'nvtxWhenKernelSelectedAlpha');
             bind('setNvtxNonSelected', 'setNvtxNonSelectedVal', 'nvtxNonSelectedAlpha');
             bind('setNvtxSelected', 'setNvtxSelectedVal', 'nvtxSelectedAlpha');
+            const hierarchySel = document.getElementById('setHierarchyLayout');
+            if (hierarchySel) hierarchySel.value = renderSettings.hierarchyLayout || 'horizontal';
+            ensureRenderLockDefaults();
+            const lockEnabled = document.getElementById('setRenderLockEnabled');
+            const lockStart = document.getElementById('setRenderLockStart');
+            const lockEnd = document.getElementById('setRenderLockEnd');
+            const lockState = document.getElementById('setRenderLockState');
+            if (lockEnabled) lockEnabled.checked = renderLock.enabled;
+            if (lockStart) lockStart.value = (renderLock.startNs / 1e9).toFixed(3);
+            if (lockEnd) lockEnd.value = (renderLock.endNs / 1e9).toFixed(3);
+            if (lockState) lockState.textContent = renderLock.enabled ? 'on' : 'off';
         }
 
         function wireSettingsPanel() {
@@ -524,6 +609,15 @@
             bind('setNvtxWhenKernelDim', 'setNvtxWhenKernelDimVal', 'nvtxWhenKernelSelectedAlpha', 0.03, 0.9);
             bind('setNvtxNonSelected', 'setNvtxNonSelectedVal', 'nvtxNonSelectedAlpha', 0.03, 0.95);
             bind('setNvtxSelected', 'setNvtxSelectedVal', 'nvtxSelectedAlpha', 0.1, 1.0);
+            const hierarchySel = document.getElementById('setHierarchyLayout');
+            if (hierarchySel) {
+                hierarchySel.addEventListener('change', () => {
+                    renderSettings.hierarchyLayout = hierarchySel.value === 'vertical' ? 'vertical' : 'horizontal';
+                    saveRenderSettings();
+                    if (selectedNvtx) showDetail(selectedNvtx);
+                    else if (selectedKernel) showDetail(selectedKernel);
+                });
+            }
             syncSettingsPanel();
         }
 
@@ -539,6 +633,43 @@
             renderSettings = { ...DEFAULT_RENDER_SETTINGS };
             saveRenderSettings();
             syncSettingsPanel();
+            if (selectedNvtx) showDetail(selectedNvtx);
+            else if (selectedKernel) showDetail(selectedKernel);
+            draw();
+        }
+
+        function applyRenderLockSettings() {
+            const lockEnabled = document.getElementById('setRenderLockEnabled');
+            const lockStart = document.getElementById('setRenderLockStart');
+            const lockEnd = document.getElementById('setRenderLockEnd');
+            const enabled = !!(lockEnabled && lockEnabled.checked);
+            const startS = Number(lockStart ? lockStart.value : NaN);
+            const endS = Number(lockEnd ? lockEnd.value : NaN);
+            if (enabled) {
+                if (!Number.isFinite(startS) || !Number.isFinite(endS) || endS <= startS) {
+                    showToast('Invalid lock range: end must be > start');
+                    return;
+                }
+                renderLock = {
+                    enabled: true,
+                    startNs: Math.max(0, Math.round(startS * 1e9)),
+                    endNs: Math.max(0, Math.round(endS * 1e9)),
+                };
+            } else {
+                renderLock = {
+                    enabled: false,
+                    startNs: Math.max(0, Number.isFinite(startS) ? Math.round(startS * 1e9) : 0),
+                    endNs: Math.max(0, Number.isFinite(endS) ? Math.round(endS * 1e9) : 0),
+                };
+            }
+            saveRenderLock();
+            syncSettingsPanel();
+            showToast(renderLock.enabled
+                ? `Render lock applied: ${(renderLock.startNs / 1e9).toFixed(3)}s–${(renderLock.endNs / 1e9).toFixed(3)}s`
+                : 'Render lock disabled');
+            if (PROGRESSIVE) {
+                void ensureTilesForView(viewStart, viewEnd);
+            }
             draw();
         }
 
@@ -1024,6 +1155,32 @@
         }
 
         // ── Detail panel ──
+        function inferKernelPathFromNvtx(k) {
+            const gpu = k._gpu;
+            let candidates = nvtxSpans.filter(s =>
+                s.gpu === gpu && s.start <= k.start_ns && s.end >= k.end_ns
+            );
+            if (!candidates.length) return '';
+            if (selectedNvtxThread && selectedNvtxThread !== 'auto') {
+                const byThread = candidates.filter(
+                    s => (s.thread || '(unnamed)') === selectedNvtxThread
+                );
+                if (byThread.length) candidates = byThread;
+            }
+            candidates.sort((a, b) =>
+                ((a.end - a.start) - (b.end - b.start)) || ((b.depth || 0) - (a.depth || 0))
+            );
+            const best = candidates[0];
+            if (!best) return '';
+            return best.path ? `${best.path} > ${k.name}` : k.name;
+        }
+
+        function kernelPathForDisplay(k) {
+            const p = String(k._path || '').trim();
+            if (p && p !== k.name) return p;
+            return inferKernelPathFromNvtx(k) || p || k.name;
+        }
+
         function showDetail(item) {
             if (!item) {
                 document.getElementById('detail').className = 'empty';
@@ -1031,8 +1188,7 @@
                 return;
             }
             if (item._kind === 'nvtx') {
-                const parts = (item.path || '').split(' > ');
-                const pathHtml = parts.slice(0, -1).map(p => `<span>${escH(p)}</span>`).join('<span class="sep">›</span>');
+                const pathInfo = renderPathHtml(item.path || '');
                 const durMs = (item.end - item.start) / 1e6;
                 const gpuLabel = isMultiGPU ? ` &nbsp;|&nbsp; GPU ${item.gpu}` : '';
                 const threadLabel = item.thread ? ` &nbsp;|&nbsp; ${escH(item.thread)}` : '';
@@ -1040,23 +1196,46 @@
                 document.getElementById('detail').innerHTML =
                     `<div class="detail-name">📦 ${escH(item.name)}</div>` +
                     `<div class="detail-dur">${fmtDur(durMs)}${gpuLabel}${threadLabel} &nbsp;|&nbsp; ${fmtNs(item.start)} → ${fmtNs(item.end)}</div>` +
-                    (pathHtml ? `<div class="detail-path">🧭 ${pathHtml}</div>` : '');
+                    (pathInfo.html ? `<div class="detail-path ${pathInfo.layout}">🧭 ${pathInfo.html}</div>` : '');
                 return;
             }
 
             const k = item;
-            const parts = (k._path || '').split(' > ');
-            const pathHtml = parts.slice(0, -1).map(p => `<span>${escH(p)}</span>`).join('<span class="sep">›</span>');
+            const displayPath = kernelPathForDisplay(k);
+            const pathInfo = renderPathHtml(displayPath);
             const gpuLabel = isMultiGPU ? ` &nbsp;|&nbsp; GPU ${k._gpu}` : '';
 
             document.getElementById('detail').className = '';
             document.getElementById('detail').innerHTML =
                 `<div class="detail-name">⚡ ${escH(k.name)}</div>` +
                 `<div class="detail-dur">${fmtDur(k.duration_ms)} &nbsp;|&nbsp; Stream ${k.stream ?? '?'}${gpuLabel} &nbsp;|&nbsp; ${fmtNs(k.start_ns)} → ${fmtNs(k.end_ns)}</div>` +
-                (pathHtml ? `<div class="detail-path">📦 ${pathHtml}</div>` : '');
+                (pathInfo.html ? `<div class="detail-path ${pathInfo.layout}">📦 ${pathInfo.html}</div>` : '');
         }
 
         function escH(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+        function renderPathHtml(path) {
+            const parts = String(path || '').split(' > ').filter(Boolean);
+            if (!parts.length) return { html: '', layout: 'horizontal' };
+            const layout = renderSettings.hierarchyLayout === 'vertical' ? 'vertical' : 'horizontal';
+            if (layout === 'vertical') {
+                const html = parts
+                    .map((p, idx) => {
+                        const cls = idx === parts.length - 1 ? 'node current' : 'node';
+                        const indent = idx * 14;
+                        return `<span class="vline" style="padding-left:${indent}px"><span class="${cls}">${escH(p)}</span></span>`;
+                    })
+                    .join('');
+                return { html, layout };
+            }
+            const html = parts
+                .map((p, idx) => {
+                    const cls = idx === parts.length - 1 ? 'node current' : 'node';
+                    return `<span class="${cls}">${escH(p)}</span>`;
+                })
+                .join('<span class="sep">›</span>');
+            return { html, layout };
+        }
 
         // ── Navigation ──
         // ── Progressive tile loading on viewport change ──
@@ -1129,6 +1308,49 @@
             selectedNvtx = { ...span, key: span._key, _kind: 'nvtx' };
             showDetail(selectedNvtx);
             draw();
+        }
+
+        function computeFitViewRange(startNs, endNs) {
+            const minSpan = 1000;
+            const span = Math.max(minSpan, endNs - startNs);
+            const pad = Math.max(span * 0.03, 500);
+            return { start: startNs - pad, end: endNs + pad };
+        }
+
+        function isViewCloseTo(startNs, endNs) {
+            const span = Math.max(endNs - startNs, 1);
+            const tol = Math.max(span * 0.02, 2000);
+            return Math.abs(viewStart - startNs) <= tol && Math.abs(viewEnd - endNs) <= tol;
+        }
+
+        function toggleFitToElement(kind, key, startNs, endNs) {
+            const fit = computeFitViewRange(startNs, endNs);
+            const canRestore = fitZoomState
+                && fitZoomState.kind === kind
+                && fitZoomState.key === key
+                && isViewCloseTo(fitZoomState.fitStart, fitZoomState.fitEnd);
+            if (canRestore) {
+                viewStart = fitZoomState.prevStart;
+                viewEnd = fitZoomState.prevEnd;
+                fitZoomState = null;
+                clampView();
+                draw();
+                afterViewChange();
+                return;
+            }
+            fitZoomState = {
+                kind,
+                key,
+                prevStart: viewStart,
+                prevEnd: viewEnd,
+                fitStart: fit.start,
+                fitEnd: fit.end,
+            };
+            viewStart = fit.start;
+            viewEnd = fit.end;
+            clampView();
+            draw();
+            afterViewChange();
         }
 
         function zoomToNsRange(startNs, endNs) {
@@ -1386,7 +1608,7 @@
             const bm = {
                 label: k ? k.name.slice(0, 30) : `@${(time_ns / 1e9).toFixed(2)}s`,
                 time_ns,
-                nvtx_path: k ? (k._path || '') : '',
+                nvtx_path: k ? kernelPathForDisplay(k) : '',
                 nvtx_index: k ? nvtxSpans.findIndex(s => time_ns >= s.start && time_ns <= s.end) : -1,
                 kernel_index: k ? kernels.indexOf(k) : -1,
                 kernel_name: k ? k.name : '',
@@ -1568,6 +1790,28 @@
             }
         });
 
+        canvas.addEventListener('dblclick', e => {
+            if (e.button !== 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            if (mx < LABEL_W) return;
+            const hit = hitTest(mx, my);
+            if (!hit) return;
+            if (hit.nvtx) {
+                const n = hit.nvtx;
+                selectNvtx(n);
+                toggleFitToElement('nvtx', n._key, n.start, n.end);
+                return;
+            }
+            if (hit.kernel) {
+                const k = hit.kernel;
+                selectedStreamIdx = hit.streamIdx ?? selectedStreamIdx;
+                selectKernel(k);
+                const kKey = `${k.start_ns}|${k.end_ns}|${k.stream}|${k.name}|${k._gpu ?? ''}`;
+                toggleFitToElement('kernel', kKey, k.start_ns, k.end_ns);
+            }
+        });
+
         canvas.addEventListener('mousemove', e => {
             const rect = canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left, my = e.clientY - rect.top;
@@ -1673,6 +1917,35 @@
                 afterViewChange();
             }
         }, { passive: false });
+
+        const detailEl = document.getElementById('detail');
+        const detailResizeHandle = document.getElementById('detailResizeHandle');
+        if (detailEl && detailResizeHandle) {
+            detailResizeHandle.addEventListener('mousedown', e => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                isResizingDetail = true;
+                detailResizeStartY = e.clientY;
+                detailResizeStartH = detailEl.getBoundingClientRect().height;
+                document.body.style.cursor = 'ns-resize';
+                document.body.style.userSelect = 'none';
+            });
+            document.addEventListener('mousemove', e => {
+                if (!isResizingDetail) return;
+                const dy = detailResizeStartY - e.clientY;
+                const minH = 48;
+                const maxH = Math.max(120, Math.floor(window.innerHeight * 0.7));
+                const h = Math.min(maxH, Math.max(minH, detailResizeStartH + dy));
+                detailEl.style.height = `${h}px`;
+                resize();
+            });
+            document.addEventListener('mouseup', () => {
+                if (!isResizingDetail) return;
+                isResizingDetail = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+        }
 
         const searchInputEl = document.getElementById('searchInput');
         if (searchInputEl) {
@@ -1876,6 +2149,12 @@
             const aiDiv = appendChatMsg('ai', '');
             aiDiv.classList.add('chat-streaming');
             let fullContent = '';
+            const ctrl = new AbortController();
+            const maxMs = 180000;
+            const abortTimer = setTimeout(() => {
+                try { ctrl.abort(); } catch (e) { }
+            }, maxMs);
+            let streamDone = false;
 
             try {
                 const modelSel = document.getElementById('chatModel');
@@ -1891,6 +2170,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
+                    signal: ctrl.signal,
                 });
 
                 if (!resp.ok) {
@@ -1908,23 +2188,34 @@
                 let buffer = '';
 
                 while (true) {
+                    if (streamDone) {
+                        try { await reader.cancel(); } catch (e) { }
+                        break;
+                    }
                     const { done, value } = await reader.read();
                     if (done) break;
                     buffer += decoder.decode(value, { stream: true });
 
-                    // Parse SSE events (format: "event: type\ndata: {...}\n\n")
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-                    let currentEvent = 'message';
-
-                    for (const line of lines) {
-                        if (line.startsWith('event: ')) {
-                            currentEvent = line.slice(7).trim();
-                            continue;
+                    // Parse SSE blocks separated by blank line.
+                    while (true) {
+                        const sep = buffer.indexOf('\n\n');
+                        if (sep < 0) break;
+                        const rawEvent = buffer.slice(0, sep);
+                        buffer = buffer.slice(sep + 2);
+                        const eventLines = rawEvent.split('\n');
+                        let currentEvent = 'message';
+                        let data = '';
+                        for (const rawLine of eventLines) {
+                            const line = rawLine.replace(/\r$/, '');
+                            if (line.startsWith('event:')) {
+                                currentEvent = line.slice(6).trim();
+                                continue;
+                            }
+                            if (line.startsWith('data:')) {
+                                data += line.slice(5).trimStart();
+                            }
                         }
-                        if (!line.startsWith('data: ')) continue;
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
+                        if (!data || data === '[DONE]') continue;
                         try {
                             const payload = JSON.parse(data);
                             if (currentEvent === 'text') {
@@ -1943,9 +2234,11 @@
                                 }
                             } else if (currentEvent === 'action') {
                                 executeAIAction(payload);
+                            } else if (currentEvent === 'done') {
+                                streamDone = true;
                             }
                         } catch (e) { /* ignore parse errors in SSE */ }
-                        currentEvent = 'message';  // reset after consuming data
+                        if (streamDone) break;
                     }
                 }
 
@@ -1957,6 +2250,7 @@
             } catch (err) {
                 aiDiv.innerHTML = formatChatContent('Connection error: ' + err.message);
             } finally {
+                clearTimeout(abortTimer);
                 aiDiv.classList.remove('chat-streaming');
                 chatStreaming = false;
                 sendBtn.disabled = false;
@@ -1989,12 +2283,51 @@
                     draw();
                     appendChatMsg('system', '→ Zoomed to ' + startS.toFixed(3) + 's – ' + endS.toFixed(3) + 's', 'system');
                 }
+            } else if (action.type === 'fit_nvtx_range' || (action.action_type === 'fit_nvtx_range')) {
+                const targetName = action.nvtx_name || action.target_name || action.target;
+                if (targetName) {
+                    const q = String(targetName).toLowerCase();
+                    const all = activeGpuNvtxSpans().spans;
+                    const occ = Math.max(1, parseInt(action.occurrence_index || 1, 10) || 1);
+                    const matches = all.filter(s => (s.name || '').toLowerCase().includes(q));
+                    const target = matches[Math.min(occ - 1, matches.length - 1)];
+                    if (target) {
+                        showNVTX = true;
+                        document.getElementById('nvtxBtn').classList.add('active');
+                        if (target.thread) {
+                            selectedNvtxThread = target.thread;
+                            updateNvtxThreadOptions();
+                        }
+                        const laid = layoutNvtxSpans([target], NVTX_PIN_ROWS).spans[0]
+                            || { ...target, _lane: NVTX_PIN_ROWS - 1, _key: nvtxKey(target), _clipped: true };
+                        selectNvtx(laid);
+                        const fit = computeFitViewRange(target.start, target.end);
+                        viewStart = fit.start;
+                        viewEnd = fit.end;
+                        clampView();
+                        draw();
+                        afterViewChange();
+                        appendChatMsg('system', '→ Fitted NVTX: ' + target.name, 'system');
+                        return;
+                    }
+                }
+                const startS = action.start_s;
+                const endS = action.end_s;
+                if (startS !== undefined && endS !== undefined) {
+                    const fit = computeFitViewRange(startS * 1e9, endS * 1e9);
+                    viewStart = fit.start;
+                    viewEnd = fit.end;
+                    clampView();
+                    draw();
+                    afterViewChange();
+                    appendChatMsg('system', '→ Fitted NVTX range ' + startS.toFixed(3) + 's – ' + endS.toFixed(3) + 's', 'system');
+                }
             }
         }
 
         function parseAndExecuteActions(content) {
             // Look for JSON action blocks in the response
-            const actionRe = /```json\s*({[^}]*"type"\s*:\s*"(navigate_to_kernel|zoom_to_time_range)"[^}]*})\s*```/g;
+            const actionRe = /```json\s*({[^}]*"type"\s*:\s*"(navigate_to_kernel|zoom_to_time_range|fit_nvtx_range)"[^}]*})\s*```/g;
             let match;
             while ((match = actionRe.exec(content)) !== null) {
                 try {
