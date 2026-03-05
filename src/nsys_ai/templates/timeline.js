@@ -856,6 +856,7 @@
             const rawInterval = viewSpan / (tw / 80);
             const mag = Math.pow(10, Math.floor(Math.log10(rawInterval)));
             const nice = [1, 2, 5, 10].find(n => n * mag >= rawInterval) * mag;
+            const rulerUnit = chooseRulerUnit(nice);
 
             ctx.fillStyle = '#161b22';
             ctx.fillRect(0, 0, W, RULER_H);
@@ -866,20 +867,49 @@
             ctx.fillStyle = '#8b949e';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'bottom';
+            let prevLabel = null;
             for (let t = start; t <= viewEnd; t += nice) {
                 const x = nsToX(t);
                 if (x < LABEL_W || x > W) continue;
                 ctx.strokeStyle = '#30363d';
                 ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, RULER_H); ctx.stroke();
-                const absS = t / 1e9;  // absolute seconds
-                const label = absS >= 1 ? absS.toFixed(2) + 's' : absS >= 0.001 ? (absS * 1000).toFixed(2) + 'ms' : (absS * 1e6).toFixed(0) + 'μs';
+                let decimals = rulerUnit.decimals;
+                let label = formatTickValue(t, rulerUnit.div, decimals);
+                while (prevLabel !== null && label === prevLabel && decimals < 7) {
+                    decimals += 1;
+                    label = formatTickValue(t, rulerUnit.div, decimals);
+                }
+                prevLabel = label;
                 ctx.fillText(label, x, RULER_H - 7);
             }
 
             // Label
             ctx.textAlign = 'right';
             ctx.fillStyle = '#8b949e';
-            ctx.fillText('Time', LABEL_W - 6, RULER_H - 7);
+            ctx.fillText(`Time (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+        }
+
+        function chooseRulerUnit(stepNs) {
+            const secStep = stepNs / 1e9;
+            const secDecimals = Math.min(6, Math.max(0, Math.ceil(-Math.log10(Math.max(secStep, 1e-18)))));
+            if (secDecimals <= 3) return { unit: 's', div: 1e9, decimals: secDecimals };
+
+            const msStep = stepNs / 1e6;
+            const msDecimals = Math.min(4, Math.max(0, Math.ceil(-Math.log10(Math.max(msStep, 1e-18)))));
+            if (msDecimals <= 3) return { unit: 'ms', div: 1e6, decimals: msDecimals };
+
+            const usStep = stepNs / 1e3;
+            const usDecimals = Math.min(3, Math.max(0, Math.ceil(-Math.log10(Math.max(usStep, 1e-18)))));
+            if (usDecimals <= 2) return { unit: 'μs', div: 1e3, decimals: usDecimals };
+
+            return { unit: 'ns', div: 1, decimals: 0 };
+        }
+
+        function formatTickValue(ns, div, decimals) {
+            const v = ns / div;
+            if (decimals <= 0) return Math.round(v).toString();
+            const out = v.toFixed(decimals);
+            return out.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
         }
 
         function drawNVTX(W) {
