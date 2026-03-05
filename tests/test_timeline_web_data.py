@@ -136,6 +136,7 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="setRenderLockStart"' in html
     assert 'id="setRenderLockEnd"' in html
     assert 'id="setHierarchyLayout"' in html
+    assert 'id="setRulerLabelMode"' in html
     assert 'id="detailResizeHandle"' in html
     assert 'id="chatCapabilities"' in html
     assert "fit_nvtx_range" in html

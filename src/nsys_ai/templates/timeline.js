@@ -445,6 +445,7 @@
             nvtxNonSelectedAlpha: 0.08,
             nvtxSelectedAlpha: 0.95,
             hierarchyLayout: 'horizontal',
+            rulerLabelMode: 'absolute',
         });
         const DEFAULT_RENDER_LOCK = Object.freeze({
             enabled: false,
@@ -494,6 +495,7 @@
                         parsed.nvtxSelectedAlpha, 0.1, 1.0, DEFAULT_RENDER_SETTINGS.nvtxSelectedAlpha
                     ),
                     hierarchyLayout: parsed.hierarchyLayout === 'vertical' ? 'vertical' : 'horizontal',
+                    rulerLabelMode: parsed.rulerLabelMode === 'anchored' ? 'anchored' : 'absolute',
                 };
             } catch (e) {
                 return { ...DEFAULT_RENDER_SETTINGS };
@@ -581,6 +583,8 @@
             bind('setNvtxSelected', 'setNvtxSelectedVal', 'nvtxSelectedAlpha');
             const hierarchySel = document.getElementById('setHierarchyLayout');
             if (hierarchySel) hierarchySel.value = renderSettings.hierarchyLayout || 'horizontal';
+            const rulerSel = document.getElementById('setRulerLabelMode');
+            if (rulerSel) rulerSel.value = renderSettings.rulerLabelMode || 'absolute';
             ensureRenderLockDefaults();
             const lockEnabled = document.getElementById('setRenderLockEnabled');
             const lockStart = document.getElementById('setRenderLockStart');
@@ -616,6 +620,14 @@
                     saveRenderSettings();
                     if (selectedNvtx) showDetail(selectedNvtx);
                     else if (selectedKernel) showDetail(selectedKernel);
+                });
+            }
+            const rulerSel = document.getElementById('setRulerLabelMode');
+            if (rulerSel) {
+                rulerSel.addEventListener('change', () => {
+                    renderSettings.rulerLabelMode = rulerSel.value === 'anchored' ? 'anchored' : 'absolute';
+                    saveRenderSettings();
+                    draw();
                 });
             }
             syncSettingsPanel();
@@ -856,6 +868,8 @@
             const rawInterval = viewSpan / (tw / 80);
             const mag = Math.pow(10, Math.floor(Math.log10(rawInterval)));
             const nice = [1, 2, 5, 10].find(n => n * mag >= rawInterval) * mag;
+            const mode = renderSettings.rulerLabelMode === 'anchored' ? 'anchored' : 'absolute';
+            const anchorNs = Math.floor(viewStart / 1e9) * 1e9;
             const rulerUnit = chooseRulerUnit(nice);
 
             ctx.fillStyle = '#161b22';
@@ -873,11 +887,12 @@
                 if (x < LABEL_W || x > W) continue;
                 ctx.strokeStyle = '#30363d';
                 ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, RULER_H); ctx.stroke();
+                const valueNs = mode === 'anchored' ? (t - anchorNs) : t;
                 let decimals = rulerUnit.decimals;
-                let label = formatTickValue(t, rulerUnit.div, decimals);
+                let label = formatTickValue(valueNs, rulerUnit.div, decimals);
                 while (prevLabel !== null && label === prevLabel && decimals < 7) {
                     decimals += 1;
-                    label = formatTickValue(t, rulerUnit.div, decimals);
+                    label = formatTickValue(valueNs, rulerUnit.div, decimals);
                 }
                 prevLabel = label;
                 ctx.fillText(label, x, RULER_H - 7);
@@ -886,7 +901,12 @@
             // Label
             ctx.textAlign = 'right';
             ctx.fillStyle = '#8b949e';
-            ctx.fillText(`Time (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            if (mode === 'anchored') {
+                const anchorLabel = formatTickValue(anchorNs, 1e9, 0);
+                ctx.fillText(`Time ${anchorLabel}s + (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            } else {
+                ctx.fillText(`Time (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
+            }
         }
 
         function chooseRulerUnit(stepNs) {
@@ -907,9 +927,12 @@
 
         function formatTickValue(ns, div, decimals) {
             const v = ns / div;
-            if (decimals <= 0) return Math.round(v).toString();
-            const out = v.toFixed(decimals);
-            return out.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+            const fmt = new Intl.NumberFormat(undefined, {
+                useGrouping: true,
+                minimumFractionDigits: 0,
+                maximumFractionDigits: Math.max(0, decimals),
+            });
+            return fmt.format(v);
         }
 
         function drawNVTX(W) {
@@ -1704,30 +1727,58 @@
             }
         }
 
-        function toggleStreamFilter() {
+        function isGpuInfoPanelOpen() {
             const panel = document.getElementById('gpuInfoPanel');
-            let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Visibility</div>';
-            // Group streams by GPU
-            const gpuStreams = {};
-            streamIds.forEach(sid => {
-                const parts = sid.split(':');
-                const gpuId = isMultiGPU ? parts[0] : 'all';
-                if (!gpuStreams[gpuId]) gpuStreams[gpuId] = [];
-                gpuStreams[gpuId].push(sid);
+            return !!panel && panel.style.display !== 'none';
+        }
+
+        function streamNumberKey(sid) {
+            if (!isMultiGPU) return String(sid);
+            const text = String(sid);
+            const idx = text.indexOf(':');
+            return idx >= 0 ? text.slice(idx + 1) : text;
+        }
+
+        function streamNumberGroups() {
+            const groups = new Map();
+            for (const sid of streamIds) {
+                const key = streamNumberKey(sid);
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(sid);
+            }
+            return [...groups.entries()].sort((a, b) => {
+                const an = Number(a[0]);
+                const bn = Number(b[0]);
+                if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+                return String(a[0]).localeCompare(String(b[0]));
             });
-            for (const [gpuId, streams] of Object.entries(gpuStreams)) {
-                const label = gpuId === 'all' ? 'Streams' : `GPU ${gpuId}`;
-                html += `<div style="margin-top:4px;color:#7ee787;font-size:10px">${label} ` +
-                    `<a href="#" onclick="setGpuStreams('${gpuId}',true);return false" style="color:#58a6ff;text-decoration:none;margin-left:4px">All</a> ` +
-                    `<a href="#" onclick="setGpuStreams('${gpuId}',false);return false" style="color:#58a6ff;text-decoration:none">None</a></div>`;
-                for (const sid of streams) {
-                    const checked = !hiddenStreams.has(sid) ? 'checked' : '';
-                    const streamLabel = isMultiGPU ? sid.split(':')[1] : sid;
-                    const count = (streamMap[sid] || []).length;
-                    html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStream('${sid}')" style="margin-right:4px">${streamLabel} <span style="color:#484f58">(${count})</span></label>`;
-                }
+        }
+
+        function renderStreamFilterPanel() {
+            const panel = document.getElementById('gpuInfoPanel');
+            let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Number Visibility</div>';
+            const visibleCount = streamIds.length - hiddenStreams.size;
+            html += `<div style="margin-bottom:6px;font-size:11px;color:#8b949e">Visible ${visibleCount}/${streamIds.length} · ` +
+                `<a href="#" onclick="setAllStreams(true);return false" style="color:#58a6ff;text-decoration:none">All</a> ` +
+                `<a href="#" onclick="setAllStreams(false);return false" style="color:#58a6ff;text-decoration:none">None</a> ` +
+                `<a href="#" onclick="toggleSelectedStreamNumber();return false" style="color:#58a6ff;text-decoration:none">Toggle selected number</a> ` +
+                `<a href="#" onclick="invertStreams();return false" style="color:#58a6ff;text-decoration:none">Invert</a></div>`;
+
+            const groups = streamNumberGroups();
+            for (const [streamNum, sids] of groups) {
+                const visible = sids.filter(sid => !hiddenStreams.has(sid)).length;
+                const total = sids.length;
+                const checked = visible === total ? 'checked' : '';
+                const totalKernels = sids.reduce((acc, sid) => acc + ((streamMap[sid] || []).length), 0);
+                html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStreamNumber('${streamNum}')" style="margin-right:4px">S${streamNum} <span style="color:#484f58">(${visible}/${total} GPUs, ${totalKernels} kernels)</span></label>`;
             }
             document.getElementById('gpuInfoContent').innerHTML = html;
+            return panel;
+        }
+
+        function toggleStreamFilter() {
+            const panel = document.getElementById('gpuInfoPanel');
+            renderStreamFilterPanel();
             panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
         }
 
@@ -1735,18 +1786,42 @@
             if (hiddenStreams.has(sid)) hiddenStreams.delete(sid);
             else hiddenStreams.add(sid);
             resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
         }
 
-        function setGpuStreams(gpuId, visible) {
-            streamIds.forEach(sid => {
-                const gid = isMultiGPU ? sid.split(':')[0] : 'all';
-                if (gid === gpuId) {
-                    if (visible) hiddenStreams.delete(sid);
-                    else hiddenStreams.add(sid);
-                }
-            });
-            toggleStreamFilter(); // refresh checkboxes
+        function toggleStreamNumber(streamNum) {
+            const members = streamIds.filter(sid => streamNumberKey(sid) === String(streamNum));
+            if (members.length === 0) return;
+            const allVisible = members.every(sid => !hiddenStreams.has(sid));
+            for (const sid of members) {
+                if (allVisible) hiddenStreams.add(sid);
+                else hiddenStreams.delete(sid);
+            }
             resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function setAllStreams(visible) {
+            if (visible) hiddenStreams.clear();
+            else streamIds.forEach(sid => hiddenStreams.add(sid));
+            resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function invertStreams() {
+            const next = new Set();
+            streamIds.forEach(sid => {
+                if (!hiddenStreams.has(sid)) next.add(sid);
+            });
+            hiddenStreams = next;
+            resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function toggleSelectedStreamNumber() {
+            const sid = streamIds[selectedStreamIdx];
+            if (!sid) return;
+            toggleStreamNumber(streamNumberKey(sid));
         }
 
         function toggleHelp() {
