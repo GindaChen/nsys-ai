@@ -1727,30 +1727,58 @@
             }
         }
 
-        function toggleStreamFilter() {
+        function isGpuInfoPanelOpen() {
             const panel = document.getElementById('gpuInfoPanel');
-            let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Visibility</div>';
-            // Group streams by GPU
-            const gpuStreams = {};
-            streamIds.forEach(sid => {
-                const parts = sid.split(':');
-                const gpuId = isMultiGPU ? parts[0] : 'all';
-                if (!gpuStreams[gpuId]) gpuStreams[gpuId] = [];
-                gpuStreams[gpuId].push(sid);
+            return !!panel && panel.style.display !== 'none';
+        }
+
+        function streamNumberKey(sid) {
+            if (!isMultiGPU) return String(sid);
+            const text = String(sid);
+            const idx = text.indexOf(':');
+            return idx >= 0 ? text.slice(idx + 1) : text;
+        }
+
+        function streamNumberGroups() {
+            const groups = new Map();
+            for (const sid of streamIds) {
+                const key = streamNumberKey(sid);
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(sid);
+            }
+            return [...groups.entries()].sort((a, b) => {
+                const an = Number(a[0]);
+                const bn = Number(b[0]);
+                if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+                return String(a[0]).localeCompare(String(b[0]));
             });
-            for (const [gpuId, streams] of Object.entries(gpuStreams)) {
-                const label = gpuId === 'all' ? 'Streams' : `GPU ${gpuId}`;
-                html += `<div style="margin-top:4px;color:#7ee787;font-size:10px">${label} ` +
-                    `<a href="#" onclick="setGpuStreams('${gpuId}',true);return false" style="color:#58a6ff;text-decoration:none;margin-left:4px">All</a> ` +
-                    `<a href="#" onclick="setGpuStreams('${gpuId}',false);return false" style="color:#58a6ff;text-decoration:none">None</a></div>`;
-                for (const sid of streams) {
-                    const checked = !hiddenStreams.has(sid) ? 'checked' : '';
-                    const streamLabel = isMultiGPU ? sid.split(':')[1] : sid;
-                    const count = (streamMap[sid] || []).length;
-                    html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStream('${sid}')" style="margin-right:4px">${streamLabel} <span style="color:#484f58">(${count})</span></label>`;
-                }
+        }
+
+        function renderStreamFilterPanel() {
+            const panel = document.getElementById('gpuInfoPanel');
+            let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Number Visibility</div>';
+            const visibleCount = streamIds.length - hiddenStreams.size;
+            html += `<div style="margin-bottom:6px;font-size:11px;color:#8b949e">Visible ${visibleCount}/${streamIds.length} · ` +
+                `<a href="#" onclick="setAllStreams(true);return false" style="color:#58a6ff;text-decoration:none">All</a> ` +
+                `<a href="#" onclick="setAllStreams(false);return false" style="color:#58a6ff;text-decoration:none">None</a> ` +
+                `<a href="#" onclick="toggleSelectedStreamNumber();return false" style="color:#58a6ff;text-decoration:none">Toggle selected number</a> ` +
+                `<a href="#" onclick="invertStreams();return false" style="color:#58a6ff;text-decoration:none">Invert</a></div>`;
+
+            const groups = streamNumberGroups();
+            for (const [streamNum, sids] of groups) {
+                const visible = sids.filter(sid => !hiddenStreams.has(sid)).length;
+                const total = sids.length;
+                const checked = visible === total ? 'checked' : '';
+                const totalKernels = sids.reduce((acc, sid) => acc + ((streamMap[sid] || []).length), 0);
+                html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStreamNumber('${streamNum}')" style="margin-right:4px">S${streamNum} <span style="color:#484f58">(${visible}/${total} GPUs, ${totalKernels} kernels)</span></label>`;
             }
             document.getElementById('gpuInfoContent').innerHTML = html;
+            return panel;
+        }
+
+        function toggleStreamFilter() {
+            const panel = document.getElementById('gpuInfoPanel');
+            renderStreamFilterPanel();
             panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
         }
 
@@ -1758,18 +1786,42 @@
             if (hiddenStreams.has(sid)) hiddenStreams.delete(sid);
             else hiddenStreams.add(sid);
             resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
         }
 
-        function setGpuStreams(gpuId, visible) {
-            streamIds.forEach(sid => {
-                const gid = isMultiGPU ? sid.split(':')[0] : 'all';
-                if (gid === gpuId) {
-                    if (visible) hiddenStreams.delete(sid);
-                    else hiddenStreams.add(sid);
-                }
-            });
-            toggleStreamFilter(); // refresh checkboxes
+        function toggleStreamNumber(streamNum) {
+            const members = streamIds.filter(sid => streamNumberKey(sid) === String(streamNum));
+            if (members.length === 0) return;
+            const allVisible = members.every(sid => !hiddenStreams.has(sid));
+            for (const sid of members) {
+                if (allVisible) hiddenStreams.add(sid);
+                else hiddenStreams.delete(sid);
+            }
             resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function setAllStreams(visible) {
+            if (visible) hiddenStreams.clear();
+            else streamIds.forEach(sid => hiddenStreams.add(sid));
+            resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function invertStreams() {
+            const next = new Set();
+            streamIds.forEach(sid => {
+                if (!hiddenStreams.has(sid)) next.add(sid);
+            });
+            hiddenStreams = next;
+            resize();
+            if (isGpuInfoPanelOpen()) renderStreamFilterPanel();
+        }
+
+        function toggleSelectedStreamNumber() {
+            const sid = streamIds[selectedStreamIdx];
+            if (!sid) return;
+            toggleStreamNumber(streamNumberKey(sid));
         }
 
         function toggleHelp() {
