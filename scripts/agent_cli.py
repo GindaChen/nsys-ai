@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-test_agent.py — CLI to run the Text-to-SQL agent loop against a profile DB (§11.5).
+agent_cli.py — CLI to run the Text-to-SQL agent loop against a profile DB (§11.5).
+
+Moved from repo root `test_agent.py` to avoid pytest collection/import name collisions
+with `tests/test_agent.py`.
 
 Usage:
-  python test_agent.py [--model MODEL] <profile.sqlite|profile.nsys-rep> [question]
-  python test_agent.py -m gemini/gemini-2.5-flash profile.sqlite "What is the first kernel?"
-  echo "What is the first kernel?" | python test_agent.py <profile.sqlite>
+  python scripts/agent_cli.py [--model MODEL] <profile.sqlite|profile.nsys-rep> [question]
+  python scripts/agent_cli.py -m gemini/gemini-2.5-flash profile.sqlite "What is the first kernel?"
+  echo "What is the first kernel?" | python scripts/agent_cli.py <profile.sqlite>
 
 Model selection:
   - CLI: --model / -m  (e.g. -m gemini/gemini-2.5-flash, -m anthropic/claude-sonnet-4-5-20250929)
@@ -14,6 +17,7 @@ Model selection:
 Accepts .sqlite or .nsys-rep (resolved to .sqlite via nsys export when needed).
 Requires: model (via -m/--model or NSYS_AI_MODEL) and one of GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY.
 """
+
 import argparse
 import sys
 import threading
@@ -22,6 +26,7 @@ import threading
 def _resolve_profile(path: str) -> str:
     """Return .sqlite path; convert .nsys-rep via resolve_profile_path when needed."""
     from nsys_ai.profile import resolve_profile_path
+
     return resolve_profile_path(path)
 
 
@@ -42,7 +47,8 @@ def _main():
         epilog="Model: use --model/NSYS_AI_MODEL (e.g. gemini/gemini-2.5-flash). API key: GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY.",
     )
     parser.add_argument(
-        "-m", "--model",
+        "-m",
+        "--model",
         metavar="MODEL",
         default=None,
         help="Model id (e.g. gemini/gemini-2.5-flash). Overrides NSYS_AI_MODEL if set.",
@@ -77,7 +83,10 @@ def _main():
 
     model, _ = _get_model_and_key(args.model)
     if not model:
-        print("No LLM configured. Use --model MODEL or set NSYS_AI_MODEL and the corresponding API key.", file=sys.stderr)
+        print(
+            "No LLM configured. Use --model MODEL or set NSYS_AI_MODEL and the corresponding API key.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -118,3 +127,4 @@ def _main():
 
 if __name__ == "__main__":
     _main()
+

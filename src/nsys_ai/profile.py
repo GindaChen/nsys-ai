@@ -227,21 +227,121 @@ class Profile:
                 streams=streams.get(dev, []))
         return info
 
-    def kernels(self, device: int, trim: tuple[int, int] | None = None) -> list[dict]:
-        """All kernels on a device, optionally trimmed to a time window."""
+    def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
+        """All kernels on a device (or all devices if None), optionally trimmed to a time window."""
         sql = """
             SELECT k.start, k.[end], k.streamId, k.correlationId,
                    s.value as name, d.value as demangled
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
-            JOIN StringIds d ON k.demangledName = d.id
-            WHERE k.deviceId = ?"""
+            JOIN StringIds d ON k.demangledName = d.id"""
         sql = sql.format(kernel_table=self.schema.kernel_table)
-        params: list = [device]
+        params: list = []
+        if device is not None:
+            sql += "\n            WHERE k.deviceId = ?"
+            params.append(device)
+        else:
+            sql += "\n            WHERE 1=1"
         if trim:
             sql += " AND k.start >= ? AND k.[end] <= ?"
             params += list(trim)
         sql += " ORDER BY k.start"
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def aggregate_kernels(
+        self,
+        device: int | None,
+        trim: tuple[int, int] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """
+        Aggregate kernels by (demangled,name) using SQL GROUP BY.
+        If device is None, aggregates across all devices.
+
+        Returns rows sorted by total_ns descending:
+          {name, demangled, total_ns, count, avg_ns, min_ns, max_ns}
+        """
+        sql = """
+            SELECT
+                s.value AS name,
+                d.value AS demangled,
+                SUM(k.[end] - k.start) AS total_ns,
+                COUNT(*) AS count,
+                AVG(k.[end] - k.start) AS avg_ns,
+                MIN(k.[end] - k.start) AS min_ns,
+                MAX(k.[end] - k.start) AS max_ns
+            FROM {kernel_table} k
+            JOIN StringIds s ON k.shortName = s.id
+            JOIN StringIds d ON k.demangledName = d.id"""
+        sql = sql.format(kernel_table=self.schema.kernel_table)
+        params: list = []
+        if device is not None:
+            sql += "\n            WHERE k.deviceId = ?"
+            params.append(device)
+        else:
+            sql += "\n            WHERE 1=1"
+        if trim:
+            sql += " AND k.start >= ? AND k.[end] <= ?"
+            params += list(trim)
+        sql += " GROUP BY s.value, d.value"
+        sql += " ORDER BY total_ns DESC"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def aggregate_nvtx_ranges(
+        self,
+        trim: tuple[int, int] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """
+        Aggregate NVTX ranges by text using SQL GROUP BY.
+
+        Note: This is a *range duration* aggregation (CPU-side wall time of NVTX ranges),
+        not "enclosed GPU kernel time". It's intended as a lightweight v1 diff signal.
+
+        Returns rows sorted by total_ns descending:
+          {text, total_ns, count, avg_ns}
+        """
+        if "NVTX_EVENTS" not in self.schema.tables:
+            return []
+
+        if self._nvtx_has_text_id:
+            sql = """
+                SELECT
+                    COALESCE(n.text, s.value) AS text,
+                    SUM(n.[end] - n.start) AS total_ns,
+                    COUNT(*) AS count,
+                    AVG(n.[end] - n.start) AS avg_ns
+                FROM NVTX_EVENTS n
+                LEFT JOIN StringIds s ON n.textId = s.id
+                WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
+                  AND n.[end] > n.start
+            """
+        else:
+            sql = """
+                SELECT
+                    n.text AS text,
+                    SUM(n.[end] - n.start) AS total_ns,
+                    COUNT(*) AS count,
+                    AVG(n.[end] - n.start) AS avg_ns
+                FROM NVTX_EVENTS n
+                WHERE n.text IS NOT NULL
+                  AND n.[end] > n.start
+            """
+
+        params: list = []
+        if trim:
+            sql += " AND n.start >= ? AND n.[end] <= ?"
+            params += list(trim)
+        sql += " GROUP BY text"
+        sql += " ORDER BY total_ns DESC"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, params)]
 

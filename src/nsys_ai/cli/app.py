@@ -135,6 +135,80 @@ def _cmd_report(args, _profile):
     _cmd_analyze(args, _profile)
 
 
+def _cmd_diff(args, _profile):
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_render import (
+        format_diff_markdown,
+        format_diff_markdown_multi,
+        format_diff_terminal,
+        format_diff_terminal_multi,
+        to_diff_json,
+    )
+
+    trim = _parse_trim(args)
+    with _profile.open(args.before) as before, _profile.open(args.after) as after:
+        if args.gpu is not None:
+            summary = diff_profiles(
+                before,
+                after,
+                gpu=args.gpu,
+                trim=trim,
+                limit=args.limit,
+                sort=args.sort,
+            )
+            if args.format == "terminal":
+                out = format_diff_terminal(summary)
+            elif args.format == "markdown":
+                out = format_diff_markdown(summary)
+            elif args.format == "json":
+                out = to_diff_json(summary)
+            else:
+                raise RuntimeError(f"Unknown format: {args.format}")
+        else:
+            # Global (all GPUs) + per-GPU breakdown.
+            global_summary = diff_profiles(
+                before,
+                after,
+                gpu=None,
+                trim=trim,
+                limit=args.limit,
+                sort=args.sort,
+            )
+            # For per-GPU we keep top-k small to avoid overwhelming output.
+            per_gpu_limit = min(args.limit, 3)
+            devices = sorted(set(before.meta.devices) | set(after.meta.devices))
+            per_gpu = {}
+            for dev in devices:
+                per_gpu[dev] = diff_profiles(
+                    before,
+                    after,
+                    gpu=dev,
+                    trim=trim,
+                    limit=per_gpu_limit,
+                    sort=args.sort,
+                )
+
+            if args.format == "terminal":
+                out = format_diff_terminal_multi(global_summary, per_gpu)
+            elif args.format == "markdown":
+                out = format_diff_markdown_multi(global_summary, per_gpu)
+            elif args.format == "json":
+                # For JSON, keep the contract simple: return only the global summary.
+                out = to_diff_json(global_summary)
+            else:
+                raise RuntimeError(f"Unknown format: {args.format}")
+
+    if args.output:
+        out_dir = os.path.dirname(args.output)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+            f.write(out)
+        print(f"Diff written to {args.output}")
+    else:
+        print(out, end="")
+
+
 def _cmd_summary(args, _profile):
     from nsys_ai.summary import auto_commentary, format_text, gpu_summary
 
@@ -406,7 +480,7 @@ def _build_parser():
     )
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{open,web,timeline-web,chat,ask,report,export,help}",
+        metavar="{open,web,timeline-web,chat,ask,report,diff,export,help}",
     )
 
     # Public commands (simplified)
@@ -448,6 +522,21 @@ def _build_parser():
     _add_gpu_trim(p)
     p.add_argument("-o", "--output", default=None, help="Write markdown report to file")
     p.set_defaults(handler=_cmd_report)
+
+    p = sub.add_parser("diff", help="Compare two profiles (before/after)")
+    p.add_argument("before", help="Path to baseline profile (.sqlite or .nsys-rep)")
+    p.add_argument("after", help="Path to candidate profile (.sqlite or .nsys-rep)")
+    p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
+    p.add_argument("--trim", nargs=2, type=float, required=False, metavar=("START_S", "END_S"),
+                   help="Time window in seconds (apply to both profiles)")
+    p.add_argument("--format", choices=["terminal", "markdown", "json"], default="terminal",
+                   help="Output format (default: terminal)")
+    p.add_argument("-o", "--output", default=None, help="Write rendered output to file")
+    p.add_argument("--limit", type=int, default=15, help="Top regressions/improvements (default: 15)")
+    p.add_argument("--sort", choices=["delta", "percent", "total"], default="delta",
+                   help="Sort mode for top changes (default: delta)")
+    p.add_argument("--no-ai", action="store_true", help="No-op v1 flag (reserved for AI narrative)")
+    p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("export", help="Export Perfetto JSON traces")
     _add_gpu_trim(p, gpu_required=False)

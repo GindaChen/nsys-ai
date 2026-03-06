@@ -284,6 +284,50 @@ The [`docs/sqlite-explorer/`](docs/sqlite-explorer/) contains an **interactive H
 
 ---
 
+## 🔀 Profile Diff
+
+Compare two profiles side-by-side — spot regressions and improvements from a single command.
+
+```bash
+# Compare before and after a code change
+nsys-ai diff before.sqlite after.sqlite
+
+# Focus on a specific GPU
+nsys-ai diff before.sqlite after.sqlite --gpu 0
+
+# Compare a specific time window
+nsys-ai diff before.sqlite after.sqlite --trim 39 42
+
+# Export as markdown (for GitHub issues)
+nsys-ai diff before.sqlite after.sqlite --format markdown -o diff.md
+
+# JSON output for scripting
+nsys-ai diff before.sqlite after.sqlite --format json --no-ai
+```
+
+The report shows:
+
+- **Top regressions** — kernels that got slower (by Δ time, %, or total)
+- **Top improvements** — kernels that got faster
+- **New / removed kernels** — workload changes across runs
+- **NVTX region diff** — wall-time delta for annotated regions
+- **Overlap diff** — compute/NCCL overlap and idle gap changes
+- **Per-GPU breakdown** — when no `--gpu` is specified, shows every device
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--gpu N` | all GPUs | Focus on a specific device |
+| `--trim START END` | — | Compare only this time window (seconds) |
+| `--format` | `terminal` | `terminal` \| `markdown` \| `json` |
+| `-o / --output` | stdout | Write output to file |
+| `--limit N` | 15 | Top regressions/improvements to show |
+| `--sort` | `delta` | `delta` \| `percent` \| `total` |
+| `--no-ai` | — | Skip AI narration (numeric diff only) |
+
+---
+
 ## 🛠️ All Commands
 
 | Command | Description |
@@ -294,6 +338,7 @@ The [`docs/sqlite-explorer/`](docs/sqlite-explorer/) contains an **interactive H
 | `nccl` | NCCL collective breakdown by type |
 | `iters` | Auto-detect training iterations |
 | `tree` | NVTX hierarchy as text |
+| `diff` | **Before/after profile comparison** |
 | `tui` | **Interactive tree TUI** |
 | `timeline` | **Interactive timeline TUI** |
 | `timeline-web` | **Web-based multi-GPU timeline** (progressive rendering) |

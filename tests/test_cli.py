@@ -25,7 +25,7 @@ def test_subcommands():
     result = subprocess.run(
         [sys.executable, "-m", "nsys_ai", "--help"],
         capture_output=True, text=True)
-    for cmd in ['open', 'web', 'timeline-web', 'chat', 'ask', 'report', 'export']:
+    for cmd in ['open', 'web', 'timeline-web', 'chat', 'ask', 'report', 'diff', 'export']:
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"
 
     # Legacy command names should be hidden from top-level help.
@@ -41,6 +41,16 @@ def test_chat_subcommand_help():
         capture_output=True, text=True)
     assert result.returncode == 0
     assert "profile" in result.stdout
+
+
+def test_diff_subcommand_help():
+    """diff subcommand should have --help and accept before/after paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--help"],
+        capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "before" in result.stdout
+    assert "after" in result.stdout
 
 
 def test_legacy_analyze_still_available():
