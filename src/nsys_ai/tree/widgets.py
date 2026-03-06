@@ -228,11 +228,31 @@ class DetailBar(Widget):
 # ---------------------------------------------------------------------------
 
 class BookmarkPanel(Widget):
-    """Right-side overlay listing saved bookmarks."""
+    """Right-side overlay listing saved bookmarks.
+
+    When visible and focused, pressing 1-9 jumps to that bookmark.
+    Press Escape or p again to close.
+    """
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("escape", "close_panel", "Close", show=False),
+        Binding("p", "close_panel", "Close", show=False),
+        Binding("1", "jump_1", "", show=False),
+        Binding("2", "jump_2", "", show=False),
+        Binding("3", "jump_3", "", show=False),
+        Binding("4", "jump_4", "", show=False),
+        Binding("5", "jump_5", "", show=False),
+        Binding("6", "jump_6", "", show=False),
+        Binding("7", "jump_7", "", show=False),
+        Binding("8", "jump_8", "", show=False),
+        Binding("9", "jump_9", "", show=False),
+    ]
 
     DEFAULT_CSS = """
     BookmarkPanel {
-        width: 35;
+        width: 42;
         height: auto;
         dock: right;
         background: $surface;
@@ -245,18 +265,139 @@ class BookmarkPanel(Widget):
     """
 
     def compose(self) -> ComposeResult:
-        yield Static("─ Bookmarks ─", id="bm-header")
+        yield Static("─ Bookmarks (1-9 jump, Esc close) ─", id="bm-header")
         yield Static("", id="bm-list")
 
-    def show_bookmarks(self, bookmarks: list[dict]) -> None:
+    def show_panel(self, bookmarks: list[dict]) -> None:
+        """Show the panel and focus it so 1-9 key jumps work."""
         self.add_class("-visible")
+        self._render_list(bookmarks)
+        self.focus()
+
+    # Backward-compat alias
+    def show_bookmarks(self, bookmarks: list[dict]) -> None:
+        self.show_panel(bookmarks)
+
+    def _render_list(self, bookmarks: list[dict]) -> None:
         if not bookmarks:
-            self.query_one("#bm-list", Static).update("(none saved)")
+            self.query_one("#bm-list", Static).update("(none)  —  press S to save")
             return
-        lines = "\n".join(
-            f" {i+1}. {bm['name'][:28]}" for i, bm in enumerate(bookmarks)
-        )
-        self.query_one("#bm-list", Static).update(lines)
+        lines = []
+        for i, bm in enumerate(bookmarks[:9]):
+            ts = f"  @{_fmt_ns(bm['start_ns'])}" if bm.get("start_ns") else ""
+            lines.append(f"  {i + 1}.  {bm['name'][:28]}{ts}")
+        if len(bookmarks) > 9:
+            lines.append(f"  … +{len(bookmarks) - 9} more")
+        self.query_one("#bm-list", Static).update("\n".join(lines))
 
     def hide_panel(self) -> None:
+        self.remove_class("-visible")
+
+    def _jump(self, n: int) -> None:
+        from .app import NsysTreeApp
+        if isinstance(self.app, NsysTreeApp):
+            self.app.jump_to_bookmark_n(n)
+        self.hide_panel()
+        try:
+            from textual.widgets import DataTable
+            self.app.query_one(DataTable).focus()
+        except Exception:
+            pass
+
+    def action_close_panel(self) -> None:
+        self.hide_panel()
+        try:
+            from textual.widgets import DataTable
+            self.app.query_one(DataTable).focus()
+        except Exception:
+            pass
+
+    def action_jump_1(self) -> None: self._jump(1)
+    def action_jump_2(self) -> None: self._jump(2)
+    def action_jump_3(self) -> None: self._jump(3)
+    def action_jump_4(self) -> None: self._jump(4)
+    def action_jump_5(self) -> None: self._jump(5)
+    def action_jump_6(self) -> None: self._jump(6)
+    def action_jump_7(self) -> None: self._jump(7)
+    def action_jump_8(self) -> None: self._jump(8)
+    def action_jump_9(self) -> None: self._jump(9)
+
+
+# ---------------------------------------------------------------------------
+# BubbleThresholdBar
+# ---------------------------------------------------------------------------
+
+class BubbleThresholdBar(Widget):
+    """Inline threshold input — appears on 'b', hides on Esc/Enter."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    DEFAULT_CSS = """
+    BubbleThresholdBar { height: 3; dock: top; display: none; }
+    BubbleThresholdBar.-visible { display: block; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Input(
+            placeholder="Bubble gap threshold μs (Enter apply, Esc cancel)",
+            id="bubble-threshold-input",
+        )
+
+    def action_cancel(self) -> None:
+        self.hide_bar()
+        try:
+            from textual.widgets import DataTable
+            self.app.query_one(DataTable).focus()
+        except Exception:
+            pass
+
+    def show_bar(self, current_us: float) -> None:
+        self.add_class("-visible")
+        inp = self.query_one(Input)
+        inp.value = str(int(current_us)) if current_us else ""
+        inp.focus()
+
+    def hide_bar(self) -> None:
+        self.remove_class("-visible")
+
+
+# ---------------------------------------------------------------------------
+# TrimBar
+# ---------------------------------------------------------------------------
+
+class TrimBar(Widget):
+    """Inline trim-range input — appears on 'T', hides on Esc/Enter."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    DEFAULT_CSS = """
+    TrimBar { height: 3; dock: top; display: none; }
+    TrimBar.-visible { display: block; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Input(
+            placeholder="Trim: START_S END_S  (e.g. 1.5 3.2, Esc cancel)",
+            id="trim-input",
+        )
+
+    def action_cancel(self) -> None:
+        self.hide_bar()
+        try:
+            from textual.widgets import DataTable
+            self.app.query_one(DataTable).focus()
+        except Exception:
+            pass
+
+    def show_bar(self, trim: tuple[int, int]) -> None:
+        self.add_class("-visible")
+        inp = self.query_one(Input)
+        if trim and trim != (0, 0):
+            s, e = trim[0] / 1e9, trim[1] / 1e9
+            inp.value = f"{s:.3f} {e:.3f}"
+        else:
+            inp.value = ""
+        inp.focus()
+
+    def hide_bar(self) -> None:
         self.remove_class("-visible")

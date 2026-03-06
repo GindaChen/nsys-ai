@@ -40,6 +40,7 @@ def _find_primary_thread(profile, device: int) -> int:
     return tids[0] if tids else 0
 
 
+
 def _get_thread_name(profile, tid: int) -> str:
     """Look up thread name from ThreadNames+StringIds tables. Returns '' if unknown."""
     try:
@@ -63,15 +64,28 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
 
     Each node: {name, start, end, type: "nvtx"|"kernel", stream?, children: [...]}
     """
-    # Load NVTX for this thread only
+    # Load NVTX for this thread only.
+    # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
     with profile._lock:
-        nvtx_rows = profile.conn.execute("""
-            SELECT text, start, [end] FROM NVTX_EVENTS
-            WHERE text IS NOT NULL AND [end] > start
-              AND globalTid = ?
-              AND [end] >= ? AND start <= ?
-            ORDER BY start
-        """, (tid, trim[0] - pad, trim[1])).fetchall()
+        if profile._nvtx_has_text_id:
+            nvtx_rows = profile.conn.execute("""
+                SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
+                FROM NVTX_EVENTS n
+                LEFT JOIN StringIds s ON n.textId = s.id
+                WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
+                  AND n.globalTid = ?
+                  AND n.[end] >= ? AND n.start <= ?
+                ORDER BY n.start
+            """, (tid, trim[0] - pad, trim[1])).fetchall()
+        else:
+            nvtx_rows = profile.conn.execute("""
+                SELECT text, start, [end]
+                FROM NVTX_EVENTS
+                WHERE text IS NOT NULL AND [end] > start
+                  AND globalTid = ?
+                  AND [end] >= ? AND start <= ?
+                ORDER BY start
+            """, (tid, trim[0] - pad, trim[1])).fetchall()
     if not nvtx_rows:
         return []
 

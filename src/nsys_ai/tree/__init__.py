@@ -11,6 +11,8 @@ TUI entry point (lazy-imports Textual to avoid import-time stalls):
 """
 from __future__ import annotations
 
+import sys
+
 # ---------------------------------------------------------------------------
 # Backward-compat re-exports from nvtx_tree.py.
 # Other existing modules do: from .tree import build_nvtx_tree
@@ -46,6 +48,28 @@ def run_tui(
     max_depth: int = -1,
     min_ms: float = 0,
 ) -> None:
-    """Launch the Textual NVTX tree browser (imports Textual lazily)."""
+    """Launch the Textual NVTX tree browser.
+
+    Falls back to a Rich static tree when stdout is not a TTY (e.g. piped).
+    """
+    if not sys.stdout.isatty():
+        _print_static_tree(db_path, device, trim)
+        return
     from .app import run_tui as _run
     _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
+
+
+def _print_static_tree(
+    db_path: str,
+    device: int,
+    trim: tuple[int, int] | None,
+) -> None:
+    """Rich text fallback for piped / non-TTY output."""
+    from .. import profile as _profile
+    from ..nvtx_tree import build_nvtx_tree, format_text as _fmt
+    try:
+        with _profile.open(db_path) as prof:
+            roots = build_nvtx_tree(prof, device, trim)
+            print(_fmt(roots))
+    except Exception as e:
+        print(f"Error loading profile: {e}", file=sys.stderr)

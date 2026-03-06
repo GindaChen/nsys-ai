@@ -106,7 +106,7 @@ class TimelineCanvas(Widget):
         """Return a Strip for each terminal row."""
         width = self.size.width
         if width <= 0:
-            return Strip.blank(width)
+            return Strip.blank(width, Style())
         if not self.streams:
             return Strip([Segment(" " * width, Style())])
 
@@ -156,7 +156,7 @@ class TimelineCanvas(Widget):
             if cur_y > row_y + 100:
                 break
 
-        return Strip.blank(width)
+        return Strip.blank(width, Style())
 
     # ------------------------------------------------------------------
     # Per-row renderers

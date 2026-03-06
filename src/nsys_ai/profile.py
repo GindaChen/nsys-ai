@@ -144,6 +144,18 @@ class Profile:
         self.conn.row_factory = sqlite3.Row
         self.schema = NsightSchema(self.conn)
         self.meta = self._discover()
+        self._nvtx_has_text_id: bool = self._detect_nvtx_text_id()
+
+    def _detect_nvtx_text_id(self) -> bool:
+        """Return True if NVTX_EVENTS uses textId -> StringIds (newer schema)."""
+        if "NVTX_EVENTS" not in self.schema.tables:
+            return False
+        try:
+            cols = [r[1] for r in self.conn.execute(
+                "PRAGMA table_info(NVTX_EVENTS)").fetchall()]
+            return "textId" in cols
+        except Exception:
+            return False
 
     def _discover(self) -> ProfileMeta:
         tables = self.schema.tables
@@ -218,9 +230,11 @@ class Profile:
     def kernels(self, device: int, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device, optionally trimmed to a time window."""
         sql = """
-            SELECT k.start, k.[end], k.streamId, k.correlationId, s.value as name
+            SELECT k.start, k.[end], k.streamId, k.correlationId,
+                   s.value as name, d.value as demangled
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
+            JOIN StringIds d ON k.demangledName = d.id
             WHERE k.deviceId = ?"""
         sql = sql.format(kernel_table=self.schema.kernel_table)
         params: list = [device]
@@ -270,15 +284,36 @@ class Profile:
 
     def nvtx_events(self, threads: set[int],
                     window: tuple[int, int]) -> list:
-        """Load NVTX push/pop events for given threads in a time window."""
+        """Load NVTX push/pop events for given threads in a time window.
+
+        Handles both schema variants:
+          - Legacy: NVTX_EVENTS.text holds the annotation string inline.
+          - Newer:  NVTX_EVENTS.textId references StringIds; text may be NULL.
+        """
+        if "NVTX_EVENTS" not in self.schema.tables or not threads:
+            return []
+        tids = ",".join(map(str, threads))
         with self._lock:
-            return self.conn.execute("""
-                SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
-                WHERE text IS NOT NULL AND [end] > start
-                  AND start >= ? AND start <= ?
-                  AND globalTid IN ({})
-                ORDER BY start
-            """.format(",".join(map(str, threads))), window).fetchall()
+            if self._nvtx_has_text_id:
+                return self.conn.execute(f"""
+                    SELECT COALESCE(n.text, s.value) AS text,
+                           n.globalTid, n.start, n.[end]
+                    FROM NVTX_EVENTS n
+                    LEFT JOIN StringIds s ON n.textId = s.id
+                    WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
+                      AND n.[end] > n.start
+                      AND n.start >= ? AND n.start <= ?
+                      AND n.globalTid IN ({tids})
+                    ORDER BY n.start
+                """, window).fetchall()
+            else:
+                return self.conn.execute(f"""
+                    SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
+                    WHERE text IS NOT NULL AND [end] > start
+                      AND start >= ? AND start <= ?
+                      AND globalTid IN ({tids})
+                    ORDER BY start
+                """, window).fetchall()
 
     def close(self):
         self.conn.close()

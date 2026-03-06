@@ -30,6 +30,21 @@ from textual.widgets import DataTable, Footer, Header, Input
 from .. import tui_actions
 from ..tui_models import TreeNode
 from .chat import ChatPanel
+
+
+def _kernel_starts_in_json(json_roots: list[dict]) -> set[int]:
+    """Collect start_ns of every kernel node in the JSON tree."""
+    starts: set[int] = set()
+
+    def _walk(nodes: list[dict]) -> None:
+        for n in nodes:
+            if n.get("type") == "kernel":
+                starts.add(n["start_ns"])
+            if n.get("children"):
+                _walk(n["children"])
+
+    _walk(json_roots)
+    return starts
 from .logic import (
     build_nodes,
     compute_summary,
@@ -39,7 +54,7 @@ from .logic import (
     visible_rows_linear,
     visible_rows_tree,
 )
-from .widgets import BookmarkPanel, DetailBar, FilterBar, TreeTable
+from .widgets import BookmarkPanel, BubbleThresholdBar, DetailBar, FilterBar, TreeTable, TrimBar
 
 
 class NsysTreeApp(App):
@@ -90,6 +105,9 @@ class NsysTreeApp(App):
         Binding("5", "depth_5", "Depth 5", show=False),
         Binding("plus,equals_sign", "min_dur_up", "Min dur+", show=False),
         Binding("minus,underscore", "min_dur_down", "Min dur-", show=False),
+        Binding("question_mark", "toggle_help", "Help", show=False),
+        Binding("b", "open_bubble_threshold", "Bubble μs", show=False),
+        Binding("T", "open_trim", "Trim range", show=False),
     ]
 
     # -------------------------------------------------------------------------
@@ -152,6 +170,8 @@ class NsysTreeApp(App):
         with Horizontal(id="main-body"):
             with Vertical(id="tree-col"):
                 yield FilterBar(id="filter-bar")
+                yield BubbleThresholdBar(id="bubble-threshold-bar")
+                yield TrimBar(id="trim-bar")
                 yield TreeTable(id="tree-table")
             yield BookmarkPanel(id="bookmark-panel")
         yield DetailBar(id="detail-bar")
@@ -185,7 +205,43 @@ class NsysTreeApp(App):
         try:
             with _profile.open(self._db_path) as prof:
                 roots = build_nvtx_tree(prof, self._device, self._trim)
-                self._json_roots = to_json(roots)
+                json_roots = to_json(roots)
+
+                # Add kernels not under any NVTX span as "(ungrouped)" root node
+                nvtx_starts = _kernel_starts_in_json(json_roots)
+                raw_kernels = prof.kernels(self._device, self._trim)
+                ungrouped_raw = [k for k in raw_kernels if k["start"] not in nvtx_starts]
+                if ungrouped_raw:
+                    children = []
+                    for k in ungrouped_raw:
+                        dur = (k["end"] - k["start"]) / 1e6
+                        children.append({
+                            "name": k["name"],
+                            "type": "kernel",
+                            "duration_ms": round(dur, 3),
+                            "heat": 0.0,
+                            "relative_pct": 100.0,
+                            "start_ns": k["start"],
+                            "end_ns": k["end"],
+                            "stream": str(k["streamId"]),
+                            "demangled": k.get("demangled", ""),
+                        })
+                    max_dur = max((c["duration_ms"] for c in children), default=1) or 1
+                    for c in children:
+                        c["heat"] = round(c["duration_ms"] / max_dur, 3)
+                    json_roots.append({
+                        "name": "(ungrouped)",
+                        "type": "nvtx",
+                        "duration_ms": round(sum(c["duration_ms"] for c in children), 3),
+                        "heat": 0.0,
+                        "relative_pct": 100.0,
+                        "start_ns": min(c["start_ns"] for c in children),
+                        "end_ns": max(c["end_ns"] for c in children),
+                        "path": "(ungrouped)",
+                        "children": children,
+                    })
+
+                self._json_roots = json_roots
         except Exception as e:
             self.notify(f"Failed to load profile: {e}", severity="error")
             return
@@ -270,6 +326,42 @@ class NsysTreeApp(App):
         self.filter_text = event.value
         self.query_one("#filter-bar", FilterBar).hide_bar()
         self._refresh_table()
+        self.query_one(DataTable).focus()
+
+    @on(Input.Submitted, "#bubble-threshold-input")
+    def _bubble_threshold_submitted(self, event: Input.Submitted) -> None:
+        try:
+            val = max(0.0, float(event.value)) if event.value.strip() else self.bubble_threshold_us
+            self.bubble_threshold_us = val
+            if self.show_bubbles:
+                self._refresh_table()
+            self.notify(f"Bubble threshold: {int(val)}μs", timeout=2)
+        except ValueError:
+            self.notify("Invalid number", severity="warning", timeout=2)
+        self.query_one("#bubble-threshold-bar", BubbleThresholdBar).hide_bar()
+        self.query_one(DataTable).focus()
+
+    @on(Input.Submitted, "#trim-input")
+    def _trim_submitted(self, event: Input.Submitted) -> None:
+        try:
+            parts = event.value.strip().split()
+            if len(parts) == 2:
+                s_ns = int(float(parts[0]) * 1e9)
+                e_ns = int(float(parts[1]) * 1e9)
+                if e_ns > s_ns:
+                    self._trim = (s_ns, e_ns)
+                    if self._db_path:
+                        self._load_from_db()
+                    self._update_title()
+                    self.notify(f"Trim → {parts[0]}s – {parts[1]}s", timeout=2)
+                else:
+                    self.notify("END must be > START", severity="warning", timeout=2)
+            else:
+                self.notify("Format: START_S END_S  (e.g. 1.5 3.2)", severity="warning", timeout=2)
+        except (ValueError, IndexError):
+            self.notify("Invalid trim values", severity="warning", timeout=2)
+        self.query_one("#trim-bar", TrimBar).hide_bar()
+        self.query_one(DataTable).focus()
 
     @on(Input.Changed, "#filter-input")
     def _filter_changed(self, event: Input.Changed) -> None:
@@ -288,6 +380,15 @@ class NsysTreeApp(App):
     def action_toggle_demangled(self) -> None:
         self.show_demangled = not self.show_demangled
         self._refresh_table()
+
+    def action_toggle_help(self) -> None:
+        self.notify(
+            "↑↓/kj:move  ←→/hl:parent/expand  e/c:node  E/C:all  "
+            "/:filter  F:live  n:clear  d:demangled  B:bubbles  b:bubble-μs  "
+            "p:bookmarks  S:save-bm  v:view  0-5:depth  +/-:min-dur  "
+            "T:trim  R:reload  A:chat  ?:help  q:quit",
+            timeout=8,
+        )
 
     def action_toggle_timestamps(self) -> None:
         self.notify("Timestamps: use DetailBar", timeout=2)
@@ -411,6 +512,14 @@ class NsysTreeApp(App):
         self._refresh_table()
         self.notify(f"Min dur: {int(prev)}μs" if prev else "Min dur: off", timeout=2)
 
+    def action_open_bubble_threshold(self) -> None:
+        """Open inline bubble threshold input ('b' key)."""
+        self.query_one("#bubble-threshold-bar", BubbleThresholdBar).show_bar(self.bubble_threshold_us)
+
+    def action_open_trim(self) -> None:
+        """Open trim range input ('T' key — matches original tui.py)."""
+        self.query_one("#trim-bar", TrimBar).show_bar(self._trim)
+
     # Actions — bubbles
     def action_toggle_bubbles(self) -> None:
         """Toggle bubble gap detection display ('B' key — matches original tui.py)."""
@@ -431,7 +540,7 @@ class NsysTreeApp(App):
         if "-visible" in bp.classes:
             bp.hide_panel()
         else:
-            bp.show_bookmarks(self._bookmarks)
+            bp.show_panel(self._bookmarks)
 
     def action_save_bookmark(self) -> None:
         node = self._current_node()
@@ -482,6 +591,35 @@ class NsysTreeApp(App):
     # -------------------------------------------------------------------------
     # Public API (for tui_actions dispatcher)
     # -------------------------------------------------------------------------
+    def jump_to_bookmark_n(self, n: int) -> None:
+        """Jump to bookmark by 1-based index (called by BookmarkPanel)."""
+        if not (1 <= n <= len(self._bookmarks)):
+            self.notify(f"No bookmark {n}", severity="warning", timeout=2)
+            return
+        bm = self._bookmarks[n - 1]
+        target_ns = bm.get("start_ns", 0)
+        # Exact match first, then nearest start_ns
+        target = next(
+            (nd for nd in self._all_nodes if nd.start_ns == target_ns),
+            None,
+        )
+        if target is None:
+            candidates = [nd for nd in self._all_nodes if nd.start_ns is not None]
+            if candidates:
+                target = min(candidates, key=lambda nd: abs(nd.start_ns - target_ns))
+        if target is None:
+            self.notify("Bookmark not found", severity="warning", timeout=2)
+            return
+        self.action_expand_all()
+        self._visible = self._get_visible()
+        idx = node_index_in_visible(self._visible, target)
+        if idx is None:
+            self.notify("Bookmark node not visible", severity="warning", timeout=2)
+            return
+        self._refresh_table()
+        self.query_one(DataTable).move_cursor(row=idx)
+        self.notify(f"📌 {bm['name']}", timeout=2)
+
     def scroll_to_kernel(self, target_name: str, occurrence_index: int = 1) -> None:
         """Navigate to the Nth kernel with the given name (1-indexed)."""
         self.action_expand_all()

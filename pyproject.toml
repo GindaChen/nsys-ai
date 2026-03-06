@@ -11,13 +11,14 @@ license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "rich>=13.0.0",
+    "textual>=8.0.0",
 ]
 authors = [
     {name = "GindaChen"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Environment :: Console :: Curses",
+    "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -31,8 +32,8 @@ nsys-ai = "nsys_ai.__main__:main"
 [project.optional-dependencies]
 agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
 ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
-tui = ["textual>=8.0.0"]                        # Textual TUI (tree + timeline + chat)
-chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (requires tui)
+tui = ["textual>=8.0.0"]                        # backward compat; textual is now core (tree + timeline)
+chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (tui extra kept for compat)
 dev = ["pytest>=7.0", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.23"]
 all = ["nsys-ai[agent,tui,chat]"]
 
@@ -57,6 +58,9 @@ ignore = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:pytest_textual_snapshot",
+]
 
 [tool.bandit]
 # B110: try_except_pass; B608: param to run(); B404/B603: suppressed at call site in profile.py via # nosec

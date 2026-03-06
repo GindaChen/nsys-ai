@@ -97,6 +97,8 @@ class NsysTimelineApp(App):
         Binding("right", "pan_right", "→", show=False),
         Binding("shift+left", "page_left", "⇐", show=False),
         Binding("shift+right", "page_right", "⇒", show=False),
+        Binding("pageup", "page_left", "⇐", show=False),
+        Binding("pagedown", "page_right", "⇒", show=False),
         Binding("up,k", "prev_stream", "↑ stream", show=False),
         Binding("down,j", "next_stream", "↓ stream", show=False),
         Binding("tab", "next_kernel", "Next kernel", priority=True),
@@ -264,9 +266,32 @@ class NsysTimelineApp(App):
                         devices = prof.meta.devices
                         self._devices = devices
                 for dev in devices:
+                    # All kernels from GPU table (not only those under NVTX)
+                    raw_kernels = prof.kernels(dev, self._trim)
+                    kernel_events = [
+                        KernelEvent({
+                            'name': k['name'],
+                            'demangled': k.get('demangled', ''),
+                            'start_ns': k['start'],
+                            'end_ns': k['end'],
+                            'duration_ms': (k['end'] - k['start']) / 1e6,
+                            'stream': str(k['streamId']),
+                        }) for k in raw_kernels
+                    ]
+                    # NVTX spans from tree for overlay rows
                     roots = build_nvtx_tree(prof, dev, self._trim)
                     json_roots = to_json(roots)
-                    self._load_from_json(json_roots, gpu_id=dev)
+                    _, nvtx_spans = extract_events(json_roots)
+                    self._gpu_kernels[dev] = kernel_events
+                    streams = collect_streams(kernel_events)
+                    self._gpu_streams[dev] = streams if streams else ["?"]
+                    self._gpu_stream_kernels[dev] = build_stream_kernels(
+                        kernel_events, self._gpu_streams[dev]
+                    )
+                    self._gpu_nvtx_spans[dev] = nvtx_spans
+                    self._gpu_nvtx_max_depth[dev] = (
+                        max((s.depth for s in nvtx_spans), default=-1) + 1
+                    )
         except Exception as e:
             self.notify(f"Failed to load profile: {e}", severity="error")
             return

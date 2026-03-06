@@ -11,6 +11,10 @@ Public surface is focused on web UI and AI workflows:
 - export
 
 Legacy commands remain available as hidden aliases for compatibility.
+
+Zero-arg behavior: running ``nsys-ai`` with no arguments shows help (not an
+interactive launcher). ``nsys-ai <profile.sqlite>`` still opens the timeline
+web UI. This is an intentional product choice after the curses→Textual cleanup.
 """
 import argparse
 import os
@@ -37,6 +41,54 @@ def _parse_trim(args):
     if getattr(args, "trim", None):
         return (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Help (moved from main_page; no curses)
+# ---------------------------------------------------------------------------
+
+_HELP_BANNER = r"""
+  ┌─────────────────────────────────────────────┐
+  │              🔬  nsys-ai                     │
+  │   AI-powered GPU profile analysis            │
+  │                                              │
+  │   Navigate timelines · Diagnose bottlenecks  │
+  │   Explore NVTX trees · Run analysis skills   │
+  └─────────────────────────────────────────────┘
+"""
+
+
+def show_help():
+    """Print getting-started guide and command reference."""
+    print(_HELP_BANNER)
+    print("  Commands:")
+    print("  ─────────────────────────────────────────────────────────")
+    print("    nsys-ai                       Show this help")
+    print("    nsys-ai help                  This help text")
+    print()
+    print("  Analysis:")
+    print("    nsys-ai info    <profile>                Profile metadata & GPUs")
+    print("    nsys-ai summary <profile> [--gpu N]      Kernel stats & commentary")
+    print("    nsys-ai timeline <profile> --gpu N --trim S E   Timeline TUI")
+    print("    nsys-ai tui     <profile> --gpu N --trim S E   Tree TUI")
+    print()
+    print("  Skills & Agent:")
+    print("    nsys-ai skill list                       List analysis skills")
+    print("    nsys-ai skill run <name> <profile>       Run a specific skill")
+    print("    nsys-ai agent analyze <profile>           Full auto-analysis")
+    print("    nsys-ai agent ask <profile> \"question\"   Ask about a profile")
+    print()
+    print("  Export:")
+    print("    nsys-ai export     <profile> -o DIR       Perfetto JSON traces")
+    print("    nsys-ai export-csv <profile> --gpu N       CSV export")
+    print("    nsys-ai viewer     <profile> --gpu N       HTML report")
+    print("    nsys-ai web        <profile> --gpu N       Browser UI")
+    print()
+    print("  Getting Started:")
+    print("    1. Profile:  nsys profile -o report python train.py")
+    print("    2. Export:   nsys export --type sqlite report.nsys-rep")
+    print("    3. Explore:  nsys-ai open <profile.sqlite>")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +276,7 @@ def _cmd_web(args, _profile):
 
 
 def _cmd_open(args, _profile):
-    from nsys_ai.tui import run_tui
+    from nsys_ai.tree import run_tui
     from nsys_ai.web import serve, serve_perfetto
 
     with _profile.open(args.profile) as prof:
@@ -538,6 +590,8 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
+        # Zero-arg / unknown: if first arg looks like a profile path, open timeline-web;
+        # otherwise show help (intentional: no interactive launcher; see PR/docs for rationale).
         remaining = sys.argv[1:]
         if remaining and not remaining[0].startswith("-"):
             candidate = remaining[0]
@@ -551,14 +605,10 @@ def main():
                     serve_timeline(prof, devices, None, port=8144, open_browser=True)
                 return
 
-        from nsys_ai.main_page import run_main_page
-
-        run_main_page()
+        show_help()
         return
 
     if args.command == "help":
-        from nsys_ai.main_page import show_help
-
         show_help()
         return
 
