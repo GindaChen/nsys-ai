@@ -38,6 +38,11 @@ from .ai.backend.profile_db_tool import (
     open_profile_readonly,
     query_profile_db,
 )
+from .diff_tools import (
+    TOOLS_DIFF_OPENAI,
+    build_phase_c_system_prompt,
+    run_diff_tool,
+)
 
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
@@ -52,6 +57,12 @@ MAX_AGENT_MESSAGES = 100
 PROMPT_TOKEN_WARNING_THRESHOLD = 30_000
 # Consecutive DB errors before injecting a break-cycle hint.
 MAX_CONSECUTIVE_DB_ERRORS = 2
+# Cap assistant content stored in history to prevent thinking-token leakage
+# (Gemini 2.5 Pro streams thinking tokens as delta.content; if not capped they
+# accumulate in api_messages and cause ContextWindowExceededError on turn N+1).
+MAX_ASSISTANT_CONTENT_CHARS = 8_000
+# thinking budget_tokens for Gemini 2.5 thinking models (limits per-turn thinking).
+GEMINI_THINKING_BUDGET = 8_000
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +371,8 @@ def stream_agent_loop(
     ui_context: dict,
     tools: list | None = None,
     profile_path: str | None = None,
+    diff_context=None,
+    diff_paths: tuple[str, str] | None = None,
     max_turns: int = 5,
 ):
     """UI-agnostic streaming agent loop — yields event dicts.
@@ -371,6 +384,8 @@ def stream_agent_loop(
     * ``{"type": "action", "action": dict}``   — navigation/zoom action
     * ``{"type": "done",   "usage": dict}``    — final event with token usage
 
+    When *diff_context* is set, uses Phase C diff tools and no single-profile DB.
+    *diff_paths* must be (before_path, after_path) for the system prompt.
     The profile connection (when *profile_path* is given) is opened in this
     generator and closed in the ``finally`` block.  Call this from a background
     thread (e.g. Textual ``@work(thread=True)``) so the main thread's UI
@@ -383,11 +398,16 @@ def stream_agent_loop(
         yield {"type": "done", "usage": {}}
         return
 
-    tools = tools if tools is not None else _tools_openai()
+    use_diff = diff_context is not None and diff_paths is not None
+    tools = tools if tools is not None else (TOOLS_DIFF_OPENAI if use_diff else _tools_openai())
     conn = None
     query_runner = None
 
-    if profile_path:
+    if use_diff:
+        system_prompt = build_phase_c_system_prompt(
+            diff_context, diff_paths[0], diff_paths[1], snapshot=None
+        )
+    elif profile_path:
         try:
             from .profile import resolve_profile_path
             sqlite_path = resolve_profile_path(profile_path)
@@ -406,7 +426,8 @@ def stream_agent_loop(
     else:
         schema_str = None
 
-    system_prompt = _build_system_prompt(ui_context, profile_schema=schema_str)
+    if not use_diff:
+        system_prompt = _build_system_prompt(ui_context, profile_schema=schema_str)
     api_messages = [{"role": "system", "content": system_prompt}]
     for m in messages:
         if m.get("role") and m.get("content") is not None:
@@ -423,6 +444,10 @@ def stream_agent_loop(
             if len(api_messages) > MAX_AGENT_MESSAGES:
                 api_messages[:] = [api_messages[0]] + api_messages[-(MAX_AGENT_MESSAGES - 1):]
 
+            extra_kwargs: dict = {}
+            if "gemini-2.5" in model:
+                extra_kwargs["thinking"] = {"type": "enabled", "budget_tokens": GEMINI_THINKING_BUDGET}
+
             try:
                 stream = litellm.completion(
                     model=model,
@@ -430,6 +455,7 @@ def stream_agent_loop(
                     tools=tools,
                     tool_choice="auto",
                     stream=True,
+                    **extra_kwargs,
                 )
             except Exception as e:
                 yield {"type": "text", "content": f"LLM error: {_friendly_error(model, e)}"}
@@ -439,60 +465,75 @@ def stream_agent_loop(
             content_parts: list[str] = []
             tool_calls_by_index: dict[int, dict] = {}
 
-            for chunk in stream:
-                choice = chunk.choices[0] if chunk.choices else None
-                if not choice:
-                    continue
-                delta = (
-                    getattr(choice, "delta", None)
-                    or (choice.get("delta") if isinstance(choice, dict) else None)
-                )
-                if not delta:
-                    continue
-                c = (
-                    getattr(delta, "content", None)
-                    if not isinstance(delta, dict)
-                    else delta.get("content")
-                )
-                if c:
-                    content_parts.append(c)
-                    yield {"type": "text", "content": c}
-
-                tcs = (
-                    getattr(delta, "tool_calls", None)
-                    if not isinstance(delta, dict)
-                    else delta.get("tool_calls")
-                ) or []
-                for tc in tcs:
-                    idx = getattr(tc, "index", 0) if not isinstance(tc, dict) else tc.get("index", 0)
-                    tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
-                    fn = (
-                        getattr(tc, "function", None)
-                        if not isinstance(tc, dict)
-                        else tc.get("function") or {}
+            try:
+                for chunk in stream:
+                    choice = chunk.choices[0] if chunk.choices else None
+                    if not choice:
+                        continue
+                    delta = (
+                        getattr(choice, "delta", None)
+                        or (choice.get("delta") if isinstance(choice, dict) else None)
                     )
-                    if isinstance(fn, dict):
-                        name, args = fn.get("name"), fn.get("arguments") or ""
-                    else:
-                        name, args = getattr(fn, "name", None), getattr(fn, "arguments", None) or ""
-                    entry = tool_calls_by_index.setdefault(idx, {"id": None, "name": None, "arguments": ""})
-                    if tc_id:
-                        entry["id"] = tc_id
-                    if name:
-                        entry["name"] = name
-                    entry["arguments"] += args
+                    if not delta:
+                        continue
+                    c = (
+                        getattr(delta, "content", None)
+                        if not isinstance(delta, dict)
+                        else delta.get("content")
+                    )
+                    if c:
+                        content_parts.append(c)
+                        yield {"type": "text", "content": c}
 
-                u = (
-                    getattr(chunk, "usage", None)
-                    or (chunk.get("usage") if isinstance(chunk, dict) else None)
-                )
-                if u:
-                    usage = u if isinstance(u, dict) else {
-                        "prompt_tokens": getattr(u, "prompt_tokens", 0),
-                        "completion_tokens": getattr(u, "completion_tokens", 0),
-                    }
+                    tcs = (
+                        getattr(delta, "tool_calls", None)
+                        if not isinstance(delta, dict)
+                        else delta.get("tool_calls")
+                    ) or []
+                    for tc in tcs:
+                        idx = getattr(tc, "index", 0) if not isinstance(tc, dict) else tc.get("index", 0)
+                        tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+                        fn = (
+                            getattr(tc, "function", None)
+                            if not isinstance(tc, dict)
+                            else tc.get("function") or {}
+                        )
+                        if isinstance(fn, dict):
+                            name, args = fn.get("name"), fn.get("arguments") or ""
+                        else:
+                            name, args = getattr(fn, "name", None), getattr(fn, "arguments", None) or ""
+                        entry = tool_calls_by_index.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                        if tc_id:
+                            entry["id"] = tc_id
+                        if name:
+                            entry["name"] = name
+                        entry["arguments"] += args
+
+                    u = (
+                        getattr(chunk, "usage", None)
+                        or (chunk.get("usage") if isinstance(chunk, dict) else None)
+                    )
+                    if u:
+                        usage = u if isinstance(u, dict) else {
+                            "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                            "completion_tokens": getattr(u, "completion_tokens", 0),
+                        }
+            except litellm.exceptions.ContextWindowExceededError:
+                yield {
+                    "type": "text",
+                    "content": (
+                        "\n\n⚠ Context window exceeded — the conversation history grew too large "
+                        "(likely due to accumulated thinking tokens). "
+                        "Please start a new chat session to continue."
+                    ),
+                }
+                yield {"type": "done", "usage": usage}
+                return
 
             full_content = "".join(content_parts).strip() if content_parts else ""
+            # Cap stored content to prevent thinking-token leakage into future turns.
+            if len(full_content) > MAX_ASSISTANT_CONTENT_CHARS:
+                full_content = full_content[:MAX_ASSISTANT_CONTENT_CHARS]
             tc_list = [
                 (t.get("id") or f"call_{idx}", t.get("name"), t.get("arguments") or "{}")
                 for idx, t in sorted(tool_calls_by_index.items())
@@ -523,6 +564,20 @@ def stream_agent_loop(
             has_external = False
             for tid, name, args_str in tc_list:
                 if not name or not tid:
+                    continue
+                if use_diff:
+                    yield {"type": "system", "content": f"Running {name}..."}
+                    try:
+                        args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    result = run_diff_tool(diff_context, name, args)
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": json.dumps(result),
+                    })
                     continue
                 if name == "query_profile_db" and query_runner is not None:
                     yield {"type": "system", "content": "Running DB query..."}

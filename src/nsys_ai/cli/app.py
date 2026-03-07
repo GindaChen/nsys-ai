@@ -144,10 +144,68 @@ def _cmd_diff(args, _profile):
         format_diff_terminal_multi,
         to_diff_json,
     )
+    from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
+
+    no_ai = getattr(args, "no_ai", False)
+
+    def _narrative_for(summary):
+        if args.format not in ("terminal", "markdown"):
+            return None
+        from nsys_ai.ai.diff_narrative import DiffNarrative, build_executive_summary, generate_diff_narrative
+        if no_ai:
+            return DiffNarrative(
+                executive_summary=build_executive_summary(summary),
+                ai_narrative=None,
+                model=None,
+                warning=None,
+            )
+        return generate_diff_narrative(summary)
+
+    if getattr(args, "chat", False):
+        _run_diff_chat(args, _profile)
+        return
 
     trim = _parse_trim(args)
+    trim_before = None
+    trim_after = None
+    if getattr(args, "iteration", None) is not None:
+        with _profile.open(args.before) as before, _profile.open(args.after) as after:
+            ctx = DiffContext(before=before, after=after, trim=trim, marker=getattr(args, "marker", "sample_0"))
+            bounds = get_iteration_boundaries(ctx, marker=getattr(args, "marker", "sample_0"), target_gpu=args.gpu)
+            bnds = bounds["boundaries"]
+            idx = args.iteration
+            if idx >= len(bnds):
+                print(f"Error: iteration {idx} out of range (0..{len(bnds) - 1})", file=sys.stderr)
+                return
+            bnd = bnds[idx]
+            if bnd["before"]["start_ns"] is not None and bnd["before"]["end_ns"] is not None:
+                trim_before = (bnd["before"]["start_ns"], bnd["before"]["end_ns"])
+            if bnd["after"]["start_ns"] is not None and bnd["after"]["end_ns"] is not None:
+                trim_after = (bnd["after"]["start_ns"], bnd["after"]["end_ns"])
+            if not trim_before or not trim_after:
+                print("Error: no time window for this iteration in one or both profiles", file=sys.stderr)
+                return
+
     with _profile.open(args.before) as before, _profile.open(args.after) as after:
-        if args.gpu is not None:
+        if trim_before is not None and trim_after is not None:
+            summary = diff_profiles(
+                before, after,
+                gpu=args.gpu,
+                trim_before=trim_before,
+                trim_after=trim_after,
+                limit=args.limit,
+                sort=args.sort,
+            )
+            narrative = _narrative_for(summary)
+            if args.format == "terminal":
+                out = format_diff_terminal(summary, narrative=narrative)
+            elif args.format == "markdown":
+                out = format_diff_markdown(summary, narrative=narrative)
+            elif args.format == "json":
+                out = to_diff_json(summary)
+            else:
+                raise RuntimeError(f"Unknown format: {args.format}")
+        elif args.gpu is not None:
             summary = diff_profiles(
                 before,
                 after,
@@ -156,10 +214,11 @@ def _cmd_diff(args, _profile):
                 limit=args.limit,
                 sort=args.sort,
             )
+            narrative = _narrative_for(summary)
             if args.format == "terminal":
-                out = format_diff_terminal(summary)
+                out = format_diff_terminal(summary, narrative=narrative)
             elif args.format == "markdown":
-                out = format_diff_markdown(summary)
+                out = format_diff_markdown(summary, narrative=narrative)
             elif args.format == "json":
                 out = to_diff_json(summary)
             else:
@@ -188,10 +247,11 @@ def _cmd_diff(args, _profile):
                     sort=args.sort,
                 )
 
+            narrative = _narrative_for(global_summary)
             if args.format == "terminal":
-                out = format_diff_terminal_multi(global_summary, per_gpu)
+                out = format_diff_terminal_multi(global_summary, per_gpu, narrative=narrative)
             elif args.format == "markdown":
-                out = format_diff_markdown_multi(global_summary, per_gpu)
+                out = format_diff_markdown_multi(global_summary, per_gpu, narrative=narrative)
             elif args.format == "json":
                 # For JSON, keep the contract simple: return only the global summary.
                 out = to_diff_json(global_summary)
@@ -207,6 +267,60 @@ def _cmd_diff(args, _profile):
         print(f"Diff written to {args.output}")
     else:
         print(out, end="")
+
+
+def _run_diff_chat(args, _profile):
+    """Interactive diff chat: Phase C tools + cached ProfileDiffSummary."""
+    from nsys_ai.chat import _get_model_and_key, stream_agent_loop
+    from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
+
+    model, _ = _get_model_and_key()
+    if not model:
+        print("Error: No LLM model configured. Set API key (e.g. OPENAI_API_KEY) and retry.", file=sys.stderr)
+        return
+
+    trim = _parse_trim(args)
+    marker = getattr(args, "marker", "sample_0") or "sample_0"
+    gpu = getattr(args, "gpu", None)
+    target_gpu = 0 if gpu is None else gpu
+
+    with _profile.open(args.before) as before, _profile.open(args.after) as after:
+        ctx = DiffContext(before=before, after=after, trim=trim, marker=marker)
+        ctx.ensure_summary(target_gpu)
+
+        bounds = get_iteration_boundaries(ctx, marker=marker, target_gpu=target_gpu)
+        n_iters = len(bounds.get("boundaries") or [])
+        print(f"Diff chat: {args.before} vs {args.after}")
+        print(f"Iteration marker: {marker}  |  Boundaries: {n_iters} iteration(s)")
+        print("Ask about regressions, regions, or iteration diffs. Empty line to exit.")
+        print()
+
+        while True:
+            try:
+                line = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not line:
+                break
+            messages = [{"role": "user", "content": line}]
+            text_parts = []
+            for ev in stream_agent_loop(
+                model=model,
+                messages=messages,
+                ui_context={},
+                profile_path=None,
+                diff_context=ctx,
+                diff_paths=(args.before, args.after),
+                max_turns=5,
+            ):
+                if ev.get("type") == "text" and ev.get("content"):
+                    text_parts.append(ev["content"])
+                    print(ev["content"], end="", flush=True)
+                elif ev.get("type") == "system" and ev.get("content"):
+                    print(f"\n[{ev['content']}]", flush=True)
+            if text_parts:
+                print()
+            print()
 
 
 def _cmd_diff_web(args, _profile):
@@ -544,6 +658,10 @@ def _build_parser():
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
     p.add_argument("--trim", nargs=2, type=float, required=False, metavar=("START_S", "END_S"),
                    help="Time window in seconds (apply to both profiles)")
+    p.add_argument("--iteration", type=int, default=None, metavar="N",
+                   help="Compare only the N-th iteration (0-based; uses NVTX marker)")
+    p.add_argument("--marker", type=str, default="sample_0",
+                   help="NVTX marker for iteration boundaries (default: sample_0)")
     p.add_argument("--format", choices=["terminal", "markdown", "json"], default="terminal",
                    help="Output format (default: terminal)")
     p.add_argument("-o", "--output", default=None, help="Write rendered output to file")
@@ -551,6 +669,7 @@ def _build_parser():
     p.add_argument("--sort", choices=["delta", "percent", "total"], default="delta",
                    help="Sort mode for top changes (default: delta)")
     p.add_argument("--no-ai", action="store_true", help="No-op v1 flag (reserved for AI narrative)")
+    p.add_argument("--chat", action="store_true", help="Start interactive AI chat for diff analysis (Phase C tools)")
     p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("diff-web", help="Serve web diff viewer for two profiles")

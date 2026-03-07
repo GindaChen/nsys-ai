@@ -253,13 +253,18 @@ def diff_profiles(
     after_prof: Profile,
     *,
     gpu: int | None,
-    trim: tuple[int, int] | None,
+    trim: tuple[int, int] | None = None,
+    trim_before: tuple[int, int] | None = None,
+    trim_after: tuple[int, int] | None = None,
     limit: int = 15,
     sort: str = "delta",
     nvtx_limit: int | None = 200,
 ) -> ProfileDiffSummary:
-    before = build_profile_summary(before_prof, gpu, trim, nvtx_limit=nvtx_limit)
-    after = build_profile_summary(after_prof, gpu, trim, nvtx_limit=nvtx_limit)
+    """Compare two profiles. Use trim for same window, or trim_before/trim_after for iteration diff."""
+    t_before = trim_before if trim_before is not None else trim
+    t_after = trim_after if trim_after is not None else trim
+    before = build_profile_summary(before_prof, gpu, t_before, nvtx_limit=nvtx_limit)
+    after = build_profile_summary(after_prof, gpu, t_after, nvtx_limit=nvtx_limit)
     warnings = collect_sanity_warnings(before, after)
 
     before_by_key = {k.key: k for k in before.kernels}

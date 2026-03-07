@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+from .ai.diff_narrative import DiffNarrative
 from .diff import ProfileDiffSummary
 
 
@@ -34,7 +35,10 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
 
 
-def format_diff_terminal(data: ProfileDiffSummary) -> str:
+def format_diff_terminal(
+    data: ProfileDiffSummary,
+    narrative: DiffNarrative | None = None,
+) -> str:
     lines: list[str] = []
     lines.append("Profile Diff")
     lines.append("─" * 60)
@@ -42,6 +46,12 @@ def format_diff_terminal(data: ProfileDiffSummary) -> str:
     lines.append(f"After:  {data.after.path}")
     lines.append(f"GPU:    {data.before.gpu}")
     lines.append("")
+
+    if narrative:
+        lines.append("Executive Summary")
+        lines.append("─" * 60)
+        lines.append(narrative.executive_summary)
+        lines.append("")
 
     if data.warnings:
         lines.append("Warnings:")
@@ -116,19 +126,32 @@ def format_diff_terminal(data: ProfileDiffSummary) -> str:
         lines.append("(none)")
     lines.append("")
 
+    if narrative:
+        if narrative.ai_narrative:
+            lines.append("AI Narrative")
+            lines.append("─" * 60)
+            lines.append(narrative.ai_narrative)
+            lines.append("")
+        if narrative.warning:
+            lines.append("Note")
+            lines.append("─" * 60)
+            lines.append(narrative.warning)
+            lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
 def format_diff_terminal_multi(
     global_summary: ProfileDiffSummary,
     per_gpu: dict[int, ProfileDiffSummary],
+    narrative: DiffNarrative | None = None,
 ) -> str:
     """Render a multi-GPU diff: global view + per-GPU overview + per-GPU top-k."""
     parts: list[str] = []
 
     # 1) Global section (reuse single-GPU formatter but tweak header)
     header = "Profile Diff (All GPUs)\n" + "─" * 60 + "\n"
-    global_block = format_diff_terminal(global_summary)
+    global_block = format_diff_terminal(global_summary, narrative=narrative)
     # Drop the first two lines ("Profile Diff" + underline) from the reused block.
     gl_lines = global_block.splitlines()
     if len(gl_lines) >= 2:
@@ -184,7 +207,10 @@ def format_diff_terminal_multi(
     return "\n".join(parts).rstrip() + "\n"
 
 
-def format_diff_markdown(data: ProfileDiffSummary) -> str:
+def format_diff_markdown(
+    data: ProfileDiffSummary,
+    narrative: DiffNarrative | None = None,
+) -> str:
     md: list[str] = []
     md.append("## Profile Diff")
     md.append("")
@@ -192,6 +218,12 @@ def format_diff_markdown(data: ProfileDiffSummary) -> str:
     md.append(f"- **After**: `{data.after.path}`")
     md.append(f"- **GPU**: `{data.before.gpu}`")
     md.append("")
+
+    if narrative:
+        md.append("### Executive Summary")
+        md.append("")
+        md.append(narrative.executive_summary)
+        md.append("")
 
     if data.warnings:
         md.append("### Warnings")
@@ -248,12 +280,25 @@ def format_diff_markdown(data: ProfileDiffSummary) -> str:
     add_table("Top regressions (kernels)", data.top_regressions, is_regression=True)
     add_table("Top improvements (kernels)", data.top_improvements, is_regression=False)
 
+    if narrative:
+        if narrative.ai_narrative:
+            md.append("### AI Narrative")
+            md.append("")
+            md.append(narrative.ai_narrative)
+            md.append("")
+        if narrative.warning:
+            md.append("### Note")
+            md.append("")
+            md.append(narrative.warning)
+            md.append("")
+
     return "\n".join(md).rstrip() + "\n"
 
 
 def format_diff_markdown_multi(
     global_summary: ProfileDiffSummary,
     per_gpu: dict[int, ProfileDiffSummary],
+    narrative: DiffNarrative | None = None,
 ) -> str:
     """Render a multi-GPU markdown report: global + per-GPU overview + per-GPU top-k."""
     md: list[str] = []
@@ -263,6 +308,12 @@ def format_diff_markdown_multi(
     md.append(f"- **Before**: `{g.before.path}`")
     md.append(f"- **After**: `{g.after.path}`")
     md.append("")
+
+    if narrative:
+        md.append("### Executive Summary")
+        md.append("")
+        md.append(narrative.executive_summary)
+        md.append("")
 
     # Warnings (global)
     if g.warnings:
@@ -364,6 +415,18 @@ def format_diff_markdown_multi(
                     f"`{_fmt_ns(kd.before_total_ns)}` ({_fmt_pct(kd.before_share)}) | "
                     f"`{_fmt_ns(kd.after_total_ns)}` ({_fmt_pct(kd.after_share)}) | {c_str} |"
                 )
+            md.append("")
+
+    if narrative:
+        if narrative.ai_narrative:
+            md.append("### AI Narrative")
+            md.append("")
+            md.append(narrative.ai_narrative)
+            md.append("")
+        if narrative.warning:
+            md.append("### Note")
+            md.append("")
+            md.append(narrative.warning)
             md.append("")
 
     return "\n".join(md).rstrip() + "\n"

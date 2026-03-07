@@ -345,6 +345,95 @@ class Profile:
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, params)]
 
+    def search_nvtx_names(
+        self,
+        pattern: str,
+        limit: int | None = 50,
+        use_glob: bool = False,
+        trim: tuple[int, int] | None = None,
+    ) -> list[dict]:
+        """
+        Discover NVTX range names by fuzzy match (LIKE or GLOB).
+
+        Use before any region diff so the agent has exact strings.
+        pattern: substring to match; for LIKE we wrap with %; for GLOB pass a full pattern.
+        Returns rows: {text, total_ns, count} sorted by total_ns descending.
+        """
+        if "NVTX_EVENTS" not in self.schema.tables:
+            return []
+        match_val = (
+            pattern
+            if (use_glob and "*" in pattern) or (not use_glob and "%" in pattern)
+            else f"%{pattern}%" if not use_glob else f"*{pattern}*"
+        )
+        if self._nvtx_has_text_id:
+            sql = """
+                SELECT
+                    COALESCE(n.text, s.value) AS text,
+                    SUM(n.[end] - n.start) AS total_ns,
+                    COUNT(*) AS count
+                FROM NVTX_EVENTS n
+                LEFT JOIN StringIds s ON n.textId = s.id
+                WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
+                  AND n.[end] > n.start
+                  AND COALESCE(n.text, s.value) """
+            sql += "GLOB ?" if use_glob else "LIKE ?"
+            params: list = [match_val]
+        else:
+            sql = """
+                SELECT
+                    n.text AS text,
+                    SUM(n.[end] - n.start) AS total_ns,
+                    COUNT(*) AS count
+                FROM NVTX_EVENTS n
+                WHERE n.text IS NOT NULL AND n.[end] > n.start
+                  AND n.text """
+            sql += "GLOB ?" if use_glob else "LIKE ?"
+            params = [match_val]
+        if trim:
+            sql += " AND n.start >= ? AND n.[end] <= ?"
+            params += list(trim)
+        sql += " GROUP BY text ORDER BY total_ns DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def memcpy_in_window(
+        self,
+        device: int,
+        trim: tuple[int, int],
+    ) -> dict:
+        """
+        Sum memcpy time in window by direction (H2D=1, D2H=2, D2D=8).
+        Returns {h2d_ns, d2h_ns, d2d_ns, total_ns}; 0 when table or window empty.
+        """
+        out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
+        if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
+            return out
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT copyKind, SUM([end] - start) AS total_ns
+                FROM CUPTI_ACTIVITY_KIND_MEMCPY
+                WHERE deviceId = ? AND start >= ? AND [end] <= ?
+                GROUP BY copyKind
+                """,
+                (device, trim[0], trim[1]),
+            ).fetchall()
+        for r in rows:
+            kind = int(r[0])
+            ns = int(r[1])
+            if kind == 1:
+                out["h2d_ns"] = ns
+            elif kind == 2:
+                out["d2h_ns"] = ns
+            elif kind == 8:
+                out["d2d_ns"] = ns
+            out["total_ns"] += ns
+        return out
+
     def kernel_map(self, device: int) -> dict[int, dict]:
         """Build correlationId -> kernel info for ALL kernels on a device."""
         with self._lock:
