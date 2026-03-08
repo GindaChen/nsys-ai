@@ -13,7 +13,8 @@ Tool catalog:
   - get_top_nvtx_diffs: hotspot radar: top N regions by absolute time change
   - get_iteration_diff: macro diff for one iteration (Stage 2)
   - get_region_diff: micro diff for a code region (Stage 3)
-  - summarize_nvtx_subtree, get_launch_config_diff, get_source_code_context, etc.
+  - summarize_nvtx_subtree, get_launch_config_diff, get_source_code_context,
+  - get_gpu_imbalance_stats, get_global_diff, get_memory_profile_diff, get_gpu_peak_tflops, compute_mfu (pure; call twice for compare)
 """
 
 from __future__ import annotations
@@ -21,7 +22,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .ai.backend.chat_tools import TOOL_COMPUTE_MFU, TOOL_GET_GPU_PEAK_TFLOPS
 from .diff import ProfileDiffSummary, diff_profiles
+from .hardware import get_peak_tflops
+from .mfu import compute_mfu_from_args
 from .nvtx_tree import build_nvtx_tree
 from .overlap import detect_iterations, overlap_analysis
 from .profile import Profile
@@ -596,7 +600,7 @@ def get_memory_profile_diff(
 
 # ── Phase C system prompt and tool metadata for agent integration ─────────────
 
-PHASE_C_SYSTEM_PROMPT = """
+DIFF_SYSTEM_PROMPT = """
 You are a Senior MLSys Performance Engineer analyzing Nsight Systems (nsys) profile diffs.
 You have access to before/after SQLite profiles and MUST use the following tools in order.
 
@@ -610,6 +614,7 @@ You have access to before/after SQLite profiles and MUST use the following tools
 8. **Hardware_Warning present** — Prefer thermal/power explanation before software regression.
 9. **Workload_Mismatch_Warning** — Do not draw a performance conclusion; tell user the input dimensions may differ.
 10. **Impact ratio** — Check pct_of_iteration_time and contribution_to_total_delta_pct; if regression is <1% of iteration time, classify as Negligible Variance.
+11. **MFU** — (1) Get step_time_s from get_iteration_diff (wall_clock_ms/1000) or get_global_diff. (2) Call get_gpu_peak_tflops to get peak_tflops from the profile GPU; if it returns an error, ask the user for peak_tflops. (3) Ask the user for model_flops_per_step (nsys does not store it). **Do NOT call compute_mfu until the user has provided model_flops_per_step** — after asking, end your response and wait for their next message; only then call compute_mfu with the value they provided. (4) For before/after: call compute_mfu twice (before_s, flops, peak) and (after_s, flops, peak); synthesize (e.g. \"MFU before 35%, after 75%, +40%\").
 """
 
 TOOL_DESCRIPTIONS = {
@@ -818,6 +823,8 @@ TOOLS_DIFF_OPENAI = [
             },
         },
     },
+    TOOL_GET_GPU_PEAK_TFLOPS,
+    TOOL_COMPUTE_MFU,
 ]
 
 
@@ -892,6 +899,16 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
                 args.get("iteration_index"),
                 args.get("target_gpu"),
             )
+        if name == "get_gpu_peak_tflops":
+            devs = ctx.after.meta.devices or [0]
+            gpu_name = ""
+            if devs:
+                gi = ctx.after.meta.gpu_info.get(devs[0])
+                if gi:
+                    gpu_name = gi.name or ""
+            return get_peak_tflops(gpu_name)
+        if name == "compute_mfu":
+            return compute_mfu_from_args(args)
     except (KeyError, TypeError, ValueError) as e:
         return {"error": "invalid arguments", "detail": str(e)}
     except Exception as e:
@@ -899,7 +916,7 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
     return {"error": "unknown tool", "name": name}
 
 
-def build_phase_c_system_prompt(
+def build_diff_system_prompt(
     ctx: DiffContext,
     before_path: str,
     after_path: str,
@@ -907,7 +924,7 @@ def build_phase_c_system_prompt(
 ) -> str:
     """Build system prompt for diff-chat: Phase C rules + paths + optional proactive snapshot."""
     parts = [
-        PHASE_C_SYSTEM_PROMPT.strip(),
+        DIFF_SYSTEM_PROMPT.strip(),
         "",
         f"Before profile: {before_path}",
         f"After profile: {after_path}",

@@ -40,9 +40,12 @@ from .ai.backend.profile_db_tool import (
 )
 from .diff_tools import (
     TOOLS_DIFF_OPENAI,
-    build_phase_c_system_prompt,
+    build_diff_system_prompt,
     run_diff_tool,
 )
+from .hardware import get_peak_tflops
+from .mfu import compute_mfu_from_args
+from .profile import get_first_gpu_name
 
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
@@ -404,7 +407,7 @@ def stream_agent_loop(
     query_runner = None
 
     if use_diff:
-        system_prompt = build_phase_c_system_prompt(
+        system_prompt = build_diff_system_prompt(
             diff_context, diff_paths[0], diff_paths[1], snapshot=None
         )
     elif profile_path:
@@ -572,6 +575,34 @@ def stream_agent_loop(
                     except json.JSONDecodeError:
                         args = {}
                     result = run_diff_tool(diff_context, name, args)
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": json.dumps(result),
+                    })
+                    continue
+                if name == "get_gpu_peak_tflops":
+                    yield {"type": "system", "content": "Getting GPU peak TFLOPS..."}
+                    if conn is not None:
+                        gpu_name = get_first_gpu_name(conn)
+                        result = get_peak_tflops(gpu_name)
+                    else:
+                        result = {"gpu_name": "", "error": "No profile loaded"}
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": json.dumps(result),
+                    })
+                    continue
+                if name == "compute_mfu":
+                    yield {"type": "system", "content": "Running compute_mfu..."}
+                    try:
+                        args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    result = compute_mfu_from_args(args)
                     api_messages.append({
                         "role": "tool",
                         "tool_call_id": tid,

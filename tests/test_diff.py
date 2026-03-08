@@ -4,6 +4,22 @@ import subprocess
 import sys
 
 
+def _make_db_with_target_info(path: str, gpu_name: str = "NVIDIA A100-SXM4-80GB"):
+    """Create a minimal SQLite DB with only TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE (for get_first_gpu_name)."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE TARGET_INFO_GPU(id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT, "
+        "totalMemory INTEGER, smCount INTEGER, chipName TEXT, memoryBandwidth INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE TARGET_INFO_CUDA_DEVICE(gpuId INTEGER, cudaId INTEGER, pid INTEGER, uuid TEXT, numMultiprocessors INTEGER)"
+    )
+    conn.execute("INSERT INTO TARGET_INFO_GPU(id, name) VALUES (0, ?)", (gpu_name,))
+    conn.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE(gpuId, cudaId) VALUES (0, 0)")
+    conn.commit()
+    conn.close()
+
+
 def _make_profile(path: str, *, kernels: list[tuple], nvtx: list[tuple] | None = None):
     """
     Create a minimal Nsight-like SQLite export sufficient for Profile().
@@ -306,12 +322,12 @@ def test_diff_cli_chat_help():
 
 
 def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
-    """Stage 6: run_diff_tool dispatches; TOOLS_DIFF_OPENAI and build_phase_c_system_prompt exist."""
+    """Stage 6: run_diff_tool dispatches; TOOLS_DIFF_OPENAI and build_diff_system_prompt exist."""
     from nsys_ai import profile as profile_mod
     from nsys_ai.diff_tools import (
         TOOLS_DIFF_OPENAI,
         DiffContext,
-        build_phase_c_system_prompt,
+        build_diff_system_prompt,
         run_diff_tool,
     )
 
@@ -320,6 +336,8 @@ def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
     assert "search_nvtx_regions" in names
     assert "get_iteration_boundaries" in names
     assert "get_iteration_diff" in names
+    assert "get_gpu_peak_tflops" in names
+    assert "compute_mfu" in names
 
     before = tmp_path / "b.sqlite"
     after = tmp_path / "a.sqlite"
@@ -330,25 +348,110 @@ def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
         out = run_diff_tool(ctx, "get_iteration_boundaries", {})
     assert "boundaries" in out
     assert isinstance(out["boundaries"], list)
+    peak_out = run_diff_tool(ctx, "get_gpu_peak_tflops", {})
+    assert "gpu_name" in peak_out
+    assert "peak_tflops" in peak_out or "error" in peak_out
 
-    prompt = build_phase_c_system_prompt(ctx, "/before.sqlite", "/after.sqlite", snapshot=None)
+    mfu_out = run_diff_tool(
+        ctx,
+        "compute_mfu",
+        {"step_time_s": 10.0, "model_flops_per_step": 1e18, "peak_tflops": 989},
+    )
+    assert "MFU_pct" in mfu_out
+    assert isinstance(mfu_out["MFU_pct"], (int, float))
+
+    prompt = build_diff_system_prompt(ctx, "/before.sqlite", "/after.sqlite", snapshot=None)
     assert "Before profile:" in prompt and "After profile:" in prompt
     assert "/before.sqlite" in prompt and "/after.sqlite" in prompt
 
 
 def test_diff_tools_phase_c_prompt_export():
     """Phase C: system prompt and tool descriptions are exported for agent use."""
-    from nsys_ai.diff_tools import PHASE_C_SYSTEM_PROMPT, TOOL_DESCRIPTIONS
+    from nsys_ai.diff_tools import DIFF_SYSTEM_PROMPT, TOOL_DESCRIPTIONS
 
-    assert "Never guess names" in PHASE_C_SYSTEM_PROMPT
-    assert "search_nvtx_regions" in PHASE_C_SYSTEM_PROMPT
-    assert "get_launch_config_diff" in PHASE_C_SYSTEM_PROMPT or "Explain" in PHASE_C_SYSTEM_PROMPT
+    assert "Never guess names" in DIFF_SYSTEM_PROMPT
+    assert "search_nvtx_regions" in DIFF_SYSTEM_PROMPT
+    assert "get_launch_config_diff" in DIFF_SYSTEM_PROMPT or "Explain" in DIFF_SYSTEM_PROMPT
     assert "search_nvtx_regions" in TOOL_DESCRIPTIONS
     assert "get_iteration_diff" in TOOL_DESCRIPTIONS
     assert "get_global_diff" in TOOL_DESCRIPTIONS
     assert "get_region_diff" in TOOL_DESCRIPTIONS
     assert "get_gpu_imbalance_stats" in TOOL_DESCRIPTIONS
     assert "get_memory_profile_diff" in TOOL_DESCRIPTIONS
+    assert "MFU" in DIFF_SYSTEM_PROMPT
+
+
+def test_hardware_get_peak_tflops():
+    """hardware.get_peak_tflops: known GPU returns peak_tflops, unknown/empty returns error."""
+    from nsys_ai.hardware import GPU_PEAK_TFLOPS, get_peak_tflops
+
+    # Known GPUs (substring match)
+    r = get_peak_tflops("NVIDIA A100-SXM4-80GB")
+    assert r.get("gpu_name") == "NVIDIA A100-SXM4-80GB"
+    assert "peak_tflops" in r and r["peak_tflops"] == 312.0
+    assert "error" not in r
+
+    r = get_peak_tflops("NVIDIA H100 80GB HBM3")
+    assert "peak_tflops" in r and r["peak_tflops"] == 989.0
+
+    r = get_peak_tflops("NVIDIA H100 SXM")
+    assert r["peak_tflops"] == 989.0
+
+    # Unknown GPU
+    r = get_peak_tflops("NVIDIA Unknown GPU XYZ")
+    assert "gpu_name" in r and "error" in r
+    assert "peak_tflops" not in r
+
+    # Empty / whitespace
+    r = get_peak_tflops("")
+    assert "error" in r
+    r = get_peak_tflops("   ")
+    assert "error" in r
+
+    # Sanity: all keys in GPU_PEAK_TFLOPS resolve
+    for key in GPU_PEAK_TFLOPS:
+        r = get_peak_tflops(f"NVIDIA {key}")
+        assert "peak_tflops" in r, f"Key {key!r} should resolve"
+        assert r["peak_tflops"] == GPU_PEAK_TFLOPS[key]
+
+
+def test_profile_get_first_gpu_name(tmp_path):
+    """profile.get_first_gpu_name returns name from TARGET_INFO_GPU when tables exist; empty when missing."""
+    from nsys_ai.profile import get_first_gpu_name
+
+    db_with_gpu = tmp_path / "with_gpu.sqlite"
+    _make_db_with_target_info(str(db_with_gpu), "NVIDIA H100 80GB HBM3")
+    with sqlite3.connect(str(db_with_gpu)) as conn:
+        name = get_first_gpu_name(conn)
+    assert name == "NVIDIA H100 80GB HBM3"
+
+    # DB without TARGET_INFO tables
+    no_gpu = tmp_path / "no_gpu.sqlite"
+    conn_no = sqlite3.connect(str(no_gpu))
+    conn_no.execute("CREATE TABLE other(id INT)")
+    conn_no.commit()
+    conn_no.close()
+    with sqlite3.connect(str(no_gpu)) as conn:
+        name = get_first_gpu_name(conn)
+    assert name == ""
+
+
+def test_mfu_single_and_compare():
+    """MFU lives in nsys_ai.mfu; single and compare are pure math."""
+    from nsys_ai.mfu import compute_mfu_compare, compute_mfu_single
+
+    out = compute_mfu_single(10.0, 1e18, 989.0)
+    assert out["MFU_pct"] == round(100.0 * (1e18 / 10.0 / 1e12) / 989.0, 2)
+    assert "achieved_model_TFLOPS" in out
+
+    err = compute_mfu_single(10.0, 0, 989.0)
+    assert "error" in err
+    assert "formula" in err
+
+    cmp_out = compute_mfu_compare(10.0, 12.0, 1e18, 989.0)
+    assert "MFU_pct" in cmp_out
+    assert "before" in cmp_out["MFU_pct"] and "after" in cmp_out["MFU_pct"]
+    assert "delta_MFU_pct" in cmp_out
 
 
 def test_diff_tools_stage5_warning_flags(tmp_path):
