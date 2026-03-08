@@ -312,7 +312,7 @@ def _run_diff_chat(args, _profile):
                 profile_path=None,
                 diff_context=ctx,
                 diff_paths=(args.before, args.after),
-                max_turns=5,
+                max_turns=8,
             ):
                 if ev.get("type") == "text" and ev.get("content"):
                     text_parts.append(ev["content"])

@@ -368,6 +368,41 @@ def _sse_event(evt: str, data: dict) -> bytes:
 # Streaming agent loop — UI-agnostic generator (used by tui_textual + web)
 # ---------------------------------------------------------------------------
 
+def _stream_litellm_content(stream, usage: dict):
+    """Consume a litellm stream; yield text events and update usage in place."""
+    for chunk in stream:
+        choice = chunk.choices[0] if chunk.choices else None
+        if not choice:
+            continue
+        delta = (
+            getattr(choice, "delta", None)
+            or (choice.get("delta") if isinstance(choice, dict) else None)
+        )
+        if not delta:
+            continue
+        c = (
+            getattr(delta, "content", None)
+            if not isinstance(delta, dict)
+            else delta.get("content")
+        )
+        if c:
+            yield {"type": "text", "content": c}
+        u = (
+            getattr(chunk, "usage", None)
+            or (chunk.get("usage") if isinstance(chunk, dict) else None)
+        )
+        if u:
+            usage.clear()
+            usage.update(
+                u
+                if isinstance(u, dict)
+                else {
+                    "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                    "completion_tokens": getattr(u, "completion_tokens", 0),
+                }
+            )
+
+
 def stream_agent_loop(
     model: str,
     messages: list,
@@ -649,6 +684,21 @@ def stream_agent_loop(
                 yield {"type": "done", "usage": usage}
                 return
 
+        # Exhausted max_turns; last message was a tool result. One more LLM call with
+        # tool_choice="none" so the model can synthesize a final summary.
+        if api_messages and api_messages[-1].get("role") == "tool":
+            extra = {}
+            if "gemini-2.5" in model:
+                extra["thinking"] = {"type": "enabled", "budget_tokens": GEMINI_THINKING_BUDGET}
+            try:
+                stream = litellm.completion(
+                    model=model, messages=api_messages, tools=tools,
+                    tool_choice="none", stream=True, **extra,
+                )
+                for ev in _stream_litellm_content(stream, usage):
+                    yield ev
+            except Exception as e:
+                yield {"type": "text", "content": f"\n\n(Summary skipped: {_friendly_error(model, e)})"}
         yield {"type": "done", "usage": usage}
 
     finally:
