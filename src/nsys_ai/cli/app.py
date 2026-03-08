@@ -271,7 +271,7 @@ def _cmd_diff(args, _profile):
 
 def _run_diff_chat(args, _profile):
     """Interactive diff chat: Phase C tools + cached ProfileDiffSummary."""
-    from nsys_ai.chat import _get_model_and_key, stream_agent_loop
+    from nsys_ai.chat import _get_model_and_key, distill_history, stream_agent_loop
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
 
     model, _ = _get_model_and_key()
@@ -295,6 +295,7 @@ def _run_diff_chat(args, _profile):
         print("Ask about regressions, regions, or iteration diffs. Empty line to exit.")
         print()
 
+        chat_history: list = []
         while True:
             try:
                 line = input("You: ").strip()
@@ -302,11 +303,11 @@ def _run_diff_chat(args, _profile):
                 break
             if not line:
                 break
-            messages = [{"role": "user", "content": line}]
-            text_parts = []
+            chat_history.append({"role": "user", "content": line})
+            text_parts: list[str] = []
             for ev in stream_agent_loop(
                 model=model,
-                messages=messages,
+                messages=list(chat_history),
                 ui_context={},
                 profile_path=None,
                 diff_context=ctx,
@@ -318,6 +319,8 @@ def _run_diff_chat(args, _profile):
                     print(ev["content"], end="", flush=True)
                 elif ev.get("type") == "system" and ev.get("content"):
                     print(f"\n[{ev['content']}]", flush=True)
+            chat_history.append({"role": "assistant", "content": "".join(text_parts)})
+            chat_history[:] = distill_history(chat_history)
             if text_parts:
                 print()
             print()

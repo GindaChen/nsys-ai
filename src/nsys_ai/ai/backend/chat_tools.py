@@ -15,12 +15,48 @@ import json
 
 from .profile_db_tool import TOOL_QUERY_PROFILE_DB
 
+# Pure MFU tool: one step_time_s per call. Same tool in single-profile and diff; diff compares by calling twice.
+TOOL_COMPUTE_MFU = {
+    "type": "function",
+    "function": {
+        "name": "compute_mfu",
+        "description": (
+            "Compute MFU (Model FLOPs Utilization) for one step. Pure calculation: step_time_s, model_flops_per_step, peak_tflops. "
+            "Get step_time_s from profile (e.g. query_profile_db: (MAX([end])-MIN(start))/1e9) or from get_iteration_diff wall_clock_ms/1000. "
+            "User must provide model_flops_per_step (nsys does not store it). peak_tflops from GPU spec (e.g. 989 H100, 312 A100). For diff comparison, call twice with before/after step_time_s."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "step_time_s": {"type": "number", "description": "Step or profile span in seconds (from query_profile_db or summary)."},
+                "model_flops_per_step": {"type": "number", "description": "Model FLOPs per step (user must provide; e.g. 6*N_params*tokens for Transformer)."},
+                "peak_tflops": {"type": "number", "description": "GPU peak TFLOPS for precision (e.g. 989 for H100 FP16, 312 for A100 FP16)."},
+            },
+            "required": ["step_time_s", "model_flops_per_step", "peak_tflops"],
+        },
+    },
+}
+
+# Get peak TFLOPS from profile GPU name (BF16/FP16). Call before compute_mfu so you only ask user for model_flops_per_step.
+TOOL_GET_GPU_PEAK_TFLOPS = {
+    "type": "function",
+    "function": {
+        "name": "get_gpu_peak_tflops",
+        "description": (
+            "Get the peak TFLOPS (BF16/FP16 Tensor Core) for the GPU in the current profile. "
+            "Call this before compute_mfu so you only need to ask the user for model_flops_per_step. "
+            "Returns gpu_name and peak_tflops, or error if GPU unknown."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Tool definitions (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
 
 def _tools_openai() -> list[dict]:
-    """Return the OpenAI-style tool list: navigate, zoom, and query_profile_db."""
+    """Return the OpenAI-style tool list: navigate, zoom, query_profile_db, get_gpu_peak_tflops, compute_mfu."""
     return [
         {
             "type": "function",
@@ -94,6 +130,8 @@ def _tools_openai() -> list[dict]:
             },
         },
         TOOL_QUERY_PROFILE_DB,
+        TOOL_GET_GPU_PEAK_TFLOPS,
+        TOOL_COMPUTE_MFU,
     ]
 
 
@@ -156,7 +194,8 @@ def _build_system_prompt(
         "query and returns rows; use them in your answer.\n"
         "   - Do NOT output code blocks or JSON for navigation - use the actual tool call mechanism only.\n"
         "5. If a requested kernel is not in the context, politely say it is not visible or "
-        "does not exist."
+        "does not exist.\n"
+        "6. For MFU: (1) Call get_gpu_peak_tflops to get peak_tflops from the profile GPU. (2) Use query_profile_db to get step_time_s (e.g. (MAX([end])-MIN(start))/1e9). (3) Ask the user for model_flops_per_step (nsys does not store it). Do NOT call compute_mfu until the user has provided it — after asking, end your response and wait for their reply; only then call compute_mfu with that value. (4) If get_gpu_peak_tflops returns an error, ask the user for peak_tflops as well."
     )
 
 

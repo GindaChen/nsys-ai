@@ -96,11 +96,11 @@ def test_build_system_prompt():
 
 
 def test_tools_openai():
-    """Tools include navigate, zoom, NVTX fit, and query_profile_db."""
+    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu."""
     tools = chat_mod._tools_openai()
-    assert len(tools) == 4
+    assert len(tools) == 6
     names = {t["function"]["name"] for t in tools}
-    assert names == {"navigate_to_kernel", "zoom_to_time_range", "fit_nvtx_range", "query_profile_db"}
+    assert names == {"navigate_to_kernel", "zoom_to_time_range", "fit_nvtx_range", "query_profile_db", "get_gpu_peak_tflops", "compute_mfu"}
     nav = next(t for t in tools if t["function"]["name"] == "navigate_to_kernel")
     assert "target_name" in nav["function"]["parameters"]["properties"]
     zoom = next(t for t in tools if t["function"]["name"] == "zoom_to_time_range")

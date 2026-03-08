@@ -572,6 +572,21 @@ def resolve_profile_path(path: str) -> str:
     return out
 
 
+def get_first_gpu_name(conn: sqlite3.Connection) -> str:
+    """Return the first GPU name from TARGET_INFO_GPU (for peak TFLOPS lookup). Empty if tables missing."""
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    if "TARGET_INFO_GPU" not in tables or "TARGET_INFO_CUDA_DEVICE" not in tables:
+        return ""
+    row = conn.execute("""
+        SELECT g.name
+        FROM TARGET_INFO_GPU g
+        JOIN TARGET_INFO_CUDA_DEVICE c ON g.id = c.gpuId
+        ORDER BY c.cudaId
+        LIMIT 1
+    """).fetchone()
+    return (row[0] or "").strip() if row else ""
+
+
 def open(path: str) -> Profile:
     """Open an Nsight Systems SQLite database."""
     path = resolve_profile_path(path)
