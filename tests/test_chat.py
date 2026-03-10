@@ -636,6 +636,79 @@ def test_chat_completion_stream_no_db_agent(monkeypatch):
     assert b"event: done" in raw
 
 
+def test_stream_agent_loop_skill_names_injected(monkeypatch, tmp_path):
+    """skill_names causes SESSION SKILL CONTEXT to appear in the system prompt sent to LLM."""
+    import nsys_ai.prompt_loader as pl
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "test_skill.md").write_text("UNIQUE_SKILL_MARKER_ABC123")
+    monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
+
+    captured_messages: list = []
+
+    chunk = MagicMock()
+    chunk.choices = [MagicMock(delta=MagicMock(content="Ok", tool_calls=[]))]
+    chunk.usage = None
+
+    def fake_completion(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return iter([chunk])
+
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = fake_completion
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        events = list(
+            chat_mod.stream_agent_loop(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "help"}],
+                ui_context={},
+                profile_path=None,
+                max_turns=1,
+                skill_names=["skills/test_skill.md"],
+            )
+        )
+
+    system_msg = next((m for m in captured_messages if m.get("role") == "system"), None)
+    assert system_msg is not None
+    assert "UNIQUE_SKILL_MARKER_ABC123" in system_msg["content"]
+    assert "SESSION SKILL CONTEXT" in system_msg["content"]
+
+
+def test_stream_agent_loop_no_skill_names_backward_compat(monkeypatch):
+    """Without skill_names, SESSION SKILL CONTEXT is absent (backward compatible)."""
+    captured_messages: list = []
+
+    chunk = MagicMock()
+    chunk.choices = [MagicMock(delta=MagicMock(content="Hi", tool_calls=[]))]
+    chunk.usage = None
+
+    def fake_completion(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return iter([chunk])
+
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = fake_completion
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        list(
+            chat_mod.stream_agent_loop(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hello"}],
+                ui_context={},
+                profile_path=None,
+                max_turns=1,
+            )
+        )
+
+    system_msg = next((m for m in captured_messages if m.get("role") == "system"), None)
+    assert system_msg is not None
+    assert "SESSION SKILL CONTEXT" not in system_msg["content"]
+
+
 # --- History distillation tests (§11.7) ---
 
 
@@ -696,3 +769,47 @@ def test_distill_history_preserves_simple_conversation():
 def test_distill_history_empty():
     """distill_history returns empty list for empty input."""
     assert chat_mod.distill_history([]) == []
+
+
+# ---------------------------------------------------------------------------
+# On-demand skill routing tests
+# ---------------------------------------------------------------------------
+
+
+def test_route_skill_names_mfu():
+    """MFU keywords → mfu.md injected."""
+    msgs = [{"role": "user", "content": "what's my MFU?"}]
+    result = chat_mod._route_skill_names(msgs)
+    assert "skills/mfu.md" in result
+
+
+def test_route_skill_names_navigation_empty():
+    """Pure navigation query → no skills injected."""
+    msgs = [{"role": "user", "content": "go to the volta_gemm_kernel please zoom in"}]
+    result = chat_mod._route_skill_names(msgs)
+    assert result == []
+
+
+
+def test_route_skill_names_nccl():
+    """NCCL keywords → distributed.md injected."""
+    msgs = [{"role": "user", "content": "why is nccl so slow on multi-gpu?"}]
+    result = chat_mod._route_skill_names(msgs)
+    assert "skills/distributed.md" in result
+
+
+def test_build_system_prompt_no_principles_by_default():
+    """CORE PRINCIPLES block must NOT appear in the base prompt (removed from auto-injection)."""
+    out = chat_mod._build_system_prompt({})
+    assert "CORE PRINCIPLES" not in out, (
+        "PRINCIPLES.md is still being auto-injected; it should only be loaded on-demand"
+    )
+
+
+def test_build_system_prompt_mfu_reference_still_present():
+    """Hardcoded MFU REFERENCE block must still be in the base prompt."""
+    out = chat_mod._build_system_prompt({})
+    assert "MFU REFERENCE" in out
+    assert "flops_per_layer" in out
+    assert "SANITY CHECK" in out
+    assert "num_gpus" in out

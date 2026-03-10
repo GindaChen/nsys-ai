@@ -52,6 +52,46 @@ from .region_mfu import compute_region_mfu_from_conn, compute_theoretical_flops
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
 
+
+# ---------------------------------------------------------------------------
+# Skill routing — keyword-based on-demand injection
+# ---------------------------------------------------------------------------
+
+
+def _route_skill_names(messages: list) -> list[str]:
+    """Detect user intent from the last user message; return skill paths to inject.
+
+    Called just before ``stream_agent_loop`` / ``_build_system_prompt`` so the
+    right skill context is loaded for each query without injecting everything
+    every time.
+
+    Keyword → skill mappings:
+      mfu / efficiency / utilization / tflops / flops / flash → skills/mfu.md
+      bottleneck / triage / analyze / slow / investigate       → skills/triage.md
+      nccl / distributed / multi-gpu / scaling / imbalance     → skills/distributed.md
+      variance / spiky / spike / inconsistent / jitter         → skills/variance.md
+
+    Navigation-only queries ("go to", "show", "zoom", "fit") return [].
+    """
+    last = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last = (m.get("content") or "").lower()
+            break
+    if not last:
+        return []
+
+    skills: list[str] = []
+    if any(k in last for k in ("mfu", "efficiency", "utilization", "tflops", "flops", "flash")):
+        skills.append("skills/mfu.md")
+    if any(k in last for k in ("bottleneck", "triage", "analyze", "slow", "investigate", "what's in")):
+        skills.append("skills/triage.md")
+    if any(k in last for k in ("nccl", "distributed", "multi-gpu", "scaling", "imbalance")):
+        skills.append("skills/distributed.md")
+    if any(k in last for k in ("variance", "spiky", "spike", "inconsistent", "jitter")):
+        skills.append("skills/variance.md")
+    return skills
+
 # ---------------------------------------------------------------------------
 # Agent-loop constants
 # ---------------------------------------------------------------------------
@@ -323,7 +363,17 @@ def chat_completion(body_bytes: bytes) -> dict | None:
         conn = open_profile_readonly(sqlite_path)
         try:
             schema_str = get_profile_schema_cached(conn, sqlite_path)
-            system_prompt = _build_system_prompt(ui_context, profile_schema=schema_str)
+            _routed_skills = _route_skill_names(messages)
+            _routed_docs: str | None = None
+            if _routed_skills:
+                try:
+                    from .prompt_loader import load_skill_context
+                    _routed_docs = load_skill_context(_routed_skills) or None
+                except Exception:
+                    pass
+            system_prompt = _build_system_prompt(
+                ui_context, profile_schema=schema_str, skill_docs=_routed_docs
+            )
             api_messages = [{"role": "system", "content": system_prompt}]
             for m in messages:
                 if m.get("role") and m.get("content") is not None:
@@ -343,7 +393,15 @@ def chat_completion(body_bytes: bytes) -> dict | None:
         finally:
             conn.close()
 
-    system_prompt = _build_system_prompt(ui_context)
+    _routed_skills = _route_skill_names(messages)
+    _routed_docs2: str | None = None
+    if _routed_skills:
+        try:
+            from .prompt_loader import load_skill_context
+            _routed_docs2 = load_skill_context(_routed_skills) or None
+        except Exception:
+            pass
+    system_prompt = _build_system_prompt(ui_context, skill_docs=_routed_docs2)
     api_messages = [{"role": "system", "content": system_prompt}]
     for m in messages:
         if m.get("role") and m.get("content") is not None:
@@ -436,6 +494,7 @@ def stream_agent_loop(
     diff_context=None,
     diff_paths: tuple[str, str] | None = None,
     max_turns: int = 5,
+    skill_names: list[str] | None = None,
 ):
     """UI-agnostic streaming agent loop — yields event dicts.
 
@@ -452,6 +511,12 @@ def stream_agent_loop(
     generator and closed in the ``finally`` block.  Call this from a background
     thread (e.g. Textual ``@work(thread=True)``) so the main thread's UI
     remains responsive during DB queries and LLM streaming.
+
+    *skill_names* — optional list of skill file paths relative to the
+    ``docs/agent_skills/`` directory (e.g. ``["skills/mfu.md"]``). When
+    provided, their contents are concatenated and appended to the system
+    prompt as a SESSION SKILL CONTEXT block.  Uses ``prompt_loader``
+    internally; missing files are silently ignored.
     """
     try:
         import litellm
@@ -490,8 +555,19 @@ def stream_agent_loop(
     else:
         schema_str = None
 
+    # Resolve skill_docs from the skill_names list (best-effort; silent on missing)
+    _skill_docs: str | None = None
+    if skill_names:
+        try:
+            from .prompt_loader import load_skill_context
+            _skill_docs = load_skill_context(skill_names) or None
+        except Exception:
+            pass
+
     if not use_diff:
-        system_prompt = _build_system_prompt(ui_context, profile_schema=schema_str)
+        system_prompt = _build_system_prompt(
+            ui_context, profile_schema=schema_str, skill_docs=_skill_docs
+        )
     api_messages = [{"role": "system", "content": system_prompt}]
     for m in messages:
         if m.get("role") and m.get("content") is not None:
@@ -918,6 +994,10 @@ def chat_completion_stream(body_bytes: bytes):
     messages = payload.get("messages") or []
     ui_context = payload.get("ui_context") or {}
     profile_path = payload.get("profile_path")
+    # skill_context: optional list of skill paths (e.g. ["skills/mfu.md"]).
+    # When provided, those files are loaded from docs/agent_skills/ and appended
+    # to the system prompt as SESSION SKILL CONTEXT. Unknown paths are silently ignored.
+    skill_context: list[str] | None = payload.get("skill_context") or None
     effective_profile = profile_path if (profile_path and _db_agent_flag_enabled()) else None
 
     try:
@@ -928,6 +1008,7 @@ def chat_completion_stream(body_bytes: bytes):
             tools=_tools_openai(),
             profile_path=effective_profile,
             max_turns=5,
+            skill_names=skill_context,
         ):
             t = ev.get("type")
             if t == "text":

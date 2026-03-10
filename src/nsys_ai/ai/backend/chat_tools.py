@@ -287,6 +287,7 @@ def _tools_openai() -> list[dict]:
 def _build_system_prompt(
     ui_context: dict,
     profile_schema: str | None = None,
+    skill_docs: str | None = None,
 ) -> str:
     """Build the system prompt that instructs the LLM on its role and tools.
 
@@ -296,6 +297,9 @@ def _build_system_prompt(
         profile_schema:  Optional schema string from ``get_profile_schema_cached``.
                          When provided the LLM is instructed to use
                          ``query_profile_db`` for whole-profile questions.
+        skill_docs:      Optional pre-loaded skill content to append at the end.
+                         Use ``prompt_loader.load_skill_context(["skills/mfu.md"])``
+                         to inject a specific skill for the current session.
     """
     ctx_json = json.dumps(ui_context, separators=(",", ":"))
     schema_block = ""
@@ -357,6 +361,10 @@ def _build_system_prompt(
         "     SELECT DISTINCT s.value FROM StringIds s JOIN CUPTI_ACTIVITY_KIND_KERNEL k ON k.shortName=s.id WHERE s.value LIKE '%%flash%%'\n"
         "   IMPORTANT: Use compute_theoretical_flops to compute FLOPs — do NOT compute manually.\n"
         "   Workflow: (1) compute_theoretical_flops → get exact FLOPs, (2) compute_region_mfu with that value.\n"
+        "8. AUTONOMY: When a skill workflow is loaded at the end of this prompt, execute ALL steps in sequence "
+        "without pausing for user confirmation between steps. Only stop mid-workflow if: (a) a tool returns an "
+        "error that needs user action, (b) you need model architecture parameters the user hasn't provided, or "
+        "(c) the user explicitly asks you to pause. Do not ask 'shall I proceed?' — just proceed.\n"
         "\n"
         "=== MFU REFERENCE (for choosing the right operation in compute_theoretical_flops) ===\n"
         "The nsys profile does NOT store model FLOPs — you must calculate them from model architecture.\n"
@@ -393,7 +401,15 @@ def _build_system_prompt(
         "  - MFU 10-80%  → typical reasonable range for compute-bound kernels.\n"
         "  If MFU > 100%, do NOT report it as-is. Recompute with correct FLOPs and explain.\n"
         "=============================\n"
+        + (
+            "\n=== SESSION SKILL CONTEXT ===\n"
+            + skill_docs
+            + "\n=== END SESSION SKILL CONTEXT ===\n"
+            if skill_docs
+            else ""
+        )
     )
+
 
 
 # ---------------------------------------------------------------------------

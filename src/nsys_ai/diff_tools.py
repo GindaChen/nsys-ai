@@ -814,6 +814,18 @@ You have access to before/after SQLite profiles and MUST use the following tools
 11. **MFU** — Only when the user explicitly asks for MFU, utilization, or efficiency metrics (do not proactively offer MFU when they only asked for regression causes or improvement ideas). Then: (1) Get step_time_s from get_iteration_diff (wall_clock_ms/1000) or get_global_diff. (2) Call get_gpu_peak_tflops; if it errors, ask the user for peak_tflops. (3) Ask the user for model_flops_per_step (nsys does not store it). **Do NOT call compute_mfu until the user has provided model_flops_per_step** — after asking, end your response and wait; only then call compute_mfu with the value they provided. (4) For before/after: call compute_mfu twice and synthesize (e.g. \"MFU before 35%, after 75%, +40%\").
 """
 
+# Dynamic override: load skills/diff.md when available (falls back to hardcoded prompt).
+try:
+    from .prompt_loader import load_skill as _load_skill_diff
+    _diff_md = _load_skill_diff("skills/diff.md")
+    if _diff_md:
+        # Preserve the fallback for debugging; expose loaded version as DIFF_SYSTEM_PROMPT
+        _DIFF_SYSTEM_PROMPT_FALLBACK = DIFF_SYSTEM_PROMPT
+        DIFF_SYSTEM_PROMPT = _diff_md
+except Exception:
+    pass
+
+
 TOOL_DESCRIPTIONS = {
     "search_nvtx_regions": "Fuzzy NVTX name discovery (LIKE/GLOB). Call BEFORE any region diff to get exact strings.",
     "get_iteration_boundaries": "Per-iteration time windows for both profiles + is_aligned. Use to pick iteration_index.",
