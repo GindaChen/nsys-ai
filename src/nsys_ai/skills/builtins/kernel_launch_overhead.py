@@ -1,19 +1,23 @@
 """CUDA API launch overhead — time between API call and kernel execution."""
+
 from ..base import Skill, SkillParam
 
 
 def _format(rows):
     if not rows:
         return "(No kernel launch overhead data found)"
-    lines = ["── Kernel Launch Overhead ──",
-             f"{'Kernel':<50s}  {'API(ms)':>8s}  {'Kern(ms)':>9s}  {'Overhead(μs)':>13s}",
-             "─" * 86]
+    lines = [
+        "── Kernel Launch Overhead ──",
+        f"{'Kernel':<50s}  {'API(ms)':>8s}  {'Kern(ms)':>9s}  {'Overhead(μs)':>13s}",
+        "─" * 86,
+    ]
     for r in rows:
         name = r["kernel_name"]
         if len(name) > 48:
             name = name[:45] + "..."
-        lines.append(f"{name:<50s}  {r['api_ms']:>8.3f}  {r['kernel_ms']:>9.3f}  "
-                      f"{r['overhead_us']:>13.1f}")
+        lines.append(
+            f"{name:<50s}  {r['api_ms']:>8.3f}  {r['kernel_ms']:>9.3f}  {r['overhead_us']:>13.1f}"
+        )
     return "\n".join(lines)
 
 

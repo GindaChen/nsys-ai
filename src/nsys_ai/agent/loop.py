@@ -6,6 +6,7 @@ and produces a structured analysis report. Works without LLM by default
 (keyword-based skill selection + template reporting). With the [agent]
 extra installed, can delegate to an LLM for natural language analysis.
 """
+
 import sqlite3
 
 from ..skills.registry import run_skill
@@ -158,12 +159,14 @@ class Agent:
             return None
 
         import os
+
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             return None
 
         try:
             from .persona import build_system_prompt
+
             client = anthropic.Anthropic(api_key=api_key)
             evidence = "\n".join(evidence_sections)
 
@@ -171,14 +174,16 @@ class Agent:
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048,
                 system=build_system_prompt(),
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Here is data from an Nsight Systems profile analysis:\n\n"
-                        f"{evidence}\n\n"
-                        f"Based on this data, answer the following question:\n{question}"
-                    ),
-                }],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Here is data from an Nsight Systems profile analysis:\n\n"
+                            f"{evidence}\n\n"
+                            f"Based on this data, answer the following question:\n{question}"
+                        ),
+                    }
+                ],
             )
             return message.content[0].text
         except Exception as e:

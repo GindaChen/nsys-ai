@@ -7,14 +7,18 @@ Supports:
   - Hierarchical search: find kernels under a specific NVTX path
     (e.g. "sample_0 > flash_attention_forward")
 """
+
 from .profile import Profile
 from .tree import build_nvtx_tree
 
 
-def search_kernels(prof: Profile, query: str,
-                   device: int | None = None,
-                   trim: tuple[int, int] | None = None,
-                   limit: int = 200) -> list[dict]:
+def search_kernels(
+    prof: Profile,
+    query: str,
+    device: int | None = None,
+    trim: tuple[int, int] | None = None,
+    limit: int = 200,
+) -> list[dict]:
     """
     Search kernel names (case-insensitive substring match).
 
@@ -27,21 +31,28 @@ def search_kernels(prof: Profile, query: str,
     for dev in devices:
         for k in prof.kernels(dev, trim):
             if q in k["name"].lower():
-                results.append(dict(
-                    name=k["name"],
-                    start=k["start"], end=k["end"],
-                    duration_ms=round((k["end"] - k["start"]) / 1e6, 3),
-                    device=dev, stream=k["streamId"],
-                ))
+                results.append(
+                    dict(
+                        name=k["name"],
+                        start=k["start"],
+                        end=k["end"],
+                        duration_ms=round((k["end"] - k["start"]) / 1e6, 3),
+                        device=dev,
+                        stream=k["streamId"],
+                    )
+                )
                 if len(results) >= limit:
                     return results
     return results
 
 
-def search_nvtx(prof: Profile, query: str,
-                device: int | None = None,
-                trim: tuple[int, int] | None = None,
-                limit: int = 200) -> list[dict]:
+def search_nvtx(
+    prof: Profile,
+    query: str,
+    device: int | None = None,
+    trim: tuple[int, int] | None = None,
+    limit: int = 200,
+) -> list[dict]:
     """
     Search NVTX annotation text (case-insensitive substring match).
 
@@ -60,20 +71,23 @@ def search_nvtx(prof: Profile, query: str,
         for n in nvtx:
             text = n["text"]
             if text and q in text.lower():
-                results.append(dict(
-                    text=text,
-                    start=n["start"], end=n["end"],
-                    duration_ms=round((n["end"] - n["start"]) / 1e6, 3),
-                    thread=n["globalTid"],
-                ))
+                results.append(
+                    dict(
+                        text=text,
+                        start=n["start"],
+                        end=n["end"],
+                        duration_ms=round((n["end"] - n["start"]) / 1e6, 3),
+                        thread=n["globalTid"],
+                    )
+                )
                 if len(results) >= limit:
                     return results
     return results
 
 
-def search_hierarchy(prof: Profile, parent_pattern: str,
-                     child_pattern: str, device: int,
-                     trim: tuple[int, int]) -> list[dict]:
+def search_hierarchy(
+    prof: Profile, parent_pattern: str, child_pattern: str, device: int, trim: tuple[int, int]
+) -> list[dict]:
     """
     Find kernels under a specific NVTX path.
 
@@ -85,13 +99,11 @@ def search_hierarchy(prof: Profile, parent_pattern: str,
     """
     roots = build_nvtx_tree(prof, device, trim)
     results = []
-    _walk_hierarchy(roots, parent_pattern.lower(), child_pattern.lower(),
-                    [], results)
+    _walk_hierarchy(roots, parent_pattern.lower(), child_pattern.lower(), [], results)
     return results
 
 
-def _walk_hierarchy(nodes: list, parent_pat: str, child_pat: str,
-                    path: list[str], results: list):
+def _walk_hierarchy(nodes: list, parent_pat: str, child_pat: str, path: list[str], results: list):
     """Recursively walk tree looking for parent→child matches."""
     for node in nodes:
         current_path = path + [node["name"]]
@@ -101,16 +113,18 @@ def _walk_hierarchy(nodes: list, parent_pat: str, child_pat: str,
 
         if node["type"] == "kernel":
             if in_parent and child_pat in node["name"].lower():
-                results.append(dict(
-                    name=node["name"],
-                    start=node["start"], end=node["end"],
-                    duration_ms=round((node["end"] - node["start"]) / 1e6, 3),
-                    stream=node.get("stream", -1),
-                    nvtx_path=" > ".join(current_path[:-1]),
-                ))
+                results.append(
+                    dict(
+                        name=node["name"],
+                        start=node["start"],
+                        end=node["end"],
+                        duration_ms=round((node["end"] - node["start"]) / 1e6, 3),
+                        stream=node.get("stream", -1),
+                        nvtx_path=" > ".join(current_path[:-1]),
+                    )
+                )
         elif node.get("children"):
-            _walk_hierarchy(node["children"], parent_pat, child_pat,
-                            current_path, results)
+            _walk_hierarchy(node["children"], parent_pat, child_pat, current_path, results)
 
 
 def format_results(results: list[dict], kind: str = "kernel") -> str:
@@ -122,15 +136,16 @@ def format_results(results: list[dict], kind: str = "kernel") -> str:
 
     if kind == "hierarchy":
         for r in results:
-            lines.append(f"  ⚡ {r['name']}  ({r['duration_ms']:.3f}ms)  "
-                         f"[stream {r['stream']}]")
+            lines.append(f"  ⚡ {r['name']}  ({r['duration_ms']:.3f}ms)  [stream {r['stream']}]")
             lines.append(f"    path: {r['nvtx_path']}")
     elif kind == "nvtx":
         for r in results:
             lines.append(f"  📦 {r['text']}  ({r['duration_ms']:.3f}ms)")
     else:
         for r in results:
-            lines.append(f"  ⚡ {r['name']}  ({r['duration_ms']:.3f}ms)  "
-                         f"[GPU {r['device']}, stream {r['stream']}]")
+            lines.append(
+                f"  ⚡ {r['name']}  ({r['duration_ms']:.3f}ms)  "
+                f"[GPU {r['device']}, stream {r['stream']}]"
+            )
 
     return "\n".join(lines)

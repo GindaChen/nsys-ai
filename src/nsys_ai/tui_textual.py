@@ -12,6 +12,7 @@ Threading:
     stream_agent_loop runs in a @work(thread=True) worker.
     UI updates are dispatched via self.call_from_thread().
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -28,6 +29,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, St
 # Profile helper — load top kernels without importing the full Profile class.
 # ---------------------------------------------------------------------------
 
+
 def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
     """Return top kernels by total GPU duration as a list of dicts.
 
@@ -40,14 +42,11 @@ def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
     except Exception:
         return []
     try:
-        tables = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         kernel_table = next(
             (
-                t for t in (
+                t
+                for t in (
                     "CUPTI_ACTIVITY_KIND_KERNEL",
                     "CUPTI_ACTIVITY_KIND_KERNEL_V2",
                     "CUPTI_ACTIVITY_KIND_KERNEL_V3",
@@ -83,6 +82,7 @@ def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
 # Textual App
 # ---------------------------------------------------------------------------
 
+
 class NsysChatApp(App):
     """Textual AI chat TUI for Nsight Systems profiles.
 
@@ -94,6 +94,7 @@ class NsysChatApp(App):
 
     class NavigateToKernel(Message):
         """Posted when the agent calls navigate_to_kernel."""
+
         def __init__(self, target_name: str, reason: str | None = None) -> None:
             super().__init__()
             self.target_name = target_name
@@ -101,6 +102,7 @@ class NsysChatApp(App):
 
     class ZoomToTimeRange(Message):
         """Posted when the agent calls zoom_to_time_range."""
+
         def __init__(self, start_s: float, end_s: float) -> None:
             super().__init__()
             self.start_s = start_s
@@ -242,6 +244,7 @@ class NsysChatApp(App):
         """Synchronously load kernels from the profile DB and fill the DataTable."""
         try:
             from .profile import resolve_profile_path
+
             sqlite_path = resolve_profile_path(self.profile_path)
             self._kernels = _load_top_kernels(sqlite_path)
         except Exception as e:
@@ -290,9 +293,7 @@ class NsysChatApp(App):
         """Append streaming text chunk to the Static display area."""
         self._streaming_buffer.append(chunk)
         current = "".join(self._streaming_buffer)
-        self.query_one("#streaming-area", Static).update(
-            f"[bold green]AI:[/bold green] {current}"
-        )
+        self.query_one("#streaming-area", Static).update(f"[bold green]AI:[/bold green] {current}")
 
     def _on_system_event(self, content: str) -> None:
         """Display a system/status message in the chat log."""
@@ -332,7 +333,9 @@ class NsysChatApp(App):
         self._last_nav_message = msg
         self.post_message(self.NavigateToKernel(target_name, reason))
 
-    def _update_kernel_info_bar(self, name: str, total_ms: float, calls: int, avg_ms: float) -> None:
+    def _update_kernel_info_bar(
+        self, name: str, total_ms: float, calls: int, avg_ms: float
+    ) -> None:
         """Update the selected kernel info bar below the DataTable."""
         bar = self.query_one("#kernel-info-bar", Static)
         bar.update(
@@ -391,9 +394,7 @@ class NsysChatApp(App):
         try:
             from .chat import _get_model_and_key, distill_history, stream_agent_loop
         except ImportError as e:
-            self.call_from_thread(
-                self._on_system_event, f"chat module unavailable: {e}"
-            )
+            self.call_from_thread(self._on_system_event, f"chat module unavailable: {e}")
             self.call_from_thread(self._on_stream_done, "")
             return
 
@@ -438,9 +439,7 @@ class NsysChatApp(App):
                         accumulated.append(chunk)
                         self.call_from_thread(self._on_text_chunk, chunk)
                 elif etype == "system":
-                    self.call_from_thread(
-                        self._on_system_event, event.get("content", "")
-                    )
+                    self.call_from_thread(self._on_system_event, event.get("content", ""))
                 elif etype == "action":
                     action = event.get("action", {})
                     atype = action.get("type")
@@ -492,6 +491,7 @@ class NsysChatApp(App):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def run_chat_tui(profile_path: str) -> None:
     """Launch the Textual AI chat TUI for the given profile path."""

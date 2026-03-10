@@ -1,13 +1,16 @@
 """Map NVTX annotation ranges to their GPU kernel children."""
+
 from ..base import Skill, SkillParam
 
 
 def _format(rows):
     if not rows:
         return "(No NVTX-to-kernel mappings found — are NVTX annotations present?)"
-    lines = ["── NVTX → Kernel Mapping ──",
-             f"{'NVTX Range':<50s}  {'Kernel':<50s}  {'Start(ms)':>10s}  {'End(ms)':>10s}",
-             "─" * 126]
+    lines = [
+        "── NVTX → Kernel Mapping ──",
+        f"{'NVTX Range':<50s}  {'Kernel':<50s}  {'Start(ms)':>10s}  {'End(ms)':>10s}",
+        "─" * 126,
+    ]
     for r in rows:
         nvtx = r["nvtx_text"] or "(unnamed)"
         if len(nvtx) > 48:

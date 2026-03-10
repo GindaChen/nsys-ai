@@ -4,6 +4,7 @@ profile.py — Open and query Nsight Systems SQLite databases.
 Provides a thin wrapper around the SQLite export with typed accessors
 for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
+
 import os
 import shutil
 import sqlite3
@@ -23,9 +24,7 @@ class NsightSchema:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
         self.tables: list[str] = [
-            r[0] for r in self._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         ]
         self.version: str | None = self._detect_version()
         self.kernel_table: str | None = self._detect_kernel_table()
@@ -59,9 +58,7 @@ class NsightSchema:
             return {}
 
         kv: dict[str, str] = {}
-        cur = self._conn.execute(
-            f"SELECT {key_col}, {val_col} FROM {table}"
-        )
+        cur = self._conn.execute(f"SELECT {key_col}, {val_col} FROM {table}")
         for k, v in cur.fetchall():
             if k is not None and v is not None:
                 kv[str(k)] = str(v)
@@ -99,8 +96,7 @@ class NsightSchema:
 
         # Fallback: any non-enum table with KERNEL in the name
         candidates = [
-            t for t in self.tables
-            if "KERNEL" in t.upper() and not t.upper().startswith("ENUM_")
+            t for t in self.tables if "KERNEL" in t.upper() and not t.upper().startswith("ENUM_")
         ]
         if candidates:
             # Deterministic order
@@ -113,6 +109,7 @@ class NsightSchema:
 @dataclass
 class GpuInfo:
     """Hardware metadata for one GPU."""
+
     device_id: int
     name: str = ""
     pci_bus: str = ""
@@ -125,9 +122,10 @@ class GpuInfo:
 @dataclass
 class ProfileMeta:
     """Discovered metadata from an Nsight profile."""
-    devices: list[int]          # active deviceIds
+
+    devices: list[int]  # active deviceIds
     streams: dict[int, list[int]]  # deviceId -> [streamId, ...]
-    time_range: tuple[int, int]    # (min_start_ns, max_end_ns)
+    time_range: tuple[int, int]  # (min_start_ns, max_end_ns)
     kernel_count: int
     nvtx_count: int
     tables: list[str]
@@ -151,8 +149,7 @@ class Profile:
         if "NVTX_EVENTS" not in self.schema.tables:
             return False
         try:
-            cols = [r[1] for r in self.conn.execute(
-                "PRAGMA table_info(NVTX_EVENTS)").fetchall()]
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()]
             return "textId" in cols
         except Exception:
             return False
@@ -172,27 +169,37 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        devices = [r[0] for r in self.conn.execute(
-            f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId")]
+        devices = [
+            r[0]
+            for r in self.conn.execute(
+                f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
+            )
+        ]
 
         streams: dict[int, list[int]] = {}
         for r in self.conn.execute(
-            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} "
-            "ORDER BY deviceId, streamId"):
+            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
+        ):
             streams.setdefault(r[0], []).append(r[1])
 
-        tr = self.conn.execute(
-            f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
+        tr = self.conn.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
 
-        kc = self.conn.execute(
-            f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
-        nc = self.conn.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0] if "NVTX_EVENTS" in tables else 0
+        kc = self.conn.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
+        nc = (
+            self.conn.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
+            if "NVTX_EVENTS" in tables
+            else 0
+        )
 
         return ProfileMeta(
-            devices=devices, streams=streams,
+            devices=devices,
+            streams=streams,
             time_range=(tr[0] or 0, tr[1] or 0),
-            kernel_count=kc, nvtx_count=nc, tables=tables,
-            gpu_info=self._gpu_info(devices, streams, tables))
+            kernel_count=kc,
+            nvtx_count=nc,
+            tables=tables,
+            gpu_info=self._gpu_info(devices, streams, tables),
+        )
 
     def _gpu_info(self, devices, streams, tables) -> dict[int, GpuInfo]:
         """Query hardware metadata per GPU."""
@@ -201,7 +208,8 @@ class Profile:
         # Kernel counts per device
         kcounts = {}
         for r in self.conn.execute(
-            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"):
+            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
+        ):
             kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
@@ -215,16 +223,24 @@ class Profile:
                 JOIN TARGET_INFO_CUDA_DEVICE c ON g.id = c.gpuId
                 GROUP BY c.cudaId
             """):
-                hw[r["dev"]] = dict(name=r["name"] or "", pci_bus=r["busLocation"] or "",
-                                    sm_count=r["sms"] or 0, memory_bytes=r["mem"] or 0)
+                hw[r["dev"]] = dict(
+                    name=r["name"] or "",
+                    pci_bus=r["busLocation"] or "",
+                    sm_count=r["sms"] or 0,
+                    memory_bytes=r["mem"] or 0,
+                )
 
         for dev in devices:
             h = hw.get(dev, {})
             info[dev] = GpuInfo(
-                device_id=dev, name=h.get("name", ""), pci_bus=h.get("pci_bus", ""),
-                sm_count=h.get("sm_count", 0), memory_bytes=h.get("memory_bytes", 0),
+                device_id=dev,
+                name=h.get("name", ""),
+                pci_bus=h.get("pci_bus", ""),
+                sm_count=h.get("sm_count", 0),
+                memory_bytes=h.get("memory_bytes", 0),
                 kernel_count=kcounts.get(dev, 0),
-                streams=streams.get(dev, []))
+                streams=streams.get(dev, []),
+            )
         return info
 
     def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
@@ -364,7 +380,9 @@ class Profile:
         match_val = (
             pattern
             if (use_glob and "*" in pattern) or (not use_glob and "%" in pattern)
-            else f"%{pattern}%" if not use_glob else f"*{pattern}*"
+            else f"%{pattern}%"
+            if not use_glob
+            else f"*{pattern}*"
         )
         if self._nvtx_has_text_id:
             sql = """
@@ -437,42 +455,58 @@ class Profile:
     def kernel_map(self, device: int) -> dict[int, dict]:
         """Build correlationId -> kernel info for ALL kernels on a device."""
         with self._lock:
-            return {r["correlationId"]: dict(start=r["start"], end=r["end"],
-                    stream=r["streamId"], name=r["name"],
-                    demangled=r["demangled"])
-                    for r in self.conn.execute(f"""
+            return {
+                r["correlationId"]: dict(
+                    start=r["start"],
+                    end=r["end"],
+                    stream=r["streamId"],
+                    name=r["name"],
+                    demangled=r["demangled"],
+                )
+                for r in self.conn.execute(
+                    f"""
                         SELECT k.start, k.[end], k.streamId, k.correlationId,
                                s.value as name, d.value as demangled
                         FROM {self.schema.kernel_table} k
                         JOIN StringIds s ON k.shortName = s.id
                         JOIN StringIds d ON k.demangledName = d.id
                         WHERE k.deviceId = ?  ORDER BY k.start
-                    """, (device,))}
+                    """,
+                    (device,),
+                )
+            }
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
         with self._lock:
-            return {r[0] for r in self.conn.execute(f"""
+            return {
+                r[0]
+                for r in self.conn.execute(
+                    f"""
                 SELECT DISTINCT r.globalTid
                 FROM CUPTI_ACTIVITY_KIND_RUNTIME r
                 JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
                 WHERE k.deviceId = ?
-            """, (device,))}
+            """,
+                    (device,),
+                )
+            }
 
-    def runtime_index(self, threads: set[int],
-                      window: tuple[int, int]) -> dict[int, list]:
+    def runtime_index(self, threads: set[int], window: tuple[int, int]) -> dict[int, list]:
         """Load CUDA runtime calls for threads, indexed by globalTid."""
         idx = {}
         with self._lock:
             for tid in threads:
-                idx[tid] = self.conn.execute("""
+                idx[tid] = self.conn.execute(
+                    """
                     SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
                     WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
-                """, (tid, window[0], window[1])).fetchall()
+                """,
+                    (tid, window[0], window[1]),
+                ).fetchall()
         return idx
 
-    def nvtx_events(self, threads: set[int],
-                    window: tuple[int, int]) -> list:
+    def nvtx_events(self, threads: set[int], window: tuple[int, int]) -> list:
         """Load NVTX push/pop events for given threads in a time window.
 
         Handles both schema variants:
@@ -484,7 +518,8 @@ class Profile:
         tids = ",".join(map(str, threads))
         with self._lock:
             if self._nvtx_has_text_id:
-                return self.conn.execute(f"""
+                return self.conn.execute(
+                    f"""
                     SELECT COALESCE(n.text, s.value) AS text,
                            n.globalTid, n.start, n.[end]
                     FROM NVTX_EVENTS n
@@ -494,15 +529,20 @@ class Profile:
                       AND n.start >= ? AND n.start <= ?
                       AND n.globalTid IN ({tids})
                     ORDER BY n.start
-                """, window).fetchall()
+                """,
+                    window,
+                ).fetchall()
             else:
-                return self.conn.execute(f"""
+                return self.conn.execute(
+                    f"""
                     SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
                     WHERE text IS NOT NULL AND [end] > start
                       AND start >= ? AND start <= ?
                       AND globalTid IN ({tids})
                     ORDER BY start
-                """, window).fetchall()
+                """,
+                    window,
+                ).fetchall()
 
     def close(self):
         self.conn.close()

@@ -1,4 +1,5 @@
 """nsight — Python library for Nsight Systems profile analysis and visualization."""
+
 from importlib.metadata import PackageNotFoundError, version
 
 try:
@@ -10,6 +11,13 @@ from . import export, export_flat, overlap, profile, projection, search, summary
 
 __all__ = [
     "__version__",
-    "profile", "projection", "export", "tree", "summary",
-    "overlap", "search", "export_flat", "web",
+    "profile",
+    "projection",
+    "export",
+    "tree",
+    "summary",
+    "overlap",
+    "search",
+    "export_flat",
+    "web",
 ]

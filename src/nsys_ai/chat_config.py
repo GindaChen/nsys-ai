@@ -4,6 +4,7 @@ chat_config.py — Model registry and API-key resolution for the AI chat layer.
 Keeping model discovery separate from the agent loop makes it easy to test
 key resolution without triggering any LLM imports.
 """
+
 from __future__ import annotations
 
 import os
@@ -15,17 +16,17 @@ import os
 # ---------------------------------------------------------------------------
 MODEL_OPTIONS: list[dict] = [
     # Anthropic
-    {"id": "anthropic/claude-sonnet-4-20250514",        "label": "Claude Sonnet 4"},
-    {"id": "anthropic/claude-3.5-sonnet",               "label": "Claude 3.5 Sonnet"},
-    {"id": "anthropic/claude-3-5-haiku-20241022",       "label": "Claude 3.5 Haiku"},
+    {"id": "anthropic/claude-sonnet-4-20250514", "label": "Claude Sonnet 4"},
+    {"id": "anthropic/claude-3.5-sonnet", "label": "Claude 3.5 Sonnet"},
+    {"id": "anthropic/claude-3-5-haiku-20241022", "label": "Claude 3.5 Haiku"},
     # OpenAI
-    {"id": "gpt-4o",                                    "label": "GPT-4o"},
-    {"id": "gpt-4o-mini",                               "label": "GPT-4o Mini"},
-    {"id": "o3-mini",                                   "label": "o3-mini"},
+    {"id": "gpt-4o", "label": "GPT-4o"},
+    {"id": "gpt-4o-mini", "label": "GPT-4o Mini"},
+    {"id": "o3-mini", "label": "o3-mini"},
     # Gemini
-    {"id": "gemini/gemini-2.5-flash",                   "label": "Gemini 2.5 Flash"},
-    {"id": "gemini/gemini-2.5-pro",                     "label": "Gemini 2.5 Pro"},
-    {"id": "gemini/gemini-2.0-flash",                   "label": "Gemini 2.0 Flash"},
+    {"id": "gemini/gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+    {"id": "gemini/gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+    {"id": "gemini/gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
 ]
 
 

@@ -3,6 +3,7 @@ tests/test_tui_timeline_app.py — Pilot-based headless tests for NsysTimelineAp
 
 Run with: pytest tests/test_tui_timeline_app.py -v
 """
+
 import pytest
 
 from nsys_ai.timeline.app import NsysTimelineApp
@@ -75,7 +76,7 @@ async def test_zoom_in_decreases_ns_per_col(timeline_app):
     """Plus key zooms in (fewer ns per column)."""
     async with timeline_app.run_test(size=(120, 40)) as pilot:
         initial = timeline_app.ns_per_col
-        await pilot.press("equals_sign")   # = key (Textual 8: "equals_sign", not "equal")
+        await pilot.press("equals_sign")  # = key (Textual 8: "equals_sign", not "equal")
         await pilot.pause()
         assert timeline_app.ns_per_col < initial
 

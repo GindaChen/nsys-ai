@@ -22,9 +22,7 @@ def _compute_depth(stacks: dict, tid: int, start: int, end: int) -> int:
     return depth
 
 
-def project_nvtx(profile, device: int,
-                 trim: tuple[int, int],
-                 pad: int = int(5e9)) -> list[dict]:
+def project_nvtx(profile, device: int, trim: tuple[int, int], pad: int = int(5e9)) -> list[dict]:
     """
     Project NVTX annotations onto a GPU's timeline.
 
@@ -72,11 +70,11 @@ def project_nvtx(profile, device: int,
         if gs:
             ps, pe = min(gs), max(ge)
             if pe >= trim[0] and ps <= trim[1]:
-                results.append(dict(name=text, start=ps, end=pe,
-                                    depth=depth, projected=True))
+                results.append(dict(name=text, start=ps, end=pe, depth=depth, projected=True))
         else:
             if cpu_end >= trim[0] and cpu_start <= trim[1]:
-                results.append(dict(name=text, start=cpu_start, end=cpu_end,
-                                    depth=depth, projected=False))
+                results.append(
+                    dict(name=text, start=cpu_start, end=cpu_end, depth=depth, projected=False)
+                )
 
     return results

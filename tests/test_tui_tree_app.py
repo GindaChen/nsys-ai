@@ -6,6 +6,7 @@ No display, no X server needed.
 
 Run with: pytest tests/test_tui_tree_app.py -v
 """
+
 import pytest
 
 from nsys_ai.tree.app import NsysTreeApp
@@ -94,6 +95,7 @@ def tree_app():
 # Mount tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_tree_app_mounts(tree_app):
     """App mounts without error and shows rows."""
@@ -115,6 +117,7 @@ async def test_tree_app_initial_rows_match_visible(tree_app):
 # ---------------------------------------------------------------------------
 # Expand/collapse
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_collapse_reduces_rows(tree_app):
@@ -151,6 +154,7 @@ async def test_expand_all_then_collapse_all(tree_app):
 # Depth filter
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_depth_1_shows_only_root(tree_app):
     """Pressing '1' restricts depth to 1 (top-level NVTX only)."""
@@ -179,6 +183,7 @@ async def test_depth_0_restores_all(tree_app):
 # View mode toggle
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_toggle_view_mode(tree_app):
     """Pressing 'v' switches between tree and linear modes."""
@@ -195,6 +200,7 @@ async def test_toggle_view_mode(tree_app):
 # ---------------------------------------------------------------------------
 # scroll_to_kernel API
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_scroll_to_kernel_navigates(tree_app):
@@ -221,15 +227,17 @@ async def test_scroll_to_nonexistent_kernel_shows_notification(tree_app):
 # Chat panel
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_toggle_chat_panel(tree_app):
     """'a' opens the chat panel; Escape closes it."""
     async with tree_app.run_test(size=(120, 40)) as pilot:
         from nsys_ai.tree.chat import ChatPanel
+
         cp = tree_app.query_one("#chat-panel", ChatPanel)
         assert "-active" not in cp.classes
 
-        await pilot.press("A")      # open (A = AI chat, matching original tui.py)
+        await pilot.press("A")  # open (A = AI chat, matching original tui.py)
         await pilot.pause()
         assert "-active" in cp.classes
 

@@ -9,6 +9,7 @@ Public API:
 Note: Textual is imported lazily inside run_timeline to avoid stalling at
 package import time when Textual is not installed.
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,6 +29,7 @@ def run_timeline(
         _print_static_summary(db_path, device, trim, min_ms)
         return
     from .app import run_timeline as _run
+
     _run(db_path, device, trim, min_ms=min_ms)
 
 
@@ -46,6 +48,7 @@ def _print_static_summary(
 
     from .. import profile as _profile
     from ..formatting import fmt_dur as _fmt_dur
+
     try:
         with _profile.open(db_path) as prof:
             trim_ns = trim or (prof.meta.time_range[0], prof.meta.time_range[1])
@@ -61,8 +64,12 @@ def _print_static_summary(
                 dur_ms = (k["end"] - k["start"]) / 1e6
                 stream_count[sid] += 1
                 stream_dur[sid] += dur_ms
-            for sid in sorted(stream_count, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else s)):
-                print(f"  Stream {sid}: {stream_count[sid]} kernels  {_fmt_dur(stream_dur[sid])} total")
+            for sid in sorted(
+                stream_count, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else s)
+            ):
+                print(
+                    f"  Stream {sid}: {stream_count[sid]} kernels  {_fmt_dur(stream_dur[sid])} total"
+                )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
 

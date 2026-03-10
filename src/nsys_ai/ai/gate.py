@@ -15,6 +15,7 @@ Usage:
 Enable profiling:
     NSIGHT_AI=1 nsys profile python my_script.py
 """
+
 import os
 from contextlib import contextmanager
 
@@ -34,6 +35,7 @@ def nsight_range(name: str):
         return
 
     import torch.cuda.nvtx as nvtx
+
     nvtx.range_push(name)
     try:
         yield

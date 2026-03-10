@@ -4,6 +4,7 @@ viewer.py - Generate interactive HTML visualizations for Nsight profiles.
 Uses string.Template with HTML template files for clean separation between
 Python logic and HTML/CSS/JS presentation.
 """
+
 import json
 import os
 from string import Template
@@ -41,8 +42,10 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
     gpu_info = prof.meta.gpu_info.get(device)
     gpu_label = f"GPU {device}"
     if gpu_info:
-        gpu_label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
-                      f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
+        gpu_label += (
+            f" - {gpu_info.name} ({gpu_info.pci_bus}), "
+            f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes / 1e9:.0f}GB"
+        )
 
     # Stable id for this profile view (device + time window) for profile-bound chat history
     trim_sec = (trim[0] / 1e9, trim[1] / 1e9)
@@ -54,7 +57,7 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
     return tmpl.safe_substitute(
         DATA=json.dumps(tree_json),
         GPU_LABEL=gpu_label,
-        TRIM_LABEL=f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s",
+        TRIM_LABEL=f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s",
         PROFILE_ID=profile_id,
         PROFILE_PATH=prof.path,
         DB_AGENT_ENABLED="1" if db_agent_enabled else "",
@@ -80,15 +83,17 @@ def _collect_nvtx_annotations(
         if ntype == "nvtx":
             path = node.get("path", "")
             depth = max(len(path.split(" > ")) - 1, 0) if path else 0
-            spans.append({
-                "name": node.get("name", ""),
-                "start": node.get("start_ns", 0),
-                "end": node.get("end_ns", 0),
-                "depth": depth,
-                "path": path,
-                "dur": node.get("duration_ms", 0),
-                "thread": thread_name or "(unnamed)",
-            })
+            spans.append(
+                {
+                    "name": node.get("name", ""),
+                    "start": node.get("start_ns", 0),
+                    "end": node.get("end_ns", 0),
+                    "depth": depth,
+                    "path": path,
+                    "dur": node.get("duration_ms", 0),
+                    "thread": thread_name or "(unnamed)",
+                }
+            )
         elif ntype == "kernel":
             key = (
                 node.get("start_ns"),
@@ -138,15 +143,17 @@ def build_timeline_gpu_data(
             for r in rows:
                 start_ns = int(r["start_ns"])
                 end_ns = int(r["end_ns"])
-                kernels.append({
-                    "type": "kernel",
-                    "name": r["name"],
-                    "start_ns": start_ns,
-                    "end_ns": end_ns,
-                    "duration_ms": round((end_ns - start_ns) / 1e6, 3),
-                    "stream": r["stream"],
-                    "path": "",
-                })
+                kernels.append(
+                    {
+                        "type": "kernel",
+                        "name": r["name"],
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                        "stream": r["stream"],
+                        "path": "",
+                    }
+                )
 
             if "CUPTI_ACTIVITY_KIND_MEMCPY" in prof.schema.tables:
                 memcpy_sql = """
@@ -159,26 +166,24 @@ def build_timeline_gpu_data(
                     ORDER BY m.start
                 """
                 with prof._lock:
-                    memcpy_rows = prof.conn.execute(
-                        memcpy_sql, (dev, trim[0], trim[1])
-                    ).fetchall()
+                    memcpy_rows = prof.conn.execute(memcpy_sql, (dev, trim[0], trim[1])).fetchall()
 
                 for r in memcpy_rows:
                     start_ns = int(r["start_ns"])
                     end_ns = int(r["end_ns"])
                     copy_kind = int(r["copy_kind"])
-                    copy_kind_label = _CUDA_MEMCPY_KIND_LABELS.get(
-                        copy_kind, f"kind={copy_kind}"
+                    copy_kind_label = _CUDA_MEMCPY_KIND_LABELS.get(copy_kind, f"kind={copy_kind}")
+                    kernels.append(
+                        {
+                            "type": "memcpy",
+                            "name": f"[CUDA memcpy {copy_kind_label}]",
+                            "start_ns": start_ns,
+                            "end_ns": end_ns,
+                            "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                            "stream": r["stream"],
+                            "path": "",
+                        }
                     )
-                    kernels.append({
-                        "type": "memcpy",
-                        "name": f"[CUDA memcpy {copy_kind_label}]",
-                        "start_ns": start_ns,
-                        "end_ns": end_ns,
-                        "duration_ms": round((end_ns - start_ns) / 1e6, 3),
-                        "stream": r["stream"],
-                        "path": "",
-                    })
 
             if "CUPTI_ACTIVITY_KIND_MEMSET" in prof.schema.tables:
                 memset_sql = """
@@ -190,22 +195,22 @@ def build_timeline_gpu_data(
                     ORDER BY m.start
                 """
                 with prof._lock:
-                    memset_rows = prof.conn.execute(
-                        memset_sql, (dev, trim[0], trim[1])
-                    ).fetchall()
+                    memset_rows = prof.conn.execute(memset_sql, (dev, trim[0], trim[1])).fetchall()
 
                 for r in memset_rows:
                     start_ns = int(r["start_ns"])
                     end_ns = int(r["end_ns"])
-                    kernels.append({
-                        "type": "memset",
-                        "name": "[CUDA memset]",
-                        "start_ns": start_ns,
-                        "end_ns": end_ns,
-                        "duration_ms": round((end_ns - start_ns) / 1e6, 3),
-                        "stream": r["stream"],
-                        "path": "",
-                    })
+                    kernels.append(
+                        {
+                            "type": "memset",
+                            "name": "[CUDA memset]",
+                            "start_ns": start_ns,
+                            "end_ns": end_ns,
+                            "duration_ms": round((end_ns - start_ns) / 1e6, 3),
+                            "stream": r["stream"],
+                            "path": "",
+                        }
+                    )
 
             kernels.sort(key=lambda k: (k["start_ns"], k["end_ns"]))
 
@@ -259,6 +264,7 @@ def generate_timeline_html(
     is ``null`` and the template fetches data via ``/api/data`` on demand.
     """
     from collections.abc import Sequence
+
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
 
     # Build GPU info list (for dropdown) and compact label
@@ -282,7 +288,7 @@ def generate_timeline_html(
         # Full data baked into HTML (kernel-first payload).
         gpu_entries = build_timeline_gpu_data(prof, devices, trim)
         data_json = json.dumps({"gpus": gpu_entries})
-        trim_label = f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s"
+        trim_label = f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s"
         progressive = ""
     else:
         # Progressive mode: no data baked in

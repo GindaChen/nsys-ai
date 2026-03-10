@@ -5,6 +5,7 @@ This package provides:
     persona.py  — Agent identity, system prompt, knowledge layers
     loop.py     — Core analysis loop: profile → skill selection → execution → report
 """
+
 from .loop import Agent
 from .persona import AGENT_IDENTITY, SYSTEM_PROMPT
 

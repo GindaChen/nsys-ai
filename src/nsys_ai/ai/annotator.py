@@ -14,6 +14,7 @@ The annotator:
 All inserted annotations use the gate.py mechanism — they're no-ops
 unless NSIGHT_AI=1 is set in the environment.
 """
+
 import ast
 
 # ── The import line we inject at the top of files ──────────────────
@@ -23,8 +24,8 @@ IMPORT_LINE = "from nsys_ai.ai.gate import nsight_range  # auto-inserted by nsig
 
 # ── Simple text-based annotation (no AST rewrite) ─────────────────
 
-def annotate_function_calls(source: str, target_func: str,
-                            context: str = "") -> str:
+
+def annotate_function_calls(source: str, target_func: str, context: str = "") -> str:
     """
     Wrap calls to `target_func(...)` with nsight_range().
 
@@ -49,12 +50,13 @@ def annotate_function_calls(source: str, target_func: str,
         import_inserted = False
         for i, line in enumerate(lines):
             result.append(line)
-            if not import_inserted and (line.startswith("import ") or
-                                         line.startswith("from ")):
+            if not import_inserted and (line.startswith("import ") or line.startswith("from ")):
                 # Check if next line is NOT an import
-                if i + 1 >= len(lines) or not (lines[i+1].startswith("import ") or
-                                                 lines[i+1].startswith("from ") or
-                                                 lines[i+1].strip() == ""):
+                if i + 1 >= len(lines) or not (
+                    lines[i + 1].startswith("import ")
+                    or lines[i + 1].startswith("from ")
+                    or lines[i + 1].strip() == ""
+                ):
                     result.append(IMPORT_LINE)
                     import_inserted = True
         if not import_inserted:
@@ -64,11 +66,11 @@ def annotate_function_calls(source: str, target_func: str,
 
     for line in lines:
         stripped = line.lstrip()
-        indent = line[:len(line) - len(stripped)]
+        indent = line[: len(line) - len(stripped)]
 
         if f"{target_func}(" in stripped and "nsight_range" not in line:
             label = f"{context}.{target_func}" if context else target_func
-            result.append(f"{indent}with nsight_range(\"{label}\"):")
+            result.append(f'{indent}with nsight_range("{label}"):')
             result.append(f"{indent}    {stripped}")
         else:
             result.append(line)
@@ -78,8 +80,8 @@ def annotate_function_calls(source: str, target_func: str,
 
 # ── AST-based function body annotation ─────────────────────────────
 
-def annotate_function_body(source: str, func_name: str,
-                           class_name: str | None = None) -> str:
+
+def annotate_function_body(source: str, func_name: str, class_name: str | None = None) -> str:
     """
     Wrap the entire body of a function with nsight_range().
 
@@ -113,7 +115,9 @@ def annotate_function_body(source: str, func_name: str,
 
     # Get the indentation of the first line of the function body
     first_body_line = target.body[0].lineno - 1  # 0-indexed
-    body_indent = lines[first_body_line][:len(lines[first_body_line]) - len(lines[first_body_line].lstrip())]
+    body_indent = lines[first_body_line][
+        : len(lines[first_body_line]) - len(lines[first_body_line].lstrip())
+    ]
 
     label = f"{class_name}.{func_name}" if class_name else func_name
 
@@ -130,7 +134,7 @@ def annotate_function_body(source: str, func_name: str,
     new_lines.append(with_line)
     for i in range(first_body_line, last_body_line + 1):
         new_lines.append("    " + lines[i])
-    new_lines.extend(lines[last_body_line + 1:])
+    new_lines.extend(lines[last_body_line + 1 :])
 
     # Ensure import exists
     result = "\n".join(new_lines)
@@ -142,6 +146,7 @@ def annotate_function_body(source: str, func_name: str,
 
 # ── Bulk annotation ────────────────────────────────────────────────
 
+
 def annotate_all_methods(source: str, class_name: str) -> str:
     """
     Wrap every method body in a class with nsight_range().
@@ -152,9 +157,11 @@ def annotate_all_methods(source: str, class_name: str) -> str:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
-            methods = [n.name for n in node.body
-                       if isinstance(n, ast.FunctionDef)
-                       and not n.name.startswith("_")]
+            methods = [
+                n.name
+                for n in node.body
+                if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")
+            ]
 
     # Apply annotations one at a time (each modifies source)
     for method in reversed(methods):  # reversed to preserve line numbers

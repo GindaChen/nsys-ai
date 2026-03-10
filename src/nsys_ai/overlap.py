@@ -4,6 +4,7 @@ overlap.py — Compute/communication overlap analysis and NCCL breakdown.
 Quantifies how much GPU compute overlaps with NCCL communication,
 detects training iterations, and breaks down collective operations.
 """
+
 from collections import defaultdict
 
 from .profile import Profile
@@ -32,8 +33,8 @@ def classify_kernel(name: str) -> str:
 
 # ── Compute/Communication overlap ──────────────────────────────────
 
-def overlap_analysis(prof: Profile, device: int,
-                     trim: tuple[int, int] | None = None) -> dict:
+
+def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = None) -> dict:
     """
     Quantify compute vs communication overlap on a GPU.
 
@@ -92,8 +93,8 @@ def overlap_analysis(prof: Profile, device: int,
 
 # ── NCCL collective breakdown ──────────────────────────────────────
 
-def nccl_breakdown(prof: Profile, device: int,
-                   trim: tuple[int, int] | None = None) -> list[dict]:
+
+def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = None) -> list[dict]:
     """
     Break down NCCL operations by collective type.
 
@@ -117,23 +118,26 @@ def nccl_breakdown(prof: Profile, device: int,
     result = []
     for ctype, durs in sorted(by_type.items(), key=lambda x: -sum(x[1])):
         total = sum(durs)
-        result.append({
-            "type": ctype.replace("nccl_", ""),
-            "count": len(durs),
-            "total_ms": round(total / 1e6, 2),
-            "avg_ms": round(total / len(durs) / 1e6, 3),
-            "min_ms": round(min(durs) / 1e6, 3),
-            "max_ms": round(max(durs) / 1e6, 3),
-            "pct": round(100 * total / total_nccl_ns, 1),
-        })
+        result.append(
+            {
+                "type": ctype.replace("nccl_", ""),
+                "count": len(durs),
+                "total_ms": round(total / 1e6, 2),
+                "avg_ms": round(total / len(durs) / 1e6, 3),
+                "min_ms": round(min(durs) / 1e6, 3),
+                "max_ms": round(max(durs) / 1e6, 3),
+                "pct": round(100 * total / total_nccl_ns, 1),
+            }
+        )
     return result
 
 
 # ── Iteration detection ────────────────────────────────────────────
 
-def detect_iterations(prof: Profile, device: int,
-                      trim: tuple[int, int] | None = None,
-                      marker: str = "sample_0") -> list[dict]:
+
+def detect_iterations(
+    prof: Profile, device: int, trim: tuple[int, int] | None = None, marker: str = "sample_0"
+) -> list[dict]:
     """
     Detect repeating training iterations using a top-level NVTX marker.
 
@@ -152,15 +156,19 @@ def detect_iterations(prof: Profile, device: int,
 
     # Find the primary thread
     from .tree import _find_primary_thread
+
     primary_tid = _find_primary_thread(prof, device)
 
     # Filter to primary thread's top-level iterations
-    pri_nvtx = prof.conn.execute("""
+    pri_nvtx = prof.conn.execute(
+        """
         SELECT text, start, [end] FROM NVTX_EVENTS
         WHERE text LIKE ? AND [end] > start AND globalTid = ?
           AND start >= ? AND start <= ?
         ORDER BY start
-    """, (f"%{marker}%", primary_tid, t[0] - pad, t[1])).fetchall()
+    """,
+        (f"%{marker}%", primary_tid, t[0] - pad, t[1]),
+    ).fetchall()
 
     # Filter to non-overlapping (top-level only)
     iterations = []
@@ -174,10 +182,13 @@ def detect_iterations(prof: Profile, device: int,
         return []
 
     # For each iteration, count kernels and compute GPU time
-    rt_all = prof.conn.execute("""
+    rt_all = prof.conn.execute(
+        """
         SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
         WHERE globalTid = ? ORDER BY start
-    """, (primary_tid,)).fetchall()
+    """,
+        (primary_tid,),
+    ).fetchall()
 
     results = []
     for i, it in enumerate(iterations):
@@ -201,20 +212,23 @@ def detect_iterations(prof: Profile, device: int,
         compute_ns = sum(k["end"] - k["start"] for k in kernels_in_iter)
         nccl_count = sum(1 for k in kernels_in_iter if "nccl" in k["name"].lower())
 
-        results.append({
-            "iteration": i,
-            "gpu_start_s": round(gpu_start / 1e9, 4),
-            "gpu_end_s": round(gpu_end / 1e9, 4),
-            "duration_ms": round((gpu_end - gpu_start) / 1e6, 2),
-            "compute_ms": round(compute_ns / 1e6, 2),
-            "kernel_count": len(kernels_in_iter),
-            "nccl_count": nccl_count,
-        })
+        results.append(
+            {
+                "iteration": i,
+                "gpu_start_s": round(gpu_start / 1e9, 4),
+                "gpu_end_s": round(gpu_end / 1e9, 4),
+                "duration_ms": round((gpu_end - gpu_start) / 1e6, 2),
+                "compute_ms": round(compute_ns / 1e6, 2),
+                "kernel_count": len(kernels_in_iter),
+                "nccl_count": nccl_count,
+            }
+        )
 
     return results
 
 
 # ── Interval math helpers ──────────────────────────────────────────
+
 
 def _merge_intervals(intervals):
     """Merge overlapping intervals into non-overlapping set."""
@@ -255,6 +269,7 @@ def _intersection_coverage(a, b):
 
 
 # ── Text formatting ────────────────────────────────────────────────
+
 
 def format_overlap(result: dict) -> str:
     """Format overlap analysis as readable text."""

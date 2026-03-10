@@ -4,6 +4,7 @@ registry.py — Skill auto-discovery and lookup.
 Walks the builtins/ directory for Python files that export a SKILL constant.
 Also supports loading skills from external directories.
 """
+
 import importlib
 import pkgutil
 import sqlite3
@@ -22,6 +23,7 @@ def _load_builtins():
         return
 
     from . import builtins
+
     for _importer, modname, _ispkg in pkgutil.iter_modules(builtins.__path__):
         mod = importlib.import_module(f".builtins.{modname}", package="nsys_ai.skills")
         skill = getattr(mod, "SKILL", None)

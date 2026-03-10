@@ -9,6 +9,7 @@ The system prompt lives in persona.md (same directory) so it can be edited
 as plain Markdown. This module loads it at import time and exposes the same
 public API: AGENT_IDENTITY, SYSTEM_PROMPT, build_system_prompt().
 """
+
 from pathlib import Path
 
 AGENT_IDENTITY = {
@@ -39,4 +40,5 @@ SYSTEM_PROMPT = _PERSONA_MD.read_text(encoding="utf-8")
 def build_system_prompt() -> str:
     """Build the full system prompt with the current skill catalog."""
     from ..skills.registry import skill_catalog
+
     return SYSTEM_PROMPT.format(skill_catalog=skill_catalog())

@@ -4,6 +4,7 @@ export_flat.py — Export profile data as flat CSV/JSON for custom analysis.
 Replaces Nsight's complex query interface with simple, script-friendly
 formats that users can load in pandas, Excel, or custom tools.
 """
+
 import csv
 import io
 import json
@@ -12,9 +13,9 @@ from .profile import Profile
 from .tree import build_nvtx_tree
 
 
-def _kernel_rows(prof: Profile, device: int,
-                 trim: tuple[int, int] | None = None,
-                 include_nvtx_path: bool = True) -> list[dict]:
+def _kernel_rows(
+    prof: Profile, device: int, trim: tuple[int, int] | None = None, include_nvtx_path: bool = True
+) -> list[dict]:
     """Build flat rows with optional NVTX path context."""
     kernels = prof.kernels(device, trim)
 
@@ -26,21 +27,22 @@ def _kernel_rows(prof: Profile, device: int,
 
     rows = []
     for k in kernels:
-        rows.append(dict(
-            name=k["name"],
-            start_ns=k["start"],
-            end_ns=k["end"],
-            duration_ms=round((k["end"] - k["start"]) / 1e6, 3),
-            duration_us=round((k["end"] - k["start"]) / 1e3, 1),
-            stream=k["streamId"],
-            device=device,
-            nvtx_path=nvtx_paths.get(k["start"], ""),
-        ))
+        rows.append(
+            dict(
+                name=k["name"],
+                start_ns=k["start"],
+                end_ns=k["end"],
+                duration_ms=round((k["end"] - k["start"]) / 1e6, 3),
+                duration_us=round((k["end"] - k["start"]) / 1e3, 1),
+                stream=k["streamId"],
+                device=device,
+                nvtx_path=nvtx_paths.get(k["start"], ""),
+            )
+        )
     return rows
 
 
-def _collect_paths(nodes: list, path: list[str],
-                   result: dict[int, str]):
+def _collect_paths(nodes: list, path: list[str], result: dict[int, str]):
     """Recursively collect kernel -> NVTX path mapping."""
     for node in nodes:
         current_path = path + [node["name"]] if node["type"] == "nvtx" else path
@@ -50,9 +52,9 @@ def _collect_paths(nodes: list, path: list[str],
             _collect_paths(node["children"], current_path, result)
 
 
-def to_csv(prof: Profile, device: int,
-           trim: tuple[int, int] | None = None,
-           output: str | None = None) -> str:
+def to_csv(
+    prof: Profile, device: int, trim: tuple[int, int] | None = None, output: str | None = None
+) -> str:
     """
     Export kernel data as CSV.
 
@@ -83,9 +85,9 @@ def to_csv(prof: Profile, device: int,
     return content
 
 
-def to_json_flat(prof: Profile, device: int,
-                 trim: tuple[int, int] | None = None,
-                 output: str | None = None) -> list[dict]:
+def to_json_flat(
+    prof: Profile, device: int, trim: tuple[int, int] | None = None, output: str | None = None
+) -> list[dict]:
     """
     Export kernel data as a flat JSON list.
 
@@ -102,9 +104,9 @@ def to_json_flat(prof: Profile, device: int,
     return rows
 
 
-def to_summary_json(prof: Profile, device: int,
-                    trim: tuple[int, int] | None = None,
-                    output: str | None = None) -> dict:
+def to_summary_json(
+    prof: Profile, device: int, trim: tuple[int, int] | None = None, output: str | None = None
+) -> dict:
     """
     Export a structured summary JSON combining hardware, kernels, and timing.
 

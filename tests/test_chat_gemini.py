@@ -3,6 +3,7 @@ Backend integration tests for AI chat using Gemini 2.5 Flash.
 Run with: GEMINI_API_KEY=<your-key> pytest tests/test_chat_gemini.py -v
 Skips all tests if GEMINI_API_KEY is not set.
 """
+
 import json
 import os
 
@@ -19,8 +20,15 @@ def test_chat_completion_gemini_25_flash():
     """Stage 1: Non-stream chat_completion with Gemini 2.5 Flash returns content."""
     payload = {
         "model": MODEL_25_FLASH,
-        "messages": [{"role": "user", "content": "Reply with exactly the word OK and nothing else."}],
-        "ui_context": {"view_state": {}, "stats": {}, "global_top_kernels": [], "visible_kernels_summary": []},
+        "messages": [
+            {"role": "user", "content": "Reply with exactly the word OK and nothing else."}
+        ],
+        "ui_context": {
+            "view_state": {},
+            "stats": {},
+            "global_top_kernels": [],
+            "visible_kernels_summary": [],
+        },
     }
     body = json.dumps(payload).encode("utf-8")
     out = chat_mod.chat_completion(body)
@@ -38,7 +46,12 @@ def test_chat_completion_stream_gemini_25_flash():
     payload = {
         "model": MODEL_25_FLASH,
         "messages": [{"role": "user", "content": "Say hello in one short word."}],
-        "ui_context": {"view_state": {}, "stats": {}, "global_top_kernels": [], "visible_kernels_summary": []},
+        "ui_context": {
+            "view_state": {},
+            "stats": {},
+            "global_top_kernels": [],
+            "visible_kernels_summary": [],
+        },
         "stream": True,
     }
     body = json.dumps(payload).encode("utf-8")

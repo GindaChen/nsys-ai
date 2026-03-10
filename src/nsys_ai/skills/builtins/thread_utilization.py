@@ -1,13 +1,16 @@
 """CPU thread utilization analysis."""
+
 from ..base import Skill, SkillParam
 
 
 def _format(rows):
     if not rows:
         return "(No CPU utilization data found — COMPOSITE_EVENTS table may be missing)"
-    lines = ["── CPU Thread Utilization ──",
-             f"{'TID':>8s}  {'Thread Name':<40s}  {'CPU %':>7s}",
-             "─" * 60]
+    lines = [
+        "── CPU Thread Utilization ──",
+        f"{'TID':>8s}  {'Thread Name':<40s}  {'CPU %':>7s}",
+        "─" * 60,
+    ]
     for r in rows:
         name = r["thread_name"] or "(unnamed)"
         if len(name) > 38:

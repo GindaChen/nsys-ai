@@ -7,6 +7,7 @@ Regression tests for nvtx_tree.build_nvtx_tree() against both NVTX schema varian
 Ensures cleanup does not hard-depend on textId so that both legal Nsight export
 formats work and Tree/Timeline load without OperationalError.
 """
+
 import sqlite3
 
 from nsys_ai import profile as _profile

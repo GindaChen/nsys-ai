@@ -19,6 +19,7 @@ Layout:
     │  ChatPanel (12 rows, collapsible)  │
     └────────────────────────────────────┘
 """
+
 from __future__ import annotations
 
 from textual import on
@@ -166,6 +167,7 @@ class NsysTreeApp(App):
     # -------------------------------------------------------------------------
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal, Vertical
+
         yield Header()
         with Horizontal(id="main-body"):
             with Vertical(id="tree-col"):
@@ -215,38 +217,44 @@ class NsysTreeApp(App):
                     children = []
                     for k in ungrouped_raw:
                         dur = (k["end"] - k["start"]) / 1e6
-                        children.append({
-                            "name": k["name"],
-                            "type": "kernel",
-                            "duration_ms": round(dur, 3),
-                            "heat": 0.0,
-                            "relative_pct": 100.0,
-                            "start_ns": k["start"],
-                            "end_ns": k["end"],
-                            "stream": str(k["streamId"]),
-                            "demangled": k.get("demangled", ""),
-                        })
+                        children.append(
+                            {
+                                "name": k["name"],
+                                "type": "kernel",
+                                "duration_ms": round(dur, 3),
+                                "heat": 0.0,
+                                "relative_pct": 100.0,
+                                "start_ns": k["start"],
+                                "end_ns": k["end"],
+                                "stream": str(k["streamId"]),
+                                "demangled": k.get("demangled", ""),
+                            }
+                        )
                     max_dur = max((c["duration_ms"] for c in children), default=1) or 1
                     for c in children:
                         c["heat"] = round(c["duration_ms"] / max_dur, 3)
-                    json_roots.append({
-                        "name": "(ungrouped)",
-                        "type": "nvtx",
-                        "duration_ms": round(sum(c["duration_ms"] for c in children), 3),
-                        "heat": 0.0,
-                        "relative_pct": 100.0,
-                        "start_ns": min(c["start_ns"] for c in children),
-                        "end_ns": max(c["end_ns"] for c in children),
-                        "path": "(ungrouped)",
-                        "children": children,
-                    })
+                    json_roots.append(
+                        {
+                            "name": "(ungrouped)",
+                            "type": "nvtx",
+                            "duration_ms": round(sum(c["duration_ms"] for c in children), 3),
+                            "heat": 0.0,
+                            "relative_pct": 100.0,
+                            "start_ns": min(c["start_ns"] for c in children),
+                            "end_ns": max(c["end_ns"] for c in children),
+                            "path": "(ungrouped)",
+                            "children": children,
+                        }
+                    )
 
                 self._json_roots = json_roots
         except Exception as e:
             self.notify(f"Failed to load profile: {e}", severity="error")
             return
         self._all_nodes = build_nodes(self._json_roots)
-        self._total_kernels, self._total_gpu_ms, self._total_nvtx = compute_summary(self._json_roots)
+        self._total_kernels, self._total_gpu_ms, self._total_nvtx = compute_summary(
+            self._json_roots
+        )
         self._refresh_table()
         self._update_title()
 
@@ -293,7 +301,11 @@ class NsysTreeApp(App):
         self._update_detail_bar()
 
     def _update_title(self) -> None:
-        trim_s = f"{self._trim[0]/1e9:.1f}s–{self._trim[1]/1e9:.1f}s" if self._trim != (0, 0) else "full"
+        trim_s = (
+            f"{self._trim[0] / 1e9:.1f}s–{self._trim[1] / 1e9:.1f}s"
+            if self._trim != (0, 0)
+            else "full"
+        )
         self.title = (
             f"nsys-ai  GPU {self._device}  {trim_s}  |  "
             f"{self._total_nvtx} NVTX  {self._total_kernels} kernels  "
@@ -514,7 +526,9 @@ class NsysTreeApp(App):
 
     def action_open_bubble_threshold(self) -> None:
         """Open inline bubble threshold input ('b' key)."""
-        self.query_one("#bubble-threshold-bar", BubbleThresholdBar).show_bar(self.bubble_threshold_us)
+        self.query_one("#bubble-threshold-bar", BubbleThresholdBar).show_bar(
+            self.bubble_threshold_us
+        )
 
     def action_open_trim(self) -> None:
         """Open trim range input ('T' key — matches original tui.py)."""
@@ -526,7 +540,9 @@ class NsysTreeApp(App):
         self.show_bubbles = not self.show_bubbles
         self._refresh_table()
         threshold = int(self.bubble_threshold_us)
-        self.notify(f"Bubbles: {'ON  ≥' + str(threshold) + 'μs' if self.show_bubbles else 'OFF'}", timeout=2)
+        self.notify(
+            f"Bubbles: {'ON  ≥' + str(threshold) + 'μs' if self.show_bubbles else 'OFF'}", timeout=2
+        )
 
     # Actions — reload
     def action_reload(self) -> None:
@@ -547,7 +563,7 @@ class NsysTreeApp(App):
         if node:
             s_ns = node.start_ns or 0
             e_ns = node.end_ns or 0
-            label = f"{node.name[:30]} @{s_ns//1_000_000}ms"
+            label = f"{node.name[:30]} @{s_ns // 1_000_000}ms"
             self._bookmarks.append({"name": label, "start_ns": s_ns, "end_ns": e_ns})
             self.notify(f"Bookmark #{len(self._bookmarks)} saved", timeout=2)
 
@@ -652,6 +668,7 @@ class NsysTreeApp(App):
 # ---------------------------------------------------------------------------
 # Entry point (replaces tui.run_tui)
 # ---------------------------------------------------------------------------
+
 
 def run_tui(
     db_path: str,

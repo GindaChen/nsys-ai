@@ -3,6 +3,7 @@ conftest.py — Shared pytest fixtures for nsys-ai tests.
 
 All fixtures here are available to every test module without explicit imports.
 """
+
 import sqlite3
 
 import pytest

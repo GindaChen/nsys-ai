@@ -9,6 +9,7 @@ This module is the "data / prompt" boundary:
 
 It does NOT make any LLM API calls (those live in chat.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -28,11 +29,151 @@ TOOL_COMPUTE_MFU = {
         "parameters": {
             "type": "object",
             "properties": {
-                "step_time_s": {"type": "number", "description": "Step or profile span in seconds (from query_profile_db or summary)."},
-                "model_flops_per_step": {"type": "number", "description": "Model FLOPs per step (user must provide; e.g. 6*N_params*tokens for Transformer)."},
-                "peak_tflops": {"type": "number", "description": "GPU peak TFLOPS for precision (e.g. 989 for H100 FP16, 312 for A100 FP16)."},
+                "step_time_s": {
+                    "type": "number",
+                    "description": "Step or profile span in seconds (from query_profile_db or summary).",
+                },
+                "model_flops_per_step": {
+                    "type": "number",
+                    "description": "Model FLOPs per step (user must provide; e.g. 6*N_params*tokens for Transformer).",
+                },
+                "peak_tflops": {
+                    "type": "number",
+                    "description": "GPU peak TFLOPS for precision (e.g. 989 for H100 FP16, 312 for A100 FP16).",
+                },
             },
             "required": ["step_time_s", "model_flops_per_step", "peak_tflops"],
+        },
+    },
+}
+
+# Region-level MFU tool: compute MFU for a specific NVTX region or kernel.
+# The backend injects the current profile_path; the model MUST NOT pass a profile_path argument.
+TOOL_COMPUTE_REGION_MFU = {
+    "type": "function",
+    "function": {
+        "name": "compute_region_mfu",
+        "description": (
+            "Compute MFU (Model FLOPs Utilization) for a named NVTX region or CUDA kernel. "
+            "Two modes: (1) source='nvtx' — finds an NVTX range by name, attributes kernels inside it; "
+            "(2) source='kernel' — finds CUDA kernels by name directly (use when no custom NVTX labels exist). "
+            "BEFORE calling this tool, compute theoretical_flops using the MFU REFERENCE formulas. "
+            "Do NOT pass a profile_path argument."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name to match: NVTX range text (source='nvtx') or kernel shortName (source='kernel'). Substring match by default.",
+                },
+                "theoretical_flops": {
+                    "type": "number",
+                    "description": "Theoretical model FLOPs for this region, computed from model architecture formulas.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "'nvtx' to match NVTX ranges (default), 'kernel' to match CUDA kernels directly by name.",
+                    "enum": ["nvtx", "kernel"],
+                    "default": "nvtx",
+                },
+                "peak_tflops": {
+                    "type": "number",
+                    "description": "Optional per-GPU peak TFLOPS (BF16/FP16). If omitted, inferred from profile GPU.",
+                },
+                "num_gpus": {
+                    "type": "integer",
+                    "description": "Number of GPUs used (world_size). Peak is scaled by this. Default 1.",
+                    "default": 1,
+                },
+                "occurrence_index": {
+                    "type": "integer",
+                    "description": "Which matching NVTX occurrence to use (1-based, only for source='nvtx'). Default 1.",
+                    "default": 1,
+                },
+                "device_id": {
+                    "type": "integer",
+                    "description": "Optional CUDA deviceId to restrict to a single GPU.",
+                },
+                "match_mode": {
+                    "type": "string",
+                    "description": "'contains' (substring, default) or 'exact'.",
+                    "enum": ["contains", "exact"],
+                    "default": "contains",
+                },
+            },
+            "required": ["name", "theoretical_flops"],
+        },
+    },
+}
+
+# Theoretical FLOPs calculator — does exact arithmetic so the LLM doesn't have to.
+TOOL_COMPUTE_THEORETICAL_FLOPS = {
+    "type": "function",
+    "function": {
+        "name": "compute_theoretical_flops",
+        "description": (
+            "Compute theoretical FLOPs for transformer operations using EXACT arithmetic. "
+            "ALWAYS call this BEFORE compute_region_mfu — do NOT compute FLOPs yourself. "
+            "IMPORTANT: set num_layers to the model's layer count (e.g. 32 for LLaMA-7B) "
+            "to get total FLOPs across all layers. "
+            "Pass the returned theoretical_flops value directly to compute_region_mfu."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "description": (
+                        "Operation type: "
+                        "'attention' (QK^T+softmax*V: 4*S²*H), "
+                        "'qkv_proj' (Q/K/V linear: 6*S*H²), "
+                        "'output_proj' (out linear: 2*S*H²), "
+                        "'mlp' (FFN up+down: 4*S*H*ffn), "
+                        "'full_layer' (attn+proj+mlp combined), "
+                        "'full_model' (same as full_layer), "
+                        "'linear' (generic: 2*M*N*K)."
+                    ),
+                    "enum": [
+                        "attention", "qkv_proj", "output_proj",
+                        "mlp", "full_layer", "full_model", "linear",
+                    ],
+                },
+                "hidden_dim": {
+                    "type": "integer",
+                    "description": "Model hidden dimension (H). Required for all operations except 'linear'.",
+                },
+                "seq_len": {
+                    "type": "integer",
+                    "description": "Sequence length (S). Required for all operations except 'linear'.",
+                },
+                "num_layers": {
+                    "type": "integer",
+                    "description": (
+                        "Number of transformer layers (L). MUST match the model's actual layer count "
+                        "(e.g. 32 for LLaMA-7B, 80 for LLaMA-70B). Per-layer FLOPs are multiplied by this."
+                    ),
+                    "default": 1,
+                },
+                "ffn_dim": {
+                    "type": "integer",
+                    "description": "FFN intermediate dimension. Defaults to 4*hidden_dim if omitted.",
+                },
+                "batch_size": {
+                    "type": "integer",
+                    "description": "Batch size. Default 1.",
+                    "default": 1,
+                },
+                "multiplier": {
+                    "type": "integer",
+                    "description": "1=forward only, 3=fwd+bwd (no ckpt), 4=fwd+bwd+recompute. Default 1.",
+                    "default": 1,
+                },
+                "M": {"type": "integer", "description": "For 'linear' only: first dimension."},
+                "N": {"type": "integer", "description": "For 'linear' only: second dimension."},
+                "K": {"type": "integer", "description": "For 'linear' only: third dimension."},
+            },
+            "required": ["operation"],
         },
     },
 }
@@ -55,8 +196,9 @@ TOOL_GET_GPU_PEAK_TFLOPS = {
 # Tool definitions (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
 
+
 def _tools_openai() -> list[dict]:
-    """Return the OpenAI-style tool list: navigate, zoom, query_profile_db, get_gpu_peak_tflops, compute_mfu."""
+    """Return the OpenAI-style tool list for single-profile chat."""
     return [
         {
             "type": "function",
@@ -97,7 +239,7 @@ def _tools_openai() -> list[dict]:
                     "type": "object",
                     "properties": {
                         "start_s": {"type": "number", "description": "Start time in seconds"},
-                        "end_s":   {"type": "number", "description": "End time in seconds"},
+                        "end_s": {"type": "number", "description": "End time in seconds"},
                     },
                     "required": ["start_s", "end_s"],
                 },
@@ -132,12 +274,15 @@ def _tools_openai() -> list[dict]:
         TOOL_QUERY_PROFILE_DB,
         TOOL_GET_GPU_PEAK_TFLOPS,
         TOOL_COMPUTE_MFU,
+        TOOL_COMPUTE_REGION_MFU,
+        TOOL_COMPUTE_THEORETICAL_FLOPS,
     ]
 
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
+
 
 def _build_system_prompt(
     ui_context: dict,
@@ -193,15 +338,68 @@ def _build_system_prompt(
         "client; you do not wait for a result. For `query_profile_db`: the backend runs the "
         "query and returns rows; use them in your answer.\n"
         "   - Do NOT output code blocks or JSON for navigation - use the actual tool call mechanism only.\n"
-        "5. If a requested kernel is not in the context, politely say it is not visible or "
-        "does not exist.\n"
-        "6. For MFU: (1) Call get_gpu_peak_tflops to get peak_tflops from the profile GPU. (2) Use query_profile_db to get step_time_s (e.g. (MAX([end])-MIN(start))/1e9). (3) Ask the user for model_flops_per_step (nsys does not store it). Do NOT call compute_mfu until the user has provided it — after asking, end your response and wait for their reply; only then call compute_mfu with that value. (4) If get_gpu_peak_tflops returns an error, ask the user for peak_tflops as well."
+        "5. NEVER REFUSE to calculate MFU when the user asks. Even if the result is approximate or the time "
+        "covers only a single kernel, compute it. Use compute_region_mfu with source='kernel' to get "
+        "kernel execution time directly. The user can judge whether the result is meaningful.\n"
+        "6. For whole-step MFU: (1) Call get_gpu_peak_tflops to get peak_tflops from the profile GPU. "
+        "   (2) Use query_profile_db to get step_time_s (e.g. (MAX([end])-MIN(start))/1e9). "
+        "   (3) Ask the user for model_flops_per_step (nsys does not store it). Do NOT call compute_mfu until the user "
+        "has provided it — after asking, end your response and wait for their reply; only then call compute_mfu with that value. "
+        "If get_gpu_peak_tflops returns an error, ask the user for peak_tflops as well.\n"
+        "7. For MFU of a specific NVTX region or kernel: use compute_region_mfu. "
+        "   - For NVTX ranges (e.g. 'Forward Pass'): set source='nvtx', name=<nvtx_text>. "
+        "   - For kernels (e.g. 'flash_fwd_kernel'): set source='kernel', name=<kernel_name>. "
+        "   The tool handles both modes. Provide theoretical_flops and optional peak_tflops / num_gpus.\n"
+        "   KERNEL NAME TIPS: The name parameter uses substring matching (LIKE '%%name%%').\n"
+        "   - Use SHORT technical names: 'flash' (not 'flash attention kernel'), 'gemm', 'nccl'.\n"
+        "   - If KERNEL_NOT_FOUND, retry with a shorter/broader keyword.\n"
+        "   - When unsure of exact name, use query_profile_db first to discover kernel names:\n"
+        "     SELECT DISTINCT s.value FROM StringIds s JOIN CUPTI_ACTIVITY_KIND_KERNEL k ON k.shortName=s.id WHERE s.value LIKE '%%flash%%'\n"
+        "   IMPORTANT: Use compute_theoretical_flops to compute FLOPs — do NOT compute manually.\n"
+        "   Workflow: (1) compute_theoretical_flops → get exact FLOPs, (2) compute_region_mfu with that value.\n"
+        "\n"
+        "=== MFU REFERENCE (for choosing the right operation in compute_theoretical_flops) ===\n"
+        "The nsys profile does NOT store model FLOPs — you must calculate them from model architecture.\n"
+        "CRITICAL: theoretical_flops must match ONLY the computation the target kernel/region performs.\n\n"
+        "## 1. CORE PRINCIPLE — Match FLOPs to the Kernel\n"
+        "  If the user asks for the MFU of a SPECIFIC kernel, compute ONLY the FLOPs that kernel does.\n"
+        "  Do NOT use the full-model FLOPs for a single kernel's MFU.\n"
+        "  Example: flash_fwd_kernel only does attention matmuls (QK^T + softmax*V),\n"
+        "    so use 4*S*S*H per layer — NOT the full transformer layer FLOPs.\n\n"
+        "## 2. Common Kernel → FLOPs Mapping (per layer, forward only)\n"
+        "  Variables: H=hidden_dim, S=seq_len, L=num_layers, ffn=ffn_dim, head_dim=H/num_heads\n"
+        "  | Kernel type                     | What it computes        | FLOPs per layer         |\n"
+        "  |--------------------------------|-------------------------|-------------------------|\n"
+        "  | Attention matmul (flash_fwd)   | QK^T + softmax*V        | 4 * S * S * H           |\n"
+        "  | GEMM / linear projection       | Matrix multiply W*x     | 2 * M * N * K           |\n"
+        "  | QKV projection                 | Linear proj for Q,K,V   | 6 * S * H * H           |\n"
+        "  | Output projection              | Linear proj after attn  | 2 * S * H * H           |\n"
+        "  | MLP / FFN                      | Up + down projection    | 4 * S * H * ffn         |\n"
+        "  Total for all layers: multiply per-layer by L.\n"
+        "  For fwd+bwd: multiply by 3 (no checkpointing) or 4 (with checkpointing).\n\n"
+        "## 3. Full Model FLOPs (use for whole-step or NVTX-wrapped regions)\n"
+        "  Transformer per-layer FLOPs (forward, batch=1):\n"
+        "    flops_per_layer = 8*H*H*S + 4*H*ffn*S + 4*S*S*H  (self-attn + MLP)\n"
+        "  Full step:\n"
+        "    theoretical_flops = batch_size * flops_per_layer * L * multiplier * grad_accum\n"
+        "  Quick estimate: flops_per_step ≈ 6 * N_params * tokens_per_step (fwd+bwd)\n\n"
+        "## 4. Multi-GPU\n"
+        "  Pass num_gpus=world_size to compute_region_mfu. Peak is scaled automatically.\n\n"
+        "## 5. SANITY CHECK (MANDATORY)\n"
+        "  After computing MFU, check the result:\n"
+        "  - MFU > 100%  → theoretical_flops is TOO HIGH. You likely used full-model FLOPs\n"
+        "                   for a single kernel. Recalculate with only that kernel's FLOPs.\n"
+        "  - MFU < 0.1%  → theoretical_flops may be TOO LOW, or the kernel barely ran.\n"
+        "  - MFU 10-80%  → typical reasonable range for compute-bound kernels.\n"
+        "  If MFU > 100%, do NOT report it as-is. Recompute with correct FLOPs and explain.\n"
+        "=============================\n"
     )
 
 
 # ---------------------------------------------------------------------------
 # Tool-call parsing — converts raw LLM function calls to UI action dicts
 # ---------------------------------------------------------------------------
+
 
 def _parse_tool_call(name: str, arguments: str) -> dict | None:
     """Parse a tool call into a UI action dict, or ``None`` if unrecognised.

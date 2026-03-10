@@ -9,8 +9,7 @@ agent consumption and human reading.
 from .profile import Profile
 
 
-def gpu_summary(prof: Profile, device: int,
-                trim: tuple[int, int] | None = None) -> dict:
+def gpu_summary(prof: Profile, device: int, trim: tuple[int, int] | None = None) -> dict:
     """
     Generate a summary report for one GPU.
 
@@ -29,6 +28,7 @@ def gpu_summary(prof: Profile, device: int,
 
     # Top kernels by total duration
     from collections import Counter, defaultdict
+
     dur_by_name = defaultdict(float)
     count_by_name = Counter()
     for k in kernels:
@@ -71,8 +71,12 @@ def gpu_summary(prof: Profile, device: int,
         },
         "kernel_count": len(kernels),
         "top_kernels": [
-            {"name": name, "total_ms": round(ms, 3), "count": count_by_name[name],
-             "pct": round(100 * ms / (total_compute_ns / 1e6), 1)}
+            {
+                "name": name,
+                "total_ms": round(ms, 3),
+                "count": count_by_name[name],
+                "pct": round(100 * ms / (total_compute_ns / 1e6), 1),
+            }
             for name, ms in top
         ],
         "streams": {
@@ -97,7 +101,9 @@ def format_text(summary: dict) -> str:
         "  Top kernels:",
     ]
     for k in summary["top_kernels"]:
-        lines.append(f"    {k['pct']:5.1f}%  {k['total_ms']:8.1f}ms  ×{k['count']:<4d}  {k['name']}")
+        lines.append(
+            f"    {k['pct']:5.1f}%  {k['total_ms']:8.1f}ms  ×{k['count']:<4d}  {k['name']}"
+        )
 
     lines.append("")
     lines.append("  Streams:")
@@ -136,10 +142,8 @@ def auto_commentary(summary: dict) -> str:
         )
 
     # Compute vs NCCL split from streams
-    nccl_ms = sum(s["total_ms"] for sid, s in summary["streams"].items()
-                  if sid in (56,))
-    compute_ms = sum(s["total_ms"] for sid, s in summary["streams"].items()
-                     if sid not in (56,))
+    nccl_ms = sum(s["total_ms"] for sid, s in summary["streams"].items() if sid in (56,))
+    compute_ms = sum(s["total_ms"] for sid, s in summary["streams"].items() if sid not in (56,))
     total_stream_ms = nccl_ms + compute_ms
     if total_stream_ms > 0 and nccl_ms > 0:
         nccl_pct = 100 * nccl_ms / total_stream_ms
@@ -150,9 +154,6 @@ def auto_commentary(summary: dict) -> str:
 
     if t["idle_ms"] > 10:
         idle_pct = 100 * t["idle_ms"] / t["span_ms"]
-        sentences.append(
-            f"There are {t['idle_ms']:.0f}ms of idle gaps ({idle_pct:.0f}% of span)."
-        )
+        sentences.append(f"There are {t['idle_ms']:.0f}ms of idle gaps ({idle_pct:.0f}% of span).")
 
     return " ".join(sentences)
-

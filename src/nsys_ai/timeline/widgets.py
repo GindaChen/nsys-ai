@@ -7,6 +7,7 @@ Widgets:
     TimelineFilterBar     — inline filter input (shown on '/')
     TimelineBookmarkPanel — numbered bookmark list overlay (shown on apostrophe)
 """
+
 from __future__ import annotations
 
 from rich.text import Text
@@ -94,7 +95,9 @@ class BottomPanel(Widget):
         s_pos = max(0, int((kernel.start_ns - time_start) / span * bar_w))
         e_pos = min(bar_w, max(s_pos + 1, int((kernel.end_ns - time_start) / span * bar_w)))
         bar = "─" * s_pos + "█" * (e_pos - s_pos) + "─" * (bar_w - e_pos)
-        s_w.update(Text(f" [{_fmt_ns(time_start)}] {bar} [{_fmt_ns(time_end)}]", style="yellow dim"))
+        s_w.update(
+            Text(f" [{_fmt_ns(time_start)}] {bar} [{_fmt_ns(time_end)}]", style="yellow dim")
+        )
 
     def _render_hierarchy(self, nvtx_path: str) -> Text:
         """Render NVTX path as indented hierarchy with timing from spans."""
@@ -206,6 +209,7 @@ class ConfigPanel(Widget):
         # Return focus to canvas
         try:
             from .canvas import TimelineCanvas
+
             self.app.query_one("#canvas", TimelineCanvas).focus()
         except Exception:
             pass
@@ -326,6 +330,7 @@ class TimelineBookmarkPanel(Widget):
 
     def _render_list(self, bookmarks: list[dict]) -> None:
         from ..formatting import fmt_ns as _fmt_ns_local
+
         if not bookmarks:
             self.query_one("#tbm-list", Static).update("(no bookmarks saved)")
             return
@@ -337,12 +342,13 @@ class TimelineBookmarkPanel(Widget):
                 extra = f"  [{bm['kernel_name'][:20]}]"
             if "range_start_ns" in bm:
                 extra += "  ↔range"
-            lines.append(f"  {i+1}  {bm['name'][:24]}  {ts}{extra}")
+            lines.append(f"  {i + 1}  {bm['name'][:24]}  {ts}{extra}")
         self.query_one("#tbm-list", Static).update("\n".join(lines))
 
     def _jump(self, n: int) -> None:
         """Jump to bookmark n (1-indexed) via the app."""
         from .app import NsysTimelineApp
+
         app = self.app
         if isinstance(app, NsysTimelineApp):
             app.jump_to_bookmark_n(n)
@@ -353,6 +359,7 @@ class TimelineBookmarkPanel(Widget):
         # Return focus to canvas
         try:
             from .canvas import TimelineCanvas
+
             self.app.query_one("#canvas", TimelineCanvas).focus()
         except Exception:
             pass

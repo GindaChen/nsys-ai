@@ -9,6 +9,7 @@ Backward-compat re-exports (other src modules do ``from .tree import X``):
 TUI entry point (lazy-imports Textual to avoid import-time stalls):
     run_tui(db_path, device, trim, max_depth=-1, min_ms=0)
 """
+
 from __future__ import annotations
 
 import sys
@@ -41,6 +42,7 @@ __all__ = [
 # TUI entry point (lazy-imports Textual)
 # ---------------------------------------------------------------------------
 
+
 def run_tui(
     db_path: str,
     device: int,
@@ -56,6 +58,7 @@ def run_tui(
         _print_static_tree(db_path, device, trim)
         return
     from .app import run_tui as _run
+
     _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
 
 
@@ -68,6 +71,7 @@ def _print_static_tree(
     # ruff: noqa: I001 - local imports keep CLI startup fast
     from .. import profile as _profile
     from ..nvtx_tree import build_nvtx_tree, format_text as _fmt
+
     try:
         with _profile.open(db_path) as prof:
             roots = build_nvtx_tree(prof, device, trim)

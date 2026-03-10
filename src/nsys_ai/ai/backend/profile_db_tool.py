@@ -4,6 +4,7 @@ tools_profile.py - Safe read-only SQL tool and schema for the Text-to-SQL agent 
 Exposes query_profile_db(conn, sql_query) and get_profile_schema(conn) for use by
 chat.py and test_agent.py. See docs/plan-brain-navigator.md
 """
+
 import json
 import logging
 import re
@@ -23,9 +24,7 @@ NVTX_TABLE = "NVTX_EVENTS"
 STRING_IDS_TABLE = "StringIds"
 
 # Regex: reject any mutating SQL.
-_READ_ONLY_BLOCK = re.compile(
-    r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b"
-)
+_READ_ONLY_BLOCK = re.compile(r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b")
 
 
 def _adaptive_limit(sql_upper: str, base_limit: int) -> int:
@@ -40,7 +39,7 @@ def _adaptive_limit(sql_upper: str, base_limit: int) -> int:
         return base_limit
     from_idx = sql_upper.find(" FROM ", select_idx + 6)
     end = from_idx if from_idx > 0 else len(sql_upper)
-    projection = sql_upper[select_idx + 6:end].strip()
+    projection = sql_upper[select_idx + 6 : end].strip()
     # Count top-level comma separators (commas inside function args don't split columns).
     depth, col_count = 0, 1
     for ch in projection:
@@ -88,7 +87,8 @@ def query_profile_db(
         return (
             "Error: SELECT * is not allowed - it returns too many columns and wastes tokens. "
             "Please select only the columns you need, for example: "
-            "SELECT start, [end], shortName FROM <table> WHERE ... LIMIT 20")
+            "SELECT start, [end], shortName FROM <table> WHERE ... LIMIT 20"
+        )
 
     # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
     effective_limit = _adaptive_limit(upper, max_limit)
@@ -98,7 +98,13 @@ def query_profile_db(
     if limit_match:
         n = int(limit_match.group(1))
         if n > effective_limit:
-            q = re.sub(r"\bLIMIT\s+" + str(n) + r"\b", f"LIMIT {effective_limit}", q, count=1, flags=re.IGNORECASE)
+            q = re.sub(
+                r"\bLIMIT\s+" + str(n) + r"\b",
+                f"LIMIT {effective_limit}",
+                q,
+                count=1,
+                flags=re.IGNORECASE,
+            )
     else:
         q = q + f" LIMIT {effective_limit}"
 
@@ -110,6 +116,7 @@ def query_profile_db(
         else:
             names = [d[0] for d in cur.description] if cur.description else []
             out = [dict(zip(names, r)) for r in rows]
+
         # JSON-serializable values (sqlite3 can return bytes etc.)
         def _serialize(obj):
             if isinstance(obj, (bytes, bytearray)):
@@ -128,7 +135,7 @@ def query_profile_db(
                 len(json_str),
                 DEFAULT_MAX_JSON_CHARS,
             )
-            json_str = json_str[: DEFAULT_MAX_JSON_CHARS] + (
+            json_str = json_str[:DEFAULT_MAX_JSON_CHARS] + (
                 f"...[Truncated - result exceeds {DEFAULT_MAX_JSON_CHARS} chars] "
                 "Please refine your query: SELECT only essential columns "
                 "(e.g. start, [end], shortName) or reduce the LIMIT."
@@ -150,6 +157,7 @@ def get_profile_schema(
     """
     try:
         from .profile import NsightSchema
+
         ns = NsightSchema(conn)
         kernel_table = ns.kernel_table
     except Exception:

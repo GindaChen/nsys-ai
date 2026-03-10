@@ -6,6 +6,7 @@ Run from repo root with GEMINI_API_KEY set and Gemini Flash available:
   python -m pytest tests/test_chat_two_requests_backend.py -v -s
   or:  GEMINI_API_KEY=xxx python tests/test_chat_two_requests_backend.py
 """
+
 import json
 import os
 import sys
@@ -74,7 +75,12 @@ def run_two_requests():
     model = "gemini/gemini-2.5-flash"
 
     # Request 1: single user message
-    messages_1 = [{"role": "user", "content": "Explain this kernel: nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"}]
+    messages_1 = [
+        {
+            "role": "user",
+            "content": "Explain this kernel: nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        }
+    ]
     body_1 = _build_payload(messages_1, model=model)
     print("--- Request 1 (first message) ---")
     gen_1 = chat.chat_completion_stream(body_1)
@@ -90,9 +96,15 @@ def run_two_requests():
 
     # Request 2: user, assistant (first reply), user (second question) — simulates "second turn"
     messages_2 = [
-        {"role": "user", "content": "Explain this kernel: nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"},
+        {
+            "role": "user",
+            "content": "Explain this kernel: nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN",
+        },
         {"role": "assistant", "content": text_1[:8000] if len(text_1) > 8000 else text_1},
-        {"role": "user", "content": "Explain this kernel: ncclDevKernel_ReduceScatter_Sum_bf16_RING_LL"},
+        {
+            "role": "user",
+            "content": "Explain this kernel: ncclDevKernel_ReduceScatter_Sum_bf16_RING_LL",
+        },
     ]
     body_2 = _build_payload(messages_2, model=model)
     print("\n--- Request 2 (second message, with history) ---")
@@ -115,6 +127,7 @@ def test_two_requests_backend():
     """Pytest: run two stream requests in sequence. Skip if no GEMINI_API_KEY."""
     if not os.environ.get("GEMINI_API_KEY"):
         import pytest
+
         pytest.skip("GEMINI_API_KEY not set")
     assert run_two_requests() == 0
 

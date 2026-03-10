@@ -4,6 +4,7 @@ tests/test_timeline_logic.py — Unit tests for timeline/logic.py.
 All pure-function tests: no Textual, no curses, no display required.
 Run with: pytest tests/test_timeline_logic.py -v
 """
+
 import pytest
 
 from nsys_ai.timeline.logic import (
@@ -84,6 +85,7 @@ def sample_stream_kernels(sample_kernels):
 # extract_events
 # ---------------------------------------------------------------------------
 
+
 def test_extract_events_kernels(sample_kernels):
     assert len(sample_kernels) == 2
     names = [k.name for k in sample_kernels]
@@ -106,6 +108,7 @@ def test_extract_events_nvtx_spans():
 # collect_streams / build_stream_kernels
 # ---------------------------------------------------------------------------
 
+
 def test_collect_streams(sample_kernels):
     streams = collect_streams(sample_kernels)
     assert "1" in streams
@@ -122,6 +125,7 @@ def test_build_stream_kernels_correct_partitioning(sample_kernels):
 # ---------------------------------------------------------------------------
 # filter_kernels
 # ---------------------------------------------------------------------------
+
 
 def test_filter_kernels_by_name(sample_kernels):
     result = filter_kernels(sample_kernels, filter_text="nccl")
@@ -144,6 +148,7 @@ def test_filter_kernels_demangled(sample_kernels):
 # kernel_at_time
 # ---------------------------------------------------------------------------
 
+
 def test_kernel_at_time_inside(sample_kernels):
     # aten::mm is 10ms-40ms on stream 1
     result = kernel_at_time(sample_kernels, 25_000_000)  # 25ms
@@ -165,6 +170,7 @@ def test_kernel_at_time_empty():
 # kernel_index_at_time
 # ---------------------------------------------------------------------------
 
+
 def test_kernel_index_at_time_returns_valid(sample_kernels):
     idx = kernel_index_at_time(sample_kernels, 25_000_000)
     assert 0 <= idx < len(sample_kernels)
@@ -177,6 +183,7 @@ def test_kernel_index_at_time_empty():
 # ---------------------------------------------------------------------------
 # find_kernel_by_name
 # ---------------------------------------------------------------------------
+
 
 def test_find_kernel_by_name_found(sample_stream_kernels):
     streams, sk = sample_stream_kernels
@@ -195,6 +202,7 @@ def test_find_kernel_by_name_not_found(sample_stream_kernels):
 # ---------------------------------------------------------------------------
 # Viewport math
 # ---------------------------------------------------------------------------
+
 
 def test_center_viewport():
     # cursor at 500, 10ns/col, 100 cols → viewport_start = 500 - 500 = 0
@@ -240,10 +248,11 @@ def test_zoom_clamped_to_time_span():
 # time_bounds
 # ---------------------------------------------------------------------------
 
+
 def test_time_bounds_from_kernels(sample_kernels):
     start, end = time_bounds(sample_kernels, (0, 0))
-    assert start == 10_000_000   # aten::mm start
-    assert end == 70_000_000     # nccl end
+    assert start == 10_000_000  # aten::mm start
+    assert end == 70_000_000  # nccl end
 
 
 def test_time_bounds_fallback():

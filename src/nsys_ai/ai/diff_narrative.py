@@ -56,14 +56,10 @@ def build_executive_summary(summary: ProfileDiffSummary) -> str:
 
     if summary.top_regressions:
         top = summary.top_regressions[0]
-        parts.append(
-            f"Largest regression: {top.name} ({_fmt_delta_ns(top.delta_ns)})."
-        )
+        parts.append(f"Largest regression: {top.name} ({_fmt_delta_ns(top.delta_ns)}).")
     if summary.top_improvements:
         top = summary.top_improvements[0]
-        parts.append(
-            f"Largest improvement: {top.name} ({_fmt_delta_ns(top.delta_ns)})."
-        )
+        parts.append(f"Largest improvement: {top.name} ({_fmt_delta_ns(top.delta_ns)}).")
 
     return " ".join(parts)
 
@@ -154,9 +150,8 @@ def generate_diff_narrative(
         )
     message = choice.message
     content = (
-        (message.get("content") if isinstance(message, dict) else getattr(message, "content", None))
-        or ""
-    )
+        message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    ) or ""
     content = content.strip()
     return DiffNarrative(
         executive_summary=executive_summary,

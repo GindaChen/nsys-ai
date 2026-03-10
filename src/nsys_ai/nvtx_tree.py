@@ -11,8 +11,7 @@ are needed because PyTorch/autograd runs backward passes on separate
 """
 
 
-def _find_kernel_threads(profile, device: int,
-                         min_pct: float = 0.5) -> list[int]:
+def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int]:
     """Find CPU threads that are significant kernel launchers on this device.
 
     Only returns threads whose launch count is >= min_pct of the top thread's
@@ -20,13 +19,16 @@ def _find_kernel_threads(profile, device: int,
     collectives on this device but bring unrelated NVTX context.
     """
     with profile._lock:
-        rows = profile.conn.execute(f"""
+        rows = profile.conn.execute(
+            f"""
             SELECT r.globalTid, COUNT(*) as cnt
             FROM CUPTI_ACTIVITY_KIND_RUNTIME r
             JOIN {profile.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
             GROUP BY r.globalTid ORDER BY cnt DESC
-        """, (device,)).fetchall()
+        """,
+            (device,),
+        ).fetchall()
     if not rows:
         return []
     top_cnt = rows[0][1]
@@ -40,25 +42,27 @@ def _find_primary_thread(profile, device: int) -> int:
     return tids[0] if tids else 0
 
 
-
 def _get_thread_name(profile, tid: int) -> str:
     """Look up thread name from ThreadNames+StringIds tables. Returns '' if unknown."""
     try:
         with profile._lock:
-            row = profile.conn.execute("""
+            row = profile.conn.execute(
+                """
                 SELECT s.value FROM ThreadNames t
                 JOIN StringIds s ON t.nameId = s.id
                 WHERE t.globalTid = ?
                 ORDER BY t.priority DESC LIMIT 1
-            """, (tid,)).fetchone()
+            """,
+                (tid,),
+            ).fetchone()
         return row[0] if row else ""
     except Exception:
         return ""
 
 
-def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
-                              tid: int, kmap: dict,
-                              pad: int = int(5e9)) -> list[dict]:
+def _build_single_thread_tree(
+    profile, device: int, trim: tuple[int, int], tid: int, kmap: dict, pad: int = int(5e9)
+) -> list[dict]:
     """
     Build an NVTX tree for a single thread's events on the target GPU.
 
@@ -68,7 +72,8 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
     with profile._lock:
         if profile._nvtx_has_text_id:
-            nvtx_rows = profile.conn.execute("""
+            nvtx_rows = profile.conn.execute(
+                """
                 SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
                 FROM NVTX_EVENTS n
                 LEFT JOIN StringIds s ON n.textId = s.id
@@ -76,16 +81,21 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
                   AND n.globalTid = ?
                   AND n.[end] >= ? AND n.start <= ?
                 ORDER BY n.start
-            """, (tid, trim[0] - pad, trim[1])).fetchall()
+            """,
+                (tid, trim[0] - pad, trim[1]),
+            ).fetchall()
         else:
-            nvtx_rows = profile.conn.execute("""
+            nvtx_rows = profile.conn.execute(
+                """
                 SELECT text, start, [end]
                 FROM NVTX_EVENTS
                 WHERE text IS NOT NULL AND [end] > start
                   AND globalTid = ?
                   AND [end] >= ? AND start <= ?
                 ORDER BY start
-            """, (tid, trim[0] - pad, trim[1])).fetchall()
+            """,
+                (tid, trim[0] - pad, trim[1]),
+            ).fetchall()
     if not nvtx_rows:
         return []
 
@@ -95,10 +105,13 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
     rt_lo = min(int(n["start"]) for n in nvtx_rows)
     rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
     with profile._lock:
-        rt_rows = profile.conn.execute("""
+        rt_rows = profile.conn.execute(
+            """
             SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
             WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
-        """, (tid, rt_lo, rt_hi)).fetchall()
+        """,
+            (tid, rt_lo, rt_hi),
+        ).fetchall()
 
     # Build projected entries: each NVTX span → projected GPU bounds + child kernels
     entries = []  # list of {name, gpu_start, gpu_end, cpu_start, cpu_end, kernels: [...]}
@@ -116,10 +129,17 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
             if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
                 k = kmap.get(rt["correlationId"])
                 if k:
-                    child_kernels.append(dict(
-                        name=k["name"], demangled=k.get("demangled",""),
-                        start=k["start"], end=k["end"],
-                        stream=k["stream"], type="kernel", children=[]))
+                    child_kernels.append(
+                        dict(
+                            name=k["name"],
+                            demangled=k.get("demangled", ""),
+                            start=k["start"],
+                            end=k["end"],
+                            stream=k["stream"],
+                            type="kernel",
+                            children=[],
+                        )
+                    )
 
         if not child_kernels:
             continue
@@ -130,10 +150,18 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
         if gpu_end < trim[0] or gpu_start > trim[1]:
             continue
 
-        entries.append(dict(
-            name=text, start=gpu_start, end=gpu_end,
-            cpu_start=cpu_start, cpu_end=cpu_end,
-            type="nvtx", kernels=child_kernels, children=[]))
+        entries.append(
+            dict(
+                name=text,
+                start=gpu_start,
+                end=gpu_end,
+                cpu_start=cpu_start,
+                cpu_end=cpu_end,
+                type="nvtx",
+                kernels=child_kernels,
+                children=[],
+            )
+        )
 
     # Nest by CPU time containment (parent = the NVTX whose CPU range contains ours)
     # Since entries are sorted by CPU start time (from the SQL ORDER BY), and NVTX
@@ -146,8 +174,13 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
         while stack and stack[-1]["cpu_end"] <= entry["cpu_start"]:
             stack.pop()
 
-        node = dict(name=entry["name"], start=entry["start"], end=entry["end"],
-                    type="nvtx", children=list(entry["kernels"]))
+        node = dict(
+            name=entry["name"],
+            start=entry["start"],
+            end=entry["end"],
+            type="nvtx",
+            children=list(entry["kernels"]),
+        )
 
         if stack:
             stack[-1]["_node"]["children"].append(node)
@@ -166,8 +199,7 @@ def _build_single_thread_tree(profile, device: int, trim: tuple[int, int],
     return roots
 
 
-def build_nvtx_tree(profile, device: int, trim: tuple[int, int],
-                    pad: int = int(5e9)) -> list[dict]:
+def build_nvtx_tree(profile, device: int, trim: tuple[int, int], pad: int = int(5e9)) -> list[dict]:
     """
     Build a hierarchical tree of NVTX annotations with GPU kernels as leaves.
 
@@ -220,8 +252,11 @@ def _deduplicate_kernels(nodes):
             if child["type"] == "nvtx":
                 _collect_kernel_starts(child, child_kernel_starts)
         # Remove kernels that are claimed deeper
-        node["children"] = [c for c in node["children"]
-                           if c["type"] != "kernel" or c["start"] not in child_kernel_starts]
+        node["children"] = [
+            c
+            for c in node["children"]
+            if c["type"] != "kernel" or c["start"] not in child_kernel_starts
+        ]
         _deduplicate_kernels(node["children"])
 
 
@@ -269,10 +304,16 @@ def to_json(roots, parent_duration_ms: float = 0, path: str = "") -> list[dict]:
         rel_pct = round(100 * dur_ms / parent_duration_ms, 1) if parent_duration_ms > 0 else 100.0
         node_path = f"{path} > {node['name']}" if path else node["name"]
 
-        d = dict(name=node["name"], type=node["type"],
-                 duration_ms=dur_ms_r, heat=heat, relative_pct=rel_pct,
-                 start_ns=node["start"], end_ns=node["end"],
-                 path=node_path)
+        d = dict(
+            name=node["name"],
+            type=node["type"],
+            duration_ms=dur_ms_r,
+            heat=heat,
+            relative_pct=rel_pct,
+            start_ns=node["start"],
+            end_ns=node["end"],
+            path=node_path,
+        )
         if "stream" in node:
             d["stream"] = node["stream"]
         if node.get("demangled"):

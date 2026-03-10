@@ -1,19 +1,24 @@
 """Top GPU kernels by total execution time."""
+
 from ..base import Skill, SkillParam
 
 
 def _format(rows):
     if not rows:
         return "(No kernels found)"
-    lines = ["── Top GPU Kernels by Total Time ──",
-             f"{'Kernel':<60s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Min(ms)':>9s}  {'Max(ms)':>9s}",
-             "─" * 112]
+    lines = [
+        "── Top GPU Kernels by Total Time ──",
+        f"{'Kernel':<60s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Min(ms)':>9s}  {'Max(ms)':>9s}",
+        "─" * 112,
+    ]
     for r in rows:
         name = r["kernel_name"]
         if len(name) > 58:
             name = name[:55] + "..."
-        lines.append(f"{name:<60s}  {r['invocations']:>7d}  {r['total_ms']:>10.2f}  "
-                      f"{r['avg_ms']:>9.2f}  {r['min_ms']:>9.2f}  {r['max_ms']:>9.2f}")
+        lines.append(
+            f"{name:<60s}  {r['invocations']:>7d}  {r['total_ms']:>10.2f}  "
+            f"{r['avg_ms']:>9.2f}  {r['min_ms']:>9.2f}  {r['max_ms']:>9.2f}"
+        )
     return "\n".join(lines)
 
 

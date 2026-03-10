@@ -45,6 +45,7 @@ Layout:
     │  ChatPanel (12 rows, collapsible)       │
     └─────────────────────────────────────────┘
 """
+
 from __future__ import annotations
 
 from textual import on
@@ -262,21 +263,28 @@ class NsysTimelineApp(App):
                 # Auto-detect devices if none specified or single default 0
                 devices = self._devices
                 if not devices or devices == [0]:
-                    if hasattr(prof, 'meta') and hasattr(prof.meta, 'devices') and prof.meta.devices:
+                    if (
+                        hasattr(prof, "meta")
+                        and hasattr(prof.meta, "devices")
+                        and prof.meta.devices
+                    ):
                         devices = prof.meta.devices
                         self._devices = devices
                 for dev in devices:
                     # All kernels from GPU table (not only those under NVTX)
                     raw_kernels = prof.kernels(dev, self._trim)
                     kernel_events = [
-                        KernelEvent({
-                            'name': k['name'],
-                            'demangled': k.get('demangled', ''),
-                            'start_ns': k['start'],
-                            'end_ns': k['end'],
-                            'duration_ms': (k['end'] - k['start']) / 1e6,
-                            'stream': str(k['streamId']),
-                        }) for k in raw_kernels
+                        KernelEvent(
+                            {
+                                "name": k["name"],
+                                "demangled": k.get("demangled", ""),
+                                "start_ns": k["start"],
+                                "end_ns": k["end"],
+                                "duration_ms": (k["end"] - k["start"]) / 1e6,
+                                "stream": str(k["streamId"]),
+                            }
+                        )
+                        for k in raw_kernels
                     ]
                     # NVTX spans from tree for overlay rows
                     roots = build_nvtx_tree(prof, dev, self._trim)
@@ -349,8 +357,9 @@ class NsysTimelineApp(App):
         if not self._is_mounted:
             return  # DOM not ready yet — called from __init__ via reactive setter
         canvas = self.query_one("#canvas", TimelineCanvas)
-        viewport_start = center_viewport(self.cursor_ns, self.ns_per_col,
-                                         max(canvas.size.width - canvas.label_w, 1))
+        viewport_start = center_viewport(
+            self.cursor_ns, self.ns_per_col, max(canvas.size.width - canvas.label_w, 1)
+        )
         # Read live config values so panel adjustments take effect immediately.
         cfg = self.query_one("#config-panel", ConfigPanel)
         selected_rows = cfg.selected_rows
@@ -388,7 +397,7 @@ class NsysTimelineApp(App):
         self._update_bottom_panel()
 
     def _update_title(self) -> None:
-        trim_s = f"{self._trim[0]/1e9:.1f}s–{self._trim[1]/1e9:.1f}s"
+        trim_s = f"{self._trim[0] / 1e9:.1f}s–{self._trim[1] / 1e9:.1f}s"
         kernel_count = len(self._kernels)
         stream = self._streams[self.selected_stream_idx] if self._streams else "?"
         k = kernel_at_time(self._stream_kernels.get(stream, []), self.cursor_ns)
@@ -690,8 +699,9 @@ class NsysTimelineApp(App):
         if self._range_start_ns is None:
             self.notify("Press [ first to set range start", timeout=2)
             return
-        name = (f"#{len(self._bookmarks) + 1} "
-                f"{_fmt_ns(self._range_start_ns)}↔{_fmt_ns(self.cursor_ns)}")
+        name = (
+            f"#{len(self._bookmarks) + 1} {_fmt_ns(self._range_start_ns)}↔{_fmt_ns(self.cursor_ns)}"
+        )
         bm: dict = {
             "name": name,
             "cursor_ns": self._range_start_ns,
@@ -746,7 +756,9 @@ class NsysTimelineApp(App):
                 "name": k.name,
                 "duration_ms": k.duration_ms,
                 "stream": k.stream,
-            } if k else None,
+            }
+            if k
+            else None,
             "view_state": {
                 "time_range_s": [self._trim[0] / 1e9, self._trim[1] / 1e9],
                 "cursor_ns": self.cursor_ns,
@@ -789,6 +801,7 @@ class NsysTimelineApp(App):
 # ---------------------------------------------------------------------------
 # Entry point (replaces tui_timeline.run_timeline)
 # ---------------------------------------------------------------------------
+
 
 def run_timeline(
     db_path: str,

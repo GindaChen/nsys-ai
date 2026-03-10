@@ -231,14 +231,15 @@ def test_diff_with_trim_before_trim_after(tmp_path):
     with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
         # Same window in both: 0–300 ns
         d = diff_profiles(
-            b, a,
+            b,
+            a,
             gpu=0,
             trim_before=(0, 300),
             trim_after=(0, 300),
             limit=10,
         )
     assert d.before.total_gpu_ns == 40  # 10 + 30
-    assert d.after.total_gpu_ns == 40   # 30 + 10
+    assert d.after.total_gpu_ns == 40  # 30 + 10
     kA = [k for k in d.kernel_diffs if k.name == "kA"][0]
     assert kA.delta_ns == 20  # 30 - 10
     kB = [k for k in d.kernel_diffs if k.name == "kB"][0]
@@ -533,7 +534,10 @@ def test_diff_generate_narrative_no_model_returns_warning(tmp_path, monkeypatch)
     from nsys_ai import profile as profile_mod
     from nsys_ai.ai.diff_narrative import DiffNarrative, generate_diff_narrative
     from nsys_ai.diff import diff_profiles
-    monkeypatch.setattr(chat_config_mod, "_get_model_and_key", lambda _=None: (None, None), raising=False)
+
+    monkeypatch.setattr(
+        chat_config_mod, "_get_model_and_key", lambda _=None: (None, None), raising=False
+    )
 
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"
@@ -547,7 +551,11 @@ def test_diff_generate_narrative_no_model_returns_warning(tmp_path, monkeypatch)
     assert narrative.executive_summary
     assert narrative.ai_narrative is None
     assert narrative.warning is not None
-    assert "No LLM" in narrative.warning or "no-ai" in narrative.warning.lower() or "API" in narrative.warning
+    assert (
+        "No LLM" in narrative.warning
+        or "no-ai" in narrative.warning.lower()
+        or "API" in narrative.warning
+    )
 
 
 def test_diff_format_terminal_with_narrative(tmp_path):

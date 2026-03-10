@@ -7,6 +7,7 @@ tests/__snapshots__/ and should be updated with:
 
     pytest tests/test_tui_snapshots.py --snapshot-update -v
 """
+
 from __future__ import annotations
 
 from nsys_ai.timeline.app import NsysTimelineApp
@@ -26,4 +27,3 @@ def test_timeline_snapshot(snap_compare, minimal_nsys_db_path):
     """Snapshot of the horizontal timeline Textual app on a minimal Nsight profile."""
     app = NsysTimelineApp(db_path=minimal_nsys_db_path, device=0, trim=None)
     snap_compare(app, terminal_size=(120, 40))
-

@@ -6,6 +6,7 @@ calls execute_tui_action(action_dict, app) so the same tool schema drives both W
 and TUI (Python). The app object should implement the methods below; missing methods
 are no-ops.
 """
+
 from typing import Any
 
 

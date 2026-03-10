@@ -8,11 +8,7 @@ from nsys_ai.timeline_benchmark import (
     run_timeline_web_benchmark,
 )
 
-DISTCA_DIR = (
-    Path(__file__).resolve().parents[1]
-    / "examples"
-    / "example-20-megatron-distca"
-)
+DISTCA_DIR = Path(__file__).resolve().parents[1] / "examples" / "example-20-megatron-distca"
 DISTCA_SQLITE = DISTCA_DIR / "output" / "megatron_distca.sqlite"
 BUDGET_JSON = DISTCA_DIR / "timeline_web_perf_budget.json"
 

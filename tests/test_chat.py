@@ -1,4 +1,5 @@
 """Unit tests for nsys_ai.chat (AI Brain + Navigator)."""
+
 import json
 import sys
 from unittest.mock import MagicMock, patch
@@ -86,23 +87,42 @@ def test_get_available_models(monkeypatch):
 
 
 def test_build_system_prompt():
-    """System prompt contains ui_context as JSON code block."""
+    """System prompt contains ui_context as JSON code block and MFU reference formulas."""
     ctx = {"view_state": {"scope": "all"}, "global_top_kernels": []}
     out = chat_mod._build_system_prompt(ctx)
     assert "```json" in out
     assert "view_state" in out
     assert "global_top_kernels" in out
     assert "CURRENT UI CONTEXT" in out
+    # MFU reference formulas
+    assert "MFU REFERENCE" in out
+    assert "flops_per_layer" in out
+    assert "SANITY CHECK" in out
+    assert "num_gpus" in out
 
 
 def test_tools_openai():
-    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu."""
+    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu, compute_region_mfu."""
     tools = chat_mod._tools_openai()
-    assert len(tools) == 6
+    assert len(tools) == 8
     names = {t["function"]["name"] for t in tools}
-    assert names == {"navigate_to_kernel", "zoom_to_time_range", "fit_nvtx_range", "query_profile_db", "get_gpu_peak_tflops", "compute_mfu"}
+    assert names == {
+        "navigate_to_kernel",
+        "zoom_to_time_range",
+        "fit_nvtx_range",
+        "query_profile_db",
+        "get_gpu_peak_tflops",
+        "compute_mfu",
+        "compute_region_mfu",
+        "compute_theoretical_flops",
+    }
     nav = next(t for t in tools if t["function"]["name"] == "navigate_to_kernel")
     assert "target_name" in nav["function"]["parameters"]["properties"]
+    region = next(t for t in tools if t["function"]["name"] == "compute_region_mfu")
+    props = region["function"]["parameters"]["properties"]
+    assert "name" in props
+    assert "source" in props
+    assert "num_gpus" in props
     zoom = next(t for t in tools if t["function"]["name"] == "zoom_to_time_range")
     assert "start_s" in zoom["function"]["parameters"]["properties"]
     assert "end_s" in zoom["function"]["parameters"]["properties"]
@@ -110,6 +130,7 @@ def test_tools_openai():
     assert "nvtx_name" in fit["function"]["parameters"]["properties"]
     assert "start_s" in fit["function"]["parameters"]["properties"]
     assert "end_s" in fit["function"]["parameters"]["properties"]
+
 
 
 def test_parse_tool_call_navigate():
@@ -140,9 +161,7 @@ def test_parse_tool_call_navigate_missing_target():
 
 def test_parse_tool_call_zoom():
     """zoom_to_time_range parses start_s and end_s."""
-    action = chat_mod._parse_tool_call(
-        "zoom_to_time_range", '{"start_s": 1.5, "end_s": 2.5}'
-    )
+    action = chat_mod._parse_tool_call("zoom_to_time_range", '{"start_s": 1.5, "end_s": 2.5}')
     assert action == {
         "type": "zoom_to_time_range",
         "start_s": 1.5,
@@ -170,9 +189,7 @@ def test_parse_tool_call_fit_nvtx_by_name():
 
 def test_parse_tool_call_fit_nvtx_by_time_range():
     """fit_nvtx_range can target by explicit start/end seconds."""
-    action = chat_mod._parse_tool_call(
-        "fit_nvtx_range", '{"start_s": 35.0, "end_s": 35.4}'
-    )
+    action = chat_mod._parse_tool_call("fit_nvtx_range", '{"start_s": 35.0, "end_s": 35.4}')
     assert action == {
         "type": "fit_nvtx_range",
         "start_s": 35.0,
@@ -252,7 +269,9 @@ def test_chat_completion_tool_calls_mock(monkeypatch):
     with patch.dict(sys.modules, {"litellm": mock_lt}):
         if "litellm" in chat_mod.__dict__:
             del chat_mod.__dict__["litellm"]
-        body = json.dumps({"messages": [{"role": "user", "content": "go to kernel_a"}]}).encode("utf-8")
+        body = json.dumps({"messages": [{"role": "user", "content": "go to kernel_a"}]}).encode(
+            "utf-8"
+        )
         out = chat_mod.chat_completion(body)
     assert out is not None
     assert out["content"] == "Going there."
@@ -415,10 +434,14 @@ def test_stream_agent_loop_yields_action_and_done(monkeypatch):
     """stream_agent_loop with navigate_to_kernel yields action event then done (§11.8.4)."""
     # Chunk 1: text delta
     chunk_text = MagicMock()
-    chunk_text.choices = [MagicMock(delta=MagicMock(
-        content="Going there.",
-        tool_calls=[],
-    ))]
+    chunk_text.choices = [
+        MagicMock(
+            delta=MagicMock(
+                content="Going there.",
+                tool_calls=[],
+            )
+        )
+    ]
     chunk_text.usage = None
     # Chunk 2: tool_call delta
     fn_delta = MagicMock()
@@ -464,9 +487,29 @@ def test_compact_old_tool_results_compacts_previous_turns():
     api_messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "q"},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "c1", "name": "query_profile_db", "content": "x" * 300},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "c2", "name": "query_profile_db", "content": "y" * 300},
     ]
     chat_mod._compact_old_tool_results(api_messages)
@@ -484,6 +527,7 @@ def test_compact_old_tool_results_noop_first_turn():
         {"role": "tool", "tool_call_id": "c1", "content": "z" * 300},
     ]
     import copy
+
     original = copy.deepcopy(api_messages)
     chat_mod._compact_old_tool_results(api_messages)
     assert api_messages == original
@@ -605,10 +649,19 @@ def test_distill_history_compresses_tool_turns():
             "role": "assistant",
             "content": None,
             "tool_calls": [
-                {"id": "c1", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
             ],
         },
-        {"role": "tool", "tool_call_id": "c1", "name": "query_profile_db", "content": '[{"name": "axpy", "total_ms": 42}]'},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "name": "query_profile_db",
+            "content": '[{"name": "axpy", "total_ms": 42}]',
+        },
         # Final assistant answer (no tool_calls)
         {"role": "assistant", "content": "The slowest kernel is axpy at 42ms."},
     ]

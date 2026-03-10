@@ -9,8 +9,7 @@ GPU kernel. Regions with multiple kernels are candidates for refinement.
 """
 
 
-def find_refinement_targets(tree_roots: list[dict],
-                            max_kernels: int = 1) -> list[dict]:
+def find_refinement_targets(tree_roots: list[dict], max_kernels: int = 1) -> list[dict]:
     """
     Find NVTX nodes that contain more than `max_kernels` kernel children.
 
@@ -42,25 +41,29 @@ def _walk(nodes, targets, max_kernels, depth):
         # If this NVTX has no NVTX children (it's a leaf NVTX)
         # and has more than max_kernels kernel children → refinement target
         if not nvtx_children and len(kern_children) > max_kernels:
-            targets.append({
-                "name": node["name"],
-                "depth": depth,
-                "duration_ms": node.get("duration_ms", 0),
-                "kernel_count": len(kern_children),
-                "kernels": [k["name"] for k in kern_children],
-            })
+            targets.append(
+                {
+                    "name": node["name"],
+                    "depth": depth,
+                    "duration_ms": node.get("duration_ms", 0),
+                    "kernel_count": len(kern_children),
+                    "kernels": [k["name"] for k in kern_children],
+                }
+            )
 
         # Also check NVTX nodes that have BOTH nvtx and kernel children
         # (mixed — the kernels at this level aren't covered by sub-NVTX)
         if nvtx_children and len(kern_children) > max_kernels:
-            targets.append({
-                "name": node["name"],
-                "depth": depth,
-                "duration_ms": node.get("duration_ms", 0),
-                "kernel_count": len(kern_children),
-                "kernels": [k["name"] for k in kern_children],
-                "note": "mixed: has both NVTX sub-ranges and uncovered kernels",
-            })
+            targets.append(
+                {
+                    "name": node["name"],
+                    "depth": depth,
+                    "duration_ms": node.get("duration_ms", 0),
+                    "kernel_count": len(kern_children),
+                    "kernels": [k["name"] for k in kern_children],
+                    "note": "mixed: has both NVTX sub-ranges and uncovered kernels",
+                }
+            )
 
         # Recurse into NVTX children
         _walk(nvtx_children, targets, max_kernels, depth + 1)
@@ -78,9 +81,14 @@ def convergence_report(tree_roots: list[dict]) -> dict:
         coverage_pct: Percentage of kernels mapped to a single NVTX
         unmapped_kernels: Kernels under multi-kernel NVTX (still ambiguous)
     """
-    stats = {"total_nvtx": 0, "total_kernels": 0,
-             "converged": 0, "unconverged": 0,
-             "mapped_kernels": 0, "unmapped_kernels": 0}
+    stats = {
+        "total_nvtx": 0,
+        "total_kernels": 0,
+        "converged": 0,
+        "unconverged": 0,
+        "mapped_kernels": 0,
+        "unmapped_kernels": 0,
+    }
     _convergence_walk(tree_roots, stats)
 
     total = stats["mapped_kernels"] + stats["unmapped_kernels"]

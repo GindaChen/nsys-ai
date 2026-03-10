@@ -1,19 +1,24 @@
 """NCCL collective operation breakdown."""
+
 from ..base import Skill
 
 
 def _format(rows):
     if not rows:
         return "(No NCCL operations found — is this a multi-GPU profile?)"
-    lines = ["── NCCL Collective Breakdown ──",
-             f"{'Operation':<40s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Max(ms)':>9s}",
-             "─" * 82]
+    lines = [
+        "── NCCL Collective Breakdown ──",
+        f"{'Operation':<40s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Max(ms)':>9s}",
+        "─" * 82,
+    ]
     for r in rows:
         name = r["kernel_name"]
         if len(name) > 38:
             name = name[:35] + "..."
-        lines.append(f"{name:<40s}  {r['count']:>7d}  {r['total_ms']:>10.2f}  "
-                      f"{r['avg_ms']:>9.2f}  {r['max_ms']:>9.2f}")
+        lines.append(
+            f"{name:<40s}  {r['count']:>7d}  {r['total_ms']:>10.2f}  "
+            f"{r['avg_ms']:>9.2f}  {r['max_ms']:>9.2f}"
+        )
     return "\n".join(lines)
 
 

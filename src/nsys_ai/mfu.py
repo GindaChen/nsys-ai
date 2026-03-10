@@ -28,7 +28,10 @@ def compute_mfu_single(
             "formula": "MFU = (model_flops_per_step / step_time_s) / 1e12 / peak_tflops",
         }
     if step_time_s <= 0:
-        return {"error": "step_time_s must be positive.", "formula": "MFU = (model_flops_per_step / step_time_s) / 1e12 / peak_tflops"}
+        return {
+            "error": "step_time_s must be positive.",
+            "formula": "MFU = (model_flops_per_step / step_time_s) / 1e12 / peak_tflops",
+        }
     achieved = (model_flops_per_step / step_time_s) / 1e12
     mfu_pct = 100.0 * achieved / peak_tflops
     return {
@@ -70,7 +73,10 @@ def compute_mfu_compare(
         "step_time_after_s": after["step_time_s"],
         "model_flops_per_step": model_flops_per_step,
         "peak_tflops": peak_tflops,
-        "achieved_model_TFLOPS": {"before": before["achieved_model_TFLOPS"], "after": after["achieved_model_TFLOPS"]},
+        "achieved_model_TFLOPS": {
+            "before": before["achieved_model_TFLOPS"],
+            "after": after["achieved_model_TFLOPS"],
+        },
         "MFU_pct": {"before": before["MFU_pct"], "after": after["MFU_pct"]},
         "delta_MFU_pct": round(after["MFU_pct"] - before["MFU_pct"], 2),
     }

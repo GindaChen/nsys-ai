@@ -6,6 +6,7 @@ hierarchy into one "just tell me what's wrong" report for terminal and
 optional markdown output. Aligns with Nsight Systems practice of focused
 profiling (trim window) and post-processing SQLite results into a report.
 """
+
 import statistics
 
 from .overlap import (
@@ -129,7 +130,7 @@ def format_report_terminal(data: dict) -> str:
 def format_report_markdown(data: dict, profile_path: str, trim: tuple[int, int]) -> str:
     """Format the full report as markdown (for -o file.md)."""
     s = data["summary"]
-    trim_label = f"{trim[0]/1e9:.1f}s – {trim[1]/1e9:.1f}s" if trim else "full range"
+    trim_label = f"{trim[0] / 1e9:.1f}s – {trim[1] / 1e9:.1f}s" if trim else "full range"
     lines = [
         "# nsys-ai analyze report",
         "",
@@ -147,9 +148,13 @@ def format_report_markdown(data: dict, profile_path: str, trim: tuple[int, int])
     else:
         hw = s["hardware"]
         t = s["timing"]
-        lines.append(f"**GPU {s['device']}:** {hw['name']} ({hw['pci_bus']}) — {hw['sm_count']} SMs, {hw['memory_gb']}GB")
+        lines.append(
+            f"**GPU {s['device']}:** {hw['name']} ({hw['pci_bus']}) — {hw['sm_count']} SMs, {hw['memory_gb']}GB"
+        )
         lines.append("")
-        lines.append(f"Span: {t['span_ms']:.1f}ms | Compute: {t['compute_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%")
+        lines.append(
+            f"Span: {t['span_ms']:.1f}ms | Compute: {t['compute_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%"
+        )
         lines.append("")
         lines.append("| % | Total ms | Count | Kernel |")
         lines.append("|---|----------|-------|-------|")
@@ -158,11 +163,56 @@ def format_report_markdown(data: dict, profile_path: str, trim: tuple[int, int])
             lines.append(f"| {k['pct']:.1f} | {k['total_ms']:.1f} | {k['count']} | {name_esc} |")
         lines.append("")
         lines.append(auto_commentary(s))
-    lines.extend(["", "---", "", "## 2. NVTX hierarchy (top-level)", "", "```", data["nvtx_summary"], "```", ""])
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 2. NVTX hierarchy (top-level)",
+            "",
+            "```",
+            data["nvtx_summary"],
+            "```",
+            "",
+        ]
+    )
 
-    lines.extend(["---", "", "## 3. Compute vs NCCL overlap", "", "```", format_overlap(data["overlap"]), "```", ""])
-    lines.extend(["---", "", "## 4. NCCL collective breakdown", "", "```", format_nccl(data["nccl_breakdown"]), "```", ""])
-    lines.extend(["---", "", "## 5. Iteration timings", "", "```", format_iterations(data["iters"]), "```", ""])
+    lines.extend(
+        [
+            "---",
+            "",
+            "## 3. Compute vs NCCL overlap",
+            "",
+            "```",
+            format_overlap(data["overlap"]),
+            "```",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+            "---",
+            "",
+            "## 4. NCCL collective breakdown",
+            "",
+            "```",
+            format_nccl(data["nccl_breakdown"]),
+            "```",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+            "---",
+            "",
+            "## 5. Iteration timings",
+            "",
+            "```",
+            format_iterations(data["iters"]),
+            "```",
+            "",
+        ]
+    )
     if data["iters_regression"]:
         lines.append("### Possible regression (slow iters)")
         lines.append("")

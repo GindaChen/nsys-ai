@@ -37,9 +37,11 @@ def test_resolve_nsys_rep_success(monkeypatch, tmp_path: Path):
             o_idx = args.index("-o")
             if o_idx + 1 < len(args):
                 Path(args[o_idx + 1]).write_bytes(b"x")
+
         class Result:
             stdout = ""
             stderr = ""
+
         return Result()
 
     monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
@@ -63,9 +65,7 @@ def test_resolve_nsys_rep_failure(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(profile_mod.shutil, "which", lambda name: "/opt/nsys")
 
     def fake_run(*args, **kwargs):
-        raise subprocess.CalledProcessError(
-            1, ["nsys"], output="", stderr="nsys error"
-        )
+        raise subprocess.CalledProcessError(1, ["nsys"], output="", stderr="nsys error")
 
     monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
 
@@ -91,4 +91,3 @@ def test_resolve_nsys_rep_timeout(monkeypatch, tmp_path: Path):
     with pytest.raises(RuntimeError) as exc:
         profile_mod.resolve_profile_path(str(rep))
     assert "timed out after 300 seconds" in str(exc.value)
-

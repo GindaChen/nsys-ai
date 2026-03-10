@@ -11,6 +11,7 @@ Usage:
         def compose(self):
             yield ChatPanel(db_path=..., device=..., ui_context_fn=...)
 """
+
 from __future__ import annotations
 
 import threading
@@ -90,6 +91,7 @@ class ChatPanel(Widget):
         self.remove_class("-active")
         # Try to re-focus a sensible main widget
         from textual.widgets import DataTable
+
         try:
             self.app.query_one(DataTable).focus()
         except Exception:
@@ -111,9 +113,7 @@ class ChatPanel(Widget):
         self._add_user_turn(text)
         self.is_running = True
         self._cancel_event.clear()
-        t = threading.Thread(
-            target=self._stream_worker, args=(text,), daemon=True
-        )
+        t = threading.Thread(target=self._stream_worker, args=(text,), daemon=True)
         t.start()
 
     def action_cancel(self) -> None:
@@ -140,9 +140,7 @@ class ChatPanel(Widget):
         stream_label.update(self._stream_buffer)
 
     def _on_system_event(self, content: str) -> None:
-        self.query_one("#chat-log", RichLog).write(
-            f"[dim italic]{content}[/dim italic]"
-        )
+        self.query_one("#chat-log", RichLog).write(f"[dim italic]{content}[/dim italic]")
 
     def _on_stream_done(self, final_content: str) -> None:
         log = self.query_one("#chat-log", RichLog)
@@ -188,10 +186,7 @@ class ChatPanel(Widget):
             return
 
         with self._lock:
-            history = [
-                {"role": m["role"], "content": m["content"]}
-                for m in self._history[-10:]
-            ]
+            history = [{"role": m["role"], "content": m["content"]} for m in self._history[-10:]]
 
         ui_context = self._ui_context_fn()
 
@@ -215,9 +210,7 @@ class ChatPanel(Widget):
                     content += chunk
                     self.app.call_from_thread(self._on_text_chunk, chunk)
                 elif t == "system":
-                    self.app.call_from_thread(
-                        self._on_system_event, (ev.get("content") or "")[:80]
-                    )
+                    self.app.call_from_thread(self._on_system_event, (ev.get("content") or "")[:80])
                 elif t == "action":
                     act = ev.get("action")
                     if act:
@@ -230,6 +223,7 @@ class ChatPanel(Widget):
         # Distill history
         try:
             from .. import chat as chat_mod  # re-import for distill
+
             with self._lock:
                 self._history[:] = chat_mod.distill_history(self._history)
         except Exception:

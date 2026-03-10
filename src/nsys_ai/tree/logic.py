@@ -5,6 +5,7 @@ No Textual, no curses, no I/O — fully unit-testable with plain pytest.
 All state is passed as arguments; the only in-place changes are view
 annotations on TreeNode instances (for example, bubble_us flags).
 """
+
 from __future__ import annotations
 
 from ..tui_models import TreeNode
@@ -12,6 +13,7 @@ from ..tui_models import TreeNode
 # ---------------------------------------------------------------------------
 # Tree construction
 # ---------------------------------------------------------------------------
+
 
 def build_nodes(json_roots: list[dict]) -> list[TreeNode]:
     """Build a depth-first flat list of TreeNode objects from JSON tree."""
@@ -52,6 +54,7 @@ def compute_summary(json_roots: list[dict]) -> tuple[int, float, int]:
 # ---------------------------------------------------------------------------
 # Visibility: tree mode
 # ---------------------------------------------------------------------------
+
 
 def visible_rows_tree(
     all_nodes: list[TreeNode],
@@ -101,6 +104,7 @@ def visible_rows_tree(
 # Visibility: linear mode
 # ---------------------------------------------------------------------------
 
+
 def visible_rows_linear(
     all_nodes: list[TreeNode],
     filter_text: str = "",
@@ -129,6 +133,7 @@ def visible_rows_linear(
 # Filter helpers
 # ---------------------------------------------------------------------------
 
+
 def _node_matches_filter(node: TreeNode, ft: str) -> bool:
     """True if node name / demangled / any descendant matches filter term."""
     if ft in node.name.lower():
@@ -152,6 +157,7 @@ def _json_descendant_matches(json_node: dict, ft: str) -> bool:
 # ---------------------------------------------------------------------------
 # Bubble annotation
 # ---------------------------------------------------------------------------
+
 
 def _annotate_bubbles(
     nodes: list[TreeNode],
@@ -181,6 +187,7 @@ def _annotate_bubbles(
 # ---------------------------------------------------------------------------
 # Navigation helpers
 # ---------------------------------------------------------------------------
+
 
 def find_parent(visible: list[TreeNode], idx: int) -> int:
     """Return index of the nearest NVTX parent in visible list, or idx itself."""

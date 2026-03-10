@@ -7,6 +7,7 @@ Widgets:
     DetailBar     — one-row selected-node info + mini timeline bar
     BookmarkPanel — right-side bookmark list overlay
 """
+
 from __future__ import annotations
 
 from rich.text import Text
@@ -46,6 +47,7 @@ def _heat_color(heat: float, is_nccl: bool) -> str:
 # TreeTable
 # ---------------------------------------------------------------------------
 
+
 class TreeTable(Widget):
     """Wraps a DataTable to display a list of TreeNode objects.
 
@@ -67,8 +69,9 @@ class TreeTable(Widget):
         dt.add_columns("Node", "Type", "Duration", "Heat%")
         yield dt
 
-    def populate(self, nodes: list[TreeNode], view_mode: str = "tree",
-                 show_demangled: bool = False) -> None:
+    def populate(
+        self, nodes: list[TreeNode], view_mode: str = "tree", show_demangled: bool = False
+    ) -> None:
         """Replace table rows with the given node list."""
         dt = self.query_one(DataTable)
         dt.clear()
@@ -88,11 +91,12 @@ class TreeTable(Widget):
             elif node.type == "kernel":
                 is_nccl = "nccl" in node.name.lower()
                 icon = "⚡" if is_nccl else "▸"
-                name = (node.demangled if show_demangled and node.demangled else node.name)
+                name = node.demangled if show_demangled and node.demangled else node.name
                 color = _heat_color(node.heat, is_nccl)
                 label = Text(f"{time_prefix}{indent}{icon} {name}", style=color)
-                type_col = Text("nccl" if is_nccl else "kernel",
-                                style="magenta" if is_nccl else "green")
+                type_col = Text(
+                    "nccl" if is_nccl else "kernel", style="magenta" if is_nccl else "green"
+                )
                 heat_col = Text(f"{node.heat * 100:.0f}%", style=color)
             else:
                 label = Text(f"{time_prefix}{indent}? {node.name}")
@@ -117,6 +121,7 @@ class TreeTable(Widget):
 # ---------------------------------------------------------------------------
 # FilterBar
 # ---------------------------------------------------------------------------
+
 
 class FilterBar(Widget):
     """Input bar for text filter with live-mode indicator.
@@ -227,6 +232,7 @@ class DetailBar(Widget):
 # BookmarkPanel
 # ---------------------------------------------------------------------------
 
+
 class BookmarkPanel(Widget):
     """Right-side overlay listing saved bookmarks.
 
@@ -295,11 +301,13 @@ class BookmarkPanel(Widget):
 
     def _jump(self, n: int) -> None:
         from .app import NsysTreeApp
+
         if isinstance(self.app, NsysTreeApp):
             self.app.jump_to_bookmark_n(n)
         self.hide_panel()
         try:
             from textual.widgets import DataTable
+
             self.app.query_one(DataTable).focus()
         except Exception:
             pass
@@ -308,24 +316,43 @@ class BookmarkPanel(Widget):
         self.hide_panel()
         try:
             from textual.widgets import DataTable
+
             self.app.query_one(DataTable).focus()
         except Exception:
             pass
 
-    def action_jump_1(self) -> None: self._jump(1)
-    def action_jump_2(self) -> None: self._jump(2)
-    def action_jump_3(self) -> None: self._jump(3)
-    def action_jump_4(self) -> None: self._jump(4)
-    def action_jump_5(self) -> None: self._jump(5)
-    def action_jump_6(self) -> None: self._jump(6)
-    def action_jump_7(self) -> None: self._jump(7)
-    def action_jump_8(self) -> None: self._jump(8)
-    def action_jump_9(self) -> None: self._jump(9)
+    def action_jump_1(self) -> None:
+        self._jump(1)
+
+    def action_jump_2(self) -> None:
+        self._jump(2)
+
+    def action_jump_3(self) -> None:
+        self._jump(3)
+
+    def action_jump_4(self) -> None:
+        self._jump(4)
+
+    def action_jump_5(self) -> None:
+        self._jump(5)
+
+    def action_jump_6(self) -> None:
+        self._jump(6)
+
+    def action_jump_7(self) -> None:
+        self._jump(7)
+
+    def action_jump_8(self) -> None:
+        self._jump(8)
+
+    def action_jump_9(self) -> None:
+        self._jump(9)
 
 
 # ---------------------------------------------------------------------------
 # BubbleThresholdBar
 # ---------------------------------------------------------------------------
+
 
 class BubbleThresholdBar(Widget):
     """Inline threshold input — appears on 'b', hides on Esc/Enter."""
@@ -347,6 +374,7 @@ class BubbleThresholdBar(Widget):
         self.hide_bar()
         try:
             from textual.widgets import DataTable
+
             self.app.query_one(DataTable).focus()
         except Exception:
             pass
@@ -364,6 +392,7 @@ class BubbleThresholdBar(Widget):
 # ---------------------------------------------------------------------------
 # TrimBar
 # ---------------------------------------------------------------------------
+
 
 class TrimBar(Widget):
     """Inline trim-range input — appears on 'T', hides on Esc/Enter."""
@@ -385,6 +414,7 @@ class TrimBar(Widget):
         self.hide_bar()
         try:
             from textual.widgets import DataTable
+
             self.app.query_one(DataTable).focus()
         except Exception:
             pass

@@ -1,13 +1,16 @@
 """Detect GPU idle gaps (bubbles) between consecutive kernel executions."""
+
 from ..base import Skill, SkillParam
 
 
 def _format(rows):
     if not rows:
         return "(No significant GPU idle gaps found — GPU is well-utilized)"
-    lines = ["── GPU Idle Gaps (Bubbles) ──",
-             f"{'Stream':>7s}  {'Gap(ms)':>9s}  {'Before Kernel':<50s}  {'After Kernel':<50s}",
-             "─" * 122]
+    lines = [
+        "── GPU Idle Gaps (Bubbles) ──",
+        f"{'Stream':>7s}  {'Gap(ms)':>9s}  {'Before Kernel':<50s}  {'After Kernel':<50s}",
+        "─" * 122,
+    ]
     for r in rows:
         before = r["before_kernel"] or "?"
         after = r["after_kernel"] or "?"

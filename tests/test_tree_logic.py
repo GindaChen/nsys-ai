@@ -73,7 +73,7 @@ SAMPLE_JSON = [
         "end_ns": 200_000_000,
         "children": [
             {
-                "name": "aten::mm",    # second occurrence of same kernel name
+                "name": "aten::mm",  # second occurrence of same kernel name
                 "type": "kernel",
                 "duration_ms": 40.0,
                 "heat": 0.7,
@@ -93,6 +93,7 @@ SAMPLE_JSON = [
 # ---------------------------------------------------------------------------
 # build_nodes
 # ---------------------------------------------------------------------------
+
 
 def test_build_nodes_count():
     nodes = build_nodes(SAMPLE_JSON)
@@ -116,6 +117,7 @@ def test_build_nodes_depth():
 # compute_summary
 # ---------------------------------------------------------------------------
 
+
 def test_compute_summary():
     kernels, gpu_ms, nvtx = compute_summary(SAMPLE_JSON)
     assert kernels == 3
@@ -126,6 +128,7 @@ def test_compute_summary():
 # ---------------------------------------------------------------------------
 # visible_rows_tree
 # ---------------------------------------------------------------------------
+
 
 def test_visible_rows_tree_all_expanded():
     nodes = build_nodes(SAMPLE_JSON)
@@ -147,8 +150,7 @@ def test_visible_rows_tree_filter():
     nodes = build_nodes(SAMPLE_JSON)
     visible = visible_rows_tree(nodes, filter_text="mm")
     assert all(
-        "mm" in n.name.lower() or "mm" in n.demangled.lower() or n.type == "nvtx"
-        for n in visible
+        "mm" in n.name.lower() or "mm" in n.demangled.lower() or n.type == "nvtx" for n in visible
     )
     # Should include the nvtx parents too (ancestor match via json_node)
     kernel_names = [n.name for n in visible if n.type == "kernel"]
@@ -175,6 +177,7 @@ def test_visible_rows_tree_min_dur():
 # visible_rows_linear
 # ---------------------------------------------------------------------------
 
+
 def test_visible_rows_linear_sorted():
     nodes = build_nodes(SAMPLE_JSON)
     visible = visible_rows_linear(nodes)
@@ -193,6 +196,7 @@ def test_visible_rows_linear_filter_demangled():
 # ---------------------------------------------------------------------------
 # find_parent
 # ---------------------------------------------------------------------------
+
 
 def test_find_parent_returns_nvtx_ancestor():
     nodes = build_nodes(SAMPLE_JSON)
@@ -214,6 +218,7 @@ def test_find_parent_at_root_returns_self():
 # ---------------------------------------------------------------------------
 # find_kernel_occurrence
 # ---------------------------------------------------------------------------
+
 
 def test_find_kernel_occurrence_first():
     nodes = build_nodes(SAMPLE_JSON)
@@ -245,6 +250,7 @@ def test_find_kernel_occurrence_not_found():
 # node_index_in_visible
 # ---------------------------------------------------------------------------
 
+
 def test_node_index_in_visible_found():
     nodes = build_nodes(SAMPLE_JSON)
     visible = visible_rows_tree(nodes)
@@ -256,13 +262,14 @@ def test_node_index_in_visible_found():
 def test_node_index_in_visible_not_found():
     nodes = build_nodes(SAMPLE_JSON)
     visible = visible_rows_tree(nodes[:2])  # only partial list
-    other = build_nodes(SAMPLE_JSON)[4]    # different object
+    other = build_nodes(SAMPLE_JSON)[4]  # different object
     assert node_index_in_visible(visible, other) is None
 
 
 # ---------------------------------------------------------------------------
 # Bubble annotation (side-effect test)
 # ---------------------------------------------------------------------------
+
 
 def test_visible_rows_tree_bubbles_annotated():
     nodes = build_nodes(SAMPLE_JSON)

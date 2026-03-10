@@ -37,19 +37,40 @@ def _top_k_payload(summary: ProfileDiffSummary, top_n: int = 5) -> tuple[list, l
     total_neg = sum(k.delta_ns for k in summary.kernel_diffs if k.delta_ns < 0) or -1
 
     def impact(k):
-        pct = (k.after_total_ns / (summary.after.total_gpu_ns or 1)) * 100 if summary.after.total_gpu_ns else 0
-        contrib = (k.delta_ns / total_pos * 100) if k.delta_ns > 0 else (k.delta_ns / total_neg * 100)
-        return {"pct_of_iteration_time": round(pct, 2), "contribution_to_total_delta_pct": round(contrib, 2)}
+        pct = (
+            (k.after_total_ns / (summary.after.total_gpu_ns or 1)) * 100
+            if summary.after.total_gpu_ns
+            else 0
+        )
+        contrib = (
+            (k.delta_ns / total_pos * 100) if k.delta_ns > 0 else (k.delta_ns / total_neg * 100)
+        )
+        return {
+            "pct_of_iteration_time": round(pct, 2),
+            "contribution_to_total_delta_pct": round(contrib, 2),
+        }
 
-    top_keys = {k.key for k in summary.top_regressions[:top_n]} | {k.key for k in summary.top_improvements[:top_n]}
+    top_keys = {k.key for k in summary.top_regressions[:top_n]} | {
+        k.key for k in summary.top_improvements[:top_n]
+    }
     others_ns = sum(k.delta_ns for k in summary.kernel_diffs if k.key not in top_keys)
 
     regressions = [
-        {"name": k.name, "delta_ns": k.delta_ns, "delta_ms": round(k.delta_ns / 1e6, 3), **impact(k)}
+        {
+            "name": k.name,
+            "delta_ns": k.delta_ns,
+            "delta_ms": round(k.delta_ns / 1e6, 3),
+            **impact(k),
+        }
         for k in summary.top_regressions[:top_n]
     ]
     improvements = [
-        {"name": k.name, "delta_ns": k.delta_ns, "delta_ms": round(k.delta_ns / 1e6, 3), **impact(k)}
+        {
+            "name": k.name,
+            "delta_ns": k.delta_ns,
+            "delta_ms": round(k.delta_ns / 1e6, 3),
+            **impact(k),
+        }
         for k in summary.top_improvements[:top_n]
     ]
     return regressions, improvements, round(others_ns / 1e6, 2)
@@ -101,18 +122,38 @@ def search_nvtx_regions(
     by_text: dict[str, dict] = {}
     for r in before_rows:
         text = str(r.get("text") or "")
-        by_text.setdefault(text, {"text": text, "total_ns_before": 0, "total_ns_after": 0, "count_before": 0, "count_after": 0})
+        by_text.setdefault(
+            text,
+            {
+                "text": text,
+                "total_ns_before": 0,
+                "total_ns_after": 0,
+                "count_before": 0,
+                "count_after": 0,
+            },
+        )
         by_text[text]["total_ns_before"] = int(r.get("total_ns") or 0)
         by_text[text]["count_before"] = int(r.get("count") or 0)
     for r in after_rows:
         text = str(r.get("text") or "")
-        by_text.setdefault(text, {"text": text, "total_ns_before": 0, "total_ns_after": 0, "count_before": 0, "count_after": 0})
+        by_text.setdefault(
+            text,
+            {
+                "text": text,
+                "total_ns_before": 0,
+                "total_ns_after": 0,
+                "count_before": 0,
+                "count_after": 0,
+            },
+        )
         by_text[text]["total_ns_after"] = int(r.get("total_ns") or 0)
         by_text[text]["count_after"] = int(r.get("count") or 0)
     for v in by_text.values():
         v["in_before"] = v["count_before"] > 0
         v["in_after"] = v["count_after"] > 0
-    regions = sorted(by_text.values(), key=lambda x: -(x["total_ns_before"] + x["total_ns_after"]))[:limit]
+    regions = sorted(by_text.values(), key=lambda x: -(x["total_ns_before"] + x["total_ns_after"]))[
+        :limit
+    ]
     return {
         "regions": regions,
         "query": query,
@@ -147,13 +188,23 @@ def get_iteration_boundaries(
         end_ns_b = int(b["gpu_end_s"] * 1e9) if b else None
         start_ns_a = int(a["gpu_start_s"] * 1e9) if a else None
         end_ns_a = int(a["gpu_end_s"] * 1e9) if a else None
-        boundaries.append({
-            "iteration_index": i,
-            "before": {"start_ns": start_ns_b, "end_ns": end_ns_b, "duration_ms": b["duration_ms"] if b else None},
-            "after": {"start_ns": start_ns_a, "end_ns": end_ns_a, "duration_ms": a["duration_ms"] if a else None},
-            "has_before": b is not None,
-            "has_after": a is not None,
-        })
+        boundaries.append(
+            {
+                "iteration_index": i,
+                "before": {
+                    "start_ns": start_ns_b,
+                    "end_ns": end_ns_b,
+                    "duration_ms": b["duration_ms"] if b else None,
+                },
+                "after": {
+                    "start_ns": start_ns_a,
+                    "end_ns": end_ns_a,
+                    "duration_ms": a["duration_ms"] if a else None,
+                },
+                "has_before": b is not None,
+                "has_after": a is not None,
+            }
+        )
     return {
         "marker": m,
         "target_gpu": target_gpu,
@@ -168,7 +219,15 @@ def get_iteration_boundaries(
 def _tree_children_at_path(roots: list[dict], path_parts: list[str], depth: int) -> list[dict]:
     """Walk NVTX tree by path (e.g. ['sample_0', 'Attention']) and return child nodes up to depth."""
     if not path_parts and depth <= 0:
-        return [{"name": n["name"], "type": n["type"], "duration_ms": round((n["end"] - n["start"]) / 1e6, 3), "path": n["name"]} for n in roots]
+        return [
+            {
+                "name": n["name"],
+                "type": n["type"],
+                "duration_ms": round((n["end"] - n["start"]) / 1e6, 3),
+                "path": n["name"],
+            }
+            for n in roots
+        ]
     current = list(roots)
     for part in path_parts:
         next_level = []
@@ -183,19 +242,28 @@ def _tree_children_at_path(roots: list[dict], path_parts: list[str], depth: int)
         if not current:
             return []
     if depth <= 0:
-        return [{"name": n["name"], "type": n["type"], "duration_ms": round((n["end"] - n["start"]) / 1e6, 3)} for n in current]
+        return [
+            {
+                "name": n["name"],
+                "type": n["type"],
+                "duration_ms": round((n["end"] - n["start"]) / 1e6, 3),
+            }
+            for n in current
+        ]
     out = []
     for n in current:
         if n.get("type") != "nvtx":
             continue
         path_str = " > ".join(path_parts + [n["name"]])
-        out.append({
-            "name": n["name"],
-            "type": "nvtx",
-            "duration_ms": round((n["end"] - n["start"]) / 1e6, 3),
-            "path": path_str,
-            "child_count": len([c for c in n.get("children", []) if c.get("type") == "nvtx"]),
-        })
+        out.append(
+            {
+                "name": n["name"],
+                "type": "nvtx",
+                "duration_ms": round((n["end"] - n["start"]) / 1e6, 3),
+                "path": path_str,
+                "child_count": len([c for c in n.get("children", []) if c.get("type") == "nvtx"]),
+            }
+        )
     return out
 
 
@@ -289,8 +357,16 @@ def get_iteration_diff(
             "iteration_index": iteration_index,
         }
     bnd = bounds["boundaries"][iteration_index]
-    trim_before = (bnd["before"]["start_ns"], bnd["before"]["end_ns"]) if bnd["before"]["start_ns"] is not None else None
-    trim_after = (bnd["after"]["start_ns"], bnd["after"]["end_ns"]) if bnd["after"]["start_ns"] is not None else None
+    trim_before = (
+        (bnd["before"]["start_ns"], bnd["before"]["end_ns"])
+        if bnd["before"]["start_ns"] is not None
+        else None
+    )
+    trim_after = (
+        (bnd["after"]["start_ns"], bnd["after"]["end_ns"])
+        if bnd["after"]["start_ns"] is not None
+        else None
+    )
     if not trim_before or not trim_after:
         return {
             "error": "Missing before or after window for this iteration",
@@ -321,8 +397,16 @@ def get_iteration_diff(
     mc_b = ctx.before.memcpy_in_window(gpu, trim_before)
     mc_a = ctx.after.memcpy_in_window(gpu, trim_after)
     memcpy_ms = {
-        "h2d": {"before": round(mc_b["h2d_ns"] / 1e6, 2), "after": round(mc_a["h2d_ns"] / 1e6, 2), "delta": round((mc_a["h2d_ns"] - mc_b["h2d_ns"]) / 1e6, 2)},
-        "d2h": {"before": round(mc_b["d2h_ns"] / 1e6, 2), "after": round(mc_a["d2h_ns"] / 1e6, 2), "delta": round((mc_a["d2h_ns"] - mc_b["d2h_ns"]) / 1e6, 2)},
+        "h2d": {
+            "before": round(mc_b["h2d_ns"] / 1e6, 2),
+            "after": round(mc_a["h2d_ns"] / 1e6, 2),
+            "delta": round((mc_a["h2d_ns"] - mc_b["h2d_ns"]) / 1e6, 2),
+        },
+        "d2h": {
+            "before": round(mc_b["d2h_ns"] / 1e6, 2),
+            "after": round(mc_a["d2h_ns"] / 1e6, 2),
+            "delta": round((mc_a["d2h_ns"] - mc_b["d2h_ns"]) / 1e6, 2),
+        },
     }
     # top3_global_categories: Compute / Memcpy / Idle (Payload Contract)
     idle_b = summary.before.overlap.get("idle_ms") or 0
@@ -330,16 +414,36 @@ def get_iteration_diff(
     mem_b = (mc_b["h2d_ns"] + mc_b["d2h_ns"] + mc_b["d2d_ns"]) / 1e6
     mem_a = (mc_a["h2d_ns"] + mc_a["d2h_ns"] + mc_a["d2d_ns"]) / 1e6
     top3_global_categories = {
-        "Compute": {"before": round(sum_k_b, 2), "after": round(sum_k_a, 2), "delta": round(sum_k_a - sum_k_b, 2)},
-        "Memcpy": {"before": round(mem_b, 2), "after": round(mem_a, 2), "delta": round(mem_a - mem_b, 2)},
-        "Idle": {"before": round(idle_b, 2), "after": round(idle_a, 2), "delta": round(idle_a - idle_b, 2)},
+        "Compute": {
+            "before": round(sum_k_b, 2),
+            "after": round(sum_k_a, 2),
+            "delta": round(sum_k_a - sum_k_b, 2),
+        },
+        "Memcpy": {
+            "before": round(mem_b, 2),
+            "after": round(mem_a, 2),
+            "delta": round(mem_a - mem_b, 2),
+        },
+        "Idle": {
+            "before": round(idle_b, 2),
+            "after": round(idle_a, 2),
+            "delta": round(idle_a - idle_b, 2),
+        },
     }
     top_regressions_payload, top_improvements_payload, others_ms = _top_k_payload(summary, 5)
     return {
         "iteration_index": iteration_index,
         "is_aligned": bounds["is_aligned"],
-        "wall_clock_ms": {"before": round(wall_b, 2), "after": round(wall_a, 2), "delta": round(wall_a - wall_b, 2)},
-        "sum_of_kernels_ms": {"before": round(sum_k_b, 2), "after": round(sum_k_a, 2), "delta": round(sum_k_a - sum_k_b, 2)},
+        "wall_clock_ms": {
+            "before": round(wall_b, 2),
+            "after": round(wall_a, 2),
+            "delta": round(wall_a - wall_b, 2),
+        },
+        "sum_of_kernels_ms": {
+            "before": round(sum_k_b, 2),
+            "after": round(sum_k_a, 2),
+            "delta": round(sum_k_a - sum_k_b, 2),
+        },
         "memcpy_ms": memcpy_ms,
         "memcpy_compute_overlap_pct": None,  # Optional: requires interval overlap; agent can ignore when None
         "unique_streams_count_before": unique_streams_b,
@@ -377,17 +481,31 @@ def get_global_diff(
     trim_after = _time_window_ns(ctx.after, skip_first_ms, duration_ms)
     if trim_before is None or trim_after is None:
         return {"error": "Could not compute time window (empty profile or invalid skip/duration)"}
-    summary = diff_profiles(ctx.before, ctx.after, gpu=target_gpu, trim=trim_before, limit=15, sort="delta")
-    summary2 = diff_profiles(ctx.before, ctx.after, gpu=target_gpu, trim=trim_after, limit=15, sort="delta")
+    summary = diff_profiles(
+        ctx.before, ctx.after, gpu=target_gpu, trim=trim_before, limit=15, sort="delta"
+    )
+    summary2 = diff_profiles(
+        ctx.before, ctx.after, gpu=target_gpu, trim=trim_after, limit=15, sort="delta"
+    )
     wall_b = (trim_before[1] - trim_before[0]) / 1e6
     wall_a = (trim_after[1] - trim_after[0]) / 1e6
     return {
         "skip_first_ms": skip_first_ms,
         "duration_ms": duration_ms,
         "target_gpu": target_gpu,
-        "wall_clock_ms": {"before": round(wall_b, 2), "after": round(wall_a, 2), "delta": round(wall_a - wall_b, 2)},
-        "top_regressions": [{"name": k.name, "delta_ms": round(k.delta_ns / 1e6, 3)} for k in summary2.top_regressions[:10]],
-        "top_improvements": [{"name": k.name, "delta_ms": round(k.delta_ns / 1e6, 3)} for k in summary2.top_improvements[:10]],
+        "wall_clock_ms": {
+            "before": round(wall_b, 2),
+            "after": round(wall_a, 2),
+            "delta": round(wall_a - wall_b, 2),
+        },
+        "top_regressions": [
+            {"name": k.name, "delta_ms": round(k.delta_ns / 1e6, 3)}
+            for k in summary2.top_regressions[:10]
+        ],
+        "top_improvements": [
+            {"name": k.name, "delta_ms": round(k.delta_ns / 1e6, 3)}
+            for k in summary2.top_improvements[:10]
+        ],
         "warnings": summary.warnings,
     }
 
@@ -409,10 +527,21 @@ def get_region_diff(
     if iteration_index is not None:
         bounds = get_iteration_boundaries(ctx, target_gpu=target_gpu)
         if iteration_index >= len(bounds["boundaries"]):
-            return {"error": f"iteration_index {iteration_index} out of range", "iteration_index": iteration_index}
+            return {
+                "error": f"iteration_index {iteration_index} out of range",
+                "iteration_index": iteration_index,
+            }
         bnd = bounds["boundaries"][iteration_index]
-        trim_before = (bnd["before"]["start_ns"], bnd["before"]["end_ns"]) if bnd["before"]["start_ns"] is not None else ctx.trim
-        trim_after = (bnd["after"]["start_ns"], bnd["after"]["end_ns"]) if bnd["after"]["start_ns"] is not None else ctx.trim
+        trim_before = (
+            (bnd["before"]["start_ns"], bnd["before"]["end_ns"])
+            if bnd["before"]["start_ns"] is not None
+            else ctx.trim
+        )
+        trim_after = (
+            (bnd["after"]["start_ns"], bnd["after"]["end_ns"])
+            if bnd["after"]["start_ns"] is not None
+            else ctx.trim
+        )
     if trim_before is None:
         trim_before = ctx.before.meta.time_range
     if trim_after is None:
@@ -421,7 +550,8 @@ def get_region_diff(
         return {"error": "Time window not available (empty profile)"}
     # Use iteration-scoped diff when trim was set from boundaries
     summary = diff_profiles(
-        ctx.before, ctx.after,
+        ctx.before,
+        ctx.after,
         gpu=target_gpu,
         trim_before=trim_before,
         trim_after=trim_after,
@@ -441,8 +571,16 @@ def get_region_diff(
     mc_b = ctx.before.memcpy_in_window(gpu, trim_before)
     mc_a = ctx.after.memcpy_in_window(gpu, trim_after)
     memcpy_ms = {
-        "h2d": {"before": round(mc_b["h2d_ns"] / 1e6, 2), "after": round(mc_a["h2d_ns"] / 1e6, 2), "delta": round((mc_a["h2d_ns"] - mc_b["h2d_ns"]) / 1e6, 2)},
-        "d2h": {"before": round(mc_b["d2h_ns"] / 1e6, 2), "after": round(mc_a["d2h_ns"] / 1e6, 2), "delta": round((mc_a["d2h_ns"] - mc_b["d2h_ns"]) / 1e6, 2)},
+        "h2d": {
+            "before": round(mc_b["h2d_ns"] / 1e6, 2),
+            "after": round(mc_a["h2d_ns"] / 1e6, 2),
+            "delta": round((mc_a["h2d_ns"] - mc_b["h2d_ns"]) / 1e6, 2),
+        },
+        "d2h": {
+            "before": round(mc_b["d2h_ns"] / 1e6, 2),
+            "after": round(mc_a["d2h_ns"] / 1e6, 2),
+            "delta": round((mc_a["d2h_ns"] - mc_b["d2h_ns"]) / 1e6, 2),
+        },
     }
     kerns_b = ctx.before.kernels(gpu, trim_before)
     kerns_a = ctx.after.kernels(gpu, trim_after)
@@ -455,16 +593,36 @@ def get_region_diff(
     sum_k_b = summary.before.total_gpu_ns / 1e6
     sum_k_a = summary.after.total_gpu_ns / 1e6
     top3_global_categories = {
-        "Compute": {"before": round(sum_k_b, 2), "after": round(sum_k_a, 2), "delta": round(sum_k_a - sum_k_b, 2)},
-        "Memcpy": {"before": round(mem_b, 2), "after": round(mem_a, 2), "delta": round(mem_a - mem_b, 2)},
-        "Idle": {"before": round(idle_b, 2), "after": round(idle_a, 2), "delta": round(idle_a - idle_b, 2)},
+        "Compute": {
+            "before": round(sum_k_b, 2),
+            "after": round(sum_k_a, 2),
+            "delta": round(sum_k_a - sum_k_b, 2),
+        },
+        "Memcpy": {
+            "before": round(mem_b, 2),
+            "after": round(mem_a, 2),
+            "delta": round(mem_a - mem_b, 2),
+        },
+        "Idle": {
+            "before": round(idle_b, 2),
+            "after": round(idle_a, 2),
+            "delta": round(idle_a - idle_b, 2),
+        },
     }
     top_regressions_payload, top_improvements_payload, others_ms = _top_k_payload(summary, 5)
 
     return {
         "nvtx_exact_match": nd.text,
-        "wall_clock_ms": {"before": round(nd.before_total_ns / 1e6, 2), "after": round(nd.after_total_ns / 1e6, 2), "delta": round(nd.delta_ns / 1e6, 2)},
-        "sum_of_kernels_ms": {"before": round(nd.before_total_ns / 1e6, 2), "after": round(nd.after_total_ns / 1e6, 2), "delta": round(nd.delta_ns / 1e6, 2)},
+        "wall_clock_ms": {
+            "before": round(nd.before_total_ns / 1e6, 2),
+            "after": round(nd.after_total_ns / 1e6, 2),
+            "delta": round(nd.delta_ns / 1e6, 2),
+        },
+        "sum_of_kernels_ms": {
+            "before": round(nd.before_total_ns / 1e6, 2),
+            "after": round(nd.after_total_ns / 1e6, 2),
+            "delta": round(nd.delta_ns / 1e6, 2),
+        },
         "memcpy_ms": memcpy_ms,
         "memcpy_compute_overlap_pct": None,
         "unique_streams_count_before": unique_streams_b,
@@ -474,11 +632,15 @@ def get_region_diff(
         "top_improvements": top_improvements_payload,
         "others_aggregated_delta_ms": others_ms,
         "top3_global_categories": top3_global_categories,
-        "overlap_pct": {"before": summary.before.overlap.get("overlap_pct"), "after": summary.after.overlap.get("overlap_pct")},
+        "overlap_pct": {
+            "before": summary.before.overlap.get("overlap_pct"),
+            "after": summary.after.overlap.get("overlap_pct"),
+        },
         "workload_warning": False,
         "Hardware_Warning": _hardware_warning(ctx),
         "JIT_Compilation_Warning": (
-            _has_overhead_in_window(ctx.before, trim_before) or _has_overhead_in_window(ctx.after, trim_after)
+            _has_overhead_in_window(ctx.before, trim_before)
+            or _has_overhead_in_window(ctx.after, trim_after)
         ),
     }
 
@@ -496,10 +658,19 @@ def summarize_nvtx_subtree(
     summary = ctx.ensure_summary(target_gpu)
     # Filter nvtx_diffs to those whose text equals parent_path or starts with parent_path + " >"
     prefix = (parent_path.rstrip(" >") + " >") if parent_path.strip() else ""
-    candidates = [n for n in summary.nvtx_diffs if not prefix or n.text == parent_path.strip() or n.text.startswith(prefix)]
+    candidates = [
+        n
+        for n in summary.nvtx_diffs
+        if not prefix or n.text == parent_path.strip() or n.text.startswith(prefix)
+    ]
     by_abs = sorted(candidates, key=lambda n: abs(n.delta_ns), reverse=True)
     top_deltas = [
-        {"text": n.text, "delta_ns": n.delta_ns, "delta_ms": round(n.delta_ns / 1e6, 3), "classification": n.classification}
+        {
+            "text": n.text,
+            "delta_ns": n.delta_ns,
+            "delta_ms": round(n.delta_ns / 1e6, 3),
+            "classification": n.classification,
+        }
         for n in by_abs[:top_n]
     ]
     return {
@@ -525,14 +696,18 @@ def get_launch_config_diff(
     with ctx.before._lock:
         cols = [r[1] for r in ctx.before.conn.execute(f"PRAGMA table_info({kt})").fetchall()]
     if not ("gridX" in cols or "blockX" in cols):
-        return {"error": "not available", "reason": "Launch-config columns (gridX/blockX, etc.) not in export"}
+        return {
+            "error": "not available",
+            "reason": "Launch-config columns (gridX/blockX, etc.) not in export",
+        }
     # Optional: query one kernel by name in trim window and return before/after config
     return {
         "kernel_name": kernel_name,
         "before": {},
         "after": {},
         "uses_tensor_core_likely": any(
-            p in kernel_name for p in ("sm80_xmma_", "volta_fp16_s884gemm", "h884gemm", "xmma", "wmma")
+            p in kernel_name
+            for p in ("sm80_xmma_", "volta_fp16_s884gemm", "h884gemm", "xmma", "wmma")
         ),
         "error": "not available",
         "reason": "Launch-config diff not yet implemented; schema present",
@@ -566,22 +741,44 @@ def get_gpu_imbalance_stats(
     if iteration_index >= len(bounds["boundaries"]):
         return {"error": f"iteration_index {iteration_index} out of range"}
     bnd = bounds["boundaries"][iteration_index]
-    trim_b = (bnd["before"]["start_ns"], bnd["before"]["end_ns"]) if bnd["before"]["start_ns"] else None
-    trim_a = (bnd["after"]["start_ns"], bnd["after"]["end_ns"]) if bnd["after"]["start_ns"] else None
+    trim_b = (
+        (bnd["before"]["start_ns"], bnd["before"]["end_ns"]) if bnd["before"]["start_ns"] else None
+    )
+    trim_a = (
+        (bnd["after"]["start_ns"], bnd["after"]["end_ns"]) if bnd["after"]["start_ns"] else None
+    )
     devices = sorted(set(ctx.before.meta.devices or [0]) | set(ctx.after.meta.devices or [0]))
     per_gpu = []
     for dev in devices:
-        ob = overlap_analysis(ctx.before, dev, trim_b) if trim_b else {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
-        oa = overlap_analysis(ctx.after, dev, trim_a) if trim_a else {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
+        ob = (
+            overlap_analysis(ctx.before, dev, trim_b)
+            if trim_b
+            else {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
+        )
+        oa = (
+            overlap_analysis(ctx.after, dev, trim_a)
+            if trim_a
+            else {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
+        )
         if isinstance(ob, dict) and "error" in ob:
             ob = {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
         if isinstance(oa, dict) and "error" in oa:
             oa = {"compute_only_ms": 0, "nccl_only_ms": 0, "idle_ms": 0}
-        per_gpu.append({
-            "gpu_id": dev,
-            "before": {"compute_ms": ob.get("compute_only_ms", 0), "nccl_ms": ob.get("nccl_only_ms", 0), "idle_ms": ob.get("idle_ms", 0)},
-            "after": {"compute_ms": oa.get("compute_only_ms", 0), "nccl_ms": oa.get("nccl_only_ms", 0), "idle_ms": oa.get("idle_ms", 0)},
-        })
+        per_gpu.append(
+            {
+                "gpu_id": dev,
+                "before": {
+                    "compute_ms": ob.get("compute_only_ms", 0),
+                    "nccl_ms": ob.get("nccl_only_ms", 0),
+                    "idle_ms": ob.get("idle_ms", 0),
+                },
+                "after": {
+                    "compute_ms": oa.get("compute_only_ms", 0),
+                    "nccl_ms": oa.get("nccl_only_ms", 0),
+                    "idle_ms": oa.get("idle_ms", 0),
+                },
+            }
+        )
     return {"iteration_index": iteration_index, "per_gpu": per_gpu}
 
 
@@ -642,9 +839,20 @@ TOOLS_DIFF_OPENAI = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Substring or pattern for NVTX name search"},
-                    "limit": {"type": "integer", "description": "Max results (default 50)", "default": 50},
-                    "use_glob": {"type": "boolean", "description": "Use GLOB instead of LIKE", "default": False},
+                    "query": {
+                        "type": "string",
+                        "description": "Substring or pattern for NVTX name search",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 50)",
+                        "default": 50,
+                    },
+                    "use_glob": {
+                        "type": "boolean",
+                        "description": "Use GLOB instead of LIKE",
+                        "default": False,
+                    },
                 },
                 "required": ["query"],
             },
@@ -658,7 +866,10 @@ TOOLS_DIFF_OPENAI = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "marker": {"type": "string", "description": "NVTX marker for iteration (e.g. %sample_0%)"},
+                    "marker": {
+                        "type": "string",
+                        "description": "NVTX marker for iteration (e.g. %sample_0%)",
+                    },
                     "target_gpu": {"type": "integer", "description": "GPU ID or omit for default"},
                 },
                 "required": [],
@@ -673,10 +884,18 @@ TOOLS_DIFF_OPENAI = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "parent_path": {"type": "string", "description": "Parent NVTX path (empty for root)", "default": ""},
+                    "parent_path": {
+                        "type": "string",
+                        "description": "Parent NVTX path (empty for root)",
+                        "default": "",
+                    },
                     "depth": {"type": "integer", "description": "Depth to expand", "default": 1},
                     "target_gpu": {"type": "integer", "description": "GPU ID"},
-                    "profile_side": {"type": "string", "enum": ["before", "after"], "default": "after"},
+                    "profile_side": {
+                        "type": "string",
+                        "enum": ["before", "after"],
+                        "default": "after",
+                    },
                 },
                 "required": [],
             },
@@ -705,7 +924,10 @@ TOOLS_DIFF_OPENAI = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "iteration_index": {"type": "integer", "description": "0-based iteration index (from get_iteration_boundaries)"},
+                    "iteration_index": {
+                        "type": "integer",
+                        "description": "0-based iteration index (from get_iteration_boundaries)",
+                    },
                     "marker": {"type": "string", "description": "Iteration marker"},
                     "target_gpu": {"type": "integer", "default": 0},
                 },
@@ -723,9 +945,15 @@ TOOLS_DIFF_OPENAI = [
                 "properties": {
                     "nvtx_exact_match": {
                         "description": "Exact NVTX name or list of path segments",
-                        "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
                     },
-                    "iteration_index": {"type": "integer", "description": "0-based iteration (optional)"},
+                    "iteration_index": {
+                        "type": "integer",
+                        "description": "0-based iteration (optional)",
+                    },
                     "target_gpu": {"type": "integer", "default": 0},
                 },
                 "required": ["nvtx_exact_match"],
@@ -801,7 +1029,10 @@ TOOLS_DIFF_OPENAI = [
                 "type": "object",
                 "properties": {
                     "skip_first_ms": {"type": "number", "default": 0},
-                    "duration_ms": {"type": "number", "description": "Window length in ms or omit for full"},
+                    "duration_ms": {
+                        "type": "number",
+                        "description": "Window length in ms or omit for full",
+                    },
                     "target_gpu": {"type": "integer"},
                 },
                 "required": [],
@@ -833,7 +1064,9 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
     args = dict(arguments) if arguments else {}
     try:
         if name == "search_nvtx_regions":
-            return search_nvtx_regions(ctx, args.get("query", ""), args.get("limit", 50), args.get("use_glob", False))
+            return search_nvtx_regions(
+                ctx, args.get("query", ""), args.get("limit", 50), args.get("use_glob", False)
+            )
         if name == "get_iteration_boundaries":
             return get_iteration_boundaries(ctx, args.get("marker"), args.get("target_gpu", 0))
         if name == "explore_nvtx_hierarchy":
@@ -885,7 +1118,9 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
         if name == "get_source_code_context":
             return get_source_code_context(ctx, args.get("nvtx_path", ""))
         if name == "get_gpu_imbalance_stats":
-            return get_gpu_imbalance_stats(ctx, int(args.get("iteration_index", 0)), args.get("marker"))
+            return get_gpu_imbalance_stats(
+                ctx, int(args.get("iteration_index", 0)), args.get("marker")
+            )
         if name == "get_global_diff":
             return get_global_diff(
                 ctx,
@@ -978,7 +1213,9 @@ def _has_overhead_in_window(prof: Profile, trim: tuple[int, int]) -> bool:
         return False
 
 
-def _time_window_ns(prof: Profile, skip_first_ms: float, duration_ms: float | None) -> tuple[int, int] | None:
+def _time_window_ns(
+    prof: Profile, skip_first_ms: float, duration_ms: float | None
+) -> tuple[int, int] | None:
     t0, t1 = prof.meta.time_range
     if t0 is None or t1 is None:
         return None

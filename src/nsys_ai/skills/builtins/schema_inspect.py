@@ -1,4 +1,5 @@
 """Schema inspection — list all tables and their columns."""
+
 from ..base import Skill
 
 

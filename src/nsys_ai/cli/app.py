@@ -16,6 +16,7 @@ Zero-arg behavior: running ``nsys-ai`` with no arguments shows help (not an
 interactive launcher). ``nsys-ai <profile.sqlite>`` still opens the timeline
 web UI. This is an intentional product choice after the curses→Textual cleanup.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,15 +28,19 @@ import sys
 # Shared argument helpers
 # ---------------------------------------------------------------------------
 
+
 def _add_gpu_trim(p, gpu_required=True, trim_required=True):
     """Attach standard --gpu and --trim arguments to a subparser."""
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
-    p.add_argument("--gpu", type=int, required=gpu_required,
-                   default=None, help="GPU device ID")
-    p.add_argument("--trim", nargs=2, type=float,
-                   required=trim_required,
-                   metavar=("START_S", "END_S"),
-                   help="Time window in seconds")
+    p.add_argument("--gpu", type=int, required=gpu_required, default=None, help="GPU device ID")
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        required=trim_required,
+        metavar=("START_S", "END_S"),
+        help="Time window in seconds",
+    )
 
 
 def _parse_trim(args):
@@ -78,7 +83,7 @@ def show_help():
     print("    nsys-ai skill list                       List analysis skills")
     print("    nsys-ai skill run <name> <profile>       Run a specific skill")
     print("    nsys-ai agent analyze <profile>           Full auto-analysis")
-    print("    nsys-ai agent ask <profile> \"question\"   Ask about a profile")
+    print('    nsys-ai agent ask <profile> "question"   Ask about a profile')
     print()
     print("  Export:")
     print("    nsys-ai export     <profile> -o DIR       Perfetto JSON traces")
@@ -97,6 +102,7 @@ def show_help():
 # Command handlers
 # ---------------------------------------------------------------------------
 
+
 def _cmd_info(args, _profile):
     with _profile.open(args.profile) as prof:
         m = prof.meta
@@ -105,12 +111,14 @@ def _cmd_info(args, _profile):
             print(f"  Nsight version (heuristic): {prof.schema.version}")
         print(f"  GPUs: {m.devices}")
         print(f"  Kernels: {m.kernel_count}  |  NVTX: {m.nvtx_count}")
-        print(f"  Time: {m.time_range[0]/1e9:.3f}s - {m.time_range[1]/1e9:.3f}s")
+        print(f"  Time: {m.time_range[0] / 1e9:.3f}s - {m.time_range[1] / 1e9:.3f}s")
         print()
         for dev, info in m.gpu_info.items():
-            print(f"  GPU {dev}: {info.name} | PCI={info.pci_bus} | "
-                  f"SMs={info.sm_count} | Mem={info.memory_bytes/1e9:.0f}GB | "
-                  f"Kernels={info.kernel_count} | Streams={info.streams}")
+            print(
+                f"  GPU {dev}: {info.name} | PCI={info.pci_bus} | "
+                f"SMs={info.sm_count} | Mem={info.memory_bytes / 1e9:.0f}GB | "
+                f"Kernels={info.kernel_count} | Streams={info.streams}"
+            )
 
 
 def _cmd_analyze(args, _profile):
@@ -151,7 +159,12 @@ def _cmd_diff(args, _profile):
     def _narrative_for(summary):
         if args.format not in ("terminal", "markdown"):
             return None
-        from nsys_ai.ai.diff_narrative import DiffNarrative, build_executive_summary, generate_diff_narrative
+        from nsys_ai.ai.diff_narrative import (
+            DiffNarrative,
+            build_executive_summary,
+            generate_diff_narrative,
+        )
+
         if no_ai:
             return DiffNarrative(
                 executive_summary=build_executive_summary(summary),
@@ -170,8 +183,12 @@ def _cmd_diff(args, _profile):
     trim_after = None
     if getattr(args, "iteration", None) is not None:
         with _profile.open(args.before) as before, _profile.open(args.after) as after:
-            ctx = DiffContext(before=before, after=after, trim=trim, marker=getattr(args, "marker", "sample_0"))
-            bounds = get_iteration_boundaries(ctx, marker=getattr(args, "marker", "sample_0"), target_gpu=args.gpu)
+            ctx = DiffContext(
+                before=before, after=after, trim=trim, marker=getattr(args, "marker", "sample_0")
+            )
+            bounds = get_iteration_boundaries(
+                ctx, marker=getattr(args, "marker", "sample_0"), target_gpu=args.gpu
+            )
             bnds = bounds["boundaries"]
             idx = args.iteration
             if idx >= len(bnds):
@@ -183,13 +200,17 @@ def _cmd_diff(args, _profile):
             if bnd["after"]["start_ns"] is not None and bnd["after"]["end_ns"] is not None:
                 trim_after = (bnd["after"]["start_ns"], bnd["after"]["end_ns"])
             if not trim_before or not trim_after:
-                print("Error: no time window for this iteration in one or both profiles", file=sys.stderr)
+                print(
+                    "Error: no time window for this iteration in one or both profiles",
+                    file=sys.stderr,
+                )
                 return
 
     with _profile.open(args.before) as before, _profile.open(args.after) as after:
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
-                before, after,
+                before,
+                after,
                 gpu=args.gpu,
                 trim_before=trim_before,
                 trim_after=trim_after,
@@ -276,7 +297,10 @@ def _run_diff_chat(args, _profile):
 
     model, _ = _get_model_and_key()
     if not model:
-        print("Error: No LLM model configured. Set API key (e.g. OPENAI_API_KEY) and retry.", file=sys.stderr)
+        print(
+            "Error: No LLM model configured. Set API key (e.g. OPENAI_API_KEY) and retry.",
+            file=sys.stderr,
+        )
         return
 
     trim = _parse_trim(args)
@@ -401,8 +425,7 @@ def _cmd_search(args, _profile):
             if args.gpu is None or not trim:
                 print("Error: hierarchical search requires --gpu and --trim")
                 return
-            results = search_hierarchy(prof, args.parent or "", args.query,
-                                       args.gpu, trim)
+            results = search_hierarchy(prof, args.parent or "", args.query, args.gpu, trim)
             print(format_results(results, "hierarchy"))
         elif args.type == "nvtx":
             results = search_nvtx(prof, args.query, args.gpu, trim, args.limit)
@@ -428,6 +451,7 @@ def _cmd_export_json(args, _profile):
     import json as _json
 
     from nsys_ai.export_flat import to_json_flat, to_summary_json
+
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
         if args.summary:
@@ -464,7 +488,7 @@ def _cmd_viewer(args, _profile):
 
     with _profile.open(args.profile) as prof:
         write_html(prof, args.gpu, _parse_trim(args), args.output)
-        print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
+        print(f"Written to {args.output} ({os.path.getsize(args.output) // 1024} KB)")
 
 
 def _cmd_timeline_html(args, _profile):
@@ -472,15 +496,14 @@ def _cmd_timeline_html(args, _profile):
 
     with _profile.open(args.profile) as prof:
         write_timeline_html(prof, args.gpu, _parse_trim(args), args.output)
-        print(f"Written to {args.output} ({os.path.getsize(args.output)//1024} KB)")
+        print(f"Written to {args.output} ({os.path.getsize(args.output) // 1024} KB)")
 
 
 def _cmd_web(args, _profile):
     from nsys_ai.web import serve
 
     with _profile.open(args.profile) as prof:
-        serve(prof, args.gpu, _parse_trim(args),
-              port=args.port, open_browser=not args.no_browser)
+        serve(prof, args.gpu, _parse_trim(args), port=args.port, open_browser=not args.no_browser)
 
 
 def _cmd_open(args, _profile):
@@ -488,7 +511,9 @@ def _cmd_open(args, _profile):
     from nsys_ai.web import serve, serve_perfetto
 
     with _profile.open(args.profile) as prof:
-        gpu = args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        gpu = (
+            args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        )
         if args.trim:
             trim_ns = (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
         else:
@@ -508,8 +533,9 @@ def _cmd_perfetto(args, _profile):
     from nsys_ai.web import serve_perfetto
 
     with _profile.open(args.profile) as prof:
-        serve_perfetto(prof, args.gpu, _parse_trim(args),
-                       port=args.port, open_browser=not args.no_browser)
+        serve_perfetto(
+            prof, args.gpu, _parse_trim(args), port=args.port, open_browser=not args.no_browser
+        )
 
 
 def _cmd_timeline_web(args, _profile):
@@ -520,15 +546,15 @@ def _cmd_timeline_web(args, _profile):
             devices = args.gpu
         else:
             devices = prof.meta.devices if prof.meta.devices else [0]
-        serve_timeline(prof, devices, _parse_trim(args),
-                       port=args.port, open_browser=not args.no_browser)
+        serve_timeline(
+            prof, devices, _parse_trim(args), port=args.port, open_browser=not args.no_browser
+        )
 
 
 def _cmd_tui(args, _profile):
     from nsys_ai.tree import run_tui
 
-    run_tui(args.profile, args.gpu, _parse_trim(args),
-            max_depth=args.depth, min_ms=args.min_ms)
+    run_tui(args.profile, args.gpu, _parse_trim(args), max_depth=args.depth, min_ms=args.min_ms)
 
 
 def _cmd_timeline(args, _profile):
@@ -542,8 +568,7 @@ def _cmd_chat(args, _profile):
     try:
         from nsys_ai.tui_textual import run_chat_tui
     except ImportError:
-        print("Error: 'textual' package is required. "
-              "Install with: pip install 'textual>=0.80.0'")
+        print("Error: 'textual' package is required. Install with: pip install 'textual>=0.80.0'")
         return
     run_chat_tui(args.profile)
 
@@ -560,6 +585,7 @@ def _cmd_skill(args, _profile):
             print(f"{s.name:<25s}  {s.category:<15s}  {s.description[:60]}")
     elif args.skill_action == "run":
         import sqlite3
+
         conn = sqlite3.connect(args.profile)
         try:
             print(_run_skill(args.skill_name, conn))
@@ -605,6 +631,7 @@ def _cmd_ask(args, _profile):
 # Parser construction
 # ---------------------------------------------------------------------------
 
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="nsys-ai",
@@ -618,15 +645,29 @@ def _build_parser():
     # Public commands (simplified)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
-    p.add_argument("--gpu", type=int, default=None,
-                   help="GPU device ID (default: first GPU in profile)")
-    p.add_argument("--trim", nargs=2, type=float, metavar=("START_S", "END_S"), default=None,
-                   help="Time window in seconds (default: full profile)")
-    p.add_argument("--viewer", choices=["perfetto", "web", "tui"], default="perfetto",
-                   help="Viewer to use (default: perfetto)")
-    p.add_argument("--port", type=int, default=None,
-                   help="HTTP port for perfetto/web (default: 8143/8142)")
-    p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser (perfetto/web)")
+    p.add_argument(
+        "--gpu", type=int, default=None, help="GPU device ID (default: first GPU in profile)"
+    )
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (default: full profile)",
+    )
+    p.add_argument(
+        "--viewer",
+        choices=["perfetto", "web", "tui"],
+        default="perfetto",
+        help="Viewer to use (default: perfetto)",
+    )
+    p.add_argument(
+        "--port", type=int, default=None, help="HTTP port for perfetto/web (default: 8143/8142)"
+    )
+    p.add_argument(
+        "--no-browser", action="store_true", help="Don't auto-open browser (perfetto/web)"
+    )
     p.set_defaults(handler=_cmd_open)
 
     p = sub.add_parser("web", help="Serve interactive web viewer")
@@ -659,28 +700,63 @@ def _build_parser():
     p.add_argument("before", help="Path to baseline profile (.sqlite or .nsys-rep)")
     p.add_argument("after", help="Path to candidate profile (.sqlite or .nsys-rep)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
-    p.add_argument("--trim", nargs=2, type=float, required=False, metavar=("START_S", "END_S"),
-                   help="Time window in seconds (apply to both profiles)")
-    p.add_argument("--iteration", type=int, default=None, metavar="N",
-                   help="Compare only the N-th iteration (0-based; uses NVTX marker)")
-    p.add_argument("--marker", type=str, default="sample_0",
-                   help="NVTX marker for iteration boundaries (default: sample_0)")
-    p.add_argument("--format", choices=["terminal", "markdown", "json"], default="terminal",
-                   help="Output format (default: terminal)")
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        required=False,
+        metavar=("START_S", "END_S"),
+        help="Time window in seconds (apply to both profiles)",
+    )
+    p.add_argument(
+        "--iteration",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Compare only the N-th iteration (0-based; uses NVTX marker)",
+    )
+    p.add_argument(
+        "--marker",
+        type=str,
+        default="sample_0",
+        help="NVTX marker for iteration boundaries (default: sample_0)",
+    )
+    p.add_argument(
+        "--format",
+        choices=["terminal", "markdown", "json"],
+        default="terminal",
+        help="Output format (default: terminal)",
+    )
     p.add_argument("-o", "--output", default=None, help="Write rendered output to file")
-    p.add_argument("--limit", type=int, default=15, help="Top regressions/improvements (default: 15)")
-    p.add_argument("--sort", choices=["delta", "percent", "total"], default="delta",
-                   help="Sort mode for top changes (default: delta)")
+    p.add_argument(
+        "--limit", type=int, default=15, help="Top regressions/improvements (default: 15)"
+    )
+    p.add_argument(
+        "--sort",
+        choices=["delta", "percent", "total"],
+        default="delta",
+        help="Sort mode for top changes (default: delta)",
+    )
     p.add_argument("--no-ai", action="store_true", help="No-op v1 flag (reserved for AI narrative)")
-    p.add_argument("--chat", action="store_true", help="Start interactive AI chat for diff analysis (Phase C tools)")
+    p.add_argument(
+        "--chat",
+        action="store_true",
+        help="Start interactive AI chat for diff analysis (Phase C tools)",
+    )
     p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("diff-web", help="Serve web diff viewer for two profiles")
     p.add_argument("before", help="Path to baseline profile (.sqlite or .nsys-rep)")
     p.add_argument("after", help="Path to candidate profile (.sqlite or .nsys-rep)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
-    p.add_argument("--trim", nargs=2, type=float, required=False, metavar=("START_S", "END_S"),
-                   help="Time window in seconds (apply to both profiles)")
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        required=False,
+        metavar=("START_S", "END_S"),
+        help="Time window in seconds (apply to both profiles)",
+    )
     p.add_argument("--port", type=int, default=8145, help="HTTP port (default: 8145)")
     p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     p.set_defaults(handler=_cmd_diff_web)
@@ -701,7 +777,9 @@ def _register_legacy_commands(sub):
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.set_defaults(handler=_cmd_info)
 
-    p = sub.add_parser("analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy")
+    p = sub.add_parser(
+        "analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy"
+    )
     _add_gpu_trim(p)
     p.add_argument("-o", "--output", default=None, help="Write markdown report to file")
     p.set_defaults(handler=_cmd_analyze)
@@ -734,11 +812,16 @@ def _register_legacy_commands(sub):
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument("--query", "-q", required=True, help="Search query (substring)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID")
-    p.add_argument("--trim", nargs=2, type=float, metavar=("START_S", "END_S"),
-                   help="Time window in seconds")
+    p.add_argument(
+        "--trim", nargs=2, type=float, metavar=("START_S", "END_S"), help="Time window in seconds"
+    )
     p.add_argument("--parent", default=None, help="NVTX parent pattern for hierarchical search")
-    p.add_argument("--type", choices=["kernel", "nvtx", "hierarchy"],
-                   default="kernel", help="Search type (default: kernel)")
+    p.add_argument(
+        "--type",
+        choices=["kernel", "nvtx", "hierarchy"],
+        default="kernel",
+        help="Search type (default: kernel)",
+    )
     p.add_argument("--limit", type=int, default=200, help="Max results")
     p.set_defaults(handler=_cmd_search)
 
@@ -815,11 +898,27 @@ def _build_legacy_parser():
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     legacy_commands = {
-        "info", "analyze", "summary", "overlap", "nccl", "iters", "tree",
-        "markdown", "search", "export-csv", "export-json", "viewer",
-        "timeline-html", "perfetto", "tui", "timeline", "skill", "agent",
+        "info",
+        "analyze",
+        "summary",
+        "overlap",
+        "nccl",
+        "iters",
+        "tree",
+        "markdown",
+        "search",
+        "export-csv",
+        "export-json",
+        "viewer",
+        "timeline-html",
+        "perfetto",
+        "tui",
+        "timeline",
+        "skill",
+        "agent",
     }
     if len(sys.argv) > 1 and sys.argv[1] in legacy_commands:
         parser = _build_legacy_parser()
@@ -833,8 +932,11 @@ def main():
         remaining = sys.argv[1:]
         if remaining and not remaining[0].startswith("-"):
             candidate = remaining[0]
-            if (candidate.endswith(".sqlite") or candidate.endswith(".nsys-rep")
-                    or candidate.endswith(".nsys-rep.zst")):
+            if (
+                candidate.endswith(".sqlite")
+                or candidate.endswith(".nsys-rep")
+                or candidate.endswith(".nsys-rep.zst")
+            ):
                 from nsys_ai import profile as _profile
                 from nsys_ai.web import serve_timeline
 

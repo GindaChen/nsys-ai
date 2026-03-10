@@ -4,6 +4,7 @@ timeline/logic.py — Pure functions for the horizontal timeline TUI.
 No Textual, no curses, no I/O — fully unit-testable with plain pytest.
 All viewport / kernel lookup math lives here.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -13,6 +14,7 @@ from ..tui_models import KernelEvent, NvtxSpan
 # ---------------------------------------------------------------------------
 # Event extraction
 # ---------------------------------------------------------------------------
+
 
 def extract_events(
     nodes: list[dict],
@@ -41,13 +43,15 @@ def _extract(
         if ntype == "kernel":
             kernels.append(KernelEvent(node, path))
         elif ntype == "nvtx":
-            spans.append(NvtxSpan(
-                node["name"],
-                node.get("start_ns", 0) or 0,
-                node.get("end_ns", 0) or 0,
-                depth,
-                node_path,
-            ))
+            spans.append(
+                NvtxSpan(
+                    node["name"],
+                    node.get("start_ns", 0) or 0,
+                    node.get("end_ns", 0) or 0,
+                    depth,
+                    node_path,
+                )
+            )
         if node.get("children"):
             _extract(node["children"], node_path, depth + 1, kernels, spans)
 
@@ -55,6 +59,7 @@ def _extract(
 # ---------------------------------------------------------------------------
 # Stream helpers
 # ---------------------------------------------------------------------------
+
 
 def collect_streams(kernels: list[KernelEvent]) -> list[str]:
     """Return sorted unique stream IDs (numeric-first)."""
@@ -77,6 +82,7 @@ def build_stream_kernels(
 # Filtering
 # ---------------------------------------------------------------------------
 
+
 def filter_kernels(
     kernels: list[KernelEvent],
     filter_text: str = "",
@@ -89,14 +95,16 @@ def filter_kernels(
         out = [k for k in out if k.duration_ms >= min_ms]
     if filter_text:
         ft = filter_text.lower()
-        out = [k for k in out
-               if ft in k.name.lower() or (k.demangled and ft in k.demangled.lower())]
+        out = [
+            k for k in out if ft in k.name.lower() or (k.demangled and ft in k.demangled.lower())
+        ]
     return out
 
 
 # ---------------------------------------------------------------------------
 # Kernel lookup
 # ---------------------------------------------------------------------------
+
 
 def kernel_at_time(kernels: list[KernelEvent], ns: int) -> KernelEvent | None:
     """Return the kernel containing ns, or the nearest one."""
@@ -144,6 +152,7 @@ def find_kernel_by_name(
 # Viewport math
 # ---------------------------------------------------------------------------
 
+
 def center_viewport(cursor_ns: int, ns_per_col: int, timeline_w: int) -> int:
     """Return the viewport start_ns so cursor_ns is centered."""
     half = (ns_per_col * timeline_w) // 2
@@ -187,6 +196,7 @@ def zoom_ns_per_col(
 # Time bounds
 # ---------------------------------------------------------------------------
 
+
 def time_bounds(kernels: list[KernelEvent], trim: tuple[int, int]) -> tuple[int, int]:
     """Return (time_start, time_end) from kernel list or trim fallback."""
     if kernels:
@@ -197,6 +207,7 @@ def time_bounds(kernels: list[KernelEvent], trim: tuple[int, int]) -> tuple[int,
 # ---------------------------------------------------------------------------
 # Merged row packing (Nsight-style "all streams" view)
 # ---------------------------------------------------------------------------
+
 
 def pack_merged_rows(kernels: list[KernelEvent]) -> list[list[KernelEvent]]:
     """Bin-pack kernels into minimum non-overlapping rows (greedy first-fit).
@@ -221,4 +232,3 @@ def pack_merged_rows(kernels: list[KernelEvent]) -> list[list[KernelEvent]]:
             row_ends.append(k.end_ns)
 
     return rows
-

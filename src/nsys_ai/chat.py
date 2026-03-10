@@ -10,6 +10,7 @@ Architecture (three layers):
 Public names are re-exported from the sub-modules so that existing callers
 (tests, tui_textual.py, web.py) can continue to do ``from .chat import …``.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,6 +47,7 @@ from .diff_tools import (
 from .hardware import get_peak_tflops
 from .mfu import compute_mfu_from_args
 from .profile import get_first_gpu_name
+from .region_mfu import compute_region_mfu_from_conn, compute_theoretical_flops
 
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
@@ -72,6 +74,7 @@ GEMINI_THINKING_BUDGET = 8_000
 # History utilities
 # ---------------------------------------------------------------------------
 
+
 def _compact_old_tool_results(api_messages: list) -> None:
     """Replace large tool-result content from previous agent turns with summaries.
 
@@ -81,7 +84,8 @@ def _compact_old_tool_results(api_messages: list) -> None:
     left intact so the model can use them for its final answer.
     """
     tool_turn_indices = [
-        i for i, m in enumerate(api_messages)
+        i
+        for i, m in enumerate(api_messages)
         if m.get("role") == "assistant" and m.get("tool_calls")
     ]
     if len(tool_turn_indices) < 2:
@@ -119,8 +123,7 @@ def distill_history(messages: list) -> list:
 
         if role == "assistant" and m.get("tool_calls"):
             tool_names = [
-                (tc.get("function") or {}).get("name", "unknown")
-                for tc in m["tool_calls"]
+                (tc.get("function") or {}).get("name", "unknown") for tc in m["tool_calls"]
             ]
             i += 1
             tool_count = 0
@@ -140,6 +143,7 @@ def distill_history(messages: list) -> list:
 # ---------------------------------------------------------------------------
 # Multi-turn agent loop (non-streaming) — used by web.py and tests
 # ---------------------------------------------------------------------------
+
 
 def run_agent_loop(
     model: str,
@@ -173,7 +177,7 @@ def run_agent_loop(
     for _ in range(max_turns):
         _compact_old_tool_results(api_messages)
         if len(api_messages) > MAX_AGENT_MESSAGES:
-            api_messages[:] = [api_messages[0]] + api_messages[-(MAX_AGENT_MESSAGES - 1):]
+            api_messages[:] = [api_messages[0]] + api_messages[-(MAX_AGENT_MESSAGES - 1) :]
         response = litellm.completion(
             model=model,
             messages=api_messages,
@@ -196,20 +200,28 @@ def run_agent_loop(
 
         tc_list = []
         for tc in tool_calls:
-            fn = getattr(tc, "function", None) if not isinstance(tc, dict) else tc.get("function") or {}
+            fn = (
+                getattr(tc, "function", None)
+                if not isinstance(tc, dict)
+                else tc.get("function") or {}
+            )
             tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
             name = getattr(fn, "name", None) if not isinstance(fn, dict) else fn.get("name")
-            args_str = (getattr(fn, "arguments", None) if not isinstance(fn, dict) else fn.get("arguments")) or "{}"
+            args_str = (
+                getattr(fn, "arguments", None) if not isinstance(fn, dict) else fn.get("arguments")
+            ) or "{}"
             tc_list.append((tc_id, name, args_str))
 
-        api_messages.append({
-            "role": "assistant",
-            "content": content or None,
-            "tool_calls": [
-                {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
-                for tid, n, a in tc_list
-            ],
-        })
+        api_messages.append(
+            {
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": [
+                    {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
+                    for tid, n, a in tc_list
+                ],
+            }
+        )
 
         has_external = False
         for tc_id, name, args_str in tc_list:
@@ -237,19 +249,31 @@ def run_agent_loop(
                         consecutive_db_errors = 0
                 else:
                     result = "Not executed (no profile loaded)."
-                api_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "name": name,
-                    "content": result,
-                })
+                api_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "name": name,
+                        "content": result,
+                    }
+                )
             else:
-                api_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "name": name,
-                    "content": "Not executed.",
-                })
+                # Tools only implemented in the streaming path get an explicit message
+                if name in {"get_gpu_peak_tflops", "compute_mfu", "compute_region_mfu", "compute_theoretical_flops"}:
+                    tool_result = (
+                        f"Tool '{name}' is only supported in the streaming API path "
+                        "and cannot be executed in this non-streaming request."
+                    )
+                else:
+                    tool_result = "Not executed."
+                api_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "name": name,
+                        "content": tool_result,
+                    }
+                )
 
         if has_external:
             return (content, actions)
@@ -260,6 +284,7 @@ def run_agent_loop(
 # ---------------------------------------------------------------------------
 # Web-API handler (non-streaming)
 # ---------------------------------------------------------------------------
+
 
 def chat_completion(body_bytes: bytes) -> dict | None:
     """Handle a POST ``/api/chat`` request body.
@@ -291,6 +316,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     if profile_path and db_agent_enabled:
         try:
             from .profile import resolve_profile_path
+
             sqlite_path = resolve_profile_path(profile_path)
         except RuntimeError as e:
             return {"content": f"Profile error: {e}", "actions": []}
@@ -348,7 +374,9 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     for tc in tool_calls:
         fn = getattr(tc, "function", None) if not isinstance(tc, dict) else tc.get("function") or {}
         name = getattr(fn, "name", None) if not isinstance(fn, dict) else fn.get("name")
-        args_str = (getattr(fn, "arguments", None) if not isinstance(fn, dict) else fn.get("arguments")) or "{}"
+        args_str = (
+            getattr(fn, "arguments", None) if not isinstance(fn, dict) else fn.get("arguments")
+        ) or "{}"
         if name:
             action = _parse_tool_call(name, args_str)
             if action:
@@ -360,6 +388,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
 # SSE helper
 # ---------------------------------------------------------------------------
 
+
 def _sse_event(evt: str, data: dict) -> bytes:
     return f"event: {evt}\ndata: {json.dumps(data)}\n\n".encode()
 
@@ -368,28 +397,23 @@ def _sse_event(evt: str, data: dict) -> bytes:
 # Streaming agent loop — UI-agnostic generator (used by tui_textual + web)
 # ---------------------------------------------------------------------------
 
+
 def _stream_litellm_content(stream, usage: dict):
     """Consume a litellm stream; yield text events and update usage in place."""
     for chunk in stream:
         choice = chunk.choices[0] if chunk.choices else None
         if not choice:
             continue
-        delta = (
-            getattr(choice, "delta", None)
-            or (choice.get("delta") if isinstance(choice, dict) else None)
+        delta = getattr(choice, "delta", None) or (
+            choice.get("delta") if isinstance(choice, dict) else None
         )
         if not delta:
             continue
-        c = (
-            getattr(delta, "content", None)
-            if not isinstance(delta, dict)
-            else delta.get("content")
-        )
+        c = getattr(delta, "content", None) if not isinstance(delta, dict) else delta.get("content")
         if c:
             yield {"type": "text", "content": c}
-        u = (
-            getattr(chunk, "usage", None)
-            or (chunk.get("usage") if isinstance(chunk, dict) else None)
+        u = getattr(chunk, "usage", None) or (
+            chunk.get("usage") if isinstance(chunk, dict) else None
         )
         if u:
             usage.clear()
@@ -440,6 +464,7 @@ def stream_agent_loop(
     tools = tools if tools is not None else (TOOLS_DIFF_OPENAI if use_diff else _tools_openai())
     conn = None
     query_runner = None
+    sqlite_path: str | None = None
 
     if use_diff:
         system_prompt = build_diff_system_prompt(
@@ -448,6 +473,7 @@ def stream_agent_loop(
     elif profile_path:
         try:
             from .profile import resolve_profile_path
+
             sqlite_path = resolve_profile_path(profile_path)
         except RuntimeError as e:
             yield {"type": "text", "content": f"Profile error: {e}"}
@@ -480,11 +506,14 @@ def stream_agent_loop(
             turn_count += 1
             _compact_old_tool_results(api_messages)
             if len(api_messages) > MAX_AGENT_MESSAGES:
-                api_messages[:] = [api_messages[0]] + api_messages[-(MAX_AGENT_MESSAGES - 1):]
+                api_messages[:] = [api_messages[0]] + api_messages[-(MAX_AGENT_MESSAGES - 1) :]
 
             extra_kwargs: dict = {}
             if "gemini-2.5" in model:
-                extra_kwargs["thinking"] = {"type": "enabled", "budget_tokens": GEMINI_THINKING_BUDGET}
+                extra_kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": GEMINI_THINKING_BUDGET,
+                }
 
             try:
                 stream = litellm.completion(
@@ -508,9 +537,8 @@ def stream_agent_loop(
                     choice = chunk.choices[0] if chunk.choices else None
                     if not choice:
                         continue
-                    delta = (
-                        getattr(choice, "delta", None)
-                        or (choice.get("delta") if isinstance(choice, dict) else None)
+                    delta = getattr(choice, "delta", None) or (
+                        choice.get("delta") if isinstance(choice, dict) else None
                     )
                     if not delta:
                         continue
@@ -529,8 +557,14 @@ def stream_agent_loop(
                         else delta.get("tool_calls")
                     ) or []
                     for tc in tcs:
-                        idx = getattr(tc, "index", 0) if not isinstance(tc, dict) else tc.get("index", 0)
-                        tc_id = getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+                        idx = (
+                            getattr(tc, "index", 0)
+                            if not isinstance(tc, dict)
+                            else tc.get("index", 0)
+                        )
+                        tc_id = (
+                            getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
+                        )
                         fn = (
                             getattr(tc, "function", None)
                             if not isinstance(tc, dict)
@@ -539,23 +573,31 @@ def stream_agent_loop(
                         if isinstance(fn, dict):
                             name, args = fn.get("name"), fn.get("arguments") or ""
                         else:
-                            name, args = getattr(fn, "name", None), getattr(fn, "arguments", None) or ""
-                        entry = tool_calls_by_index.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                            name, args = (
+                                getattr(fn, "name", None),
+                                getattr(fn, "arguments", None) or "",
+                            )
+                        entry = tool_calls_by_index.setdefault(
+                            idx, {"id": None, "name": None, "arguments": ""}
+                        )
                         if tc_id:
                             entry["id"] = tc_id
                         if name:
                             entry["name"] = name
                         entry["arguments"] += args
 
-                    u = (
-                        getattr(chunk, "usage", None)
-                        or (chunk.get("usage") if isinstance(chunk, dict) else None)
+                    u = getattr(chunk, "usage", None) or (
+                        chunk.get("usage") if isinstance(chunk, dict) else None
                     )
                     if u:
-                        usage = u if isinstance(u, dict) else {
-                            "prompt_tokens": getattr(u, "prompt_tokens", 0),
-                            "completion_tokens": getattr(u, "completion_tokens", 0),
-                        }
+                        usage = (
+                            u
+                            if isinstance(u, dict)
+                            else {
+                                "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                                "completion_tokens": getattr(u, "completion_tokens", 0),
+                            }
+                        )
             except litellm.exceptions.ContextWindowExceededError:
                 yield {
                     "type": "text",
@@ -578,9 +620,15 @@ def stream_agent_loop(
             ]
 
             if usage:
-                pt = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else getattr(usage, "prompt_tokens", 0)
+                pt = (
+                    usage.get("prompt_tokens", 0)
+                    if isinstance(usage, dict)
+                    else getattr(usage, "prompt_tokens", 0)
+                )
                 if isinstance(pt, int) and pt > PROMPT_TOKEN_WARNING_THRESHOLD:
-                    _log.warning("stream_agent_loop: high prompt token usage (%d). model=%s", pt, model)
+                    _log.warning(
+                        "stream_agent_loop: high prompt token usage (%d). model=%s", pt, model
+                    )
                     yield {
                         "type": "system",
                         "content": f"⚠ Large context ({pt:,} tokens). Consider starting a new chat to reduce cost.",
@@ -590,14 +638,16 @@ def stream_agent_loop(
                 yield {"type": "done", "usage": usage}
                 return
 
-            api_messages.append({
-                "role": "assistant",
-                "content": full_content or None,
-                "tool_calls": [
-                    {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
-                    for tid, n, a in tc_list
-                ],
-            })
+            api_messages.append(
+                {
+                    "role": "assistant",
+                    "content": full_content or None,
+                    "tool_calls": [
+                        {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
+                        for tid, n, a in tc_list
+                    ],
+                }
+            )
 
             has_external = False
             for tid, name, args_str in tc_list:
@@ -610,12 +660,14 @@ def stream_agent_loop(
                     except json.JSONDecodeError:
                         args = {}
                     result = run_diff_tool(diff_context, name, args)
-                    api_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tid,
-                        "name": name,
-                        "content": json.dumps(result),
-                    })
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps(result),
+                        }
+                    )
                     continue
                 if name == "get_gpu_peak_tflops":
                     yield {"type": "system", "content": "Getting GPU peak TFLOPS..."}
@@ -624,12 +676,14 @@ def stream_agent_loop(
                         result = get_peak_tflops(gpu_name)
                     else:
                         result = {"gpu_name": "", "error": "No profile loaded"}
-                    api_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tid,
-                        "name": name,
-                        "content": json.dumps(result),
-                    })
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps(result),
+                        }
+                    )
                     continue
                 if name == "compute_mfu":
                     yield {"type": "system", "content": "Running compute_mfu..."}
@@ -638,12 +692,119 @@ def stream_agent_loop(
                     except json.JSONDecodeError:
                         args = {}
                     result = compute_mfu_from_args(args)
-                    api_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tid,
-                        "name": name,
-                        "content": json.dumps(result),
-                    })
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps(result),
+                        }
+                    )
+                    continue
+                if name == "compute_theoretical_flops":
+                    yield {"type": "system", "content": "Computing theoretical FLOPs..."}
+                    try:
+                        args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    op = str(args.get("operation") or "")
+                    if not op:
+                        result = {"error": {"code": "MISSING_PARAMETER", "message": "operation is required."}}
+                    else:
+                        result = compute_theoretical_flops(
+                            op,
+                            hidden_dim=int(args.get("hidden_dim") or 0),
+                            seq_len=int(args.get("seq_len") or 0),
+                            num_layers=int(args.get("num_layers") or 1),
+                            ffn_dim=int(args["ffn_dim"]) if args.get("ffn_dim") is not None else None,
+                            batch_size=int(args.get("batch_size") or 1),
+                            multiplier=int(args.get("multiplier") or 1),
+                            M=int(args.get("M") or 0),
+                            N=int(args.get("N") or 0),
+                            K=int(args.get("K") or 0),
+                        )
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps(result),
+                        }
+                    )
+                    continue
+                if name == "compute_region_mfu":
+                    yield {"type": "system", "content": "Running compute_region_mfu..."}
+                    if conn is None or sqlite_path is None:
+                        result = {
+                            "error": {
+                                "code": "PROFILE_NOT_LOADED",
+                                "message": "No profile loaded; cannot compute region MFU.",
+                            }
+                        }
+                    else:
+                        try:
+                            args = json.loads(args_str) if args_str.strip() else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        # Validate required params before calling
+                        region_name = args.get("name") or ""
+                        raw_flops = args.get("theoretical_flops")
+                        if not region_name:
+                            result = {
+                                "error": {
+                                    "code": "MISSING_PARAMETER",
+                                    "message": "name is required (NVTX range or kernel name).",
+                                }
+                            }
+                        elif raw_flops is None:
+                            result = {
+                                "error": {
+                                    "code": "MISSING_PARAMETER",
+                                    "message": "theoretical_flops is required and must be positive. "
+                                    "Compute it from model architecture using the MFU REFERENCE FORMULAS.",
+                                }
+                            }
+                        else:
+                            try:
+                                flops_val = float(raw_flops)
+                            except (ValueError, TypeError):
+                                flops_val = -1.0
+                            if flops_val <= 0:
+                                result = {
+                                    "error": {
+                                        "code": "INVALID_PARAMETER",
+                                        "message": f"theoretical_flops must be a positive number, got: {raw_flops!r}",
+                                    }
+                                }
+                            else:
+                                result = compute_region_mfu_from_conn(
+                                    conn,
+                                    sqlite_path,
+                                    region_name,
+                                    flops_val,
+                                    source=str(args.get("source") or "nvtx"),
+                                    peak_tflops=(
+                                        float(args["peak_tflops"])
+                                        if "peak_tflops" in args and args["peak_tflops"] is not None
+                                        else None
+                                    ),
+                                    num_gpus=int(args.get("num_gpus") or 1),
+                                    occurrence_index=int(args.get("occurrence_index") or 1),
+                                    device_id=(
+                                        int(args["device_id"])
+                                        if "device_id" in args and args["device_id"] is not None
+                                        else None
+                                    ),
+                                    match_mode=str(args.get("match_mode") or "contains"),
+                                )
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps(result),
+                        }
+                    )
                     continue
                 if name == "query_profile_db" and query_runner is not None:
                     yield {"type": "system", "content": "Running DB query..."}
@@ -661,20 +822,24 @@ def stream_agent_loop(
                             )
                     else:
                         consecutive_db_errors = 0
-                    api_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tid,
-                        "name": name,
-                        "content": result,
-                    })
-                else:
-                    if name == "query_profile_db":
-                        api_messages.append({
+                    api_messages.append(
+                        {
                             "role": "tool",
                             "tool_call_id": tid,
                             "name": name,
-                            "content": "Not executed (no profile loaded).",
-                        })
+                            "content": result,
+                        }
+                    )
+                else:
+                    if name == "query_profile_db":
+                        api_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tid,
+                                "name": name,
+                                "content": "Not executed (no profile loaded).",
+                            }
+                        )
                     action = _parse_tool_call(name, args_str)
                     if action:
                         has_external = True
@@ -692,12 +857,19 @@ def stream_agent_loop(
                 extra["thinking"] = {"type": "enabled", "budget_tokens": GEMINI_THINKING_BUDGET}
             try:
                 stream = litellm.completion(
-                    model=model, messages=api_messages, tools=tools,
-                    tool_choice="none", stream=True, **extra,
+                    model=model,
+                    messages=api_messages,
+                    tools=tools,
+                    tool_choice="none",
+                    stream=True,
+                    **extra,
                 )
                 yield from _stream_litellm_content(stream, usage)
             except Exception as e:
-                yield {"type": "text", "content": f"\n\n(Summary skipped: {_friendly_error(model, e)})"}
+                yield {
+                    "type": "text",
+                    "content": f"\n\n(Summary skipped: {_friendly_error(model, e)})",
+                }
         yield {"type": "done", "usage": usage}
 
     finally:
@@ -705,8 +877,12 @@ def stream_agent_loop(
             _telemetry_log.info(
                 "agent_usage model=%s prompt_tokens=%s completion_tokens=%s turns=%d",
                 model,
-                usage.get("prompt_tokens", "?") if isinstance(usage, dict) else getattr(usage, "prompt_tokens", "?"),
-                usage.get("completion_tokens", "?") if isinstance(usage, dict) else getattr(usage, "completion_tokens", "?"),
+                usage.get("prompt_tokens", "?")
+                if isinstance(usage, dict)
+                else getattr(usage, "prompt_tokens", "?"),
+                usage.get("completion_tokens", "?")
+                if isinstance(usage, dict)
+                else getattr(usage, "completion_tokens", "?"),
                 turn_count,
             )
         if conn is not None:
@@ -719,6 +895,7 @@ def stream_agent_loop(
 # ---------------------------------------------------------------------------
 # Web-API streaming handler (SSE)
 # ---------------------------------------------------------------------------
+
 
 def chat_completion_stream(body_bytes: bytes):
     """Generator yielding SSE bytes for the streaming web endpoint.
@@ -776,6 +953,7 @@ def chat_completion_stream(body_bytes: bytes):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _db_agent_flag_enabled() -> bool:
     """Return True when ``NSYS_AI_DB_AGENT`` env var is set to a truthy value."""

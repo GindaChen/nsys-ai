@@ -21,6 +21,7 @@ Usage:
     pytest tests/test_trajectories.py -v -k "q001"
     NSYS_TRAJ_MODEL=anthropic/claude-sonnet-4-6 pytest tests/test_trajectories.py -v
 """
+
 from __future__ import annotations
 
 import json
@@ -37,6 +38,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _repo_root() -> Path:
     return _REPO_ROOT
@@ -96,8 +98,8 @@ def _resolve_model(traj_model_id: str) -> str | None:
     # 3: auto-detect by available key
     _PROVIDER_DEFAULTS = [
         ("ANTHROPIC_API_KEY", "anthropic/claude-sonnet-4-6"),
-        ("OPENAI_API_KEY",    "gpt-4o"),
-        ("GEMINI_API_KEY",    "gemini/gemini-2.5-flash"),
+        ("OPENAI_API_KEY", "gpt-4o"),
+        ("GEMINI_API_KEY", "gemini/gemini-2.5-flash"),
     ]
     for key_name, default_model in _PROVIDER_DEFAULTS:
         if os.environ.get(key_name):
@@ -117,13 +119,16 @@ def _resolve_model(traj_model_id: str) -> str | None:
 
 _ALL_TRAJECTORIES = _load_trajectories()
 
+
 def _traj_id(traj: dict) -> str:
     return traj.get("id", Path(traj["_path"]).stem)
 
 
 # When no trajectory files exist yet, skip rather than error.
-_TRAJ_PARAMS = _ALL_TRAJECTORIES or [pytest.param(None, marks=pytest.mark.skip(reason="No trajectory files found"))]
-_TRAJ_IDS    = [_traj_id(t) for t in _ALL_TRAJECTORIES] if _ALL_TRAJECTORIES else ["no-trajectories"]
+_TRAJ_PARAMS = _ALL_TRAJECTORIES or [
+    pytest.param(None, marks=pytest.mark.skip(reason="No trajectory files found"))
+]
+_TRAJ_IDS = [_traj_id(t) for t in _ALL_TRAJECTORIES] if _ALL_TRAJECTORIES else ["no-trajectories"]
 
 
 @pytest.mark.parametrize("traj", _TRAJ_PARAMS, ids=_TRAJ_IDS)
@@ -139,7 +144,9 @@ def test_trajectory(traj: dict) -> None:
     traj_model_id = traj.get("model", {}).get("id", "")
     model_id = _resolve_model(traj_model_id)
     if not model_id:
-        pytest.skip("No API key configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY)")
+        pytest.skip(
+            "No API key configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY)"
+        )
 
     # --- 3. Import agent components ------------------------------------
     try:
@@ -172,7 +179,7 @@ def test_trajectory(traj: dict) -> None:
     question = traj["entrypoint"]["args"]["question"]
     api_messages: list[dict] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": question},
+        {"role": "user", "content": question},
     ]
 
     try:
@@ -212,11 +219,9 @@ def test_trajectory(traj: dict) -> None:
     expected_resp = traj.get("expected_response", {})
     for required in expected_resp.get("must_contain", []):
         assert required in answer, (
-            f"Required string missing from answer: {required!r}\n"
-            f"Answer:\n{answer}"
+            f"Required string missing from answer: {required!r}\nAnswer:\n{answer}"
         )
     for forbidden in expected_resp.get("must_not_contain", []):
         assert forbidden not in answer, (
-            f"Forbidden string found in answer: {forbidden!r}\n"
-            f"Answer:\n{answer}"
+            f"Forbidden string found in answer: {forbidden!r}\nAnswer:\n{answer}"
         )

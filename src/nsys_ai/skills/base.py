@@ -3,6 +3,7 @@ base.py — Skill dataclass and execution helpers.
 
 A Skill is the minimum analyzable unit: SQL template + parameters + formatter.
 """
+
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -11,9 +12,10 @@ from dataclasses import dataclass, field
 @dataclass
 class SkillParam:
     """One parameter a skill accepts."""
+
     name: str
     description: str
-    type: str = "str"          # str, int, float
+    type: str = "str"  # str, int, float
     required: bool = False
     default: object = None
 
@@ -32,6 +34,7 @@ class Skill:
         format_fn:   Optional function(rows) → formatted string
         tags:        Search tags for skill discovery
     """
+
     name: str
     title: str
     description: str
@@ -41,8 +44,7 @@ class Skill:
     format_fn: Callable | None = None
     tags: list[str] = field(default_factory=list)
 
-    def execute(self, conn: sqlite3.Connection,
-                **kwargs) -> list[dict]:
+    def execute(self, conn: sqlite3.Connection, **kwargs) -> list[dict]:
         """Run the skill's SQL against a connection.
 
         Args:

@@ -4,6 +4,7 @@ timeline/canvas.py — TimelineCanvas: Textual widget for the horizontal timelin
 Uses render_line(y) → Strip for cell-level control over block characters,
 matching the Perfetto-style rendering from the old curses TimelineTUI.
 """
+
 from __future__ import annotations
 
 from rich.color import Color
@@ -32,8 +33,9 @@ _STREAM_COLORS = [
 _NCCL_COLOR = Color.parse("magenta")
 
 
-def _stream_color(stream_idx: int, selected: bool, heat: float,
-                   is_nccl: bool, parity: int = 0) -> Style:
+def _stream_color(
+    stream_idx: int, selected: bool, heat: float, is_nccl: bool, parity: int = 0
+) -> Style:
     color = _NCCL_COLOR if is_nccl else _STREAM_COLORS[stream_idx % len(_STREAM_COLORS)]
     bold = selected or heat > 0.7
     # Alternate brightness for adjacent kernels: even = normal, odd = dimmed
@@ -146,12 +148,17 @@ class TimelineCanvas(Widget):
                 cur_y += 1
             prev_gpu = gpu_id
 
-            row_h = self.selected_stream_rows if si == self.selected_stream_idx else self.default_stream_rows
+            row_h = (
+                self.selected_stream_rows
+                if si == self.selected_stream_idx
+                else self.default_stream_rows
+            )
             if cur_y <= row_y < cur_y + row_h:
-                is_selected = (si == self.selected_stream_idx)
+                is_selected = si == self.selected_stream_idx
                 within = row_y - cur_y
-                return self._render_stream_row(stream, si, within, row_h, is_selected,
-                                               timeline_w, label_w, width)
+                return self._render_stream_row(
+                    stream, si, within, row_h, is_selected, timeline_w, label_w, width
+                )
             cur_y += row_h
             if cur_y > row_y + 100:
                 break
@@ -214,7 +221,10 @@ class TimelineCanvas(Widget):
             if span.end_ns < self.viewport_start_ns or span.start_ns >= view_end:
                 continue
             s_col = max(0, int((span.start_ns - self.viewport_start_ns) / max(self.ns_per_col, 1)))
-            e_col = min(timeline_w - 1, int((span.end_ns - self.viewport_start_ns) / max(self.ns_per_col, 1)))
+            e_col = min(
+                timeline_w - 1,
+                int((span.end_ns - self.viewport_start_ns) / max(self.ns_per_col, 1)),
+            )
             span_w = max(1, e_col - s_col + 1)
             if span_w >= len(span.name) + 2:
                 content = f"[{span.name}]"
@@ -223,7 +233,7 @@ class TimelineCanvas(Widget):
                 inner = span_w - 3  # room for [ … ]
                 content = f"[{span.name[:inner]}…]"
             elif span_w >= 2:
-                content = f"[{']' if span_w == 2 else span.name[:span_w - 2] + ']'}"
+                content = f"[{']' if span_w == 2 else span.name[: span_w - 2] + ']'}"
             else:
                 content = "│"  # thin marker instead of fat block
             for ci, ch in enumerate(content[:span_w]):
@@ -279,7 +289,7 @@ class TimelineCanvas(Widget):
         )
         cells = [(" ", Style())] * timeline_w
 
-        is_block_row = (within == row_h - 1)
+        is_block_row = within == row_h - 1
         # How many label rows do we have above the block row?
         label_row_count = row_h - 1  # row_h=1 → 0 label rows, row_h=2 → 1, row_h=3 → 2, etc.
 
@@ -321,7 +331,7 @@ class TimelineCanvas(Widget):
                     continue
 
                 # Render kernel label with overflow
-                name_to_use = (k.demangled if self.show_demangled and k.demangled else k.name)
+                name_to_use = k.demangled if self.show_demangled and k.demangled else k.name
                 short = _short_name(name_to_use)
                 dur = _fmt_dur(k.duration_ms)
                 if len(short) + len(dur) + 1 <= 40:

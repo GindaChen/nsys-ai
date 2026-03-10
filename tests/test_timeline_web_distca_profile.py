@@ -27,8 +27,7 @@ def test_distca_timeline_web_contains_flash_backward_on_gpu3():
         kernels = [e for e in events if e.get("type") == "kernel"]
 
     hit = [
-        k for k in kernels
-        if k["start_ns"] <= target_ns <= k["end_ns"] and "flash_bwd" in k["name"]
+        k for k in kernels if k["start_ns"] <= target_ns <= k["end_ns"] and "flash_bwd" in k["name"]
     ]
     assert hit, "Expected flash backward kernel at ~50,232.846ms on GPU3"
 
@@ -56,8 +55,7 @@ def test_distca_timeline_web_includes_memcpy_memset_23s_to_24s():
     with Profile(str(DISTCA_SQLITE)) as prof:
         devices = list(prof.meta.devices)
         payload_by_gpu = {
-            gpu: build_timeline_gpu_data(prof, gpu, trim)[0]["kernels"]
-            for gpu in devices
+            gpu: build_timeline_gpu_data(prof, gpu, trim)[0]["kernels"] for gpu in devices
         }
 
     conn = sqlite3.connect(str(DISTCA_SQLITE))
@@ -128,7 +126,8 @@ def test_distca_nvtx_path_depth_stable_across_adjacent_tiles():
     assert left["path"] == right["path"]
 
     right_bad_roots = [
-        s for s in right_spans
+        s
+        for s in right_spans
         if (
             s["name"] == "TransformerLayer._forward_attention.self_attention"
             and s.get("depth", 0) == 0
