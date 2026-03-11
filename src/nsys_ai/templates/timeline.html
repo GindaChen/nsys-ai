@@ -34,7 +34,7 @@
         <button onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
         <button onclick="toggleSettingsMenu()" id="settingsBtn">⚙ Settings</button>
         <div class="sep"></div>
-        <input type="text" id="searchInput" placeholder="/ to search kernels + NVTX..." oninput="onSearch()">
+        <input type="text" id="searchInput" placeholder="/ to search kernels + NVTX (/regex/flags)..." oninput="onSearch()">
         <span class="hint" id="searchHint"></span>
         <div class="sep"></div>
         <button onclick="runAnalyze()" id="analyzeBtn" title="Run AI analysis on this profile">🔍 Analyze</button>
@@ -189,7 +189,7 @@
             </tr>
             <tr>
                 <td><span class="key">/</span></td>
-                <td>Search kernels + NVTX</td>
+                <td>Search kernels + NVTX (wrap in /regex/ for regex)</td>
             </tr>
             <tr>
                 <td><span class="key">Esc</span></td>
