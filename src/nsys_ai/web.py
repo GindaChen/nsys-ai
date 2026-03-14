@@ -72,7 +72,12 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
 
 
 from .export import gpu_trace  # noqa: E402
-from .viewer import build_timeline_gpu_data, generate_evidence_html, generate_html, generate_timeline_html  # noqa: E402
+from .viewer import (  # noqa: E402
+    build_timeline_gpu_data,
+    generate_evidence_html,
+    generate_html,
+    generate_timeline_html,
+)
 
 # ── Shared helpers ───────────────────────────────────────────────
 

@@ -7,7 +7,6 @@ that overlay onto the timeline viewer for human verification.
 
 import json
 from dataclasses import asdict, dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -17,9 +16,9 @@ class Finding:
     type: str  # "highlight" | "region" | "marker"
     label: str
     start_ns: int
-    end_ns: Optional[int] = None  # None for marker type
-    stream: Optional[str] = None  # target stream ID (for highlight)
-    gpu_id: Optional[int] = None
+    end_ns: int | None = None  # None for marker type
+    stream: str | None = None  # target stream ID (for highlight)
+    gpu_id: int | None = None
     color: str = "rgba(255,68,68,0.3)"
     severity: str = "info"  # "critical" | "warning" | "info"
     note: str = ""

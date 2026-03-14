@@ -6,7 +6,6 @@ to produce findings with exact nanosecond timestamps for timeline overlay.
 """
 
 import statistics
-from typing import Optional
 
 from .annotation import EvidenceReport, Finding
 from .profile import Profile
@@ -27,7 +26,7 @@ class EvidenceBuilder:
         self,
         prof: Profile,
         device: int = 0,
-        trim: Optional[tuple[int, int]] = None,
+        trim: tuple[int, int] | None = None,
     ):
         self.prof = prof
         self.device = device
