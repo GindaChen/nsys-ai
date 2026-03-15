@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable
+import threading
 
 # ---------------------------------------------------------------------------
 # Sub-module re-exports — keep the public API stable for existing callers.
@@ -51,6 +52,20 @@ from .region_mfu import compute_region_mfu_from_conn, compute_theoretical_flops
 
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
+
+# Simple module-level counter to assign indices to findings created via
+# the `submit_finding` tool. This allows the model to refer to them as
+# "[Finding N]" using a concrete, server-tracked index.
+_finding_counter = 0
+_finding_counter_lock = threading.Lock()
+
+
+def _next_finding_index() -> int:
+    """Allocate and return the next finding index."""
+    global _finding_counter
+    with _finding_counter_lock:
+        _finding_counter += 1
+        return _finding_counter
 
 
 # ---------------------------------------------------------------------------
@@ -350,10 +365,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     ui_context = payload.get("ui_context") or {}
     profile_path = payload.get("profile_path")
 
-    # Feature flag: NSYS_AI_DB_AGENT enables the DB-backed agent for the web path.
-    db_agent_enabled = _db_agent_flag_enabled()
-
-    if profile_path and db_agent_enabled:
+    if profile_path:
         try:
             from .profile import resolve_profile_path
 
@@ -385,7 +397,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                     api_messages=api_messages,
                     tools=_tools_openai(),
                     query_runner=query_runner,
-                    max_turns=8,
+                    max_turns=5,
                 )
                 return {"content": content, "actions": actions}
             except Exception as e:
@@ -555,6 +567,13 @@ def stream_agent_loop(
     else:
         schema_str = None
 
+    # Fix 2: Filter out DB-dependent tools when no profile is connected.
+    # This prevents LLM from calling tools that always fail, avoiding retry spirals.
+    _DB_TOOLS = {"query_profile_db", "get_gpu_peak_tflops", "compute_region_mfu",
+                 "get_gpu_overlap_stats", "get_nccl_breakdown"}
+    if not use_diff and conn is None and tools:
+        tools = [t for t in tools if t.get("function", {}).get("name") not in _DB_TOOLS]
+
     # Resolve skill_docs from the skill_names list (best-effort; silent on missing)
     # If no skill_names provided, auto-route from user messages for consistency
     # with the non-streaming chat_completion path.
@@ -594,9 +613,12 @@ def stream_agent_loop(
 
             extra_kwargs: dict = {}
             if "gemini-2.5" in model:
+                # Fix 4: Use smaller thinking budget for tool-result turns
+                # to speed up tool-call processing.
+                budget = GEMINI_THINKING_BUDGET if turn_count == 1 else 2000
                 extra_kwargs["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": GEMINI_THINKING_BUDGET,
+                    "budget_tokens": budget,
                 }
 
             try:
@@ -890,6 +912,118 @@ def stream_agent_loop(
                         }
                     )
                     continue
+                if name == "submit_finding":
+                    try:
+                        finding_args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        finding_args = {}
+                    # Allocate a concrete index for this finding so the
+                    # model can reference it as "[Finding N]".
+                    finding_index = _next_finding_index()
+                    finding_payload = dict(finding_args)
+                    finding_payload["index"] = finding_index
+                    yield {"type": "finding", "finding": finding_payload}
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "name": name,
+                            "content": json.dumps({
+                                "status": "submitted",
+                                "index": finding_index,
+                                "note": (
+                                    "Finding overlaid on timeline. "
+                                    f"Reference as [Finding {finding_index}] in your answer."
+                                ),
+                            }),
+                        }
+                    )
+                    continue
+                if name == "get_gpu_overlap_stats" and sqlite_path:
+                    yield {"type": "system", "content": "Computing GPU overlap stats..."}
+                    try:
+                        args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        from .profile import Profile as _OverlapProfile
+                        from .overlap import overlap_analysis as _overlap_fn
+
+                        _prof = None
+                        try:
+                            _prof = _OverlapProfile(sqlite_path)
+                            _devices = _prof.meta.devices or [0]
+                            _start_s = args.get("start_s")
+                            _end_s = args.get("end_s")
+                            _trim = (
+                                (int(float(_start_s) * 1e9), int(float(_end_s) * 1e9))
+                                if _start_s is not None and _end_s is not None
+                                else None
+                            )
+                            _per_gpu = []
+                            for _dev in _devices:
+                                _oa = _overlap_fn(_prof, _dev, _trim)
+                                if isinstance(_oa, dict) and "error" not in _oa:
+                                    _oa["gpu_id"] = _dev
+                                    _gpu_info = _prof.meta.gpu_info.get(_dev)
+                                    if _gpu_info:
+                                        _oa["gpu_name"] = _gpu_info.name
+                                    _per_gpu.append(_oa)
+                            result = {
+                                "device_count": len(_devices),
+                                "per_gpu": _per_gpu,
+                            }
+                        finally:
+                            if _prof is not None:
+                                _prof.close()
+                    except Exception as _e:
+                        result = {"error": str(_e)}
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": json.dumps(result),
+                    })
+                    continue
+                if name == "get_nccl_breakdown" and sqlite_path:
+                    yield {"type": "system", "content": "Analyzing NCCL collectives..."}
+                    try:
+                        args = json.loads(args_str) if args_str.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        from .profile import Profile as _NcclProfile
+                        from .overlap import nccl_breakdown as _nccl_fn
+
+                        _prof = None
+                        try:
+                            _prof = _NcclProfile(sqlite_path)
+                            _devices = _prof.meta.devices or [0]
+                            _dev = args.get("device_id", _devices[0])
+                            _start_s = args.get("start_s")
+                            _end_s = args.get("end_s")
+                            _trim = (
+                                (int(float(_start_s) * 1e9), int(float(_end_s) * 1e9))
+                                if _start_s is not None and _end_s is not None
+                                else None
+                            )
+                            _rows = _nccl_fn(_prof, int(_dev), _trim)
+                            result = {
+                                "device_id": _dev,
+                                "collectives": _rows,
+                            }
+                        finally:
+                            if _prof is not None:
+                                _prof.close()
+                    except Exception as _e:
+                        result = {"error": str(_e)}
+                    api_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "name": name,
+                        "content": json.dumps(result),
+                    })
+                    continue
                 if name == "query_profile_db" and query_runner is not None:
                     yield {"type": "system", "content": "Running DB query..."}
                     try:
@@ -1006,7 +1140,7 @@ def chat_completion_stream(body_bytes: bytes):
     # When provided, those files are loaded from docs/agent_skills/ and appended
     # to the system prompt as SESSION SKILL CONTEXT. Unknown paths are silently ignored.
     skill_context: list[str] | None = payload.get("skill_context") or None
-    effective_profile = profile_path if (profile_path and _db_agent_flag_enabled()) else None
+    effective_profile = profile_path if profile_path else None
 
     try:
         for ev in stream_agent_loop(
@@ -1015,7 +1149,7 @@ def chat_completion_stream(body_bytes: bytes):
             ui_context=ui_context,
             tools=_tools_openai(),
             profile_path=effective_profile,
-            max_turns=8,
+            max_turns=5,
             skill_names=skill_context,
         ):
             t = ev.get("type")
@@ -1025,6 +1159,8 @@ def chat_completion_stream(body_bytes: bytes):
                 yield _sse_event("system", {"content": ev.get("content", "")})
             elif t == "action":
                 yield _sse_event("action", ev.get("action", {}))
+            elif t == "finding":
+                yield _sse_event("finding", ev.get("finding", {}))
             elif t == "done":
                 yield _sse_event("done", ev.get("usage") or {})
     except (BrokenPipeError, ConnectionResetError, OSError):

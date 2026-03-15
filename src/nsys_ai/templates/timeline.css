@@ -663,3 +663,138 @@
             font-size: 10px;
             color: #6e7681;
         }
+
+        /* ── Findings sidebar ── */
+        #findingsSidebar {
+            width: 300px;
+            flex-shrink: 0;
+            display: none;
+            flex-direction: column;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+        }
+
+        #findingsSidebar.open {
+            display: flex;
+        }
+
+        #findingsHeader {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        #findingsHeader .findings-badge {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 10px;
+            background: rgba(88,166,255,0.15);
+            color: var(--accent-dim);
+            margin-left: auto;
+        }
+
+        #findingsHeader button {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 0 4px;
+        }
+
+        #findingsList {
+            flex: 1;
+            overflow-y: auto;
+            padding: 4px 0;
+        }
+
+        .finding-card {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            border-left: 4px solid transparent;
+            transition: background 0.12s, border-left-color 0.12s;
+        }
+
+        .finding-card:hover {
+            background: rgba(88,166,255,0.06);
+        }
+
+        .finding-card.active {
+            background: rgba(88,166,255,0.1);
+            border-left-color: var(--accent-dim);
+        }
+
+        .finding-card .fc-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 3px;
+        }
+
+        .finding-card .fc-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            color: #0d1117;
+            font-size: 10px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .finding-card .fc-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text);
+            line-height: 1.3;
+        }
+
+        .finding-card .fc-severity {
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-left: 24px;
+        }
+
+        .finding-card .fc-severity.critical { color: #ff4444; }
+        .finding-card .fc-severity.warning  { color: #d4a72c; }
+        .finding-card .fc-severity.info     { color: #58a6ff; }
+
+        .finding-card .fc-range {
+            font-size: 9px;
+            color: #6e7681;
+            margin-top: 2px;
+            margin-left: 24px;
+        }
+
+        .finding-card .fc-note {
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-top: 3px;
+            margin-left: 24px;
+            line-height: 1.3;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* Chat finding links — [Finding N] clickable references */
+        .finding-link {
+            color: #58a6ff;
+            cursor: pointer;
+            text-decoration: underline;
+            font-weight: 600;
+        }
+        .finding-link:hover {
+            color: #79c0ff;
+        }
+

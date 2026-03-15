@@ -42,6 +42,8 @@ WITH ordered AS (
     JOIN StringIds s ON k.shortName = s.id
 )
 SELECT streamId,
+       prev_end AS start_ns,
+       start AS end_ns,
        ROUND((start - prev_end) / 1e6, 3) AS gap_ms,
        prev_kernel AS before_kernel,
        kernel_name AS after_kernel

@@ -51,6 +51,37 @@ Follow the loaded skill's workflow exactly. Do not skip steps.
 - Report any computed metrics (MFU %, achieved TFLOPS)
 - Suggest the next investigation step
 
+### Phase 5: Visual Evidence
+
+After delivering your text conclusion, produce visual evidence so humans can verify your claims against the actual timeline.
+
+1. **Identify key time ranges** — for each conclusion, note the `start_ns` and `end_ns` from the data you queried (e.g. from `skill run gpu_idle_gaps --format json`)
+2. **Write findings JSON** — see [`evidence_schema.md`](evidence_schema.md) for the format:
+   ```bash
+   cat > /tmp/findings.json << 'EOF'
+   {
+     "title": "Your analysis title",
+     "findings": [
+       {
+         "type": "region",
+         "label": "Your conclusion label",
+         "start_ns": 89000000000,
+         "end_ns": 110000000000,
+         "severity": "critical",
+         "note": "Evidence supporting this conclusion"
+       }
+     ]
+   }
+   EOF
+   ```
+3. **Open the viewer**:
+   ```bash
+   nsys-ai timeline-web profile.sqlite --findings /tmp/findings.json
+   ```
+
+> Only include findings that directly support your conclusions. Each finding
+> should highlight the specific timeline range that proves your claim.
+
 ---
 
 ## Output Requirements

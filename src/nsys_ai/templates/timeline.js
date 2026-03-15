@@ -3,6 +3,7 @@ const INITIAL_DATA = BOOT.INITIAL_DATA ?? null;
 const PROGRESSIVE = BOOT.PROGRESSIVE === true;
 const TILE_WINDOW_S = Number.isFinite(BOOT.TILE_WINDOW_S) ? BOOT.TILE_WINDOW_S : 5;  // seconds per tile
 const GPU_INFO = Array.isArray(BOOT.GPU_INFO) ? BOOT.GPU_INFO : [];
+const FINDINGS = Array.isArray(BOOT.FINDINGS) ? BOOT.FINDINGS : [];
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -474,6 +475,7 @@ let fitZoomState = null;
 // ── Layout constants ──
 const LABEL_W = isMultiGPU ? 110 : 90;
 const RULER_H = 24;
+const FINDINGS_LANE_H = 28;  // dedicated annotation lane for AI findings
 const NVTX_ROW_H = 20;
 const NVTX_PIN_ROWS = 5;
 const STREAM_H = 32;
@@ -481,6 +483,9 @@ const STREAM_GAP = 2;
 const GPU_SEP_H = isMultiGPU ? 22 : 0;
 const MIN_BLOCK_W = 2;
 const DPR = window.devicePixelRatio || 1;
+
+// Height of the findings annotation lane (0 when no findings loaded)
+function findingsLaneH() { return FINDINGS.length > 0 ? FINDINGS_LANE_H : 0; }
 
 function clampNum(v, minV, maxV, fallback) {
     const n = Number(v);
@@ -821,9 +826,9 @@ function onNvtxThreadChange() {
 
 // ── Resize ──
 function contentHeight() {
-    // Total height needed: ruler + NVTX + GPU separators + all stream rows
+    // Total height needed: ruler + findings lane + NVTX + GPU separators + all stream rows
     const gpuSeps = isMultiGPU ? gpuBands.length * GPU_SEP_H : 0;
-    return RULER_H + nvtxAreaH() + gpuSeps + streamIds.length * (STREAM_H + STREAM_GAP) + 20;
+    return RULER_H + findingsLaneH() + nvtxAreaH() + gpuSeps + streamIds.length * (STREAM_H + STREAM_GAP) + 20;
 }
 function resize() {
     const r = wrap.getBoundingClientRect();
@@ -854,7 +859,7 @@ function nvtxAreaH() {
 
 // Compute Y position for a stream index, accounting for GPU separator rows
 function streamY(idx) {
-    let y = RULER_H + nvtxAreaH();
+    let y = RULER_H + findingsLaneH() + nvtxAreaH();
     let sepsAbove = 0;
     if (isMultiGPU) {
         for (const band of gpuBands) {
@@ -874,6 +879,7 @@ function draw() {
     drawRuler(W);
     if (showNVTX) drawNVTX(W);
     drawStreams(W, H);
+    if (FINDINGS.length) drawFindings(W, H);
 }
 
 function drawRuler(W) {
@@ -951,7 +957,7 @@ function formatTickValue(ns, div, decimals) {
 }
 
 function drawNVTX(W) {
-    const baseY = RULER_H;
+    const baseY = RULER_H + findingsLaneH();
     ctx.fillStyle = 'rgba(22, 27, 34, 0.85)';
     ctx.fillRect(0, baseY, W, nvtxAreaH());
 
@@ -1071,19 +1077,19 @@ function drawStreams(W, H) {
         if (gpuBands.length > 0) {
             const band = gpuBands[0];
             const topY = streamY(0) - GPU_SEP_H;
-            if (topY >= RULER_H + nvtxAreaH() - GPU_SEP_H) {
+            if (topY >= RULER_H + findingsLaneH() + nvtxAreaH() - GPU_SEP_H) {
                 const sepColor = GPU_SEP_COLORS[0];
                 ctx.fillStyle = '#0d1117';
-                ctx.fillRect(0, RULER_H + nvtxAreaH(), W, GPU_SEP_H);
+                ctx.fillRect(0, RULER_H + findingsLaneH() + nvtxAreaH(), W, GPU_SEP_H);
                 ctx.fillStyle = sepColor;
                 ctx.globalAlpha = 0.6;
-                ctx.fillRect(0, RULER_H + nvtxAreaH(), W, 2);
+                ctx.fillRect(0, RULER_H + findingsLaneH() + nvtxAreaH(), W, 2);
                 ctx.globalAlpha = 1;
                 ctx.fillStyle = sepColor;
                 ctx.font = '10px SF Mono, Cascadia Code, Fira Code, monospace';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(`── GPU ${band.gpuId} ──`, 8, RULER_H + nvtxAreaH() + GPU_SEP_H / 2 + 1);
+                ctx.fillText(`── GPU ${band.gpuId} ──`, 8, RULER_H + findingsLaneH() + nvtxAreaH() + GPU_SEP_H / 2 + 1);
                 ctx.font = '11px SF Mono, Cascadia Code, Fira Code, monospace';
             }
         }
@@ -1187,7 +1193,7 @@ function drawStreams(W, H) {
 // ── Hit testing ──
 function hitTest(mx, my) {
     if (showNVTX) {
-        const baseY = RULER_H;
+        const baseY = RULER_H + findingsLaneH();
         const endY = baseY + nvtxAreaH();
         if (my >= baseY && my <= endY) {
             const { spans } = activeNvtxLayout();
@@ -1887,6 +1893,18 @@ canvas.addEventListener('mousedown', e => {
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     if (mx < LABEL_W) return;
 
+    // Check findings annotation lane + overlays first
+    if (FINDINGS.length) {
+        const fi = _findingsHitTest(mx, my);
+        if (fi >= 0) {
+            selectFinding(fi);
+            // Ensure sidebar is open
+            const sidebar = document.getElementById('findingsSidebar');
+            if (sidebar && !sidebar.classList.contains('open')) toggleFindings();
+            return;
+        }
+    }
+
     const hit = hitTest(mx, my);
     if (hit) {
         if (hit.streamIdx !== null && hit.streamIdx !== undefined) {
@@ -1992,7 +2010,35 @@ canvas.addEventListener('mousemove', e => {
         tt.style.left = (e.clientX + 12) + 'px';
         tt.style.top = (e.clientY - 10) + 'px';
     } else {
-        tt.style.display = 'none';
+        // Check findings hover
+        if (FINDINGS.length) {
+            const fi = _findingsHitTest(mx, my);
+            if (fi >= 0) {
+                const f = FINDINGS[fi];
+                const sevCol = _findingSevColor(f.severity);
+                const rangeStr = f.end_ns
+                    ? _fmtFindingNs(f.start_ns) + ' → ' + _fmtFindingNs(f.end_ns)
+                    : '@ ' + _fmtFindingNs(f.start_ns);
+                tt.innerHTML =
+                    `<div style="color:${sevCol};font-weight:600">📋 #${fi + 1} ${escH(f.label)}</div>` +
+                    `<div style="color:#8b949e">${(f.severity || 'info').toUpperCase()} · ${f.type}` +
+                    (f.gpu_id != null ? ` · GPU ${f.gpu_id}` : '') +
+                    ` · ${rangeStr}</div>` +
+                    (f.note ? `<div style="color:#c9d1d9;margin-top:3px;max-width:280px;white-space:normal;line-height:1.3">${escH(f.note.slice(0, 120))}</div>` : '');
+                tt.style.display = 'block';
+                tt.style.left = (e.clientX + 12) + 'px';
+                tt.style.top = (e.clientY - 10) + 'px';
+                const tr = tt.getBoundingClientRect();
+                if (tr.right > window.innerWidth) tt.style.left = (e.clientX - tr.width - 8) + 'px';
+                if (tr.bottom > window.innerHeight) tt.style.top = (e.clientY - tr.height - 8) + 'px';
+                canvas.style.cursor = 'pointer';
+            } else {
+                tt.style.display = 'none';
+                if (!isDragging && !isSelecting) canvas.style.cursor = 'crosshair';
+            }
+        } else {
+            tt.style.display = 'none';
+        }
     }
 });
 
@@ -2182,7 +2228,9 @@ document.addEventListener('keydown', e => {
         case 'v': case 'V': e.preventDefault(); gotoNvtxPrompt(); break;
         case '/': e.preventDefault(); document.getElementById('searchInput').focus(); break;
         case 'Escape':
-            selectedKernel = null; selectedNvtx = null; showDetail(null);
+            selectedKernel = null; selectedNvtx = null; selectedFindingIdx = -1;
+            document.querySelectorAll('.finding-card').forEach(el => el.classList.remove('active'));
+            showDetail(null);
             searchQuery = ''; searchKernelMatches.clear(); searchNvtxMatches.clear();
             document.getElementById('searchInput').value = '';
             document.getElementById('searchHint').textContent = '';
@@ -2190,10 +2238,27 @@ document.addEventListener('keydown', e => {
             draw(); break;
         case 'n': case 'N': toggleNVTX(); break;
         case 'a': case 'A': toggleChat(); break;
+        case 'e': case 'E': if (FINDINGS.length) toggleFindings(); break;
         case 'f': case 'F': fitAll(); break;
         case 'b': saveBookmark(); break;
         case 'B': toggleBookmarkList(); break;
         case 's': case 'S': toggleStreamFilter(); break;
+        case '[':
+            if (FINDINGS.length) {
+                e.preventDefault();
+                const prevIdx = selectedFindingIdx <= 0 ? FINDINGS.length - 1 : selectedFindingIdx - 1;
+                selectFinding(prevIdx);
+                if (!document.getElementById('findingsSidebar').classList.contains('open')) toggleFindings();
+            }
+            break;
+        case ']':
+            if (FINDINGS.length) {
+                e.preventDefault();
+                const nextIdx = selectedFindingIdx >= FINDINGS.length - 1 ? 0 : selectedFindingIdx + 1;
+                selectFinding(nextIdx);
+                if (!document.getElementById('findingsSidebar').classList.contains('open')) toggleFindings();
+            }
+            break;
         case '?': toggleHelp(); break;
         default:
             // 1-9 jump to bookmark
@@ -2248,12 +2313,18 @@ function appendChatMsg(role, content, cls) {
 
 function formatChatContent(text) {
     // Simple markdown-ish rendering
-    return text
+    let html = text
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
         .replace(/`([^`]+)`/g, '<code>$1</code>')
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/\n/g, '<br>');
+    // Linkify [Finding N] references → click to zoom to evidence
+    html = html.replace(/\[Finding\s+(\d+)\]/gi, (match, n) => {
+        const idx = parseInt(n) - 1;
+        return '<a href="#" class="finding-link" onclick="selectFinding(' + idx + ');return false">' + match + '</a>';
+    });
+    return html;
 }
 
 async function sendChat() {
@@ -2288,6 +2359,7 @@ async function sendChat() {
             model: model,
             stream: true,
             ui_context: buildUIContext(),
+            profile_path: BOOT.PROFILE_PATH || undefined,
         };
         lastChatTs = Date.now();
 
@@ -2358,10 +2430,15 @@ async function sendChat() {
                             fullContent = payload.content;
                             aiDiv.innerHTML = formatChatContent(fullContent);
                         }
+                        streamDone = true;
                     } else if (currentEvent === 'action') {
                         executeAIAction(payload);
-                    } else if (currentEvent === 'done') {
-                        streamDone = true;
+                    } else if (currentEvent === 'finding') {
+                        const idx = Number.isFinite(payload.index)
+                            ? payload.index
+                            : addFinding(payload);
+                        appendChatMsg('system',
+                            `📋 Finding ${idx}: ${payload.label || ''}`, 'system');
                     }
                 } catch (e) { /* ignore parse errors in SSE */ }
                 if (streamDone) break;
@@ -2515,3 +2592,512 @@ window.addEventListener('message', e => {
 
 // ── Init ──
 setTimeout(initData, 0);
+
+// ── Findings Evidence Layer ──
+let selectedFindingIdx = -1;
+
+function _findingSevColor(sev) {
+    if (sev === 'critical') return '#ff4444';
+    if (sev === 'warning') return '#d4a72c';
+    return '#58a6ff';
+}
+
+function _findingStreamRange(f) {
+    // Returns { y, h } in canvas coordinates for this finding's target area
+    const topY = RULER_H + findingsLaneH() + nvtxAreaH();
+    const totalH = streamIds.length * (STREAM_H + STREAM_GAP) +
+        (isMultiGPU ? gpuBands.length * GPU_SEP_H : 0);
+
+    if (f.gpu_id != null && isMultiGPU) {
+        const band = gpuBands.find(b => b.gpuId === f.gpu_id);
+        if (band) {
+            if (f.stream != null) {
+                const streamKey = band.gpuId + ':' + f.stream;
+                const si = streamIds.indexOf(streamKey);
+                if (si >= 0) {
+                    const y = streamY(si) + GPU_SEP_H;
+                    return { y, h: STREAM_H };
+                }
+            }
+            const y0 = streamY(band.startIdx) + GPU_SEP_H;
+            const yEnd = band.endIdx < streamIds.length
+                ? streamY(band.endIdx)
+                : topY + totalH;
+            return { y: y0, h: yEnd - y0 };
+        }
+    }
+
+    if (f.stream != null && !isMultiGPU) {
+        const si = streamIds.indexOf(String(f.stream));
+        if (si >= 0) {
+            return { y: streamY(si), h: STREAM_H };
+        }
+    }
+
+    return { y: topY, h: totalH };
+}
+
+function drawFindings(W, H) {
+    const font = ctx.font;
+    ctx.save();
+
+    const hasActive = selectedFindingIdx >= 0 && selectedFindingIdx < FINDINGS.length;
+    const laneY = RULER_H;  // annotation lane starts right below the ruler
+    const laneH = findingsLaneH();
+
+    // ── Pass 0: Draw annotation lane background ──
+    if (laneH > 0) {
+        ctx.fillStyle = '#0f141d';
+        ctx.fillRect(0, laneY, W, laneH);
+        ctx.strokeStyle = '#21262d';
+        ctx.beginPath();
+        ctx.moveTo(0, laneY + laneH - 0.5);
+        ctx.lineTo(W, laneY + laneH - 0.5);
+        ctx.stroke();
+
+        // Label on the left
+        ctx.fillStyle = '#6e7681';
+        ctx.font = '9px SF Mono, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Findings', LABEL_W - 6, laneY + laneH / 2);
+    }
+
+    // ── Pass 1: Focus dim — darken everything OUTSIDE the active finding ──
+    if (hasActive) {
+        const af = FINDINGS[selectedFindingIdx];
+        const aStart = af.start_ns;
+        const aEnd = af.end_ns ?? aStart;
+        const ax1 = nsToX(aStart);
+        const ax2 = nsToX(aEnd);
+        const sevCol = _findingSevColor(af.severity);
+
+        // Heavy dim
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        if (ax1 > LABEL_W) ctx.fillRect(LABEL_W, laneY + laneH, ax1 - LABEL_W, H - laneY - laneH);
+        if (ax2 < W) ctx.fillRect(ax2, laneY + laneH, W - ax2, H - laneY - laneH);
+
+        // Bright accent border around the un-dimmed window
+        ctx.strokeStyle = sevCol;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.moveTo(ax1, laneY + laneH); ctx.lineTo(ax1, H);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ax2, laneY + laneH); ctx.lineTo(ax2, H);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 1;
+    }
+
+    // ── Pass 2: Draw region/highlight/marker overlays on streams ──
+    for (let i = 0; i < FINDINGS.length; i++) {
+        const f = FINDINGS[i];
+        const startNs = f.start_ns;
+        const endNs = f.end_ns ?? startNs;
+        if (endNs < viewStart || startNs > viewEnd) continue;
+
+        const x1 = Math.max(LABEL_W, nsToX(startNs));
+        const x2 = Math.min(W, nsToX(endNs));
+        const pixW = Math.max(x2 - x1, 2);
+        const isActive = i === selectedFindingIdx;
+        const sevCol = _findingSevColor(f.severity);
+        const { y: targetY, h: targetH } = _findingStreamRange(f);
+        const baseAlpha = hasActive && !isActive ? 0.1 : 1;
+
+        if (f.type === 'region' || f.type === 'highlight') {
+            ctx.globalAlpha = baseAlpha;
+
+            // Fill
+            const fillAlpha = isActive ? 0.25 : 0.08;
+            ctx.fillStyle = sevCol;
+            ctx.globalAlpha = baseAlpha * fillAlpha;
+            ctx.fillRect(x1, targetY, pixW, targetH);
+
+            // Glow for active
+            if (isActive) {
+                ctx.save();
+                ctx.shadowColor = sevCol;
+                ctx.shadowBlur = 12;
+                ctx.strokeStyle = sevCol;
+                ctx.lineWidth = 2.5;
+                ctx.globalAlpha = 0.8;
+                ctx.strokeRect(x1, targetY, pixW, targetH);
+                ctx.restore();
+            } else {
+                // Subtle border for inactive
+                ctx.strokeStyle = sevCol;
+                ctx.lineWidth = 1;
+                ctx.globalAlpha = baseAlpha * 0.4;
+                ctx.setLineDash([4, 4]);
+                ctx.strokeRect(x1, targetY, pixW, targetH);
+                ctx.setLineDash([]);
+            }
+            ctx.lineWidth = 1;
+
+        } else if (f.type === 'marker') {
+            const x = nsToX(startNs);
+            if (x < LABEL_W || x > W) continue;
+
+            ctx.globalAlpha = baseAlpha;
+            ctx.strokeStyle = sevCol;
+            ctx.lineWidth = isActive ? 3 : 2;
+            ctx.globalAlpha = baseAlpha * (isActive ? 1 : 0.6);
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(x, laneY + laneH);
+            ctx.lineTo(x, targetY + targetH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1;
+        }
+
+        ctx.globalAlpha = 1;
+    }
+
+    // ── Pass 3: Draw annotation lane pills + connecting lines ──
+    if (laneH > 0) {
+        for (let i = 0; i < FINDINGS.length; i++) {
+            const f = FINDINGS[i];
+            const startNs = f.start_ns;
+            const endNs = f.end_ns ?? startNs;
+            if (endNs < viewStart || startNs > viewEnd) continue;
+
+            const x1 = Math.max(LABEL_W, nsToX(startNs));
+            const x2 = Math.min(W, nsToX(endNs));
+            const midX = (x1 + x2) / 2;
+            const isActive = i === selectedFindingIdx;
+            const sevCol = _findingSevColor(f.severity);
+            const baseAlpha = hasActive && !isActive ? 0.2 : 1;
+            const { y: targetY, h: targetH } = _findingStreamRange(f);
+
+            // ── Connecting dotted line from pill to target region ──
+            ctx.globalAlpha = baseAlpha * (isActive ? 0.6 : 0.25);
+            ctx.strokeStyle = sevCol;
+            ctx.lineWidth = isActive ? 1.5 : 1;
+            ctx.setLineDash(isActive ? [6, 3] : [3, 5]);
+            ctx.beginPath();
+            ctx.moveTo(midX, laneY + laneH);
+            ctx.lineTo(midX, targetY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1;
+
+            // ── Pill bar in annotation lane ──
+            const pillH = laneH - 6;
+            const pillY = laneY + 3;
+            const pillX1 = Math.max(LABEL_W + 2, x1);
+            const pillX2 = Math.min(W - 2, x2);
+            let pillW = Math.max(pillX2 - pillX1, 24);  // min 24px
+            // Prevent pills from going off screen
+            const clampedX = Math.max(LABEL_W + 2, Math.min(pillX1, W - pillW - 2));
+
+            // Pill background
+            ctx.globalAlpha = baseAlpha * (isActive ? 0.9 : 0.5);
+            ctx.fillStyle = sevCol;
+            ctx.beginPath();
+            ctx.roundRect(clampedX, pillY, pillW, pillH, 4);
+            ctx.fill();
+
+            // Active glow
+            if (isActive) {
+                ctx.save();
+                ctx.shadowColor = sevCol;
+                ctx.shadowBlur = 8;
+                ctx.strokeStyle = sevCol;
+                ctx.lineWidth = 1.5;
+                ctx.globalAlpha = 0.6;
+                ctx.beginPath();
+                ctx.roundRect(clampedX, pillY, pillW, pillH, 4);
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // Number circle inside pill
+            const circR = pillH / 2 - 1;
+            const circX = clampedX + circR + 3;
+            const circCY = pillY + pillH / 2;
+            ctx.globalAlpha = baseAlpha;
+            ctx.fillStyle = '#0d1117';
+            ctx.beginPath();
+            ctx.arc(circX, circCY, circR, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = sevCol;
+            ctx.font = 'bold 9px SF Mono, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(i + 1), circX, circCY);
+
+            // Label text (truncated to fit)
+            if (pillW > 40) {
+                ctx.fillStyle = '#0d1117';
+                ctx.font = (isActive ? 'bold ' : '') + '9px SF Mono, monospace';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                const textStart = circX + circR + 4;
+                const maxTextW = pillW - (textStart - clampedX) - 4;
+                if (maxTextW > 10) {
+                    const maxChars = Math.floor(maxTextW / 5.5);
+                    const truncLabel = f.label.length > maxChars
+                        ? f.label.slice(0, maxChars - 1) + '…' : f.label;
+                    ctx.fillText(truncLabel, textStart, circCY);
+                }
+            }
+
+            ctx.globalAlpha = 1;
+        }
+    }
+
+    // ── Pass 4: Active finding stream label flash ──
+    if (hasActive) {
+        const af = FINDINGS[selectedFindingIdx];
+        const sevCol = _findingSevColor(af.severity);
+        // Flash the stream label background
+        if (af.gpu_id != null && isMultiGPU) {
+            const band = gpuBands.find(b => b.gpuId === af.gpu_id);
+            if (band) {
+                for (let si = band.startIdx; si < band.endIdx; si++) {
+                    const sy = streamY(si) + (si === band.startIdx ? GPU_SEP_H : 0);
+                    ctx.fillStyle = sevCol;
+                    ctx.globalAlpha = 0.12;
+                    ctx.fillRect(0, sy, LABEL_W, STREAM_H);
+                    ctx.globalAlpha = 1;
+                }
+            }
+        } else if (af.stream != null && !isMultiGPU) {
+            const si = streamIds.indexOf(String(af.stream));
+            if (si >= 0) {
+                const sy = streamY(si);
+                ctx.fillStyle = sevCol;
+                ctx.globalAlpha = 0.12;
+                ctx.fillRect(0, sy, LABEL_W, STREAM_H);
+                ctx.globalAlpha = 1;
+            }
+        }
+    }
+
+    ctx.restore();
+    ctx.font = font;
+}
+
+// ── Findings hit-test (for annotation lane pills and region overlays) ──
+function _findingsHitTest(mx, my) {
+    const laneY = RULER_H;
+    const laneH = findingsLaneH();
+
+    // Check annotation lane pills
+    if (laneH > 0 && my >= laneY && my <= laneY + laneH) {
+        for (let i = FINDINGS.length - 1; i >= 0; i--) {
+            const f = FINDINGS[i];
+            const startNs = f.start_ns;
+            const endNs = f.end_ns ?? startNs;
+            if (endNs < viewStart || startNs > viewEnd) continue;
+            const x1 = Math.max(LABEL_W, nsToX(startNs));
+            const x2 = Math.min(canvas.width / DPR, nsToX(endNs));
+            const pillW = Math.max(x2 - x1, 24);
+            const clampedX = Math.max(LABEL_W + 2, Math.min(x1, canvas.width / DPR - pillW - 2));
+            if (mx >= clampedX && mx <= clampedX + pillW) {
+                return i;
+            }
+        }
+    }
+
+    // Check stream-area region/highlight overlays
+    for (let i = FINDINGS.length - 1; i >= 0; i--) {
+        const f = FINDINGS[i];
+        const startNs = f.start_ns;
+        const endNs = f.end_ns ?? startNs;
+        if (endNs < viewStart || startNs > viewEnd) continue;
+        const x1 = Math.max(LABEL_W, nsToX(startNs));
+        const x2 = Math.min(canvas.width / DPR, nsToX(endNs));
+        const { y: targetY, h: targetH } = _findingStreamRange(f);
+        if (mx >= x1 && mx <= x2 && my >= targetY && my <= targetY + targetH) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+// ── Findings sidebar ──
+function _fmtFindingNs(ns) {
+    const s = ns / 1e9;
+    if (s >= 1) return s.toFixed(3) + 's';
+    const ms = ns / 1e6;
+    if (ms >= 1) return ms.toFixed(2) + 'ms';
+    return (ns / 1e3).toFixed(1) + 'μs';
+}
+
+function _initFindingsSidebar() {
+    if (!FINDINGS.length) return;
+
+    const btn = document.getElementById('findingsBtn');
+    if (btn) btn.style.display = '';
+
+    const badge = document.getElementById('findingsCount');
+    if (badge) {
+        const crit = FINDINGS.filter(f => f.severity === 'critical').length;
+        badge.textContent = FINDINGS.length + ' finding' + (FINDINGS.length !== 1 ? 's' : '');
+        if (crit) badge.style.background = 'rgba(255,68,68,0.2)';
+    }
+
+    const list = document.getElementById('findingsList');
+    if (!list) return;
+    list.innerHTML = '';  // Clear existing cards for re-initialization
+
+    FINDINGS.forEach((f, i) => {
+        const card = document.createElement('div');
+        card.className = 'finding-card';
+        card.dataset.idx = i;
+
+        const sevCol = _findingSevColor(f.severity);
+        const rangeText = f.end_ns
+            ? _fmtFindingNs(f.start_ns) + ' – ' + _fmtFindingNs(f.end_ns)
+            : '@ ' + _fmtFindingNs(f.start_ns);
+
+        const noteSnippet = (f.note || '').replace(/\n/g, ' ').slice(0, 80);
+
+        card.innerHTML =
+            '<div class="fc-header">' +
+                '<span class="fc-badge" style="background:' + sevCol + '">' + (i + 1) + '</span>' +
+                '<span class="fc-label">' + _esc(f.label) + '</span>' +
+            '</div>' +
+            '<div class="fc-severity ' + (f.severity || 'info') + '">' +
+                (f.severity || 'info').toUpperCase() + ' · ' + f.type +
+                (f.gpu_id != null ? ' · GPU ' + f.gpu_id : '') +
+            '</div>' +
+            '<div class="fc-range">' + rangeText + '</div>' +
+            (noteSnippet ? '<div class="fc-note">' + _esc(noteSnippet) + '</div>' : '');
+
+        card.style.borderLeftColor = sevCol;
+
+        card.addEventListener('click', () => selectFinding(i));
+        list.appendChild(card);
+    });
+}
+
+function selectFinding(idx) {
+    selectedFindingIdx = idx;
+    const f = FINDINGS[idx];
+    if (!f) return;
+
+    // Update sidebar active state
+    document.querySelectorAll('.finding-card').forEach((el, i) => {
+        el.classList.toggle('active', i === idx);
+    });
+    const activeCard = document.querySelector('.finding-card.active');
+    if (activeCard) activeCard.scrollIntoView({ block: 'nearest' });
+
+    // Update detail panel
+    const detail = document.getElementById('detail');
+    if (detail) {
+        detail.classList.remove('empty', 'collapsed');
+        const sev = f.severity || 'info';
+        const rangeText = f.end_ns
+            ? _fmtFindingNs(f.start_ns) + ' → ' + _fmtFindingNs(f.end_ns) +
+              ' (' + _fmtFindingNs(f.end_ns - f.start_ns) + ')'
+            : '@ ' + _fmtFindingNs(f.start_ns);
+        detail.innerHTML =
+            '<div style="color:' + _findingSevColor(sev) + ';font-weight:600;font-size:13px">' +
+                '📋 ' + _esc(f.label) + '</div>' +
+            '<div style="font-size:11px;color:#8b949e;margin-top:2px">' +
+                sev.toUpperCase() + ' · ' + f.type + ' · ' + rangeText +
+                (f.gpu_id != null ? ' · GPU ' + f.gpu_id : '') +
+                (f.stream != null ? ' · Stream ' + f.stream : '') +
+            '</div>' +
+            (f.note ? '<div style="font-size:11px;color:#e6edf3;margin-top:6px;white-space:pre-wrap;line-height:1.5">' +
+                _esc(f.note) + '</div>' : '');
+    }
+
+    // ── Smart zoom: center the finding, range = 50% of viewport ──
+    const startNs = f.start_ns;
+    const endNs = f.end_ns ?? startNs;
+    const span = endNs - startNs || 1e6;  // at least 1ms for markers
+    // Finding should occupy half the viewport → viewport = span * 2
+    // Center it → pad each side by span * 0.5
+    const pad = span * 0.5;
+    viewStart = startNs - pad;
+    viewEnd = endNs + pad;
+    clampView();
+    draw();
+    if (PROGRESSIVE) ensureTilesForView(viewStart, viewEnd);
+}
+
+function toggleFindings() {
+    const sidebar = document.getElementById('findingsSidebar');
+    const btn = document.getElementById('findingsBtn');
+    if (!sidebar) return;
+    sidebar.classList.toggle('open');
+    if (btn) btn.classList.toggle('active', sidebar.classList.contains('open'));
+    setTimeout(resize, 0);
+
+    if (sidebar.classList.contains('open') && selectedFindingIdx < 0 && FINDINGS.length) {
+        selectFinding(0);
+    }
+}
+
+function _esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── Analyze button + live finding injection ──
+
+async function runAnalyze() {
+    const btn = document.getElementById('analyzeBtn');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ Analyzing...';
+    try {
+        const pfx = BOOT.API_PREFIX || '';
+        const resp = await fetch(`${pfx}/api/analyze`, { method: 'POST' });
+        if (!resp.ok) throw new Error(await resp.text());
+        const newFindings = await resp.json();
+        FINDINGS.length = 0;
+        FINDINGS.push(...newFindings);
+        selectedFindingIdx = -1;
+        _initFindingsSidebar();
+        // Auto-open sidebar + select first finding
+        const sidebar = document.getElementById('findingsSidebar');
+        if (sidebar && FINDINGS.length > 0) {
+            sidebar.classList.add('open');
+            const fbtn = document.getElementById('findingsBtn');
+            if (fbtn) { fbtn.classList.add('active'); fbtn.style.display = ''; }
+            setTimeout(resize, 0);
+            selectFinding(0);
+        }
+        btn.textContent = `✓ ${FINDINGS.length} findings`;
+    } catch (err) {
+        btn.textContent = '❌ Error';
+        console.error('Analyze failed:', err);
+    }
+    setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = '🔍 Analyze';
+    }, 3000);
+}
+
+function addFinding(findingDict) {
+    FINDINGS.push(findingDict);
+    selectedFindingIdx = -1;
+    _initFindingsSidebar();
+    // Show sidebar if hidden
+    const sidebar = document.getElementById('findingsSidebar');
+    const fbtn = document.getElementById('findingsBtn');
+    if (sidebar && !sidebar.classList.contains('open')) {
+        sidebar.classList.add('open');
+        if (fbtn) { fbtn.classList.add('active'); fbtn.style.display = ''; }
+        setTimeout(resize, 0);
+    }
+    draw();
+    return FINDINGS.length;  // 1-based index
+}
+
+// Initialize findings sidebar
+_initFindingsSidebar();
+
+// Auto-open findings sidebar if findings exist
+if (FINDINGS.length > 0) {
+    setTimeout(() => toggleFindings(), 300);
+}

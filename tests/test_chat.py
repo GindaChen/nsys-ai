@@ -102,9 +102,9 @@ def test_build_system_prompt():
 
 
 def test_tools_openai():
-    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu, compute_region_mfu."""
+    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu, compute_region_mfu, submit_finding, get_gpu_overlap_stats, get_nccl_breakdown."""
     tools = chat_mod._tools_openai()
-    assert len(tools) == 8
+    assert len(tools) == 11
     names = {t["function"]["name"] for t in tools}
     assert names == {
         "navigate_to_kernel",
@@ -115,6 +115,9 @@ def test_tools_openai():
         "compute_mfu",
         "compute_region_mfu",
         "compute_theoretical_flops",
+        "submit_finding",
+        "get_gpu_overlap_stats",
+        "get_nccl_breakdown",
     }
     nav = next(t for t in tools if t["function"]["name"] == "navigate_to_kernel")
     assert "target_name" in nav["function"]["parameters"]["properties"]

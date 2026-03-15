@@ -192,6 +192,123 @@ TOOL_GET_GPU_PEAK_TFLOPS = {
     },
 }
 
+# Submit a visual finding to overlay on the timeline for human verification.
+TOOL_SUBMIT_FINDING = {
+    "type": "function",
+    "function": {
+        "name": "submit_finding",
+        "description": (
+            "Submit a visual finding to overlay on the GPU timeline. "
+            "Call this when you identify a bottleneck, stall, idle gap, or anomaly. "
+            "The finding appears as a colored annotation on the timeline and a card "
+            "in the Evidence sidebar. Returns the finding number (1-based). "
+            "Reference it in your answer as [Finding N] so the user can click to zoom."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["region", "highlight", "marker"],
+                    "description": (
+                        "region: colored overlay spanning a time range. "
+                        "highlight: overlay on a specific stream. "
+                        "marker: single point in time."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short label, e.g. 'NCCL Stall' or 'Compute Gap'",
+                },
+                "start_ns": {
+                    "type": "integer",
+                    "description": "Start timestamp in nanoseconds (from kernel start column)",
+                },
+                "end_ns": {
+                    "type": "integer",
+                    "description": "End timestamp in nanoseconds (omit for marker type)",
+                },
+                "gpu_id": {"type": "integer", "description": "GPU device ID"},
+                "stream": {"type": "integer", "description": "Stream ID (for highlight type)"},
+                "severity": {
+                    "type": "string",
+                    "enum": ["critical", "warning", "info"],
+                    "description": "critical=red, warning=yellow, info=blue",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Explanation text shown in sidebar card and tooltip",
+                },
+            },
+            "required": ["type", "label", "start_ns", "severity"],
+        },
+    },
+}
+
+# Per-GPU compute/NCCL overlap breakdown for multi-GPU analysis.
+TOOL_GET_GPU_OVERLAP_STATS = {
+    "type": "function",
+    "function": {
+        "name": "get_gpu_overlap_stats",
+        "description": (
+            "Compute per-GPU breakdown of compute vs NCCL communication overlap. "
+            "Returns for EACH GPU: compute_only_ms, nccl_only_ms, overlap_ms, "
+            "idle_ms, overlap_pct (fraction of NCCL time hidden behind compute). "
+            "Use to diagnose: "
+            "(1) GPU imbalance — compare compute_only_ms across GPUs; "
+            "(2) NCCL hiding efficiency — overlap_pct >60% means well-hidden; "
+            "(3) idle bubbles between kernels. "
+            "Optional time range for per-iteration analysis."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_s": {
+                    "type": "number",
+                    "description": "Optional start time in seconds (omit for full profile).",
+                },
+                "end_s": {
+                    "type": "number",
+                    "description": "Optional end time in seconds (omit for full profile).",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+# NCCL collective breakdown by type (AllReduce, AllGather, ReduceScatter, etc.).
+TOOL_GET_NCCL_BREAKDOWN = {
+    "type": "function",
+    "function": {
+        "name": "get_nccl_breakdown",
+        "description": (
+            "Break down NCCL operations by collective type (AllReduce, AllGather, "
+            "ReduceScatter, SendRecv, Broadcast). Returns count, total_ms, avg_ms, "
+            "pct for each collective. Use to infer parallelism strategy: "
+            "AllReduce=DDP, ReduceScatter+AllGather=FSDP/ZeRO, SendRecv=Pipeline Parallel."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "integer",
+                    "description": "GPU device ID (optional, default: first GPU).",
+                },
+                "start_s": {
+                    "type": "number",
+                    "description": "Optional start time in seconds.",
+                },
+                "end_s": {
+                    "type": "number",
+                    "description": "Optional end time in seconds.",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Tool definitions (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
@@ -276,6 +393,9 @@ def _tools_openai() -> list[dict]:
         TOOL_COMPUTE_MFU,
         TOOL_COMPUTE_REGION_MFU,
         TOOL_COMPUTE_THEORETICAL_FLOPS,
+        TOOL_SUBMIT_FINDING,
+        TOOL_GET_GPU_OVERLAP_STATS,
+        TOOL_GET_NCCL_BREAKDOWN,
     ]
 
 
@@ -369,6 +489,18 @@ def _build_system_prompt(
         "over many narrow ones. When a workflow requires multiple queries (e.g. triage steps 2-4), batch them "
         "into a single tool call round using parallel tool calls. Never run more than 3 separate "
         "query_profile_db calls when you could combine them into one.\n"
+        "10. VISUAL EVIDENCE: When you identify a bottleneck, stall, idle gap, or anomaly, "
+        "call `submit_finding` to overlay it on the timeline. Get start_ns/end_ns from "
+        "query_profile_db (kernel start/[end] columns are in nanoseconds). After submitting, "
+        "reference it as [Finding N] (N = the returned index number) in your text so the user "
+        "can click it to zoom to the evidence.\n"
+        "11. MULTI-GPU ANALYSIS: When asked about GPU imbalance, NCCL overlap, or "
+        "communication overhead:\n"
+        "   - Call `get_gpu_overlap_stats` to get per-GPU compute/nccl/overlap/idle breakdown.\n"
+        "   - Call `get_nccl_breakdown` to identify collective types and infer parallelism strategy.\n"
+        "   - Compare compute_only_ms across GPUs to detect imbalance (max/min ratio > 1.2 = imbalanced).\n"
+        "   - overlap_pct > 60% = NCCL well-hidden; < 30% = serialized with compute.\n"
+        "   - After analysis, call `submit_finding` for any GPU with unusual overlap_pct or idle_ms.\n"
         "\n"
         "=== MFU REFERENCE (for choosing the right operation in compute_theoretical_flops) ===\n"
         "The nsys profile does NOT store model FLOPs — you must calculate them from model architecture.\n"

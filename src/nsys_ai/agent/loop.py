@@ -153,12 +153,54 @@ class Agent:
 
     def _try_llm_synthesis(self, question: str, evidence_sections: list[str]) -> str | None:
         """Try to use an LLM to synthesize an answer. Returns None if no LLM available."""
+        import os
+
+        evidence = "\n".join(evidence_sections)
+        user_msg = (
+            f"Here is data from an Nsight Systems profile analysis:\n\n"
+            f"{evidence}\n\n"
+            f"Based on this data, answer the following question:\n{question}"
+        )
+
+        # Try litellm first (supports Gemini, OpenAI, Anthropic, etc.)
+        try:
+            import litellm
+
+            # Pick best available model based on API keys
+            model = None
+            if os.environ.get("GEMINI_API_KEY"):
+                model = "gemini/gemini-2.5-flash"
+            elif os.environ.get("OPENAI_API_KEY"):
+                model = "gpt-4o-mini"
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                model = "claude-sonnet-4-20250514"
+
+            if model:
+                try:
+                    from .persona import build_system_prompt
+                    system = build_system_prompt()
+                except Exception:
+                    system = "You are an expert GPU profiling assistant."
+
+                resp = litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    max_tokens=2048,
+                )
+                return resp.choices[0].message.content
+        except ImportError:
+            pass
+        except Exception as e:
+            return f"(LLM synthesis failed: {e})"
+
+        # Fallback: direct Anthropic SDK (legacy path)
         try:
             import anthropic
         except ImportError:
             return None
-
-        import os
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -168,23 +210,13 @@ class Agent:
             from .persona import build_system_prompt
 
             client = anthropic.Anthropic(api_key=api_key)
-            evidence = "\n".join(evidence_sections)
-
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048,
                 system=build_system_prompt(),
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Here is data from an Nsight Systems profile analysis:\n\n"
-                            f"{evidence}\n\n"
-                            f"Based on this data, answer the following question:\n{question}"
-                        ),
-                    }
-                ],
+                messages=[{"role": "user", "content": user_msg}],
             )
             return message.content[0].text
         except Exception as e:
             return f"(LLM synthesis failed: {e})"
+

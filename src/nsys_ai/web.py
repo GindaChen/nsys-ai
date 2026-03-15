@@ -21,6 +21,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
 
+_FINDINGS_LOCK = threading.Lock()
+
 # Bounded thread pool: fixed worker count, request queue with max size.
 # Workers are released when each request finishes (finish_request + shutdown_request).
 # See docs/chat-thread-pool.md.
@@ -72,7 +74,12 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
 
 
 from .export import gpu_trace  # noqa: E402
-from .viewer import build_timeline_gpu_data, generate_html, generate_timeline_html  # noqa: E402
+from .viewer import (  # noqa: E402
+    build_timeline_gpu_data,
+    generate_evidence_html,
+    generate_html,
+    generate_timeline_html,
+)
 
 # ── Shared helpers ───────────────────────────────────────────────
 
@@ -161,6 +168,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     _prebuilt_nvtx_mode: str = "full"  # "full" (prebuilt has NVTX) or "tile" (compute per tile)
     _tile_nvtx_cache: dict = {}  # (start_ns, end_ns, devices_tuple) -> {gpu_id: [nvtx_spans]}
     _asset_cache: dict[str, bytes] = {}
+    _findings: list[dict] = []  # mutable findings state for evidence overlay
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -186,6 +194,10 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/data":
             self._handle_data()
+            return
+        if path == "/api/findings":
+            with _FINDINGS_LOCK:
+                self._json_response(list(self._findings))
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -348,8 +360,48 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_analyze(self):
+        """POST /api/analyze — run EvidenceBuilder, replace all findings."""
+        try:
+            from .evidence_builder import EvidenceBuilder
+
+            device = self.devices[0] if self.devices else 0
+            builder = EvidenceBuilder(self.prof, device=device)
+            report = builder.build()
+            with _FINDINGS_LOCK:
+                self.__class__._findings = [f.to_dict() for f in report.findings]
+                findings = list(self.__class__._findings)
+            print(
+                f"[analyze] Generated {len(findings)} finding(s)",
+                flush=True,
+            )
+            self._json_response(findings)
+        except Exception as e:
+            print(f"[analyze] Error: {e}", flush=True)
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_post_finding(self):
+        """POST /api/findings — append a single finding (from chat agent)."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(content_length) if content_length else b"{}"
+            finding_dict = json.loads(raw.decode("utf-8"))
+            with _FINDINGS_LOCK:
+                self.__class__._findings.append(finding_dict)
+                idx = len(self.__class__._findings)
+            self._json_response({"index": idx})
+        except Exception as e:
+            self._json_response({"error": str(e)}, 400)
+
     def do_POST(self):
-        if self.path.split("?")[0] != "/api/chat":
+        path = self.path.split("?")[0]
+        if path == "/api/analyze":
+            self._handle_analyze()
+            return
+        if path == "/api/findings":
+            self._handle_post_finding()
+            return
+        if path != "/api/chat":
             self.send_error(404)
             return
         content_length = int(self.headers.get("Content-Length", 0))
@@ -479,28 +531,45 @@ def serve_timeline(
     *,
     port: int = 8144,
     open_browser: bool = True,
+    findings_path: str | None = None,
+    auto_findings: list[dict] | None = None,
 ):
     """Start a local HTTP server serving the horizontal timeline viewer.
 
     If *trim* is None, the initial view shows a default 5s window and
     the client can freely navigate via /api/data.
+    If *findings_path* is given, findings are loaded and rendered as overlays.
+    If *auto_findings* is given, they are used directly (from --auto-analyze).
     """
     from collections.abc import Sequence
 
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
 
+    # Load findings if provided
+    findings_data = auto_findings  # from --auto-analyze
+    if findings_path and not findings_data:
+        from .annotation import load_findings
+
+        report = load_findings(findings_path)
+        findings_data = [f.to_dict() for f in report.findings]
+        print(f"Loaded {len(findings_data)} finding(s) from {findings_path}", flush=True)
+
     # Store prof + devices on handler for /api/meta queries
     _ViewerHandler.prof = prof
     _ViewerHandler.devices = devices
     _ViewerHandler._tile_nvtx_cache = {}
+    _ViewerHandler._findings = findings_data or []
+
+    # Resolve profile path for chat agent DB access
+    _profile_path = prof.path if hasattr(prof, "path") else ""
 
     if trim is not None:
         # Legacy: render full HTML with all data baked in
-        html = generate_timeline_html(prof, devices, trim)
+        html = generate_timeline_html(prof, devices, trim, findings_data=findings_data, profile_path=_profile_path)
         _ViewerHandler._prebuilt_nvtx_mode = "full"
     else:
         # Progressive: generate shell HTML, data fetched via /api/data
-        html = generate_timeline_html(prof, devices, None)
+        html = generate_timeline_html(prof, devices, None, findings_data=findings_data, profile_path=_profile_path)
         _ViewerHandler._prebuilt_nvtx_mode = "tile"
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
@@ -588,7 +657,154 @@ def serve_timeline(
     _run_server(server, actual_url if open_browser else None, prof)
 
 
-# ── Mode 2: Perfetto UI ─────────────────────────────────────────
+# ── Mode 3: Evidence View ────────────────────────────────────────
+
+
+class _EvidenceHandler(BaseHTTPRequestHandler):
+    """Serve the Evidence View HTML; GET /api/data for progressive kernel tiles."""
+
+    html_bytes: bytes = b""
+    prof = None
+    devices: list = []
+    _prebuilt_data: list = []
+    _prebuilt_nvtx_mode: str = "full"
+    _tile_nvtx_cache: dict = {}
+    _asset_cache: dict[str, bytes] = {}
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/assets/evidence.css":
+            # Reuse the existing timeline.css asset for evidence CSS.
+            self._serve_asset("timeline.css", "text/css; charset=utf-8")
+            return
+        if path == "/assets/evidence.js":
+            # Reuse the existing timeline.js asset for evidence JS.
+            self._serve_asset("timeline.js", "application/javascript; charset=utf-8")
+            return
+        if path == "/api/data":
+            self._handle_data()
+            return
+        # Default: serve evidence HTML
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(self.html_bytes)))
+        self.end_headers()
+        self.wfile.write(self.html_bytes)
+
+    def _serve_asset(self, filename: str, content_type: str):
+        body = self.__class__._asset_cache.get(filename)
+        if body is None:
+            try:
+                path = os.path.join(_TEMPLATE_DIR, filename)
+                with open(path, "rb") as f:
+                    body = f.read()
+                self.__class__._asset_cache[filename] = body
+            except OSError:
+                self.send_error(404)
+                return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_response(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_data(self):
+        """Return kernel data for a time window from this handler's prebuilt cache."""
+        from urllib.parse import parse_qs, urlparse
+
+        prebuilt = self.__class__._prebuilt_data
+        if not prebuilt:
+            self._json_response({"error": "no prebuilt data"}, 500)
+            return
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            start_s = float(qs.get("start_s", [0])[0])
+            end_s = float(qs.get("end_s", [5])[0])
+        except (ValueError, IndexError):
+            start_s, end_s = 0, 5
+        start_ns = int(start_s * 1e9)
+        end_ns = int(end_s * 1e9)
+        try:
+            gpu_entries = []
+            for gpu_data in prebuilt:
+                if "kernels" in gpu_data:
+                    filtered = _filter_timeline_gpu_entry(gpu_data, start_ns, end_ns)
+                    gpu_entries.append(filtered)
+            data_json = json.dumps({"gpus": gpu_entries})
+            body = data_json.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def serve_evidence(
+    prof,
+    device,
+    findings_data: list[dict],
+    title: str = "Evidence View",
+    *,
+    port: int = 8146,
+    open_browser: bool = True,
+):
+    """Start a local HTTP server serving the Evidence View page.
+
+    *findings_data* is a list of Finding dicts (from annotation.py).
+    """
+    from collections.abc import Sequence
+
+    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+
+    html = generate_evidence_html(prof, devices, findings_data, title)
+    _EvidenceHandler.html_bytes = html.encode("utf-8")
+
+    # Set up progressive tile data (reuse _ViewerHandler's prebuilt data)
+    _ViewerHandler.prof = prof
+    _ViewerHandler.devices = devices
+    _ViewerHandler._tile_nvtx_cache = {}
+
+    # Pre-build kernel data for tile serving
+    t0 = _time.monotonic()
+    full_range = prof.meta.time_range
+    print(f"Pre-building kernels for evidence view ({len(devices)} GPU(s))...", flush=True)
+    prebuilt = build_timeline_gpu_data(
+        prof, devices, full_range, include_kernels=True, include_nvtx=False
+    )
+    for gpu_entry in prebuilt:
+        print(
+            f"  GPU {gpu_entry['id']}: {len(gpu_entry.get('kernels', []))} kernels",
+            flush=True,
+        )
+    elapsed = _time.monotonic() - t0
+    print(f"Pre-build complete in {elapsed:.1f}s", flush=True)
+    _EvidenceHandler._prebuilt_data = prebuilt
+    _ViewerHandler._prebuilt_nvtx_mode = "full"
+
+    server = _ThreadedHTTPServer(("127.0.0.1", port), _EvidenceHandler)
+    actual_url = f"http://127.0.0.1:{server.server_address[1]}"
+    print(f"Evidence viewer at {actual_url}")
+    print(f"  {len(findings_data)} finding(s): {title}")
+    _run_server(server, actual_url if open_browser else None, prof)
+
+
+# ── Mode 4: Perfetto UI ─────────────────────────────────────────
+
 
 
 class _PerfettoHandler(BaseHTTPRequestHandler):

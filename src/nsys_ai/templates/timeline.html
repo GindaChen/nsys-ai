@@ -37,7 +37,9 @@
         <input type="text" id="searchInput" placeholder="/ to search kernels + NVTX..." oninput="onSearch()">
         <span class="hint" id="searchHint"></span>
         <div class="sep"></div>
+        <button onclick="runAnalyze()" id="analyzeBtn" title="Run AI analysis on this profile">🔍 Analyze</button>
         <button onclick="toggleChat()" id="chatBtn">💬 AI Chat</button>
+        <button onclick="toggleFindings()" id="findingsBtn" style="display:none">📋 Evidence</button>
         <div class="sep"></div>
         <button onclick="toggleHelp()">? Help</button>
     </div>
@@ -75,6 +77,14 @@
                 <input type="text" id="chatInput" placeholder="Ask about this profile..." />
                 <button id="chatSendBtn" onclick="sendChat()">Send</button>
             </div>
+        </div>
+        <div id="findingsSidebar">
+            <div id="findingsHeader">
+                <span>📋 Evidence</span>
+                <span class="findings-badge" id="findingsCount"></span>
+                <button onclick="toggleFindings()" title="Close">✕</button>
+            </div>
+            <div id="findingsList"></div>
         </div>
     </div>
     <div class="tooltip" id="tooltip" style="display:none"></div>
@@ -198,6 +208,14 @@
                 <td>Toggle AI chat sidebar</td>
             </tr>
             <tr>
+                <td><span class="key">E</span></td>
+                <td>Toggle evidence sidebar</td>
+            </tr>
+            <tr>
+                <td><span class="key">[ ]</span></td>
+                <td>Previous / next finding</td>
+            </tr>
+            <tr>
                 <td><span class="key">⌘/Ctrl+K</span></td>
                 <td>Command prompt</td>
             </tr>
@@ -226,6 +244,8 @@
             GPU_LABEL: $GPU_LABEL_JSON,
             API_PREFIX: '$API_PREFIX',
             TILE_WINDOW_S: 5,
+            FINDINGS: $FINDINGS_JSON,
+            PROFILE_PATH: $PROFILE_PATH,
         };
     </script>
     <script src="$TIMELINE_JS_SRC"></script>

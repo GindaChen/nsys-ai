@@ -34,6 +34,11 @@ def _read_template_text(name: str) -> str:
         return f.read()
 
 
+def _escape_json_for_html_script(json_str: str) -> str:
+    """Escape '</' in JSON so it can be safely embedded in a <script> block."""
+    return json_str.replace("</", "<\\/")
+
+
 def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
     """Generate a standalone HTML page showing the NVTX stack trace."""
     roots = build_nvtx_tree(prof, device, trim)
@@ -51,6 +56,9 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
     trim_sec = (trim[0] / 1e9, trim[1] / 1e9)
     profile_id = f"{device}_{trim_sec[0]:.1f}_{trim_sec[1]:.1f}"
 
+    # Escape profile path for safe embedding in <script>
+    safe_profile_path = _escape_json_for_html_script(json.dumps(prof.path))
+
     tmpl = _load_template("nvtx_tree.html")
     db_agent_flag = os.environ.get("NSYS_AI_DB_AGENT", "").strip().lower()
     db_agent_enabled = bool(db_agent_flag) and db_agent_flag not in ("0", "false", "no", "off")
@@ -59,7 +67,7 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
         GPU_LABEL=gpu_label,
         TRIM_LABEL=f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s",
         PROFILE_ID=profile_id,
-        PROFILE_PATH=prof.path,
+        PROFILE_PATH=safe_profile_path,
         DB_AGENT_ENABLED="1" if db_agent_enabled else "",
     )
 
@@ -253,9 +261,11 @@ def generate_timeline_html(
     device,
     trim: tuple[int, int] | None = None,
     *,
+    findings_data: list[dict] | None = None,
     timeline_css_href: str = "/assets/timeline.css",
     timeline_js_src: str = "/assets/timeline.js",
     api_prefix: str = "",
+    profile_path: str = "",
 ) -> str:
     """Generate a standalone HTML page with the horizontal timeline viewer.
 
@@ -296,17 +306,27 @@ def generate_timeline_html(
         trim_label = "Progressive"
         progressive = "1"
 
+    safe_data_json = _escape_json_for_html_script(data_json)
+    safe_gpu_info_json = _escape_json_for_html_script(gpu_info_json)
+    safe_gpu_label_json = _escape_json_for_html_script(gpu_label_json)
+    safe_findings_json = _escape_json_for_html_script(json.dumps(findings_data or []))
+    safe_profile_path_json = _escape_json_for_html_script(
+        json.dumps(profile_path) if profile_path is not None else "null"
+    )
+
     tmpl = _load_template("timeline.html")
     return tmpl.safe_substitute(
-        DATA=data_json,
+        DATA=safe_data_json,
         GPU_LABEL=gpu_label,
-        GPU_LABEL_JSON=gpu_label_json,
-        GPU_INFO_JSON=gpu_info_json,
+        GPU_LABEL_JSON=safe_gpu_label_json,
+        GPU_INFO_JSON=safe_gpu_info_json,
         TRIM_LABEL=trim_label,
         PROGRESSIVE=progressive,
         TIMELINE_CSS_HREF=timeline_css_href,
         TIMELINE_JS_SRC=timeline_js_src,
         API_PREFIX=api_prefix,
+        FINDINGS_JSON=safe_findings_json,
+        PROFILE_PATH=safe_profile_path_json,
     )
 
 
@@ -333,3 +353,99 @@ def write_timeline_html(prof, device: int, trim: tuple[int, int], path: str):
         f.write(_read_template_text("timeline.css"))
     with open(os.path.join(out_dir, js_name), "w", encoding="utf-8", newline="\n") as f:
         f.write(_read_template_text("timeline.js"))
+
+
+def generate_evidence_html(
+    prof,
+    device,
+    findings_data: list[dict],
+    title: str = "Evidence View",
+    *,
+    trim: tuple[int, int] | None = None,
+    evidence_css_href: str = "/assets/evidence.css",
+    evidence_js_src: str = "/assets/evidence.js",
+    api_prefix: str = "",
+) -> str:
+    """Generate the Evidence View HTML page.
+
+    *findings_data* is a list of Finding dicts (from annotation.py).
+    *device* may be a single int or list of ints.
+    When *trim* is None, progressive mode is used (kernels fetched via API).
+    """
+    from collections.abc import Sequence
+
+    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+
+    # GPU label
+    gpu_type = "GPU"
+    for dev in devices:
+        gpu_info = prof.meta.gpu_info.get(dev)
+        if gpu_info:
+            gpu_type = gpu_info.name
+    gpu_label = f"{len(devices)}× {gpu_type}" if len(devices) > 1 else gpu_type
+    gpu_label_json = json.dumps(gpu_label)
+
+    # Time range
+    time_range = list(prof.meta.time_range)
+
+    if trim is not None:
+        # Bake kernel data into HTML
+        gpu_entries = build_timeline_gpu_data(
+            prof, devices, trim, include_kernels=True, include_nvtx=False
+        )
+        kernels = []
+        streams_set = set()
+        for entry in gpu_entries:
+            for k in entry.get("kernels", []):
+                kernels.append(k)
+                streams_set.add(k.get("stream", 0))
+        progressive = ""
+    else:
+        kernels = []
+        streams_set = set()
+        progressive = "1"
+
+    streams = sorted(streams_set)
+
+    # Load evidence template from disk when available; otherwise fall back to a
+    # minimal inline template so this view does not fail when the asset is
+    # missing from the templates directory.
+    evidence_template_path = os.path.join(_TEMPLATE_DIR, "evidence.html")
+    if os.path.exists(evidence_template_path):
+        tmpl = _load_template("evidence.html")
+    else:
+        tmpl = Template(
+            """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>${TITLE}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="${EVIDENCE_CSS_HREF}">
+</head>
+<body>
+    <div id="app" data-api-prefix="${API_PREFIX}"
+         data-gpu-label='${GPU_LABEL_JSON}'
+         data-time-range='${TIME_RANGE_JSON}'
+         data-findings='${FINDINGS_JSON}'
+         data-kernels='${KERNELS_JSON}'
+         data-streams='${STREAMS_JSON}'
+         data-progressive="${PROGRESSIVE}">
+    </div>
+    <script src="${EVIDENCE_JS_SRC}"></script>
+</body>
+</html>
+"""
+        )
+    return tmpl.safe_substitute(
+        TITLE=title,
+        FINDINGS_JSON=json.dumps(findings_data),
+        KERNELS_JSON=json.dumps(kernels),
+        STREAMS_JSON=json.dumps(streams),
+        GPU_LABEL_JSON=gpu_label_json,
+        TIME_RANGE_JSON=json.dumps(time_range),
+        PROGRESSIVE=progressive,
+        EVIDENCE_CSS_HREF=evidence_css_href,
+        EVIDENCE_JS_SRC=evidence_js_src,
+        API_PREFIX=api_prefix,
+    )
