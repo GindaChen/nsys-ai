@@ -57,6 +57,12 @@ FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId = s.id
 
 ---
 
+> [!IMPORTANT]
+> **For profiles >100 MB, always add a time-range WHERE clause.**
+> Without it, queries scan millions of rows and can take 30–90 minutes.
+> Use: `WHERE k.start >= <start_ns> AND k.[end] <= <end_ns>`
+> See "Kernels in a specific time window" below.
+
 ## Common Queries
 
 ### Profile overview

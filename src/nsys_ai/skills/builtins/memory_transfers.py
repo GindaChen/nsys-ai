@@ -31,12 +31,13 @@ SKILL = Skill(
     ),
     category="memory",
     sql="""\
-SELECT copyKind,
+SELECT k.copyKind,
        COUNT(*) AS count,
-       ROUND(SUM(bytes) / 1e6, 2) AS total_mb,
-       ROUND(SUM([end] - start) / 1e6, 2) AS total_ms
-FROM CUPTI_ACTIVITY_KIND_MEMCPY
-GROUP BY copyKind
+       ROUND(SUM(k.bytes) / 1e6, 2) AS total_mb,
+       ROUND(SUM(k.[end] - k.start) / 1e6, 2) AS total_ms
+FROM CUPTI_ACTIVITY_KIND_MEMCPY k
+WHERE 1=1 {trim_clause}
+GROUP BY k.copyKind
 ORDER BY total_ms DESC""",
     format_fn=_format,
     tags=["memory", "transfer", "H2D", "D2H", "copy", "bandwidth"],

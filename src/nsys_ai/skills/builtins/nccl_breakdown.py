@@ -39,7 +39,7 @@ SELECT s.value AS kernel_name,
        ROUND(MAX(k.[end] - k.start) / 1e6, 2) AS max_ms
 FROM CUPTI_ACTIVITY_KIND_KERNEL k
 JOIN StringIds s ON k.shortName = s.id
-WHERE s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
+WHERE (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%') {trim_clause}
 GROUP BY s.value
 ORDER BY total_ms DESC""",
     format_fn=_format,

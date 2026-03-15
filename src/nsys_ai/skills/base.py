@@ -4,9 +4,56 @@ base.py — Skill dataclass and execution helpers.
 A Skill is the minimum analyzable unit: SQL template + parameters + formatter.
 """
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
+
+# Track connections that have already been indexed to avoid repeated work.
+_indexed_connections: set[int] = set()
+
+# Indexes to create on Nsight SQLite profiles for skill query performance.
+# Uses ``_nsysai_`` prefix to avoid conflicts with upstream tables.
+_INDEX_STMTS = [
+    "CREATE INDEX IF NOT EXISTS _nsysai_kernel_start ON CUPTI_ACTIVITY_KIND_KERNEL(start)",
+    "CREATE INDEX IF NOT EXISTS _nsysai_kernel_corr  ON CUPTI_ACTIVITY_KIND_KERNEL(correlationId)",
+    "CREATE INDEX IF NOT EXISTS _nsysai_runtime_corr ON CUPTI_ACTIVITY_KIND_RUNTIME(correlationId)",
+    "CREATE INDEX IF NOT EXISTS _nsysai_runtime_tid  ON CUPTI_ACTIVITY_KIND_RUNTIME(globalTid, start)",
+    "CREATE INDEX IF NOT EXISTS _nsysai_nvtx_start   ON NVTX_EVENTS(start)",
+    "CREATE INDEX IF NOT EXISTS _nsysai_nvtx_tid     ON NVTX_EVENTS(globalTid, start)",
+]
+
+
+def ensure_indexes(conn: sqlite3.Connection) -> None:
+    """Create performance indexes on the profile DB if they don't already exist.
+
+    This is safe to call repeatedly — indexes are ``CREATE IF NOT EXISTS`` and
+    the function tracks which connections have been processed.  Each index
+    creation is wrapped in try/except so missing tables (common for profiles
+    without NVTX or NCCL data) don't block the rest.
+    """
+    conn_id = id(conn)
+    if conn_id in _indexed_connections:
+        return
+
+    for stmt in _INDEX_STMTS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            # Table doesn't exist in this profile — skip silently.
+            pass
+        except Exception as exc:
+            # Read-only filesystem, locked DB, etc.
+            _log.debug("ensure_indexes: %s — %s", stmt.split("ON")[0].strip(), exc)
+
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+    _indexed_connections.add(conn_id)
 
 
 @dataclass
@@ -49,11 +96,17 @@ class Skill:
 
         Args:
             conn: SQLite connection to an Nsight profile database
-            **kwargs: Parameter values (substituted into SQL template)
+            **kwargs: Parameter values (substituted into SQL template).
+                      Special keys ``trim_start_ns`` and ``trim_end_ns``
+                      trigger ``{trim_clause}`` substitution if present
+                      in the SQL template.
 
         Returns:
             List of result rows as dicts
         """
+        # Auto-create performance indexes (one-time per connection).
+        ensure_indexes(conn)
+
         # Apply defaults
         resolved = {}
         for p in self.params:
@@ -63,6 +116,17 @@ class Skill:
                 resolved[p.name] = p.default
             elif p.required:
                 raise ValueError(f"Skill '{self.name}' requires parameter '{p.name}'")
+
+        # Handle {trim_clause} injection
+        trim_start = kwargs.get("trim_start_ns")
+        trim_end = kwargs.get("trim_end_ns")
+        if trim_start is not None and trim_end is not None and "{trim_clause}" in self.sql:
+            resolved["trim_clause"] = (
+                f"AND k.start >= {int(trim_start)} AND k.[end] <= {int(trim_end)}"
+            )
+        elif "{trim_clause}" in self.sql:
+            # No trim requested — replace with empty string
+            resolved["trim_clause"] = ""
 
         sql = self.sql.format(**resolved) if resolved else self.sql
         cursor = conn.execute(sql)

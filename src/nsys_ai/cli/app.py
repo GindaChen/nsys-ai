@@ -549,7 +549,7 @@ def _cmd_timeline_web(args, _profile):
 
         # Auto-analyze: build findings in-process before serving
         auto_findings = None
-        if getattr(args, 'auto_analyze', False) and not getattr(args, 'findings', None):
+        if getattr(args, "auto_analyze", False) and not getattr(args, "findings", None):
             from nsys_ai.evidence_builder import EvidenceBuilder
 
             device = devices[0] if isinstance(devices, list) else devices
@@ -559,11 +559,14 @@ def _cmd_timeline_web(args, _profile):
             print(f"Auto-analysis: {len(auto_findings)} finding(s)", flush=True)
 
         serve_timeline(
-            prof, devices, _parse_trim(args), port=args.port, open_browser=not args.no_browser,
-            findings_path=getattr(args, 'findings', None),
+            prof,
+            devices,
+            _parse_trim(args),
+            port=args.port,
+            open_browser=not args.no_browser,
+            findings_path=getattr(args, "findings", None),
             auto_findings=auto_findings,
         )
-
 
 
 def _cmd_tui(args, _profile):
@@ -595,9 +598,7 @@ def _cmd_skill(args, _profile):
     from nsys_ai.skills.registry import run_skill as _run_skill
 
     # Load custom skills from --skills-dir or env var
-    skills_dir = getattr(args, "skills_dir", None) or os.environ.get(
-        "NSYS_AI_CUSTOM_SKILLS_DIR"
-    )
+    skills_dir = getattr(args, "skills_dir", None) or os.environ.get("NSYS_AI_CUSTOM_SKILLS_DIR")
     if skills_dir and os.path.isdir(skills_dir):
         load_custom_skills_dir(skills_dir)
 
@@ -638,6 +639,14 @@ def _cmd_skill(args, _profile):
 
         fmt = getattr(args, "format", "text")
         conn = sqlite3.connect(args.profile)
+
+        # Build trim kwargs if --trim was provided
+        trim_kwargs = {}
+        trim = getattr(args, "trim", None)
+        if trim:
+            trim_kwargs["trim_start_ns"] = int(trim[0] * 1e9)
+            trim_kwargs["trim_end_ns"] = int(trim[1] * 1e9)
+
         try:
             if fmt == "json":
                 skill = get_skill(args.skill_name)
@@ -652,10 +661,10 @@ def _cmd_skill(args, _profile):
                         )
                     )
                     sys.exit(1)
-                rows = skill.execute(conn)
+                rows = skill.execute(conn, **trim_kwargs)
                 print(_json.dumps(rows, indent=2))
             else:
-                print(_run_skill(args.skill_name, conn))
+                print(_run_skill(args.skill_name, conn, **trim_kwargs))
         finally:
             conn.close()
     elif args.skill_action == "add":
@@ -820,8 +829,9 @@ def _build_parser():
     p.add_argument("--port", type=int, default=8144, help="HTTP port (default: 8144)")
     p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     p.add_argument("--findings", default=None, help="Path to findings.json for evidence overlay")
-    p.add_argument("--auto-analyze", action="store_true",
-                   help="Run AI analysis on startup and show findings")
+    p.add_argument(
+        "--auto-analyze", action="store_true", help="Run AI analysis on startup and show findings"
+    )
     p.set_defaults(handler=_cmd_timeline_web)
 
     p = sub.add_parser("chat", help="AI chat TUI")
@@ -1028,6 +1038,14 @@ def _register_legacy_commands(sub):
         default="text",
         help="Output format (default: text)",
     )
+    sp_run.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds — filters data before analysis (recommended for large profiles)",
+    )
     sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
     sp_add.add_argument("skill_file", help="Path to skill .md file")
     sp_rm = skill_sub.add_parser("remove", help="Remove a custom skill")
@@ -1041,10 +1059,15 @@ def _register_legacy_commands(sub):
     agent_sub = p.add_subparsers(dest="agent_action")
     sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
     sp_analyze.add_argument("profile", help="Path to .sqlite file")
-    sp_analyze.add_argument("--evidence", action="store_true",
-                            help="Also output evidence findings JSON")
-    sp_analyze.add_argument("-o", "--output", default=None,
-                            help="Output path for findings JSON (default: findings.json)")
+    sp_analyze.add_argument(
+        "--evidence", action="store_true", help="Also output evidence findings JSON"
+    )
+    sp_analyze.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output path for findings JSON (default: findings.json)",
+    )
     sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
     sp_ask.add_argument("profile", help="Path to .sqlite file")
     sp_ask.add_argument("question", help="Natural language question")

@@ -91,11 +91,40 @@ cat analysis.md
 # See docs/agent_skills/commands/evidence_schema.md for Finding JSON format
 
 # 4a: Agent-driven evidence (recommended for external agents)
-#     Agent queries data, reasons about it, writes findings.json with only
-#     the time ranges that support its conclusions, then opens viewer.
-nsys-ai skill run gpu_idle_gaps profile.sqlite --format json   # get timestamps
-nsys-ai skill run nccl_breakdown profile.sqlite --format json  # get NCCL data
-# ... agent writes /tmp/findings.json based on its conclusions ...
+#     Full agent loop: collect → reason → conclude → write findings → view
+#
+#   Step 1: COLLECT — query multiple skills for raw data
+nsys-ai skill run gpu_idle_gaps profile.sqlite --format json > /tmp/gaps.json
+nsys-ai skill run nccl_breakdown profile.sqlite --format json > /tmp/nccl.json
+nsys-ai skill run top_kernels profile.sqlite --format json > /tmp/kernels.json
+#
+#   Step 2: REASON — agent (AI) analyzes the collected data:
+#     - Cross-references gaps, NCCL, and kernel data
+#     - Identifies root causes (e.g. "21s bubble caused by serialized NCCL")
+#     - Draws conclusions with supporting evidence
+#     (This is the agent's own LLM reasoning — not a nsys-ai command)
+#
+#   Step 3: WRITE — agent writes conclusions + supporting time ranges
+#     Each finding in findings.json must:
+#     - Have a conclusion LABEL (not just raw data)
+#     - Reference the specific start_ns/end_ns that proves the conclusion
+#     - Include a NOTE explaining WHY this time range matters
+cat > /tmp/findings.json << 'EOF'
+{
+  "title": "Pipeline Parallelism Bubble Analysis",
+  "findings": [
+    {
+      "type": "region",
+      "label": "PP Bubble: 21s idle caused by serialized NCCL",
+      "start_ns": 89886440111, "end_ns": 110951683466,
+      "severity": "critical",
+      "note": "GPU idle for 21s after AllReduce — NCCL not overlapping with compute"
+    }
+  ]
+}
+EOF
+#
+#   Step 4: VIEW — open timeline with evidence overlay
 nsys-ai timeline-web profile.sqlite --findings /tmp/findings.json
 
 # 4b: Auto-analyze evidence (built-in heuristics, no agent reasoning)

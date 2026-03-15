@@ -55,8 +55,21 @@ Follow the loaded skill's workflow exactly. Do not skip steps.
 
 After delivering your text conclusion, produce visual evidence so humans can verify your claims against the actual timeline.
 
-1. **Identify key time ranges** — for each conclusion, note the `start_ns` and `end_ns` from the data you queried (e.g. from `skill run gpu_idle_gaps --format json`)
-2. **Write findings JSON** — see [`evidence_schema.md`](evidence_schema.md) for the format:
+**Complete agent loop** — do not skip the reasoning step:
+
+1. **COLLECT** — query skills for raw data:
+   ```bash
+   nsys-ai skill run gpu_idle_gaps profile.sqlite --format json > /tmp/gaps.json
+   nsys-ai skill run nccl_breakdown profile.sqlite --format json > /tmp/nccl.json
+   ```
+
+2. **REASON** — analyze the collected data (this is your AI reasoning, not a command):
+   - Cross-reference multiple skill outputs
+   - Identify root causes and causal relationships
+   - Draw conclusions with specific evidence
+   - Example: "21s GPU idle gap is caused by serialized NCCL AllReduce — the gap starts exactly where AllReduce ends"
+
+3. **WRITE** — encode your **conclusions** (not raw data) as findings:
    ```bash
    cat > /tmp/findings.json << 'EOF'
    {
@@ -64,17 +77,21 @@ After delivering your text conclusion, produce visual evidence so humans can ver
      "findings": [
        {
          "type": "region",
-         "label": "Your conclusion label",
+         "label": "PP Bubble: 21s idle caused by serialized NCCL",
          "start_ns": 89000000000,
          "end_ns": 110000000000,
          "severity": "critical",
-         "note": "Evidence supporting this conclusion"
+         "note": "GPU idle for 21s after AllReduce — NCCL not overlapping with compute"
        }
      ]
    }
    EOF
    ```
-3. **Open the viewer**:
+   > **Key**: the `label` must state your **conclusion**, not just "idle gap".
+   > The `note` must explain **why** this time range matters.
+   > See [`evidence_schema.md`](evidence_schema.md) for the full schema.
+
+4. **VIEW** — open timeline with evidence overlay:
    ```bash
    nsys-ai timeline-web profile.sqlite --findings /tmp/findings.json
    ```

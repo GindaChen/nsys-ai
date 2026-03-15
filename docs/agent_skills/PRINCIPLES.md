@@ -35,6 +35,22 @@ and diagnose performance issues without requiring a display or manual inspection
 
 ---
 
+## Performance
+
+- **Large profiles (>100 MB) require trimming.** SQL queries on 250 MB+ profiles
+  can take 30–90 minutes because Nsight SQLite files lack indexes and skills do
+  full-table scans. Always narrow the analysis window:
+  - **CLI**: add `--trim START_S END_S` to `skill run` or other commands.
+  - **Manual SQL**: add `WHERE k.start >= <start_ns> AND k.[end] <= <end_ns>`.
+  - **Best practice**: profile 1–2 representative iterations, not the entire run.
+- **Costliest skills on big files**: `nvtx_kernel_map` (3-way range JOIN) and
+  `gpu_idle_gaps` (window function over all kernels). Trim before running these.
+- **Auto-indexing**: `nsys-ai` automatically creates indexes (`_nsysai_*`) on
+  first skill execution. This is a one-time cost (~30 s for 250 MB) that speeds
+  up all subsequent queries.
+
+---
+
 ## Non-Negotiable Rules
 
 1. **MFU > 100% is always wrong.** The FLOPs scope is too wide. Stop, recompute with
