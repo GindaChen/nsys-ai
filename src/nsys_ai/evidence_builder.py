@@ -240,15 +240,15 @@ LIMIT ?"""
         if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.prof.schema.tables:
             return []
         sql = """\
-SELECT copyKind, bytes, start, [end], (end - start) AS dur_ns
+SELECT copyKind, bytes, start, [end], ([end] - start) AS dur_ns
 FROM CUPTI_ACTIVITY_KIND_MEMCPY
-WHERE bytes > ? AND [end] >= ? AND start <= ?
+WHERE deviceId = ? AND bytes > ? AND [end] >= ? AND start <= ?
 ORDER BY dur_ns DESC
 LIMIT ?"""
         kind_names = {1: "H2D", 2: "D2H", 3: "D2D", 8: "P2P"}
         with self.prof._lock:
             rows = self.prof.conn.execute(
-                sql, (min_bytes, self.trim[0], self.trim[1], top_n)
+                sql, (self.device, min_bytes, self.trim[0], self.trim[1], top_n)
             ).fetchall()
         findings = []
         for r in rows:

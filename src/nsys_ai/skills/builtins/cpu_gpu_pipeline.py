@@ -26,12 +26,12 @@ WITH runtime_kernel AS (
     SELECT
         r.globalTid AS cpu_tid,
         r.start AS cpu_dispatch_start,
-        r.end AS cpu_dispatch_end,
+        r.[end] AS cpu_dispatch_end,
         k.start AS gpu_start,
         k.[end] AS gpu_end,
         (k.start - r.[end]) AS queue_delay_ns,
         (k.[end] - k.start) AS gpu_dur_ns
-    FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+    FROM {runtime_table} r
     JOIN {kernel_table} k ON r.correlationId = k.correlationId
     WHERE r.[end] < k.start  -- CPU dispatch finishes before GPU starts
         {trim_clause}

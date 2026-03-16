@@ -152,22 +152,48 @@ def detect_iterations(
         return []
 
     pad = int(5e9)
-    t = trim or prof.meta.time_range
+    time_range = trim or prof.meta.time_range
 
     # Find the primary thread
     from .tree import _find_primary_thread
 
     primary_tid = _find_primary_thread(prof, device)
 
+    # Resolve table names dynamically (versioned-table support)
+    tables = prof.schema.tables
+    nvtx_table = "NVTX_EVENTS"
+    for t in tables:
+        if t.startswith("NVTX_EVENTS"):
+            nvtx_table = t
+            break
+    runtime_table = "CUPTI_ACTIVITY_KIND_RUNTIME"
+    for t in tables:
+        if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME"):
+            runtime_table = t
+            break
+
     # Filter to primary thread's top-level iterations
+    # Use COALESCE to handle newer schemas where text is NULL and textId is used
+    has_textid = prof.conn.execute(
+        f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
+    ).fetchone()[0] > 0
+
+    if has_textid:
+        text_expr = "COALESCE(n.text, s.value)"
+        text_join = "LEFT JOIN StringIds s ON n.textId = s.id"
+    else:
+        text_expr = "n.text"
+        text_join = ""
+
     pri_nvtx = prof.conn.execute(
-        """
-        SELECT text, start, [end] FROM NVTX_EVENTS
-        WHERE text LIKE ? AND [end] > start AND globalTid = ?
-          AND start >= ? AND start <= ?
-        ORDER BY start
+        f"""
+        SELECT {text_expr} AS text, n.start, n.[end] FROM {nvtx_table} n
+        {text_join}
+        WHERE {text_expr} LIKE ? AND n.[end] > n.start AND n.globalTid = ?
+          AND n.start >= ? AND n.start <= ?
+        ORDER BY n.start
     """,
-        (f"%{marker}%", primary_tid, t[0] - pad, t[1]),
+        (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
     ).fetchall()
 
     # Filter to non-overlapping (top-level only)
@@ -183,8 +209,8 @@ def detect_iterations(
 
     # For each iteration, count kernels and compute GPU time
     rt_all = prof.conn.execute(
-        """
-        SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+        f"""
+        SELECT start, [end], correlationId FROM {runtime_table}
         WHERE globalTid = ? ORDER BY start
     """,
         (primary_tid,),

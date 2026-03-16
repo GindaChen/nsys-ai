@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS NVTX_EVENTS (
     end             INTEGER DEFAULT -1,
     text            TEXT DEFAULT '',
     eventType       INTEGER DEFAULT 59,
-    rangeId         INTEGER DEFAULT 0
+    rangeId         INTEGER DEFAULT 0,
+    textId          INTEGER DEFAULT NULL
 );
 """
 
@@ -114,7 +115,7 @@ INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
     (100, 2, 2900000, 3000000, 0),
     (100, 10, 2400000, 2500000, 0);
 
-INSERT INTO NVTX_EVENTS VALUES
+INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) VALUES
     (100, 500000,  4500000, 'train_step', 59, 0),
     (100, 900000,  2100000, 'forward',    59, 1);
 """

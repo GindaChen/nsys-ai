@@ -42,21 +42,22 @@ SKILL = Skill(
     category="nvtx",
     sql="""\
 SELECT
-    n.text AS nvtx_region,
+    COALESCE(n.text, s2.value) AS nvtx_region,
     COUNT(DISTINCT k.correlationId) AS kernel_count,
     ROUND(SUM(k.[end] - k.start) / 1e6, 2) AS total_gpu_ms,
     ROUND(AVG(k.[end] - k.start) / 1e6, 3) AS avg_kernel_ms,
     ROUND(MAX(k.[end] - k.start) / 1e6, 3) AS max_kernel_ms
-FROM NVTX_EVENTS n
-JOIN CUPTI_ACTIVITY_KIND_RUNTIME r
+FROM {nvtx_table} n
+JOIN {runtime_table} r
     ON r.globalTid = n.globalTid
     AND r.start >= n.start AND r.[end] <= n.[end]
 JOIN {kernel_table} k
     ON k.correlationId = r.correlationId
+LEFT JOIN StringIds s2 ON n.textId = s2.id
 WHERE n.[end] > n.start
-    AND n.text IS NOT NULL
+    AND COALESCE(n.text, s2.value) IS NOT NULL
     {trim_clause}
-GROUP BY n.text
+GROUP BY COALESCE(n.text, s2.value)
 ORDER BY total_gpu_ms DESC
 LIMIT {limit}""",
     params=[SkillParam("limit", "Max number of NVTX regions to return", "int", False, 20)],

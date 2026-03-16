@@ -191,23 +191,28 @@ class Skill:
         # Auto-create performance indexes (one-time per connection).
         ensure_indexes(conn)
 
-        # Python-level skill: delegate to execute_fn
-        if self.execute_fn is not None:
-            return self.execute_fn(conn, **kwargs)
-
-        # SQL skill: apply defaults and run query
-        resolved = {}
+        # Apply parameter defaults and required checks for all skill types.
+        # Start from the provided kwargs so we preserve any extra arguments.
+        resolved: dict[str, object] = dict(kwargs)
         for p in self.params:
-            if p.name in kwargs:
-                resolved[p.name] = kwargs[p.name]
-            elif p.default is not None:
+            if p.name in resolved:
+                # Caller-supplied value wins over default.
+                continue
+            if p.default is not None:
                 resolved[p.name] = p.default
             elif p.required:
-                raise ValueError(f"Skill '{self.name}' requires parameter '{p.name}'")
+                raise ValueError(
+                    f"Skill '{self.name}' requires parameter '{p.name}'"
+                )
 
+        # Python-level skill: delegate to execute_fn with resolved params.
+        if self.execute_fn is not None:
+            return self.execute_fn(conn, **resolved)
+
+        # SQL skill: further augment resolved params and run query
         # Handle {trim_clause} injection
-        trim_start = kwargs.get("trim_start_ns")
-        trim_end = kwargs.get("trim_end_ns")
+        trim_start = resolved.get("trim_start_ns")
+        trim_end = resolved.get("trim_end_ns")
         if trim_start is not None and trim_end is not None and "{trim_clause}" in self.sql:
             resolved["trim_clause"] = (
                 f"AND k.start >= {int(trim_start)} AND k.[end] <= {int(trim_end)}"

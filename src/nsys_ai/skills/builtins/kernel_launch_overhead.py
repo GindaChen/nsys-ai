@@ -35,7 +35,7 @@ SELECT s.value AS kernel_name,
        ROUND((r.[end] - r.start) / 1e6, 3) AS api_ms,
        ROUND((k.[end] - k.start) / 1e6, 3) AS kernel_ms,
        ROUND((k.start - r.start) / 1e3, 1) AS overhead_us
-FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+FROM {runtime_table} r
 JOIN {kernel_table} k ON r.correlationId = k.correlationId
 JOIN StringIds s ON k.shortName = s.id
 WHERE 1=1 {trim_clause}

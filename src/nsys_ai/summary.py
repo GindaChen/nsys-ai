@@ -55,6 +55,15 @@ def gpu_summary(prof: Profile, device: int, trim: tuple[int, int] | None = None)
 
     total_compute_ns = sum(k["end"] - k["start"] for k in kernels)
 
+    # NCCL vs compute split across ALL kernels (not just top 10)
+    nccl_ms_total = 0.0
+    compute_ms_total = 0.0
+    for name, ms in dur_by_name.items():
+        if "nccl" in (name or "").lower():
+            nccl_ms_total += ms
+        else:
+            compute_ms_total += ms
+
     return {
         "device": device,
         "hardware": {
@@ -83,6 +92,8 @@ def gpu_summary(prof: Profile, device: int, trim: tuple[int, int] | None = None)
             sid: {"kernels": stream_kernels[sid], "total_ms": round(stream_dur[sid], 2)}
             for sid in sorted(stream_kernels)
         },
+        "nccl_ms": round(nccl_ms_total, 3),
+        "compute_only_ms": round(compute_ms_total, 3),
     }
 
 
@@ -141,22 +152,15 @@ def auto_commentary(summary: dict) -> str:
             f"of compute time ({top[0]['total_ms']:.0f}ms across {top[0]['count']} calls)."
         )
 
-    # Compute vs NCCL split — detect by kernel name, not stream ID
-    nccl_ms = 0.0
-    compute_ms_total = 0.0
-    for k in top:
-        name_lower = (k["name"] or "").lower()
-        ms = k["total_ms"]
-        if "nccl" in name_lower:
-            nccl_ms += ms
-        else:
-            compute_ms_total += ms
+    # Compute vs NCCL split from full kernel set (not just top 10)
+    nccl_ms = summary.get("nccl_ms", 0.0)
+    compute_ms_total = summary.get("compute_only_ms", 0.0)
     total_stream_ms = nccl_ms + compute_ms_total
     if total_stream_ms > 0 and nccl_ms > 0:
         nccl_pct = 100 * nccl_ms / total_stream_ms
         sentences.append(
             f"NCCL collectives account for {nccl_pct:.0f}% of kernel time "
-            f"({nccl_ms:.0f}ms), with compute at {compute_ms_total:.0f}ms."
+            f"({nccl_ms:.0f}ms), with compute kernels contributing {compute_ms_total:.0f}ms."
         )
 
     if t["idle_ms"] > 10:
