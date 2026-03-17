@@ -499,6 +499,32 @@ def test_nvtx_layer_breakdown_registered():
     assert skill.execute_fn  # Python execute_fn skill (sort-merge attribution)
 
 
+def test_nvtx_kernel_map_registered():
+    """nvtx_kernel_map should be registered with correct metadata."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_kernel_map")
+    assert skill is not None
+    assert skill.name == "nvtx_kernel_map"
+    assert skill.category == "nvtx"
+    assert skill.execute_fn  # Python execute_fn skill (sort-merge attribution)
+
+
+def test_nvtx_kernel_map_execute(minimal_nsys_conn):
+    """nvtx_kernel_map should run against minimal DB without error."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_kernel_map")
+    rows = skill.execute(minimal_nsys_conn)
+    assert isinstance(rows, list)
+    for r in rows:
+        assert isinstance(r, dict)
+        assert "nvtx_text" in r
+        assert "kernel_name" in r
+        assert "start_ms" in r
+        assert "end_ms" in r
+
+
 def test_overlap_breakdown_execute(minimal_nsys_conn):
     """overlap_breakdown should return overlap data from minimal DB."""
     from nsys_ai.skills.registry import get_skill

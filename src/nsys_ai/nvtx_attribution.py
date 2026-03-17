@@ -99,19 +99,6 @@ def _run_nsys_recipe(nsys_rep_path: str, trim: tuple[int, int] | None = None) ->
 # ── Tier 2: Python sort-merge ───────────────────────────────────────
 
 
-def _resolve_nvtx_text(conn: sqlite3.Connection, nvtx_table: str) -> str:
-    """Determine SQL expression for NVTX text based on schema."""
-    try:
-        has_textid = conn.execute(
-            f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
-        ).fetchone()[0] > 0
-    except Exception:
-        has_textid = False
-
-    if has_textid:
-        return "COALESCE(n.text, s.value)"
-    return "n.text"
-
 
 def _sort_merge_attribute(
     conn: sqlite3.Connection,
@@ -132,9 +119,26 @@ def _sort_merge_attribute(
     ]
 
     def _find(prefix: str) -> str:
+        # Prefer exact match (e.g. CUPTI_ACTIVITY_KIND_KERNEL)
+        if prefix in all_tables:
+            return prefix
+        # Otherwise pick highest versioned variant (e.g. _V3 > _V2)
+        best_table: str | None = None
+        best_version: int | None = None
+        version_prefix = prefix + "_V"
         for t in all_tables:
-            if t.startswith(prefix):
-                return t
+            if not t.startswith(version_prefix):
+                continue
+            suffix = t[len(version_prefix):]
+            try:
+                v = int(suffix)
+            except ValueError:
+                continue
+            if best_version is None or v > best_version:
+                best_version = v
+                best_table = t
+        if best_table is not None:
+            return best_table
         return prefix
 
     kernel_table = _find("CUPTI_ACTIVITY_KIND_KERNEL")
@@ -145,7 +149,7 @@ def _sort_merge_attribute(
     trim_sql = ""
     trim_params: tuple = ()
     if trim:
-        trim_sql = "AND k.start >= ? AND k.start <= ?"
+        trim_sql = "AND k.start >= ? AND k.[end] <= ?"
         trim_params = (trim[0], trim[1])
 
     # Phase 1: Kernel → Runtime via correlationId (indexed, fast)
@@ -191,8 +195,17 @@ def _sort_merge_attribute(
         """
     ).fetchall()
 
-    # StringIds lookup for kernel names
-    sid_map = dict(conn.execute("SELECT id, value FROM StringIds").fetchall())
+    # StringIds lookup for kernel names — only fetch the IDs we need
+    short_name_ids = {r[5] for r in kr_rows if r[5] is not None}
+    if short_name_ids:
+        placeholders = ",".join("?" for _ in short_name_ids)
+        sid_rows = conn.execute(
+            f"SELECT id, value FROM StringIds WHERE id IN ({placeholders})",
+            tuple(short_name_ids),
+        ).fetchall()
+        sid_map = dict(sid_rows)
+    else:
+        sid_map = {}
 
     # Phase 3: Group by globalTid, then sweep
     nvtx_by_tid: dict[int, list[tuple]] = defaultdict(list)
@@ -223,11 +236,7 @@ def _sort_merge_attribute(
                 ns, ne, nt = nvtx_list[idx]
                 if ns <= r_start and ne >= r_end:
                     # This NVTX encloses the runtime call
-                    # Keep looking for a more specific (later start) one
                     best_nvtx = nt
-                    break
-                # If this NVTX starts way before, stop searching
-                if r_start - ns > 100_000_000_000:  # >100s gap, bail
                     break
                 idx -= 1
 
