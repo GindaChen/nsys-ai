@@ -37,7 +37,7 @@ WITH ranked AS (
         copyKind,
         bytes,
         (k.[end] - k.start) AS dur_ns
-    FROM CUPTI_ACTIVITY_KIND_MEMCPY k
+    FROM {memcpy_table} k
     WHERE 1=1
         {trim_clause}
 )

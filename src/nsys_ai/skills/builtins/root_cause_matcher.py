@@ -28,8 +28,6 @@ def _execute(conn, **kwargs):
     idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
-    # NCCL breakdown
-    _safe_execute("nccl_breakdown", conn, **kwargs)
     # Kernel launch overhead
     launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
 

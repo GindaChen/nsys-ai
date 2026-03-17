@@ -46,6 +46,7 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
 
     kernel_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_KERNEL")
     runtime_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_RUNTIME")
+    memcpy_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_MEMCPY")
     if "NVTX_EVENTS" in tables:
         nvtx_table = "NVTX_EVENTS"
     else:
@@ -56,6 +57,8 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
         resolved["kernel"] = kernel_table
     if runtime_table:
         resolved["runtime"] = runtime_table
+    if memcpy_table:
+        resolved["memcpy"] = memcpy_table
     if nvtx_table:
         resolved["nvtx"] = nvtx_table
 
@@ -240,7 +243,7 @@ class Skill:
         )
         resolved.setdefault(
             "memcpy_table",
-            "CUPTI_ACTIVITY_KIND_MEMCPY",
+            tables.get("memcpy", "CUPTI_ACTIVITY_KIND_MEMCPY"),
         )
 
         # NVTX text resolution: handle both legacy (text column only)

@@ -35,7 +35,7 @@ SELECT k.copyKind,
        COUNT(*) AS count,
        ROUND(SUM(k.bytes) / 1e6, 2) AS total_mb,
        ROUND(SUM(k.[end] - k.start) / 1e6, 2) AS total_ms
-FROM CUPTI_ACTIVITY_KIND_MEMCPY k
+FROM {memcpy_table} k
 WHERE 1=1 {trim_clause}
 GROUP BY k.copyKind
 ORDER BY total_ms DESC""",

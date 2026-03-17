@@ -160,24 +160,27 @@ def detect_iterations(
     primary_tid = _find_primary_thread(prof, device)
 
     # Resolve table names dynamically (versioned-table support)
+    # Prefer exact canonical name first, then sorted prefix fallback
+    # (consistent with base._resolve_activity_tables).
     tables = prof.schema.tables
+
     nvtx_table = "NVTX_EVENTS"
-    for t in tables:
-        if t.startswith("NVTX_EVENTS"):
-            nvtx_table = t
-            break
+    if nvtx_table not in tables:
+        for t in sorted(tables):
+            if t.startswith("NVTX_EVENTS"):
+                nvtx_table = t
+                break
+
     runtime_table = "CUPTI_ACTIVITY_KIND_RUNTIME"
-    for t in tables:
-        if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME"):
-            runtime_table = t
-            break
+    if runtime_table not in tables:
+        for t in sorted(tables):
+            if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME"):
+                runtime_table = t
+                break
 
     # Filter to primary thread's top-level iterations
     # Use COALESCE to handle newer schemas where text is NULL and textId is used
-    with prof._lock:
-        has_textid = prof.conn.execute(
-            f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
-        ).fetchone()[0] > 0
+    has_textid = prof._nvtx_has_text_id
 
     if has_textid:
         text_expr = "COALESCE(n.text, s.value)"

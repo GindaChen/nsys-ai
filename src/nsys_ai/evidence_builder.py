@@ -237,11 +237,19 @@ LIMIT ?"""
         self, min_bytes: int = 10_000_000, top_n: int = 5
     ) -> list[Finding]:
         """Flag large memory transfers that may stall the GPU."""
-        if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.prof.schema.tables:
+        # Resolve memcpy table dynamically (may be versioned)
+        memcpy_table = None
+        for t in self.prof.schema.tables:
+            if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith(
+                "CUPTI_ACTIVITY_KIND_MEMCPY"
+            ):
+                memcpy_table = t
+                break
+        if memcpy_table is None:
             return []
-        sql = """\
+        sql = f"""\
 SELECT copyKind, bytes, start, [end], ([end] - start) AS dur_ns
-FROM CUPTI_ACTIVITY_KIND_MEMCPY
+FROM {memcpy_table}
 WHERE deviceId = ? AND bytes > ? AND [end] >= ? AND start <= ?
 ORDER BY dur_ns DESC
 LIMIT ?"""
