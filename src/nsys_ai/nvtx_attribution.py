@@ -109,9 +109,10 @@ def _sort_merge_attribute(
     Algorithm (high level):
     1. Load Kernel→Runtime via correlationId (fast indexed join).
     2. Load NVTX ranges sorted by (globalTid, start).
-    3. For each thread, do a single forward sweep using a stack of
-       "currently open" NVTX ranges.  Runtime calls are matched to
-       the top of the stack (innermost enclosing NVTX).
+    3. For each thread, do a single forward sweep maintaining a stack of
+       "currently open" NVTX ranges.  For each runtime call, search this
+       stack (from top to bottom) to find the innermost NVTX that fully
+       encloses the call, if any.
 
     Overall complexity is O(N+M) per thread (each NVTX is pushed and
     popped at most once; each runtime call is processed once).
@@ -127,23 +128,11 @@ def _sort_merge_attribute(
         # Prefer exact match (e.g. CUPTI_ACTIVITY_KIND_KERNEL)
         if prefix in all_tables:
             return prefix
-        # Otherwise pick highest versioned variant (e.g. _V3 > _V2)
-        best_table: str | None = None
-        best_version: int | None = None
-        version_prefix = prefix + "_V"
-        for t in all_tables:
-            if not t.startswith(version_prefix):
-                continue
-            suffix = t[len(version_prefix):]
-            try:
-                v = int(suffix)
-            except ValueError:
-                continue
-            if best_version is None or v > best_version:
-                best_version = v
-                best_table = t
-        if best_table is not None:
-            return best_table
+        # Otherwise pick the first sorted versioned variant, aligning
+        # with the resolution used by ensure_indexes() / _resolve_activity_tables().
+        candidates = sorted(t for t in all_tables if t.startswith(prefix + "_V"))
+        if candidates:
+            return candidates[0]
         return prefix
 
     kernel_table = _find("CUPTI_ACTIVITY_KIND_KERNEL")
