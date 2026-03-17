@@ -43,7 +43,8 @@ and diagnose performance issues without requiring a display or manual inspection
   - **CLI**: add `--trim START_S END_S` to `skill run` or other commands.
   - **Manual SQL**: add `WHERE k.start >= <start_ns> AND k.[end] <= <end_ns>`.
   - **Best practice**: profile 1–2 representative iterations, not the entire run.
-- **Costliest skills on big files**: `nvtx_kernel_map` (3-way range JOIN) and
+- **Costliest skills on big files**: `nvtx_kernel_map` / `nvtx_layer_breakdown`
+  (sort-merge attribution across NVTX×Runtime×Kernel) and
   `gpu_idle_gaps` (window function over all kernels). Trim before running these.
 - **Auto-indexing**: `nsys-ai` automatically creates indexes (`_nsysai_*`) on
   first skill execution. This is a one-time cost (~30 s for 250 MB) that speeds

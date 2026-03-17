@@ -3,6 +3,36 @@
 from ..base import Skill, SkillParam
 
 
+def _execute(conn, **kwargs):
+    """Execute NVTX→Kernel mapping via efficient attribution module."""
+    from ...nvtx_attribution import attribute_kernels_to_nvtx
+
+    limit = int(kwargs.get("limit", 50))
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+    trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
+
+    # Get the sqlite path for Tier 1 (nsys recipe) attempt
+    sqlite_path = kwargs.get("_sqlite_path")
+
+    rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim)
+
+    # Sort by kernel start and apply limit
+    rows.sort(key=lambda r: r["k_start"])
+    rows = rows[:limit]
+
+    # Format output to match expected schema
+    return [
+        {
+            "nvtx_text": r["nvtx_text"],
+            "kernel_name": r["kernel_name"],
+            "start_ms": round(r["k_start"] / 1e6, 3),
+            "end_ms": round(r["k_end"] / 1e6, 3),
+        }
+        for r in rows
+    ]
+
+
 def _format(rows):
     if not rows:
         return "(No NVTX-to-kernel mappings found — are NVTX annotations present?)"
@@ -31,24 +61,7 @@ SKILL = Skill(
         "which code region launched which kernels."
     ),
     category="nvtx",
-    sql="""\
-SELECT {nvtx_text_expr} AS nvtx_text,
-       s.value AS kernel_name,
-       ROUND(k.start / 1e6, 3) AS start_ms,
-       ROUND(k.[end] / 1e6, 3) AS end_ms
-FROM {nvtx_table} n
-JOIN {runtime_table} r
-  ON n.eventType = 59
-  AND n.globalTid = r.globalTid
-  AND n.start <= r.start
-  AND n.[end] >= r.[end]
-JOIN {kernel_table} k
-  ON r.correlationId = k.correlationId
-JOIN StringIds s ON k.shortName = s.id
-{nvtx_text_join}
-WHERE 1=1 {trim_clause}
-ORDER BY k.start
-LIMIT {limit}""",
+    execute_fn=_execute,
     params=[SkillParam("limit", "Max results", "int", False, 50)],
     format_fn=_format,
     tags=["nvtx", "kernel", "source", "attribution", "mapping"],

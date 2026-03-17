@@ -496,7 +496,7 @@ def test_nvtx_layer_breakdown_registered():
     assert skill is not None
     assert skill.name == "nvtx_layer_breakdown"
     assert skill.category == "nvtx"
-    assert skill.sql  # SQL skill
+    assert skill.execute_fn  # Python execute_fn skill (sort-merge attribution)
 
 
 def test_overlap_breakdown_execute(minimal_nsys_conn):

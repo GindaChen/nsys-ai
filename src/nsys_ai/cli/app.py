@@ -732,6 +732,9 @@ def _cmd_skill(args, _profile):
         full_kwargs = {}
         full_kwargs.update(trim_kwargs)
         full_kwargs.update(param_kwargs)
+        # Provide the sqlite path so execute_fn skills can find
+        # the sibling .nsys-rep for nsys recipe acceleration.
+        full_kwargs["_sqlite_path"] = args.profile
 
         try:
             if fmt == "json":
