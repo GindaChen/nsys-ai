@@ -157,29 +157,45 @@ class Agent:
     def ask(self, question: str) -> str:
         """Answer a natural language question about the profile.
 
-        Without LLM: uses keyword matching to select relevant skills,
-        runs them, and presents the raw output.
-
-        With [agent] extra: delegates to LLM with structured JSON evidence
-        from skill results for mathematical reasoning.
-
-        Args:
-            question: Natural language question (e.g. "why is iteration 3 slow?")
-
-        Returns:
-            Analysis text.
+        Uses a two-stage process:
+        1. Triage: Runs root_cause_matcher to gather baseline signals.
+        2. Deep Dive: Uses an LLM to select targeted skills based on the triage signals,
+           executes them, and synthesizes a final response. If no LLM, falls back to keywords.
         """
-        # Select relevant skills based on keywords
-        selected = self._select_skills(question)
-
-        if not selected:
-            # Default to overview skills
-            selected = ["top_kernels", "gpu_idle_gaps"]
+        import os
+        has_llm = bool(os.environ.get("GEMINI_API_KEY") or 
+                       os.environ.get("OPENAI_API_KEY") or 
+                       os.environ.get("ANTHROPIC_API_KEY"))
 
         sections = [f"Question: {question}\n"]
         evidence = {}
 
+        # Stage 1: Triage (Unconditional root_cause_matcher)
+        triage_skill = "root_cause_matcher"
+        try:
+            skill = get_skill(triage_skill)
+            if skill:
+                rows = skill.execute(self.conn, **self._trim_kwargs)
+                evidence[triage_skill] = rows
+                sections.append("── Phase 1: Triage (Root Cause Matcher) ──")
+                sections.append(skill.format_rows(rows))
+                sections.append("")
+        except Exception as e:
+            sections.append(f"({triage_skill}: skipped — {e})\n")
+
+        # Select Deep Dive Skills
+        if has_llm:
+            selected = self._try_llm_triage(question, evidence.get(triage_skill, []))
+            sections.append(f"── Phase 2: AI Triage selected skills: {', '.join(selected)} ──\n")
+        else:
+            selected = self._select_skills(question)
+            if not selected:
+                selected = ["top_kernels", "gpu_idle_gaps"]
+
+        # Stage 2: Deep Dive (Execute selected skills)
         for skill_name in selected:
+            if skill_name == triage_skill:
+                continue
             try:
                 skill = get_skill(skill_name)
                 if skill is None:
@@ -192,17 +208,69 @@ class Agent:
             except Exception as e:
                 sections.append(f"({skill_name}: skipped — {e})\n")
 
-        # Try LLM synthesis with structured evidence
-        llm_answer = self._try_llm_synthesis(question, evidence)
-        if llm_answer:
-            sections.append("\n── AI Analysis ──")
-            sections.append(llm_answer)
+        # Try LLM synthesis with combined structured evidence
+        if has_llm:
+            llm_answer = self._try_llm_synthesis(question, evidence)
+            if llm_answer:
+                sections.append("── Phase 3: AI Final Analysis ──")
+                sections.append(llm_answer)
 
         return "\n".join(sections)
 
     def run_skill(self, name: str, **kwargs) -> str:
         """Run a specific skill by name."""
         return run_skill(name, self.conn, **kwargs)
+
+    def _try_llm_triage(self, question: str, triage_results: list[dict]) -> list[str]:
+        """Use LLM to select the next set of skills based on the triage findings."""
+        import json
+        import os
+        from ..skills.registry import list_skills
+
+        available_skills = list_skills()
+        triage_json = json.dumps(triage_results, indent=2, default=str)
+        
+        prompt = (
+            f"You are a performance profiling expert. The user asked: '{question}'.\n"
+            f"We ran a triage check (`root_cause_matcher`) and found these signals:\n"
+            f"```json\n{triage_json}\n```\n\n"
+            f"Available skills you can run to investigate further: {', '.join(available_skills)}\n\n"
+            f"Based on the user's question and the triage findings, select up to 4 skill names "
+            f"to run in a deep-dive investigation. Respond ONLY with a comma-separated list of skill names, "
+            f"like 'top_kernels, gpu_idle_gaps'. Do not provide any other text."
+        )
+
+        try:
+            import litellm
+            model = None
+            if os.environ.get("GEMINI_API_KEY"):
+                model = "gemini/gemini-2.5-flash"
+            elif os.environ.get("OPENAI_API_KEY"):
+                model = "gpt-4o-mini"
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                model = "claude-sonnet-4-20250514"
+
+            if model:
+                resp = litellm.completion(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=100,
+                )
+                text_response = resp.choices[0].message.content.strip()
+                # Parse returned text into a list of skills
+                selected = []
+                for s in text_response.split(","):
+                    s = s.strip()
+                    # Strip any markdown backticks or quotes that the LLM might have included
+                    s = s.replace("`", "").replace("'", "").replace('"', "")
+                    if s in available_skills:
+                        selected.append(s)
+                return selected[:4]
+        except Exception:
+            pass
+        
+        # Fallback to keywords if LLM fails
+        return self._select_skills(question)
 
     def _select_skills(self, question: str) -> list[str]:
         """Select skills relevant to a question using keyword matching."""

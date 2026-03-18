@@ -12,13 +12,15 @@ def _format(rows):
         "─" * 122,
     ]
     for r in rows:
-        before = r["before_kernel"] or "?"
-        after = r["after_kernel"] or "?"
+        before = r["before_kernel"] or "(start of stream)"
+        after = r["after_kernel"] or "(end of stream)"
         if len(before) > 48:
             before = before[:45] + "..."
         if len(after) > 48:
             after = after[:45] + "..."
         lines.append(f"{r['streamId']:>7d}  {r['gap_ms']:>9.3f}  {before:<50s}  {after:<50s}")
+    lines.append("\n  💡 TIP: Large gaps (>1ms) often indicate the GPU is starved waiting for CPU")
+    lines.append("     (e.g., DataLoader blocking, explicit synchronization) or waiting on PCIe transfers.")
     return "\n".join(lines)
 
 

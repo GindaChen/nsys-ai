@@ -34,6 +34,12 @@ def _load_builtins():
         skill = getattr(mod, "SKILL", None)
         if isinstance(skill, Skill):
             _SKILLS[skill.name] = skill
+            
+        skills_list = getattr(mod, "SKILLS", None)
+        if skills_list and isinstance(skills_list, (list, tuple)):
+            for s in skills_list:
+                if isinstance(s, Skill):
+                    _SKILLS[s.name] = s
 
     _LOADED = True
 

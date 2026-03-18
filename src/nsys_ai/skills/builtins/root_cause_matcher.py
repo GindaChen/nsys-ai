@@ -42,10 +42,11 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         large_gaps = [g for g in idle_gaps_data
                       if g.get("gap_ms", 0) > 1.0]
         if len(large_gaps) >= 3:
+            total_gap_ms = sum(g.get("gap_ms", 0) for g in large_gaps)
             findings.append({
                 "pattern": "GPU Bubbles (Pipeline Stalls)",
                 "severity": "warning",
-                "evidence": f"{len(large_gaps)} gaps > 1ms detected",
+                "evidence": f"{len(large_gaps)} gaps > 1ms detected, totaling {total_gap_ms:.1f}ms of idle time",
                 "recommendation": (
                     "Use CUDA graphs, overlap data loading with compute, "
                     "or replace explicit cudaDeviceSynchronize with events."
@@ -60,6 +61,18 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             nccl_only = ov.get("nccl_only_ms", 0)
             total = ov.get("total_ms", 1)
             if nccl_only > 0 and overlap_pct < 30:
+                rec = (
+                    "Tune DDP bucket sizes (bucket_cap_mb), "
+                    "ensure NCCL runs on separate stream, "
+                    "consider gradient compression or FSDP."
+                )
+                if overlap_pct == 0.0:
+                    rec = (
+                        "Overlap is EXACTLY 0.0%. NCCL is completely synchronous! "
+                        "Ensure your script is not calling `torch.cuda.synchronize()` "
+                        "after every step, or that your framework supports background "
+                        "communication streams (e.g. PyTorch DDP with `find_unused_parameters=False`)."
+                    )
                 findings.append({
                     "pattern": "NCCL Serialization",
                     "severity": "critical",
@@ -67,11 +80,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         f"NCCL overlap only {overlap_pct}%, "
                         f"NCCL-only time: {nccl_only:.1f}ms / {total:.1f}ms"
                     ),
-                    "recommendation": (
-                        "Tune DDP bucket sizes (bucket_cap_mb), "
-                        "ensure NCCL runs on separate stream, "
-                        "consider gradient compression or FSDP."
-                    ),
+                    "recommendation": rec,
                 })
 
     # --- Excessive H2D Transfers ---
@@ -254,7 +263,8 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
                 "recommendation": (
                     "Remove .item()/.cpu() from the training loop, "
                     "use torch.cuda.set_sync_debug_mode(1) to find hidden syncs, "
-                    "replace cudaDeviceSynchronize with event-based dependencies."
+                    "replace cudaDeviceSynchronize with event-based dependencies. "
+                    "Run `nsys recipe cuda_api_sync <profile.nsys-rep>` for a detailed breakdown."
                 ),
             }]
     except sqlite3.OperationalError as e:
@@ -315,7 +325,8 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
             ),
             "recommendation": (
                 "Replace cudaMemcpy with cudaMemcpyAsync + pinned memory. "
-                "Use pin_memory=True in DataLoader and non_blocking=True in .to(device)."
+                "Use pin_memory=True in DataLoader and non_blocking=True in .to(device). "
+                "Run `nsys recipe cuda_memcpy_sync <profile.nsys-rep>` for a detailed breakdown."
             ),
         }]
     except sqlite3.OperationalError as e:
@@ -363,7 +374,8 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
             ),
             "recommendation": (
                 "Use pinned (page-locked) memory: cudaMallocHost() / "
-                "pin_memory=True in DataLoader. This enables true async H2D overlap."
+                "pin_memory=True in DataLoader. This enables true async H2D overlap. "
+                "Run `nsys recipe cuda_memcpy_async <profile.nsys-rep>` for details on pageable fallback."
             ),
         }]
     except sqlite3.OperationalError as e:
@@ -421,7 +433,8 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
                 f"These block the host thread."
             ),
             "recommendation": (
-                "Replace cudaMemset with cudaMemsetAsync on the appropriate stream."
+                "Replace cudaMemset with cudaMemsetAsync on the appropriate stream. "
+                "Run `nsys recipe cuda_memset_sync <profile.nsys-rep>` for a detailed breakdown."
             ),
         }]
     except sqlite3.OperationalError as e:

@@ -26,8 +26,10 @@ def _execute(conn, **kwargs):
 
 def _format(rows):
     if not rows:
-        return "(No iterations detected — NVTX marker not found)"
-    lines = ["── Iteration Timings ──"]
+        return "(No iterations detected — NVTX marker not found and no large gaps found)"
+    is_heuristic = any(it.get('text', '').startswith('heuristic') for it in rows)
+    title = "── Iteration Timings (Heuristic Fallback) ──" if is_heuristic else "── Iteration Timings ──"
+    lines = [title]
     for it in rows:
         lines.append(
             f"  iter {it['iteration']:2d}  "
