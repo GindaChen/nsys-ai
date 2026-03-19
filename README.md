@@ -404,7 +404,7 @@ With `pip install nsys-ai[agent]`, the agent can use an LLM to synthesize natura
 ## 📦 Install Tiers
 
 ```bash
-pip install nsys-ai          # Core: CLI + TUI + skills (no dependencies!)
+pip install nsys-ai          # Core: CLI + TUI + skills (rich + textual)
 pip install nsys-ai[agent]   # + LLM-backed agent analysis (requires anthropic)
 pip install nsys-ai[all]     # Everything
 ```

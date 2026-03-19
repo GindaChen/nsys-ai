@@ -327,7 +327,8 @@ def test_remove_custom_skill_not_found(tmp_path):
 
 def test_ensure_indexes_creates_indexes():
     """ensure_indexes should create _nsysai_* indexes on tables that exist."""
-    from nsys_ai.skills.base import _indexed_connections, ensure_indexes
+    from nsys_ai.indexing import _indexed_connections
+    from nsys_ai.skills.base import ensure_indexes
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -357,7 +358,8 @@ def test_ensure_indexes_creates_indexes():
 
 def test_ensure_indexes_skips_missing_tables():
     """ensure_indexes should not raise when tables don't exist."""
-    from nsys_ai.skills.base import _indexed_connections, ensure_indexes
+    from nsys_ai.indexing import _indexed_connections
+    from nsys_ai.skills.base import ensure_indexes
 
     conn = sqlite3.connect(":memory:")
     _indexed_connections.discard(id(conn))
@@ -367,7 +369,8 @@ def test_ensure_indexes_skips_missing_tables():
 
 def test_ensure_indexes_idempotent():
     """Calling ensure_indexes twice should not error."""
-    from nsys_ai.skills.base import _indexed_connections, ensure_indexes
+    from nsys_ai.indexing import _indexed_connections
+    from nsys_ai.skills.base import ensure_indexes
 
     conn = sqlite3.connect(":memory:")
     conn.execute(

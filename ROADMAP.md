@@ -122,7 +122,7 @@ Three pillars: **UI** (effortless viewing), **AI** (effortless understanding), a
 │  ✅ AI/LLM-powered analysis & natural language      │
 │  ✅ Interactive terminal TUI (tree + timeline)       │
 │  ✅ NVTX hierarchy navigation & tree browser        │
-│  ✅ Zero-dependency core (pure stdlib Python)        │
+│  ✅ Minimal-dependency core (rich + textual only)    │
 │  ✅ Extensible skill system + Book of Root Causes    │
 │  ✅ Agentic NVTX annotation (kernel→source mapping)  │
 ├─────────────────────────────────────────────────────┤

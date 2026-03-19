@@ -267,29 +267,11 @@ def _resolve_string_ids(
 def _ensure_kernel_indexes(conn: sqlite3.Connection) -> None:
     """Create indexes on kernel/runtime tables if the DB is writable.
 
-    Indexes on ``shortName``, ``start``, and ``correlationId`` dramatically
-    speed up kernel lookups on large profiles.  On a read-only connection
-    (e.g. ``?mode=ro``) this silently does nothing.
+    Delegates to the centralized :func:`~nsys_ai.indexing.ensure_performance_indexes`.
     """
-    schema = NsightSchema(conn)
-    try:
-        if schema.kernel_table:
-            kt = schema.kernel_table
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_kernel_shortname ON {kt}(shortName)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_kernel_start ON {kt}(start)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_kernel_corr ON {kt}(correlationId)"
-            )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_runtime_corr "
-            "ON CUPTI_ACTIVITY_KIND_RUNTIME(correlationId)"
-        )
-    except Exception:
-        pass  # read-only DB or missing table — skip silently
+    from .indexing import ensure_performance_indexes
+
+    ensure_performance_indexes(conn)
 
 
 def find_kernels_by_name(

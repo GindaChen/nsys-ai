@@ -6,11 +6,27 @@ for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess  # nosec B404 — only for nsys export .nsys-rep→.sqlite, list args no shell
 import threading
 from dataclasses import dataclass, field
+
+# Regex for safe SQL identifiers (table/column names).
+_SAFE_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _validate_table_name(name: str) -> str:
+    """Ensure a table name contains only safe SQL identifier characters.
+
+    Table names come from ``sqlite_master`` (not user input), but this
+    provides defence-in-depth against accidental SQL injection if schema
+    detection logic ever changes.
+    """
+    if not _SAFE_IDENTIFIER_RE.match(name):
+        raise ValueError(f"Unsafe table name from schema: {name!r}")
+    return name
 
 
 class NsightSchema:
@@ -27,7 +43,8 @@ class NsightSchema:
             r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         ]
         self.version: str | None = self._detect_version()
-        self.kernel_table: str | None = self._detect_kernel_table()
+        kt = self._detect_kernel_table()
+        self.kernel_table: str | None = _validate_table_name(kt) if kt else None
 
     # ── Version detection ──────────────────────────────────────────────
 

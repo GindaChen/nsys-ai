@@ -18,7 +18,6 @@ import logging
 import os
 import sys
 from collections.abc import Callable
-import threading
 
 # ---------------------------------------------------------------------------
 # Sub-module re-exports — keep the public API stable for existing callers.
@@ -53,19 +52,9 @@ from .region_mfu import compute_region_mfu_from_conn, compute_theoretical_flops
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
 
-# Simple module-level counter to assign indices to findings created via
-# the `submit_finding` tool. This allows the model to refer to them as
-# "[Finding N]" using a concrete, server-tracked index.
-_finding_counter = 0
-_finding_counter_lock = threading.Lock()
-
-
-def _next_finding_index() -> int:
-    """Allocate and return the next finding index."""
-    global _finding_counter
-    with _finding_counter_lock:
-        _finding_counter += 1
-        return _finding_counter
+# _finding_counter was previously module-level global state.
+# Now handled per-request inside stream_agent_loop via nonlocal.
+# (Removed global to avoid unbounded growth across requests.)
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +356,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
 
     if profile_path:
         try:
-            from .profile import resolve_profile_path
+            from .profile import Profile, resolve_profile_path
 
             sqlite_path = resolve_profile_path(profile_path)
         except RuntimeError as e:
@@ -538,11 +527,22 @@ def stream_agent_loop(
         yield {"type": "done", "usage": {}}
         return
 
+    # Per-request finding counter (replaces old module-level global).
+    _local_finding_counter = findings_count
+
+    def _next_finding_index() -> int:
+        nonlocal _local_finding_counter
+        _local_finding_counter += 1
+        return _local_finding_counter
+
     use_diff = diff_context is not None and diff_paths is not None
     tools = tools if tools is not None else (TOOLS_DIFF_OPENAI if use_diff else _tools_openai())
     conn = None
     query_runner = None
     sqlite_path: str | None = None
+
+    # Lazy import once per call (consolidates 4 previously-scattered imports)
+    from .profile import Profile, resolve_profile_path
 
     if use_diff:
         system_prompt = build_diff_system_prompt(
@@ -550,8 +550,6 @@ def stream_agent_loop(
         )
     elif profile_path:
         try:
-            from .profile import resolve_profile_path
-
             sqlite_path = resolve_profile_path(profile_path)
         except RuntimeError as e:
             yield {"type": "text", "content": f"Profile error: {e}"}
@@ -930,8 +928,6 @@ def stream_agent_loop(
                     explicit_index = finding_args.get("index")
                     if isinstance(explicit_index, int):
                         finding_index = explicit_index
-                    elif findings_count > 0:
-                        finding_index = findings_count + _next_finding_index()
                     else:
                         finding_index = _next_finding_index()
                     finding_payload = dict(finding_args)
@@ -960,12 +956,11 @@ def stream_agent_loop(
                     except json.JSONDecodeError:
                         args = {}
                     try:
-                        from .profile import Profile as _OverlapProfile
                         from .overlap import overlap_analysis as _overlap_fn
 
                         _prof = None
                         try:
-                            _prof = _OverlapProfile(sqlite_path)
+                            _prof = Profile(sqlite_path)
                             _devices = _prof.meta.devices or [0]
                             _start_s = args.get("start_s")
                             _end_s = args.get("end_s")
@@ -1006,12 +1001,11 @@ def stream_agent_loop(
                     except json.JSONDecodeError:
                         args = {}
                     try:
-                        from .profile import Profile as _NcclProfile
                         from .overlap import nccl_breakdown as _nccl_fn
 
                         _prof = None
                         try:
-                            _prof = _NcclProfile(sqlite_path)
+                            _prof = Profile(sqlite_path)
                             _devices = _prof.meta.devices or [0]
                             _dev = args.get("device_id", _devices[0])
                             _start_s = args.get("start_s")

@@ -71,85 +71,11 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
 def ensure_indexes(conn: sqlite3.Connection) -> None:
     """Create performance indexes on the profile DB if they don't already exist.
 
-    This is safe to call repeatedly — indexes are ``CREATE IF NOT EXISTS`` and
-    the function tracks which connections have been processed.  Each index
-    creation is wrapped in try/except so missing tables (common for profiles
-    without NVTX or NCCL data) don't block the rest.
+    Delegates to the centralized :func:`~nsys_ai.indexing.ensure_performance_indexes`.
     """
-    conn_id = id(conn)
-    if conn_id in _indexed_connections:
-        return
+    from ..indexing import ensure_performance_indexes
 
-    tables = _resolve_activity_tables(conn)
-
-    index_stmts: list[str] = []
-
-    kernel_table = tables.get("kernel")
-    if kernel_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_start ON {kernel_table}(start)"
-        )
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_corr  ON {kernel_table}(correlationId)"
-        )
-
-    runtime_table = tables.get("runtime")
-    if runtime_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_corr ON {runtime_table}(correlationId)"
-        )
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_tid  ON {runtime_table}(globalTid, start)"
-        )
-
-    nvtx_table = tables.get("nvtx")
-    if nvtx_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_start   ON {nvtx_table}(start)"
-        )
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_tid     ON {nvtx_table}(globalTid, start)"
-        )
-        # Compound index for NVTX join queries (nvtx_layer_breakdown, nvtx_kernel_map)
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_range   ON {nvtx_table}(globalTid, start, [end])"
-        )
-
-    memcpy_table = tables.get("memcpy")
-    if memcpy_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_memcpy_corr ON {memcpy_table}(correlationId)"
-        )
-
-    memset_table = tables.get("memset")
-    if memset_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_memset_corr ON {memset_table}(correlationId)"
-        )
-
-    # Streamwise kernel index for window-function skills
-    # (gpu_idle_gaps, kernel_launch_pattern)
-    if kernel_table:
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_stream ON {kernel_table}(streamId, start)"
-        )
-
-    for stmt in index_stmts:
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError:
-            # Table doesn't exist in this profile — skip silently.
-            pass
-        except Exception as exc:
-            # Read-only filesystem, locked DB, etc.
-            _log.debug("ensure_indexes: %s — %s", stmt.split("ON")[0].strip(), exc)
-
-    try:
-        conn.commit()
-    except Exception:
-        pass
-
-    _indexed_connections.add(conn_id)
+    ensure_performance_indexes(conn)
 
 
 @dataclass
