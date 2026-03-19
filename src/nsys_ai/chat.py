@@ -356,7 +356,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
 
     if profile_path:
         try:
-            from .profile import Profile, resolve_profile_path
+            from .profile import resolve_profile_path
 
             sqlite_path = resolve_profile_path(profile_path)
         except RuntimeError as e:
