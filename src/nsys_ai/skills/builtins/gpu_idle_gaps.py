@@ -130,10 +130,12 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     # Gaps are summed across ALL streams, so we need to normalize by
     # the number of active streams to avoid pct > 100%.
     try:
-        time_range = conn.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_tbl}").fetchone()
+        time_range = conn.execute(
+            f"SELECT MIN(start), MAX([end]) FROM {kernel_tbl} WHERE 1=1 {trim_clause}", trim_params
+        ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
         stream_count_row = conn.execute(
-            f"SELECT COUNT(DISTINCT streamId) AS n FROM {kernel_tbl}"
+            f"SELECT COUNT(DISTINCT streamId) AS n FROM {kernel_tbl} WHERE 1=1 {trim_clause}", trim_params
         ).fetchone()
         n_streams = stream_count_row["n"] if stream_count_row else 1
     except sqlite3.OperationalError:

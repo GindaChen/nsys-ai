@@ -342,7 +342,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
             (device,),
         ).fetchall()
         if same_stream_rows:
-            streams = [str(r["streamId"]) for r in same_stream_rows]
+            streams = [str(r[0]) for r in same_stream_rows]
             return {
                 "cause": "same_stream",
                 "detail": (f"Stream(s) [{', '.join(streams)}] run both NCCL and compute kernels"),
@@ -380,7 +380,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
 
                 # Check if any sync call starts within 1ms after NCCL kernel ends
                 for nccl in nccl_corrs:
-                    nccl_end = nccl["kernel_end"]
+                    nccl_end = nccl[1]
                     sync_after = conn.execute(
                         f"""
                         SELECT COUNT(*) AS cnt FROM {runtime_tbl}
@@ -389,7 +389,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
                         """,
                         sync_id_list + [nccl_end, nccl_end + 1_000_000],
                     ).fetchone()
-                    if sync_after and sync_after["cnt"] > 0:
+                    if sync_after and sync_after[0] > 0:
                         return {
                             "cause": "sync_after_nccl",
                             "detail": (

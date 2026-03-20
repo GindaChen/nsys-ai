@@ -200,7 +200,13 @@ LIMIT ?"""
         # Compute total idle stats for note enrichment
         total_idle_ns = sum(r["gap_ns"] for r in rows)
         profile_span = self.trim[1] - self.trim[0]
-        pct = round(100 * total_idle_ns / profile_span, 1) if profile_span > 0 else 0
+        # Normalize by number of active streams so percentage is not misleading on multi-stream workloads
+        active_streams = len({r["streamId"] for r in rows}) or 1
+        pct = (
+            round(100 * total_idle_ns / (profile_span * active_streams), 1)
+            if profile_span > 0
+            else 0
+        )
 
         findings = []
         for r in rows:
