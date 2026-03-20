@@ -86,7 +86,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             )
 
             evidence = (
-                f"{len(large_gaps)} gaps > {gap_threshold / 1e6:.0f}ms detected, "
+                f"{len(large_gaps)} gaps > {gap_threshold / 1e6:.1f}ms detected, "
                 f"totaling {total_idle_ms:.1f}ms of idle time"
             )
             if pct > 0:

@@ -420,7 +420,7 @@ SELECT
 FROM {memcpy_table} m CROSS JOIN baseline b
 WHERE m.copyKind = 1 AND m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
 GROUP BY 1
-ORDER BY 1"""
+ORDER BY total_bytes DESC"""
         try:
             with self.prof._lock:
                 rows = self.prof.conn.execute(
