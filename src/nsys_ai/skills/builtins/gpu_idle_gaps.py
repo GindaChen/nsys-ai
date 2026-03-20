@@ -13,12 +13,16 @@ from ..base import Skill, SkillParam, _resolve_activity_tables
 _log = logging.getLogger(__name__)
 
 # Gap classification rules based on dominant CUDA Runtime API during the gap
+# NOTE: More specific patterns (e.g. cudaMemcpyAsync) must appear BEFORE
+# less specific ones (e.g. cudaMemcpy) since matching uses substring search.
 _GAP_CLASSIFICATIONS = [
     # (api_substring, category, description)
     ("cudaDeviceSynchronize", "synchronization", "Explicit GPU sync stall"),
     ("cudaStreamSynchronize", "synchronization", "Stream sync stall"),
     ("cudaEventSynchronize", "synchronization", "Event sync stall"),
+    ("cudaMemcpyAsync", "kernel_launch", "Async memory transfer (non-blocking)"),
     ("cudaMemcpy", "memory_transfer", "Blocked on memory transfer"),
+    ("cudaMemsetAsync", "kernel_launch", "Async memory set (non-blocking)"),
     ("cudaMemset", "memory_transfer", "Blocked on memory set"),
     ("cudaLaunchKernel", "kernel_launch", "Kernel launch overhead"),
 ]
