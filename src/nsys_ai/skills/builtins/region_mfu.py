@@ -77,13 +77,27 @@ SKILL = Skill(
     format_fn=_format,
     params=[
         SkillParam("name", "NVTX region or kernel name to analyze", "str", True, None),
-        SkillParam("theoretical_flops", "Model FLOPs per step (must be provided by user)", "float", True, None),
+        SkillParam(
+            "theoretical_flops",
+            "Model FLOPs per step (must be provided by user)",
+            "float",
+            True,
+            None,
+        ),
         SkillParam("source", "Match source: 'nvtx' or 'kernel'", "str", False, "nvtx"),
-        SkillParam("peak_tflops", "GPU peak TFLOPS (auto-detected if omitted)", "float", False, None),
+        SkillParam(
+            "peak_tflops", "GPU peak TFLOPS (auto-detected if omitted)", "float", False, None
+        ),
         SkillParam("num_gpus", "Number of GPUs (for DP/TP adjustment)", "int", False, 1),
         SkillParam("occurrence_index", "Which occurrence to analyze (1-based)", "int", False, 1),
         SkillParam("device_id", "GPU device ID filter", "int", False, None),
-        SkillParam("match_mode", "Name matching: 'contains', 'exact', 'startswith'", "str", False, "contains"),
+        SkillParam(
+            "match_mode",
+            "Name matching: 'contains', 'exact', 'startswith'",
+            "str",
+            False,
+            "contains",
+        ),
     ],
     tags=["mfu", "flops", "utilization", "efficiency", "region", "nvtx", "kernel"],
 )

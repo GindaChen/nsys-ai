@@ -96,8 +96,7 @@ class ToolDispatcher:
             self._register_diff_tools()
         else:
             raise ValueError(
-                f"Unsupported ToolDispatcher mode: {mode!r}. "
-                "Expected 'profile' or 'diff'."
+                f"Unsupported ToolDispatcher mode: {mode!r}. Expected 'profile' or 'diff'."
             )
 
     def _register_profile_tools(self) -> None:
@@ -150,16 +149,27 @@ class ToolDispatcher:
         except Exception as exc:
             _log.exception("Failed to parse JSON args for tool '%s'", name)
             return ToolResult(
-                content=json.dumps({"error": "invalid_tool_arguments", "tool": name, "message": str(exc)}),
-                events=[{"type": "system", "content": "Tool argument parsing failed; see logs for details."}],
+                content=json.dumps(
+                    {"error": "invalid_tool_arguments", "tool": name, "message": str(exc)}
+                ),
+                events=[
+                    {
+                        "type": "system",
+                        "content": "Tool argument parsing failed; see logs for details.",
+                    }
+                ],
             )
         try:
             return handler(args)
         except Exception as exc:
             _log.exception("Unhandled exception in tool handler '%s'", name)
             return ToolResult(
-                content=json.dumps({"error": "tool_execution_error", "tool": name, "message": str(exc)}),
-                events=[{"type": "system", "content": "Tool execution failed; see logs for details."}],
+                content=json.dumps(
+                    {"error": "tool_execution_error", "tool": name, "message": str(exc)}
+                ),
+                events=[
+                    {"type": "system", "content": "Tool execution failed; see logs for details."}
+                ],
             )
 
     # ── Tool handlers ─────────────────────────────────────────────────
@@ -404,60 +414,76 @@ class ToolDispatcher:
 
     def _handle_search_nvtx_regions(self, args: dict) -> ToolResult:
         from .diff_tools import search_nvtx_regions
+
         events = [{"type": "system", "content": "Searching NVTX regions..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = search_nvtx_regions(
-            self._diff_context, args.get("query", ""),
-            args.get("limit", 50), args.get("use_glob", False),
+            self._diff_context,
+            args.get("query", ""),
+            args.get("limit", 50),
+            args.get("use_glob", False),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_iteration_boundaries(self, args: dict) -> ToolResult:
         from .diff_tools import get_iteration_boundaries
+
         events = [{"type": "system", "content": "Getting iteration boundaries..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_iteration_boundaries(
-            self._diff_context, args.get("marker"), args.get("target_gpu", 0),
+            self._diff_context,
+            args.get("marker"),
+            args.get("target_gpu", 0),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_explore_nvtx_hierarchy(self, args: dict) -> ToolResult:
         from .diff_tools import explore_nvtx_hierarchy
+
         events = [{"type": "system", "content": "Exploring NVTX hierarchy..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = explore_nvtx_hierarchy(
-            self._diff_context, args.get("parent_path", ""),
-            args.get("depth", 1), args.get("target_gpu", 0),
+            self._diff_context,
+            args.get("parent_path", ""),
+            args.get("depth", 1),
+            args.get("target_gpu", 0),
             args.get("profile_side", "after"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_top_nvtx_diffs(self, args: dict) -> ToolResult:
         from .diff_tools import get_top_nvtx_diffs
+
         events = [{"type": "system", "content": "Getting top NVTX diffs..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_top_nvtx_diffs(
-            self._diff_context, args.get("limit", 20), args.get("target_gpu"),
+            self._diff_context,
+            args.get("limit", 20),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_iteration_diff(self, args: dict) -> ToolResult:
         from .diff_tools import get_iteration_diff
+
         events = [{"type": "system", "content": "Getting iteration diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_iteration_diff(
-            self._diff_context, int(args["iteration_index"]),
-            args.get("marker"), args.get("target_gpu", 0),
+            self._diff_context,
+            int(args["iteration_index"]),
+            args.get("marker"),
+            args.get("target_gpu", 0),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_region_diff(self, args: dict) -> ToolResult:
         from .diff_tools import get_region_diff
+
         events = [{"type": "system", "content": "Getting region diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
@@ -474,6 +500,7 @@ class ToolDispatcher:
 
     def _handle_get_source_code_context(self, args: dict) -> ToolResult:
         from .diff_tools import get_source_code_context
+
         events = [{"type": "system", "content": "Getting source context..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
@@ -482,54 +509,69 @@ class ToolDispatcher:
 
     def _handle_get_global_diff(self, args: dict) -> ToolResult:
         from .diff_tools import get_global_diff
+
         events = [{"type": "system", "content": "Getting global diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_global_diff(
-            self._diff_context, args.get("skip_first_ms", 0),
-            args.get("duration_ms"), args.get("target_gpu"),
+            self._diff_context,
+            args.get("skip_first_ms", 0),
+            args.get("duration_ms"),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_memory_profile_diff(self, args: dict) -> ToolResult:
         from .diff_tools import get_memory_profile_diff
+
         events = [{"type": "system", "content": "Getting memory profile diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_memory_profile_diff(
-            self._diff_context, args.get("iteration_index"), args.get("target_gpu"),
+            self._diff_context,
+            args.get("iteration_index"),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_gpu_imbalance_stats(self, args: dict) -> ToolResult:
         from .diff_tools import get_gpu_imbalance_stats
+
         events = [{"type": "system", "content": "Getting GPU imbalance stats..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_gpu_imbalance_stats(
-            self._diff_context, args.get("iteration_index"), args.get("marker"),
+            self._diff_context,
+            args.get("iteration_index"),
+            args.get("marker"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_summarize_nvtx_subtree(self, args: dict) -> ToolResult:
         from .diff_tools import summarize_nvtx_subtree
+
         events = [{"type": "system", "content": "Summarizing NVTX subtree..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = summarize_nvtx_subtree(
-            self._diff_context, args.get("parent_path", ""),
-            args.get("iteration_index"), args.get("target_gpu", 0),
+            self._diff_context,
+            args.get("parent_path", ""),
+            args.get("iteration_index"),
+            args.get("target_gpu", 0),
             args.get("top_n", 3),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
     def _handle_get_launch_config_diff(self, args: dict) -> ToolResult:
         from .diff_tools import get_launch_config_diff
+
         events = [{"type": "system", "content": "Getting launch config diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
         res = get_launch_config_diff(
-            self._diff_context, args.get("kernel_name", ""),
-            args.get("iteration_index"), args.get("target_gpu", 0),
+            self._diff_context,
+            args.get("kernel_name", ""),
+            args.get("iteration_index"),
+            args.get("target_gpu", 0),
         )
         return ToolResult(content=json.dumps(res), events=events)

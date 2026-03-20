@@ -31,9 +31,7 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
     try:
         tables = {
             row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     except Exception:
         return {}
@@ -145,9 +143,7 @@ class Skill:
             if p.default is not None:
                 resolved[p.name] = p.default
             elif p.required:
-                raise ValueError(
-                    f"Skill '{self.name}' requires parameter '{p.name}'"
-                )
+                raise ValueError(f"Skill '{self.name}' requires parameter '{p.name}'")
 
         # Python-level skill: delegate to execute_fn with resolved params.
         if self.execute_fn is not None:
@@ -196,9 +192,12 @@ class Skill:
         nvtx_tbl = resolved.get("nvtx_table", "NVTX_EVENTS")
         if "{nvtx_text_expr}" in self.sql or "{nvtx_text_join}" in self.sql:
             try:
-                has_textid = conn.execute(
-                    f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_tbl}') WHERE name='textId'"
-                ).fetchone()[0] > 0
+                has_textid = (
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_tbl}') WHERE name='textId'"
+                    ).fetchone()[0]
+                    > 0
+                )
             except Exception:
                 has_textid = False
             if has_textid:

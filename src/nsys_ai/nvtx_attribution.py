@@ -12,7 +12,6 @@ Provides efficient NVTX-to-kernel mapping using a two-tier strategy:
    runtime call.  Complexity: O(N+M) after sorting.
 """
 
-
 import csv
 import io
 import os
@@ -46,9 +45,12 @@ def _run_nsys_recipe(nsys_rep_path: str, trim: tuple[int, int] | None = None) ->
         return None
 
     cmd = [
-        nsys_exe, "stats",
-        "-r", "nvtx_gpu_proj_trace",
-        "--format", "csv",
+        nsys_exe,
+        "stats",
+        "-r",
+        "nvtx_gpu_proj_trace",
+        "--format",
+        "csv",
         "--force-export=true",
         nsys_rep_path,
     ]
@@ -85,19 +87,20 @@ def _run_nsys_recipe(nsys_rep_path: str, trim: tuple[int, int] | None = None) ->
             if start_ns < trim[0] or end_ns > trim[1]:
                 continue
 
-        rows.append({
-            "nvtx_text": row.get("NVTX Range", row.get("Name", "")),
-            "kernel_name": row.get("Kernel Name", row.get("Operation", "")),
-            "k_start": start_ns,
-            "k_end": end_ns,
-            "k_dur_ns": dur_ns,
-        })
+        rows.append(
+            {
+                "nvtx_text": row.get("NVTX Range", row.get("Name", "")),
+                "kernel_name": row.get("Kernel Name", row.get("Operation", "")),
+                "k_start": start_ns,
+                "k_end": end_ns,
+                "k_dur_ns": dur_ns,
+            }
+        )
 
     return rows if rows else None
 
 
 # ── Tier 2: Python sort-merge ───────────────────────────────────────
-
 
 
 def _sort_merge_attribute(
@@ -118,11 +121,7 @@ def _sort_merge_attribute(
     popped at most once; each runtime call is processed once).
     """
     # Detect versioned table names
-    all_tables = [
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    ]
+    all_tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
 
     def _find(prefix: str) -> str:
         # Prefer exact match (e.g. CUPTI_ACTIVITY_KIND_KERNEL)
@@ -166,9 +165,12 @@ def _sort_merge_attribute(
     # Resolve text expression (handles textId vs text column)
     has_textid = False
     try:
-        has_textid = conn.execute(
-            f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
-        ).fetchone()[0] > 0
+        has_textid = (
+            conn.execute(
+                f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
+            ).fetchone()[0]
+            > 0
+        )
     except Exception:
         pass
 
@@ -245,13 +247,15 @@ def _sort_merge_attribute(
                     break
 
             if best_nvtx is not None:
-                results.append({
-                    "nvtx_text": best_nvtx,
-                    "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
-                    "k_start": k_start,
-                    "k_end": k_end,
-                    "k_dur_ns": k_end - k_start,
-                })
+                results.append(
+                    {
+                        "nvtx_text": best_nvtx,
+                        "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
+                        "k_start": k_start,
+                        "k_end": k_end,
+                        "k_dur_ns": k_end - k_start,
+                    }
+                )
 
     return results
 

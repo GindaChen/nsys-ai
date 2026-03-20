@@ -9,6 +9,7 @@ Profile: distca-0/baseline.t128k.host-fs-mbz-gpu-899.sqlite
 Downloads the pre-converted .sqlite file so you can immediately use nsys-ai
 without needing nsys or Modal installed.
 """
+
 import os
 import subprocess
 import sys

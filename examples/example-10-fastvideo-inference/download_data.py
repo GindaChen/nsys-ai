@@ -8,6 +8,7 @@ Profile: fastvideo/fastvideo_inference.sqlite
 Downloads the pre-converted .sqlite file so you can immediately use nsys-ai
 without needing Modal or GPU access.
 """
+
 import os
 import subprocess
 import sys

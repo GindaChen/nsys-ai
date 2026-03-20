@@ -30,7 +30,7 @@ def test_timeline_web_kernel_first_keeps_kernels_outside_nvtx(minimal_nsys_db_pa
         kernel_names = {k["name"] for k in gpu0["kernels"]}
 
         assert "kernel_C" in kernel_names
-        assert len(gpu0["kernels"]) == 4
+        assert len(gpu0["kernels"]) == 8
 
         k_c = next(k for k in gpu0["kernels"] if k["name"] == "kernel_C")
         assert k_c["path"] == "kernel_C"
@@ -60,7 +60,7 @@ def test_timeline_web_can_build_kernels_without_nvtx(minimal_nsys_db_path):
             include_nvtx=False,
         )
         entry = gpu_data[0]
-        assert len(entry["kernels"]) == 3
+        assert len(entry["kernels"]) == 7
         assert entry["nvtx_spans"] == []
 
 
@@ -106,7 +106,7 @@ def test_timeline_web_includes_memcpy_and_memset_events(minimal_nsys_db_path):
         memcpy_events = [e for e in events if e["type"] == "memcpy"]
         memset_events = [e for e in events if e["type"] == "memset"]
 
-    assert len(memcpy_events) == 1
+    assert len(memcpy_events) == 2
     assert len(memset_events) == 1
     assert memcpy_events[0]["name"] == "[CUDA memcpy H2D]"
     assert memcpy_events[0]["path"] == "[CUDA memcpy H2D]"

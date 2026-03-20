@@ -19,6 +19,7 @@ def _execute(conn, **kwargs):
 
     # Select the earliest kernels by start time without fully sorting
     import heapq
+
     rows = heapq.nsmallest(limit, rows, key=lambda r: r["k_start"])
 
     # Format output to match expected schema

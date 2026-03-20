@@ -32,15 +32,17 @@ def _execute(conn, **kwargs):
         saved = idle_ms
         new_iter = iteration_ms - saved
         speedup = iteration_ms / new_iter if new_iter > 0 else 1
-        results.append({
-            "optimization": "Eliminate GPU Idle Gaps",
-            "method": "CUDA graphs / async data loading / remove explicit syncs",
-            "current_ms": idle_ms,
-            "saved_ms": round(saved, 1),
-            "new_iteration_ms": round(new_iter, 1),
-            "speedup": round(speedup, 3),
-            "confidence": "medium",
-        })
+        results.append(
+            {
+                "optimization": "Eliminate GPU Idle Gaps",
+                "method": "CUDA graphs / async data loading / remove explicit syncs",
+                "current_ms": idle_ms,
+                "saved_ms": round(saved, 1),
+                "new_iteration_ms": round(new_iter, 1),
+                "speedup": round(speedup, 3),
+                "confidence": "medium",
+            }
+        )
 
     # --- Estimate 2: Perfect NCCL overlap ---
     if nccl_ms > 0 and overlap_pct < 100:
@@ -48,15 +50,17 @@ def _execute(conn, **kwargs):
         if nccl_exposed > 0:
             new_iter = iteration_ms - nccl_exposed
             speedup = iteration_ms / new_iter if new_iter > 0 else 1
-            results.append({
-                "optimization": "Perfect Compute/NCCL Overlap",
-                "method": "Overlap all NCCL with compute via stream pipelining",
-                "current_exposed_nccl_ms": round(nccl_exposed, 1),
-                "saved_ms": round(nccl_exposed, 1),
-                "new_iteration_ms": round(new_iter, 1),
-                "speedup": round(speedup, 3),
-                "confidence": "medium",
-            })
+            results.append(
+                {
+                    "optimization": "Perfect Compute/NCCL Overlap",
+                    "method": "Overlap all NCCL with compute via stream pipelining",
+                    "current_exposed_nccl_ms": round(nccl_exposed, 1),
+                    "saved_ms": round(nccl_exposed, 1),
+                    "new_iteration_ms": round(new_iter, 1),
+                    "speedup": round(speedup, 3),
+                    "confidence": "medium",
+                }
+            )
 
     # --- Estimate 3: Reduce TP degree ---
     if tp_degree > 1 and nccl_ms > 0:
@@ -72,40 +76,46 @@ def _execute(conn, **kwargs):
             nccl_savings = nccl_ms * 0.9
             new_iter = iteration_ms - nccl_savings
             speedup = iteration_ms / new_iter if new_iter > 0 else 1
-            results.append({
-                "optimization": f"Reduce TP={tp_degree} → TP=1",
-                "method": f"Model ({model_params_b:.1f}B params, ~{total_needed_gb:.0f}GB) fits on {gpu_memory_gb:.0f}GB GPU",
-                "nccl_savings_ms": round(nccl_savings, 1),
-                "saved_ms": round(nccl_savings, 1),
-                "new_iteration_ms": round(new_iter, 1),
-                "speedup": round(speedup, 3),
-                "confidence": "high",
-                "feasibility": "HIGH — model fits on single GPU",
-            })
+            results.append(
+                {
+                    "optimization": f"Reduce TP={tp_degree} → TP=1",
+                    "method": f"Model ({model_params_b:.1f}B params, ~{total_needed_gb:.0f}GB) fits on {gpu_memory_gb:.0f}GB GPU",
+                    "nccl_savings_ms": round(nccl_savings, 1),
+                    "saved_ms": round(nccl_savings, 1),
+                    "new_iteration_ms": round(new_iter, 1),
+                    "speedup": round(speedup, 3),
+                    "confidence": "high",
+                    "feasibility": "HIGH — model fits on single GPU",
+                }
+            )
         else:
             half_tp = max(1, tp_degree // 2)
             nccl_savings = nccl_ms * 0.4  # Rough: halving TP saves ~40% NCCL
             new_iter = iteration_ms - nccl_savings
             speedup = iteration_ms / new_iter if new_iter > 0 else 1
-            results.append({
-                "optimization": f"Reduce TP={tp_degree} → TP={half_tp}",
-                "method": f"Model too large for 1 GPU ({total_needed_gb:.0f}GB > {gpu_memory_gb:.0f}GB), halve TP instead",
-                "nccl_savings_ms": round(nccl_savings, 1),
-                "saved_ms": round(nccl_savings, 1),
-                "new_iteration_ms": round(new_iter, 1),
-                "speedup": round(speedup, 3),
-                "confidence": "low",
-                "feasibility": "MEDIUM — requires memory optimization",
-            })
+            results.append(
+                {
+                    "optimization": f"Reduce TP={tp_degree} → TP={half_tp}",
+                    "method": f"Model too large for 1 GPU ({total_needed_gb:.0f}GB > {gpu_memory_gb:.0f}GB), halve TP instead",
+                    "nccl_savings_ms": round(nccl_savings, 1),
+                    "saved_ms": round(nccl_savings, 1),
+                    "new_iteration_ms": round(new_iter, 1),
+                    "speedup": round(speedup, 3),
+                    "confidence": "low",
+                    "feasibility": "MEDIUM — requires memory optimization",
+                }
+            )
 
     if not results:
-        results.append({
-            "optimization": "No clear optimization path",
-            "method": "Profile looks well-optimized; consider NCU for kernel-level tuning",
-            "saved_ms": 0,
-            "speedup": 1.0,
-            "confidence": "n/a",
-        })
+        results.append(
+            {
+                "optimization": "No clear optimization path",
+                "method": "Profile looks well-optimized; consider NCU for kernel-level tuning",
+                "saved_ms": 0,
+                "speedup": 1.0,
+                "confidence": "n/a",
+            }
+        )
 
     return results
 

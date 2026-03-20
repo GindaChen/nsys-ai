@@ -53,8 +53,7 @@ def _escape_json_for_html_attr(value) -> str:
         json_text = json.dumps(value)
     # Escape HTML-sensitive characters and single quotes for single-quoted attrs.
     return (
-        json_text
-        .replace("&", "&amp;")
+        json_text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")

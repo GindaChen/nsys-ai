@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass, field
 
 # Regex for safe SQL identifiers (table/column names).
-_SAFE_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _validate_table_name(name: str) -> str:
@@ -580,7 +580,7 @@ class Profile:
                 ).fetchall()
 
     def close(self):
-        if getattr(self, '_owns_conn', True):
+        if getattr(self, "_owns_conn", True):
             self.conn.close()
 
     def __enter__(self) -> "Profile":

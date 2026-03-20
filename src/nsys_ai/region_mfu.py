@@ -55,13 +55,13 @@ def _error(code: str, message: str) -> ErrorDict:
 # ---------------------------------------------------------------------------
 
 _VALID_OPERATIONS = {
-    "attention",      # QK^T + softmax*V: 4 * S^2 * H
-    "qkv_proj",       # Q/K/V linear projections: 6 * S * H^2
-    "output_proj",    # Output projection: 2 * S * H^2
-    "mlp",            # MLP/FFN up + down: 4 * S * H * ffn
-    "full_layer",     # attention + qkv_proj + output_proj + mlp
-    "full_model",     # full_layer * num_layers (alias for convenience)
-    "linear",         # Generic: 2 * M * N * K
+    "attention",  # QK^T + softmax*V: 4 * S^2 * H
+    "qkv_proj",  # Q/K/V linear projections: 6 * S * H^2
+    "output_proj",  # Output projection: 2 * S * H^2
+    "mlp",  # MLP/FFN up + down: 4 * S * H * ffn
+    "full_layer",  # attention + qkv_proj + output_proj + mlp
+    "full_model",  # full_layer * num_layers (alias for convenience)
+    "linear",  # Generic: 2 * M * N * K
 }
 
 
@@ -612,7 +612,10 @@ def compute_region_mfu_from_conn(
     # ---------------------------------------------------------------
     if source == "kernel":
         kernels = find_kernels_by_name(
-            conn, name, match_mode=match_mode, device_id=device_id,
+            conn,
+            name,
+            match_mode=match_mode,
+            device_id=device_id,
         )
         if not kernels:
             return _error(
@@ -690,7 +693,9 @@ def compute_region_mfu_from_conn(
         "name": name,
         "matched_text": matched_name,
         "match_mode": match_mode,
-        "occurrence_index": int(chosen.get("occurrence_index", occurrence_index)) if source == "nvtx" else None,
+        "occurrence_index": int(chosen.get("occurrence_index", occurrence_index))
+        if source == "nvtx"
+        else None,
         "device_id": int(device_id) if device_id is not None else None,
         "profile_path": profile_path,
         "num_gpus": effective_num_gpus,

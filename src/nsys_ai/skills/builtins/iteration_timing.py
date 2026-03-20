@@ -27,8 +27,12 @@ def _execute(conn, **kwargs):
 def _format(rows):
     if not rows:
         return "(No iterations detected — NVTX marker not found and no large gaps found)"
-    is_heuristic = any(it.get('text', '').startswith('heuristic') for it in rows)
-    title = "── Iteration Timings (Heuristic Fallback) ──" if is_heuristic else "── Iteration Timings ──"
+    is_heuristic = any(it.get("text", "").startswith("heuristic") for it in rows)
+    title = (
+        "── Iteration Timings (Heuristic Fallback) ──"
+        if is_heuristic
+        else "── Iteration Timings ──"
+    )
     lines = [title]
     for it in rows:
         lines.append(
@@ -40,9 +44,7 @@ def _format(rows):
     if len(rows) > 1:
         durs = [it["duration_ms"] for it in rows]
         avg = sum(durs) / len(durs)
-        lines.append(
-            f"\n  Average: {avg:.1f}ms  Min: {min(durs):.1f}ms  Max: {max(durs):.1f}ms"
-        )
+        lines.append(f"\n  Average: {avg:.1f}ms  Min: {min(durs):.1f}ms  Max: {max(durs):.1f}ms")
     return "\n".join(lines)
 
 

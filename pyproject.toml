@@ -58,9 +58,6 @@ ignore = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-filterwarnings = [
-    "ignore::DeprecationWarning:pytest_textual_snapshot",
-]
 
 [tool.bandit]
 # B110: try_except_pass; B608: param to run(); B404/B603: suppressed at call site in profile.py via # nosec

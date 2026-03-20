@@ -41,6 +41,7 @@ class EvidenceBuilder:
         findings += self._kernel_hotspots()
         findings += self._overlap_ratio()
         findings += self._memory_anomalies()
+        findings += self._h2d_spikes()
         return EvidenceReport(
             title="Auto-Analysis",
             profile_path=getattr(self.prof, "path", ""),
@@ -67,38 +68,72 @@ class EvidenceBuilder:
 
         # Low overlap: NCCL not well hidden behind compute
         if nccl_ms > 0 and overlap_pct < 30:
-            findings.append(Finding(
-                type="region",
-                label=f"Low Compute/NCCL Overlap ({overlap_pct}%)",
-                start_ns=self.trim[0],
-                end_ns=self.trim[1],
-                gpu_id=self.device,
-                severity="warning",
-                note=(
-                    f"Only {overlap_pct}% of NCCL time overlaps with compute. "
-                    f"NCCL-only: {result['nccl_only_ms']:.1f}ms out of "
-                    f"{total_ms:.1f}ms total span."
-                ),
-            ))
+            note = (
+                f"Only {overlap_pct}% of NCCL time overlaps with compute. "
+                f"NCCL-only: {result['nccl_only_ms']:.1f}ms out of "
+                f"{total_ms:.1f}ms total span."
+            )
+            # Try same-stream diagnosis for richer note
+            try:
+                kernel_tbl = self.prof.schema.kernel_table
+                if kernel_tbl:
+                    with self.prof._lock:
+                        same_stream = self.prof.conn.execute(
+                            f"""
+                            SELECT k.streamId,
+                                SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
+                                    THEN 1 ELSE 0 END) AS nccl_count,
+                                SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
+                                    THEN 1 ELSE 0 END) AS compute_count
+                            FROM {kernel_tbl} k
+                            JOIN StringIds s ON k.shortName = s.id
+                            WHERE k.deviceId = ?
+                            GROUP BY k.streamId
+                            HAVING nccl_count > 0 AND compute_count > 0
+                            """,
+                            (self.device,),
+                        ).fetchall()
+                    if same_stream:
+                        streams = [str(r["streamId"]) for r in same_stream]
+                        note += (
+                            f" Streams [{', '.join(streams)}] run both NCCL and "
+                            f"compute — overlap is impossible on same stream."
+                        )
+            except Exception:
+                pass
+
+            findings.append(
+                Finding(
+                    type="region",
+                    label=f"Low Compute/NCCL Overlap ({overlap_pct}%)",
+                    start_ns=self.trim[0],
+                    end_ns=self.trim[1],
+                    gpu_id=self.device,
+                    severity="warning",
+                    note=note,
+                )
+            )
 
         # Communication dominated: NCCL > compute
         if nccl_ms > 0 and compute_ms > 0:
             ratio = compute_ms / nccl_ms
             if ratio < 0.5:
-                findings.append(Finding(
-                    type="region",
-                    label=f"Communication Dominated (ratio={ratio:.2f})",
-                    start_ns=self.trim[0],
-                    end_ns=self.trim[1],
-                    gpu_id=self.device,
-                    severity="critical",
-                    note=(
-                        f"Compute/Communication ratio is {ratio:.2f} "
-                        f"(healthy > 2.0). Compute: {compute_ms:.1f}ms, "
-                        f"NCCL: {nccl_ms:.1f}ms. Consider reducing "
-                        f"tensor parallelism degree."
-                    ),
-                ))
+                findings.append(
+                    Finding(
+                        type="region",
+                        label=f"Communication Dominated (ratio={ratio:.2f})",
+                        start_ns=self.trim[0],
+                        end_ns=self.trim[1],
+                        gpu_id=self.device,
+                        severity="critical",
+                        note=(
+                            f"Compute/Communication ratio is {ratio:.2f} "
+                            f"(healthy > 2.0). Compute: {compute_ms:.1f}ms, "
+                            f"NCCL: {nccl_ms:.1f}ms. Consider reducing "
+                            f"tensor parallelism degree."
+                        ),
+                    )
+                )
 
         return findings
 
@@ -117,25 +152,29 @@ class EvidenceBuilder:
         for it in iters:
             if it["duration_ms"] > 1.5 * med:
                 pct = 100 * it["duration_ms"] / med
-                findings.append(Finding(
-                    type="region",
-                    label=f"Slow Iteration {it['iteration']}",
-                    start_ns=int(it["gpu_start_s"] * 1e9),
-                    end_ns=int(it["gpu_end_s"] * 1e9),
-                    gpu_id=self.device,
-                    severity="warning",
-                    note=(
-                        f"{it['duration_ms']:.1f}ms "
-                        f"({pct:.0f}% of median {med:.1f}ms), "
-                        f"{it['kernel_count']} kernels"
-                    ),
-                ))
+                findings.append(
+                    Finding(
+                        type="region",
+                        label=f"Slow Iteration {it['iteration']}",
+                        start_ns=int(it["gpu_start_s"] * 1e9),
+                        end_ns=int(it["gpu_end_s"] * 1e9),
+                        gpu_id=self.device,
+                        severity="warning",
+                        note=(
+                            f"{it['duration_ms']:.1f}ms "
+                            f"({pct:.0f}% of median {med:.1f}ms), "
+                            f"{it['kernel_count']} kernels"
+                        ),
+                    )
+                )
         return findings
 
-    def _gpu_idle_gaps(
-        self, top_n: int = 5, min_gap_ns: int = 1_000_000
-    ) -> list[Finding]:
-        """Top N idle gaps between consecutive kernels → region findings."""
+    def _gpu_idle_gaps(self, top_n: int = 5, min_gap_ns: int = 1_000_000) -> list[Finding]:
+        """Top N idle gaps between consecutive kernels → region findings.
+
+        Enriched with total idle time statistics and CPU attribution
+        from CUDA Runtime API calls during each gap window.
+        """
         sql = f"""\
 WITH ordered AS (
     SELECT k.streamId, k.deviceId,
@@ -157,19 +196,79 @@ LIMIT ?"""
                 sql,
                 (self.device, self.trim[0], self.trim[1], min_gap_ns, top_n),
             ).fetchall()
-        return [
-            Finding(
-                type="region",
-                label=f"GPU Idle Gap ({r['gap_ns'] / 1e6:.2f}ms)",
-                start_ns=int(r["gap_start"]),
-                end_ns=int(r["gap_end"]),
-                gpu_id=self.device,
-                stream=str(r["streamId"]),
-                severity="warning",
-                note=f"Stream {r['streamId']}: {r['gap_ns'] / 1e6:.2f}ms idle",
+
+        # Compute total idle stats for note enrichment
+        total_idle_ns = sum(r["gap_ns"] for r in rows)
+        profile_span = self.trim[1] - self.trim[0]
+        pct = round(100 * total_idle_ns / profile_span, 1) if profile_span > 0 else 0
+
+        findings = []
+        for r in rows:
+            gap_ms = r["gap_ns"] / 1e6
+            note = f"Stream {r['streamId']}: {gap_ms:.2f}ms idle"
+
+            # CPU attribution: find dominant CUDA Runtime API during gap
+            try:
+                runtime_tables = [
+                    t
+                    for t in self.prof.schema.tables
+                    if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME")
+                ]
+                if runtime_tables:
+                    rt_tbl = runtime_tables[0]
+                    with self.prof._lock:
+                        api_rows = self.prof.conn.execute(
+                            f"""
+                            SELECT s.value AS api_name,
+                                   SUM(r.[end] - r.start) AS total_ns
+                            FROM {rt_tbl} r
+                            JOIN StringIds s ON r.nameId = s.id
+                            WHERE r.start < ? AND r.[end] > ?
+                            GROUP BY s.value
+                            ORDER BY total_ns DESC
+                            LIMIT 1
+                            """,
+                            (int(r["gap_end"]), int(r["gap_start"])),
+                        ).fetchall()
+                    if api_rows:
+                        api = api_rows[0]
+                        api_name = api["api_name"].split("_v")[0]  # strip version
+                        api_ms = api["total_ns"] / 1e6
+                        note += f" — CPU: {api_name} ({api_ms:.1f}ms)"
+            except Exception:
+                pass
+
+            findings.append(
+                Finding(
+                    type="region",
+                    label=f"GPU Idle Gap ({gap_ms:.2f}ms)",
+                    start_ns=int(r["gap_start"]),
+                    end_ns=int(r["gap_end"]),
+                    gpu_id=self.device,
+                    stream=str(r["streamId"]),
+                    severity="warning",
+                    note=note,
+                )
             )
-            for r in rows
-        ]
+
+        # Add summary finding if significant idle time
+        if pct > 5 and len(rows) > 0:
+            findings.append(
+                Finding(
+                    type="region",
+                    label=f"GPU Idle Summary ({pct}% of profile)",
+                    start_ns=self.trim[0],
+                    end_ns=self.trim[1],
+                    gpu_id=self.device,
+                    severity="info",
+                    note=(
+                        f"Total: {total_idle_ns / 1e6:.1f}ms idle across "
+                        f"{len(rows)} gaps ({pct}% of profiled span)"
+                    ),
+                )
+            )
+
+        return findings
 
     def _nccl_stalls(self, top_n: int = 3) -> list[Finding]:
         """Longest individual NCCL kernel instances → highlight findings."""
@@ -233,16 +332,12 @@ LIMIT ?"""
             for r in rows
         ]
 
-    def _memory_anomalies(
-        self, min_bytes: int = 10_000_000, top_n: int = 5
-    ) -> list[Finding]:
+    def _memory_anomalies(self, min_bytes: int = 10_000_000, top_n: int = 5) -> list[Finding]:
         """Flag large memory transfers that may stall the GPU."""
         # Resolve memcpy table dynamically (may be versioned)
         memcpy_table = None
         for t in self.prof.schema.tables:
-            if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith(
-                "CUPTI_ACTIVITY_KIND_MEMCPY"
-            ):
+            if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
                 memcpy_table = t
                 break
         if memcpy_table is None:
@@ -263,16 +358,84 @@ LIMIT ?"""
             kind = kind_names.get(r["copyKind"], f"kind{r['copyKind']}")
             mb = r["bytes"] / 1e6
             dur_ms = r["dur_ns"] / 1e6
-            findings.append(Finding(
-                type="highlight",
-                label=f"Large {kind} Transfer ({mb:.1f}MB)",
-                start_ns=int(r["start"]),
-                end_ns=int(r["end"]),
-                gpu_id=self.device,
-                severity="warning" if dur_ms > 1.0 else "info",
-                note=(
-                    f"{kind}: {mb:.1f}MB in {dur_ms:.2f}ms "
-                    f"({r['bytes'] / max(r['dur_ns'], 1) * 1e9 / 1e9:.1f}GB/s)"
-                ),
-            ))
+            findings.append(
+                Finding(
+                    type="highlight",
+                    label=f"Large {kind} Transfer ({mb:.1f}MB)",
+                    start_ns=int(r["start"]),
+                    end_ns=int(r["end"]),
+                    gpu_id=self.device,
+                    severity="warning" if dur_ms > 1.0 else "info",
+                    note=(
+                        f"{kind}: {mb:.1f}MB in {dur_ms:.2f}ms "
+                        f"({r['bytes'] / max(r['dur_ns'], 1) * 1e9 / 1e9:.1f}GB/s)"
+                    ),
+                )
+            )
+        return findings
+
+    def _h2d_spikes(self) -> list[Finding]:
+        """Detect H2D transfer spike windows and mark on timeline."""
+        memcpy_table = None
+        for t in self.prof.schema.tables:
+            if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
+                memcpy_table = t
+                break
+        if memcpy_table is None:
+            return []
+
+        # Group H2D by 1-second windows
+        sql = f"""\
+WITH baseline AS (
+    SELECT MIN(start) AS min_start FROM {memcpy_table}
+    WHERE copyKind = 1 AND [end] >= ? AND start <= ?
+)
+SELECT
+    CAST((m.start - b.min_start) / 1000000000.0 AS INT) AS second,
+    COUNT(*) AS ops,
+    SUM(m.bytes) AS total_bytes,
+    MIN(m.start) AS window_start,
+    MAX(m.[end]) AS window_end
+FROM {memcpy_table} m CROSS JOIN baseline b
+WHERE m.copyKind = 1 AND m.[end] >= ? AND m.start <= ?
+GROUP BY 1
+ORDER BY 1"""
+        try:
+            with self.prof._lock:
+                rows = self.prof.conn.execute(
+                    sql, (self.trim[0], self.trim[1], self.trim[0], self.trim[1])
+                ).fetchall()
+        except Exception:
+            return []
+
+        if len(rows) < 3:
+            return []
+
+        # Find spike windows (> 3× median bytes)
+        sorted_bytes = sorted(r["total_bytes"] for r in rows)
+        median_bytes = sorted_bytes[len(sorted_bytes) // 2]
+        if median_bytes <= 0:
+            return []
+
+        findings = []
+        for r in rows:
+            if r["total_bytes"] > 3 * median_bytes:
+                mb = r["total_bytes"] / 1e6
+                findings.append(
+                    Finding(
+                        type="region",
+                        label=f"H2D Spike ({mb:.1f}MB at t={r['second']}s)",
+                        start_ns=int(r["window_start"]),
+                        end_ns=int(r["window_end"]),
+                        gpu_id=self.device,
+                        severity="info",
+                        note=(
+                            f"{r['ops']} H2D ops, {mb:.1f}MB "
+                            f"(median {median_bytes / 1e6:.1f}MB/s window)"
+                        ),
+                    )
+                )
+                if len(findings) >= 3:  # cap at top 3 spikes
+                    break
+
         return findings

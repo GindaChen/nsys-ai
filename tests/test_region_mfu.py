@@ -235,12 +235,22 @@ def test_compute_region_mfu_from_conn_multi_gpu(tmp_path):
     conn.row_factory = sqlite3.Row
     try:
         r1 = compute_region_mfu_from_conn(
-            conn, str(db), "FlashAttention", 1e18,
-            peak_tflops=None, num_gpus=1, device_id=0,
+            conn,
+            str(db),
+            "FlashAttention",
+            1e18,
+            peak_tflops=None,
+            num_gpus=1,
+            device_id=0,
         )
         r2 = compute_region_mfu_from_conn(
-            conn, str(db), "FlashAttention", 1e18,
-            peak_tflops=None, num_gpus=2, device_id=0,
+            conn,
+            str(db),
+            "FlashAttention",
+            1e18,
+            peak_tflops=None,
+            num_gpus=2,
+            device_id=0,
         )
         assert "error" not in r1 and "error" not in r2
         # num_gpus field
@@ -286,9 +296,7 @@ def test_compute_region_mfu_kernel_mode(tmp_path):
 
 def test_compute_theoretical_flops_attention():
     """Flash attention FLOPs: 4 * S^2 * H * L."""
-    result = compute_theoretical_flops(
-        "attention", hidden_dim=4096, seq_len=131072, num_layers=32
-    )
+    result = compute_theoretical_flops("attention", hidden_dim=4096, seq_len=131072, num_layers=32)
     assert "error" not in result
     # 4 * 131072^2 * 4096 = 2.81474976e14 per layer, * 32 = 9.00719924e15
     expected = 4 * 131072 * 131072 * 4096 * 32
@@ -299,9 +307,7 @@ def test_compute_theoretical_flops_attention():
 
 def test_compute_theoretical_flops_full_layer():
     """Full layer = attention + qkv_proj + output_proj + mlp."""
-    result = compute_theoretical_flops(
-        "full_layer", hidden_dim=4096, seq_len=1024, num_layers=1
-    )
+    result = compute_theoretical_flops("full_layer", hidden_dim=4096, seq_len=1024, num_layers=1)
     assert "error" not in result
     H, S = 4096, 1024
     ffn = 4 * H  # default

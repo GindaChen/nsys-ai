@@ -106,7 +106,10 @@ INSERT INTO StringIds VALUES
     (21, 'cudaMemcpy'),
     (22, 'cudaMemcpyAsync'),
     (23, 'cudaMemset'),
-    (24, 'cudaLaunchKernel');
+    (24, 'cudaLaunchKernel'),
+    -- Additional for V3 overlap diagnosis
+    (25, 'cudaStreamSynchronize'),
+    (11, 'nccl_ReduceScatter_kernel');
 
 INSERT INTO TARGET_INFO_GPU VALUES
     (0, 'NVIDIA Test GPU', '0000:00:00.0', 8589934592, 108, 'TestChip', 0);
@@ -115,27 +118,47 @@ INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES
     (0, 0, 100, '', 108);
 
 INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+    -- Stream 7: compute kernels
     (100, 0, 7, 1, 1000000, 2000000, 1, 1, 32, 1, 1, 256, 1, 1),
     (100, 0, 7, 2, 3000000, 4000000, 2, 2, 16, 1, 1, 128, 1, 1),
-    (100, 0, 8, 10, 2500000, 3500000, 10, 10, 1, 1, 1, 512, 1, 1);
+    -- Stream 8: NCCL on separate stream
+    (100, 0, 8, 10, 2500000, 3500000, 10, 10, 1, 1, 1, 512, 1, 1),
+    -- Stream 7: NCCL on SAME stream as compute (same-stream anti-pattern)
+    (100, 0, 7, 12, 4500000, 5500000, 11, 11, 1, 1, 1, 256, 1, 1),
+    -- Stream 7: another compute kernel after a large gap (for idle gap testing)
+    (100, 0, 7, 13, 8000000, 9000000, 1, 1, 32, 1, 1, 256, 1, 1);
 
 INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
     -- Kernel launches (existing)
     (100, 1,   900000,  1000000, 24),   -- cudaLaunchKernel
     (100, 2,  2900000,  3000000, 24),   -- cudaLaunchKernel
     (100, 10, 2400000,  2500000, 24),   -- cudaLaunchKernel
+    (100, 12, 4400000,  4500000, 24),   -- cudaLaunchKernel (NCCL same-stream)
+    (100, 13, 7900000,  8000000, 24),   -- cudaLaunchKernel (after gap)
     -- Sync API calls (anti-pattern: Excessive Synchronization)
     (100, 100, 5000000, 15000000, 20),  -- cudaDeviceSynchronize, 10ms
     (100, 101, 16000000, 22000000, 20), -- cudaDeviceSynchronize, 6ms
+    -- cudaStreamSynchronize right after NCCL (sync-after-NCCL pattern)
+    (100, 104, 5600000, 5800000, 25),   -- cudaStreamSynchronize, 0.2ms
     -- Sync memcpy (anti-pattern: Synchronous Memcpy)
     (100, 102, 23000000, 23500000, 21), -- cudaMemcpy (sync), 0.5ms
+    -- cudaDeviceSynchronize during GPU idle gap (5.5ms..8ms)
+    (100, 105, 5800000, 7800000, 20),   -- cudaDeviceSynchronize during gap, 2ms
     -- Sync memset (anti-pattern: Synchronous Memset)
     (100, 103, 24000000, 24200000, 23); -- cudaMemset (sync), 0.2ms
 
 -- Sync memcpy correlated data (correlationId=102 matches cudaMemcpy runtime entry)
 -- srcKind=1 = Pageable memory (see CUPTI schema docs)
+-- Also add H2D memcpy at multiple time points for distribution testing
 INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES
-    (100, 0, 7, 102, 1, 1048576, 1, 2, 23100000, 23400000);
+    (100, 0, 7, 102, 1, 1048576, 1, 2, 23100000, 23400000),
+    -- H2D transfers at second 0 (init-heavy: 4MB)
+    (100, 0, 7, 200, 1, 2097152, 7, 2, 100000, 200000),
+    (100, 0, 7, 201, 1, 2097152, 7, 2, 300000, 400000),
+    -- H2D transfer at second 2 (small: 0.1MB)
+    (100, 0, 7, 202, 1, 104858, 7, 2, 2100000, 2200000),
+    -- H2D transfer at second 5 (small: 0.1MB)
+    (100, 0, 7, 203, 1, 104858, 7, 2, 5100000, 5200000);
 
 -- Sync memset correlated data
 INSERT INTO CUPTI_ACTIVITY_KIND_MEMSET VALUES

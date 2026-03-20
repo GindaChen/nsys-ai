@@ -799,6 +799,7 @@ def get_memory_profile_diff(
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
+
 def _load_diff_system_prompt() -> str:
     """Load the diff system prompt, falling back to a minimal prompt if file is missing."""
     _fallback = (
@@ -810,11 +811,18 @@ def _load_diff_system_prompt() -> str:
         return prompt_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         _log_dt = logging.getLogger(__name__)
-        _log_dt.warning("diff_tools: diff_system.txt not found at %s; using minimal fallback prompt", prompt_path)
+        _log_dt.warning(
+            "diff_tools: diff_system.txt not found at %s; using minimal fallback prompt",
+            prompt_path,
+        )
         return _fallback
     except OSError as _exc:
         _log_dt = logging.getLogger(__name__)
-        _log_dt.warning("diff_tools: could not read diff_system.txt at %s: %s; using minimal fallback prompt", prompt_path, _exc)
+        _log_dt.warning(
+            "diff_tools: could not read diff_system.txt at %s: %s; using minimal fallback prompt",
+            prompt_path,
+            _exc,
+        )
         return _fallback
 
 
@@ -823,6 +831,7 @@ DIFF_SYSTEM_PROMPT = _load_diff_system_prompt()
 # Dynamic override: load skills/diff.md when available (falls back to hardcoded prompt).
 try:
     from .prompt_loader import load_skill as _load_skill_diff
+
     _diff_md = _load_skill_diff("skills/diff.md")
     if _diff_md:
         # Preserve the fallback for debugging; expose loaded version as DIFF_SYSTEM_PROMPT
@@ -830,6 +839,7 @@ try:
         DIFF_SYSTEM_PROMPT = _diff_md
 except (ImportError, OSError) as _exc:
     import logging as _logging
+
     _logging.getLogger(__name__).debug("diff_tools: could not load skills/diff.md: %s", _exc)
 
 
@@ -1082,6 +1092,7 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
     """Execute a Phase C tool by name with parsed arguments. Returns a JSON-serialisable dict."""
     args_str = json.dumps(arguments) if arguments else "{}"
     from .tool_dispatch import ToolDispatcher
+
     dispatcher = ToolDispatcher(mode="diff", diff_context=ctx)
     try:
         res = dispatcher.dispatch(name, args_str)

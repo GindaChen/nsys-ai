@@ -299,7 +299,8 @@ def _register_legacy_commands(sub):
         help="Output format (default: text)",
     )
     sp_run.add_argument(
-        "--param", "-p",
+        "--param",
+        "-p",
         action="append",
         default=[],
         metavar="KEY=VALUE",

@@ -67,7 +67,6 @@ def _coerce_param_value(raw_value, param_type):
     return raw_value
 
 
-
 def _cmd_info(args, _profile):
     with _profile.open(args.profile) as prof:
         m = prof.meta
@@ -628,8 +627,7 @@ def _cmd_skill(args, _profile):
 
             if skill_for_params is not None and hasattr(skill_for_params, "params"):
                 param_specs = {
-                    p.name: p for p in skill_for_params.params
-                    if getattr(p, "name", None)
+                    p.name: p for p in skill_for_params.params if getattr(p, "name", None)
                 }
             else:
                 param_specs = None
@@ -807,4 +805,3 @@ def _cmd_ask(args, _profile):
         print(agent.ask(args.question))
     finally:
         agent.close()
-

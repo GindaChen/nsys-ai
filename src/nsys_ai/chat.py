@@ -80,13 +80,16 @@ def _route_skill_names(messages: list) -> list[str]:
     skills: list[str] = []
     if any(k in last for k in ("mfu", "efficiency", "utilization", "tflops", "flops", "flash")):
         skills.append("skills/mfu.md")
-    if any(k in last for k in ("bottleneck", "triage", "analyze", "slow", "investigate", "what's in")):
+    if any(
+        k in last for k in ("bottleneck", "triage", "analyze", "slow", "investigate", "what's in")
+    ):
         skills.append("skills/triage.md")
     if any(k in last for k in ("nccl", "distributed", "multi-gpu", "scaling", "imbalance")):
         skills.append("skills/distributed.md")
     if any(k in last for k in ("variance", "spiky", "spike", "inconsistent", "jitter")):
         skills.append("skills/variance.md")
     return skills
+
 
 # ---------------------------------------------------------------------------
 # Agent-loop constants
@@ -295,7 +298,12 @@ def run_agent_loop(
                 )
             else:
                 # Tools only implemented in the streaming path get an explicit message
-                if name in {"get_gpu_peak_tflops", "compute_mfu", "compute_region_mfu", "compute_theoretical_flops"}:
+                if name in {
+                    "get_gpu_peak_tflops",
+                    "compute_mfu",
+                    "compute_region_mfu",
+                    "compute_theoretical_flops",
+                }:
                     tool_result = (
                         f"Tool '{name}' is only supported in the streaming API path "
                         "and cannot be executed in this non-streaming request."
@@ -351,6 +359,7 @@ def _prepare_session(
 
         def _runner(sql, c=conn):
             return query_profile_db(c, sql)
+
         query_runner = _runner
 
     _effective_skills = explicit_skills
@@ -364,6 +373,7 @@ def _prepare_session(
     if _effective_skills:
         try:
             from .prompt_loader import load_skill_context
+
             _skill_docs = load_skill_context(_effective_skills) or None
         except Exception:
             pass
@@ -425,7 +435,6 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             return {"content": f"LLM error: {_friendly_error(model, e)}", "actions": []}
         finally:
             conn.close()
-
 
     try:
         response = litellm.completion(
@@ -579,8 +588,13 @@ def stream_agent_loop(
 
     # Fix 2: Filter out DB-dependent tools when no profile is connected.
     # This prevents LLM from calling tools that always fail, avoiding retry spirals.
-    _DB_TOOLS = {"query_profile_db", "get_gpu_peak_tflops", "compute_region_mfu",
-                 "get_gpu_overlap_stats", "get_nccl_breakdown"}
+    _DB_TOOLS = {
+        "query_profile_db",
+        "get_gpu_peak_tflops",
+        "compute_region_mfu",
+        "get_gpu_overlap_stats",
+        "get_nccl_breakdown",
+    }
     if not use_diff and conn is None and tools:
         tools = [t for t in tools if t.get("function", {}).get("name") not in _DB_TOOLS]
 

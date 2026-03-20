@@ -22,75 +22,70 @@ import subprocess  # nosec B404 — only used for hardcoded nvidia-smi
 # ---------------------------------------------------------------------------
 GPU_PEAK_TFLOPS: dict[str, float] = {
     # === Blackwell (2024-2025) ===
-    "B200": 2250.0,       # GB200/B200 SXM — BF16 dense
-    "B100": 1750.0,       # BF16 dense
-    "GB200": 2250.0,      # Grace Blackwell Superchip
-    "RTX 5090": 838.0,    # GeForce RTX 5090 — BF16/FP16 dense
-    "RTX 5080": 453.0,    # GeForce RTX 5080 — BF16/FP16 dense
-    "RTX 5070 Ti": 370.0, # GeForce RTX 5070 Ti — BF16/FP16 dense
-    "RTX 5070": 246.0,    # GeForce RTX 5070 — BF16/FP16 dense
-
+    "B200": 2250.0,  # GB200/B200 SXM — BF16 dense
+    "B100": 1750.0,  # BF16 dense
+    "GB200": 2250.0,  # Grace Blackwell Superchip
+    "RTX 5090": 838.0,  # GeForce RTX 5090 — BF16/FP16 dense
+    "RTX 5080": 453.0,  # GeForce RTX 5080 — BF16/FP16 dense
+    "RTX 5070 Ti": 370.0,  # GeForce RTX 5070 Ti — BF16/FP16 dense
+    "RTX 5070": 246.0,  # GeForce RTX 5070 — BF16/FP16 dense
     # === Hopper (2022-2023) ===
-    "H200": 989.0,        # H200 SXM — BF16 dense (same die as H100 SXM)
-    "H100 SXM": 989.0,    # H100 SXM5 — BF16 dense
+    "H200": 989.0,  # H200 SXM — BF16 dense (same die as H100 SXM)
+    "H100 SXM": 989.0,  # H100 SXM5 — BF16 dense
     "H100 80GB HBM3": 989.0,
-    "H100 PCIe": 756.0,   # H100 PCIe — BF16 dense
-    "H100 NVL": 835.0,    # H100 NVL — BF16 dense
-    "H800": 989.0,        # H800 (China variant, same die)
-
+    "H100 PCIe": 756.0,  # H100 PCIe — BF16 dense
+    "H100 NVL": 835.0,  # H100 NVL — BF16 dense
+    "H800": 989.0,  # H800 (China variant, same die)
     # === Ada Lovelace (2022-2023) ===
-    "L40S": 362.0,        # L40S — BF16/FP16 dense
-    "L40": 181.0,         # L40 — BF16/FP16 dense
-    "L4": 121.0,          # L4 — BF16/FP16 dense
+    "L40S": 362.0,  # L40S — BF16/FP16 dense
+    "L40": 181.0,  # L40 — BF16/FP16 dense
+    "L4": 121.0,  # L4 — BF16/FP16 dense
     "RTX 6000 Ada": 364.0,  # RTX 6000 Ada Generation
     "RTX 5880 Ada": 305.0,  # RTX 5880 Ada
     "RTX 5000 Ada": 200.0,  # RTX 5000 Ada
     "RTX 4500 Ada": 160.0,  # RTX 4500 Ada
     "RTX 4000 Ada": 102.0,  # RTX 4000 Ada
-    "RTX 4090": 330.0,    # GeForce RTX 4090 — BF16/FP16 w/ FP32 accum (dense, effective)
+    "RTX 4090": 330.0,  # GeForce RTX 4090 — BF16/FP16 w/ FP32 accum (dense, effective)
     "RTX 4080 SUPER": 204.0,
-    "RTX 4080": 204.0,    # GeForce RTX 4080 — BF16/FP16 dense
+    "RTX 4080": 204.0,  # GeForce RTX 4080 — BF16/FP16 dense
     "RTX 4070 Ti SUPER": 184.0,
     "RTX 4070 Ti": 184.0,
     "RTX 4070 SUPER": 175.0,
     "RTX 4070": 147.0,
-
     # === Ampere (2020-2022) ===
     "A100-SXM4-80GB": 312.0,
     "A100-SXM4-40GB": 312.0,
     "A100-PCIE-80GB": 312.0,
     "A100-PCIE-40GB": 312.0,
-    "A100 80GB": 312.0,   # A100 80GB (SXM or PCIe) — BF16 dense
+    "A100 80GB": 312.0,  # A100 80GB (SXM or PCIe) — BF16 dense
     "A100 40GB": 312.0,
     "A100X": 312.0,
-    "A800": 312.0,        # A800 (China variant, same die)
-    "A40": 150.0,         # A40 — FP16 dense
-    "A30": 165.0,         # A30 — BF16 dense
-    "A10G": 125.0,        # A10G (AWS) — BF16 dense
-    "A10": 125.0,         # A10 — BF16 dense
-    "A16": 16.9,          # A16 (per GPU, 4 GPUs per card)
+    "A800": 312.0,  # A800 (China variant, same die)
+    "A40": 150.0,  # A40 — FP16 dense
+    "A30": 165.0,  # A30 — BF16 dense
+    "A10G": 125.0,  # A10G (AWS) — BF16 dense
+    "A10": 125.0,  # A10 — BF16 dense
+    "A16": 16.9,  # A16 (per GPU, 4 GPUs per card)
     "A2": 36.0,
-    "RTX A6000": 310.0,   # RTX A6000 Ampere
+    "RTX A6000": 310.0,  # RTX A6000 Ampere
     "RTX A5500": 256.0,
     "RTX A5000": 222.0,
     "RTX A4500": 185.0,
     "RTX A4000": 153.0,
-    "RTX 3090 Ti": 160.0, # GeForce RTX 3090 Ti
-    "RTX 3090": 142.0,    # GeForce RTX 3090
+    "RTX 3090 Ti": 160.0,  # GeForce RTX 3090 Ti
+    "RTX 3090": 142.0,  # GeForce RTX 3090
     "RTX 3080 Ti": 136.0,
     "RTX 3080": 119.0,
     "RTX 3070 Ti": 87.0,
     "RTX 3070": 81.0,
-
     # === Turing (2018-2019) ===
-    "T4": 65.0,           # T4 — FP16 dense
+    "T4": 65.0,  # T4 — FP16 dense
     "RTX 2080 Ti": 53.8,  # GeForce RTX 2080 Ti
-
     # === Volta (2017-2018) ===
-    "V100 SXM2": 125.0,   # V100 SXM2 — FP16 dense
+    "V100 SXM2": 125.0,  # V100 SXM2 — FP16 dense
     "V100S PCIe": 130.0,  # V100S PCIe
-    "V100 PCIe": 112.0,   # V100 PCIe
-    "V100": 112.0,        # V100 (PCIe fallback)
+    "V100 PCIe": 112.0,  # V100 PCIe
+    "V100": 112.0,  # V100 (PCIe fallback)
 }
 
 
