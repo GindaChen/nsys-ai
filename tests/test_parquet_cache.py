@@ -100,9 +100,10 @@ class TestBuildAndOpen:
         parquet_cache.build_cache(minimal_nsys_db_path)
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
 
-        # Touch the SQLite to make it newer
+        # Touch the SQLite to make it newer; sleep long enough to exceed
+        # coarse filesystem mtime granularity (often 1s).
         import time
-        time.sleep(0.1)
+        time.sleep(1.1)
         os.utime(minimal_nsys_db_path, None)
 
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is False

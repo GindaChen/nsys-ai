@@ -97,12 +97,16 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
 ORDER BY gap_ns DESC
 LIMIT ?"""
+    import sqlite3
+
+    import duckdb
+
     from ...sql_compat import sqlite_to_duckdb
     try:
-        rows = [
-            dict(r) for r in conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit]).fetchall()
-        ]
-    except Exception as e:
+        cur = conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    except (sqlite3.Error, duckdb.Error) as e:
         _log.debug("gpu_idle_gaps: %s", e)
         return []
 

@@ -604,9 +604,10 @@ class Profile:
 
         if isinstance(conn, duckdb.DuckDBPyConnection):
             ddb_sql = sqlite_to_duckdb(sql)
-            cur = conn.execute(ddb_sql, params or [])
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            with self._lock:
+                cur = conn.execute(ddb_sql, params or [])
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
         else:
             if not getattr(self, "_warned_sqlite_fallback", False):
                 self._log.warning(

@@ -106,6 +106,9 @@ def build_cache(sqlite_path: str) -> Path:
     Returns the cache directory path.
     """
     cache_dir = _cache_dir_for(sqlite_path)
+    if cache_dir.exists():
+        import shutil
+        shutil.rmtree(cache_dir, ignore_errors=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     print("Building analysis cache (first run only)...", file=sys.stderr, flush=True)
@@ -114,8 +117,9 @@ def build_cache(sqlite_path: str) -> Path:
     db = duckdb.connect()
 
     # Attach the SQLite database
+    safe_sqlite_path = str(sqlite_path).replace("'", "''")
     try:
-        db.execute(f"ATTACH '{sqlite_path}' AS src (TYPE SQLITE)")
+        db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
     except duckdb.Error:
         # Clean up partial attach before retry with permissive typing
         try:
@@ -123,7 +127,7 @@ def build_cache(sqlite_path: str) -> Path:
         except duckdb.Error:
             pass
         db.execute("SET sqlite_all_varchar = true")
-        db.execute(f"ATTACH '{sqlite_path}' AS src (TYPE SQLITE)")
+        db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
 
     # Discover which tables actually exist in the source
     # Note: DuckDB doesn't expose sqlite_master from attached DBs.
@@ -233,8 +237,9 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     # Create views over Parquet files
     for parquet_file in cache_dir.glob("*.parquet"):
         view_name = parquet_file.stem
+        safe_fpath = str(parquet_file).replace("'", "''")
         db.execute(
-            f"CREATE VIEW {view_name} AS SELECT * FROM '{parquet_file}'"
+            f'CREATE VIEW "{view_name}" AS SELECT * FROM \'{safe_fpath}\''
         )
 
     # ── Create alias views for SQLite table names ─────────────────────
@@ -244,19 +249,23 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         "kernels": [
             "CUPTI_ACTIVITY_KIND_KERNEL",
             "CUPTI_ACTIVITY_KIND_KERNEL_V2",
+            "CUPTI_ACTIVITY_KIND_KERNEL_V3",
         ],
         "nvtx": ["NVTX_EVENTS"],
         "runtime": [
             "CUPTI_ACTIVITY_KIND_RUNTIME",
             "CUPTI_ACTIVITY_KIND_RUNTIME_V2",
+            "CUPTI_ACTIVITY_KIND_RUNTIME_V3",
         ],
         "memcpy": [
             "CUPTI_ACTIVITY_KIND_MEMCPY",
             "CUPTI_ACTIVITY_KIND_MEMCPY_V2",
+            "CUPTI_ACTIVITY_KIND_MEMCPY_V3",
         ],
         "memset": [
             "CUPTI_ACTIVITY_KIND_MEMSET",
             "CUPTI_ACTIVITY_KIND_MEMSET_V2",
+            "CUPTI_ACTIVITY_KIND_MEMSET_V3",
         ],
         "string_ids": ["StringIds"],
         "gpu_info": ["TARGET_INFO_GPU"],

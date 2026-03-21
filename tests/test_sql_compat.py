@@ -26,10 +26,11 @@ class TestSqliteToDuckdb:
         assert sqlite_to_duckdb(sql) == sql
 
     def test_preserves_array_indexing(self):
-        """DuckDB array indexing (arr[0]) should not be matched — digits aren't \\w+."""
-        # Note: arr[0] won't match because 0 is not \w+ (only matches [a-zA-Z0-9_]+)
+        """DuckDB array indexing (arr[0]) should not be bracket-escaped as an identifier."""
+        # Note: arr[0] is preserved because the translation regex only rewrites bracketed
+        # identifiers where the first character after '[' is a letter or underscore
+        # (e.g., [end]), not a digit as in [0].
         sql = "SELECT arr[0] FROM t"
-        # This actually won't match because the regex needs \w+ (word chars)
         assert sqlite_to_duckdb(sql) == sql
 
     def test_where_clause(self):

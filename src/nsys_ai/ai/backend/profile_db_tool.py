@@ -117,8 +117,9 @@ def query_profile_db(
     # DuckDB translation for LLM-generated SQL
     q = sqlite_to_duckdb(q)
 
+    import duckdb
     # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
-    if "sqlite_master" in q.lower():
+    if "sqlite_master" in q.lower() and isinstance(conn, duckdb.DuckDBPyConnection):
         q = "SHOW TABLES"
 
     try:
@@ -257,8 +258,7 @@ def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Con
     from nsys_ai import parquet_cache
 
     try:
-        if parquet_cache.is_cache_valid(path):
-            return parquet_cache.open_cached_db(path)
+        return parquet_cache.open_cached_db(path)
     except Exception as e:
         _log.warning("Failed to open DuckDB cache for %s, falling back to SQLite: %s", path, e)
 
