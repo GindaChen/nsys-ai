@@ -35,8 +35,8 @@ def _execute(conn, **kwargs):
 
     # Optional depth filtering: only keep rows at exactly the requested depth
     if depth is not None:
-        if depth > 0 and not any(r.get("nvtx_depth", 0) > 0 for r in rows):
-            return [{"error": "Depth filtering >0 requested, but profile has no nested NVTX regions (all depth 0). Note: depth filtering requires Tier 2 sqlite attribution."}]
+        if depth < 0:
+            return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
         rows = [r for r in rows if r.get("nvtx_depth") == depth]
         if not rows:
             return []

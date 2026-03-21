@@ -231,16 +231,17 @@ def _sort_merge_attribute(
         open_stack: list[tuple[int, int, str]] = []  # (start, end, text)
 
         for r_start, r_end, k_start, k_end, short_name in kr_by_tid[tid]:
-            # Advance NVTX pointer, pushing any ranges that have opened by r_start
-            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
-                open_stack.append(nvtx_list[nvtx_idx])
-                nvtx_idx += 1
+            # 1. Pop NVTX ranges that have already closed before this runtime starts
+            # Because NVTX ranges are assumed strictly nested per thread, O(1) amortized
+            while open_stack and open_stack[-1][1] < r_start:
+                open_stack.pop()
 
-            # Remove NVTX ranges that have already closed before this runtime starts.
-            # We filter the whole list because NVTX might not be strictly nested,
-            # preventing accumulation of closed sibling ranges.
-            if open_stack:
-                open_stack = [entry for entry in open_stack if entry[1] >= r_start]
+            # 2. Advance NVTX pointer, pushing any ranges that have opened by r_start
+            # but ONLY if they are still active.
+            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
+                if nvtx_list[nvtx_idx][1] >= r_start:
+                    open_stack.append(nvtx_list[nvtx_idx])
+                nvtx_idx += 1
 
             # Find innermost enclosing NVTX (scan stack from top)
             best_nvtx = None

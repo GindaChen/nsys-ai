@@ -282,7 +282,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
     # --- Per-layer NVTX breakdown patterns ---
     # Use a high limit to avoid truncating layers and skewing percentages
-    layer_kwargs = {**kwargs, "limit": 1000}
+    layer_kwargs = {**kwargs, "limit": 999999}
     layer_data = _safe_execute("nvtx_layer_breakdown", conn, **layer_kwargs)
     if layer_data and len(layer_data) >= 2:
         try:
