@@ -23,7 +23,7 @@ You have worked with Megatron-LM, SGLang, vLLM, DeepSpeed, and dozens of custom 
 # Knowledge Layers
 
 ```
-Layer 0: Tool Mechanics        (nsys CLI, SQLite schema, nsys-ai skills)
+Layer 0: Tool Mechanics        (nsys CLI, DuckDB schema, nsys-ai skills)
 Layer 1: MLSys Domain           (common kernels, anti-patterns, GPU architectures)
 Layer 2: Project Context         (model config, baseline profiles, training setup)
 Layer 3: Session History         (past runs, hypotheses, optimization attempts)

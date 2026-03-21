@@ -29,10 +29,18 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
     This helper finds the first matching table for each logical kind.
     """
     try:
-        tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
+        # DuckDB: use SHOW TABLES; SQLite: use sqlite_master
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            tables = {
+                row[0]
+                for row in conn.execute("SHOW TABLES").fetchall()
+            }
+        else:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
     except Exception:
         return {}
 
@@ -192,12 +200,17 @@ class Skill:
         nvtx_tbl = resolved.get("nvtx_table", "NVTX_EVENTS")
         if "{nvtx_text_expr}" in self.sql or "{nvtx_text_join}" in self.sql:
             try:
-                has_textid = (
-                    conn.execute(
-                        f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_tbl}') WHERE name='textId'"
-                    ).fetchone()[0]
-                    > 0
-                )
+                import duckdb as _ddb
+                if isinstance(conn, _ddb.DuckDBPyConnection):
+                    cols = [r[0] for r in conn.execute(f"DESCRIBE {nvtx_tbl}").fetchall()]
+                    has_textid = "textId" in cols
+                else:
+                    has_textid = (
+                        conn.execute(
+                            f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_tbl}') WHERE name='textId'"
+                        ).fetchone()[0]
+                        > 0
+                    )
             except Exception:
                 has_textid = False
             if has_textid:
@@ -208,6 +221,11 @@ class Skill:
                 resolved.setdefault("nvtx_text_join", "")
 
         sql = self.sql.format(**resolved) if resolved else self.sql
+        # Apply DuckDB SQL translation if needed
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            from nsys_ai.sql_compat import sqlite_to_duckdb
+            sql = sqlite_to_duckdb(sql)
         cursor = conn.execute(sql)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         return [dict(zip(columns, row)) for row in cursor.fetchall()]

@@ -691,10 +691,13 @@ def get_launch_config_diff(
     """
     Grid/block/registers before vs after; explains 'why'. Returns error when columns missing (BETA).
     """
-    # Launch-config columns are BETA; detect with PRAGMA table_info
+    # Launch-config columns are BETA; detect with DESCRIBE
     kt = ctx.before.schema.kernel_table
-    with ctx.before._lock:
-        cols = [r[1] for r in ctx.before.conn.execute(f"PRAGMA table_info({kt})").fetchall()]
+    try:
+        col_rows = ctx.before._duckdb_query(f"DESCRIBE {kt}")
+        cols = [r.get("column_name") or r.get("name") or "" for r in col_rows]
+    except Exception:
+        cols = []
     if not ("gridX" in cols or "blockX" in cols):
         return {
             "error": "not available",
@@ -1159,12 +1162,11 @@ def _has_overhead_in_window(prof: Profile, trim: tuple[int, int]) -> bool:
     if "CUPTI_ACTIVITY_KIND_OVERHEAD" not in prof.schema.tables or not trim:
         return False
     try:
-        with prof._lock:
-            r = prof.conn.execute(
-                "SELECT 1 FROM CUPTI_ACTIVITY_KIND_OVERHEAD WHERE start < ? AND [end] > ? LIMIT 1",
-                (trim[1], trim[0]),
-            ).fetchone()
-        return r is not None
+        rows = prof._duckdb_query(
+            "SELECT 1 FROM CUPTI_ACTIVITY_KIND_OVERHEAD WHERE start < ? AND [end] > ? LIMIT 1",
+            [trim[1], trim[0]],
+        )
+        return len(rows) > 0
     except Exception:
         return False
 

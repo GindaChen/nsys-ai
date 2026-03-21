@@ -34,12 +34,12 @@ def test_build_system_prompt():
     assert "{skill_catalog}" not in prompt  # should be substituted
 
 
-def test_agent_skill_selection():
+def test_agent_skill_selection(minimal_nsys_db_path):
     """Agent should select relevant skills for a question."""
     from nsys_ai.agent.loop import Agent
 
     # Use in-memory DB (won't run skills successfully but tests selection)
-    agent = Agent(":memory:")
+    agent = Agent(minimal_nsys_db_path)
     try:
         selected = agent._select_skills("why are there bubbles in the GPU pipeline?")
         assert "gpu_idle_gaps" in selected
@@ -56,16 +56,11 @@ def test_agent_skill_selection():
         agent.close()
 
 
-def test_agent_run_skill():
+def test_agent_run_skill(minimal_nsys_db_path):
     """Agent should be able to run schema_inspect on a real db."""
     from nsys_ai.agent.loop import Agent
 
-    # Create a minimal in-memory DB
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE test (id INTEGER)")
-    conn.close()
-
-    agent = Agent(":memory:")
+    agent = Agent(minimal_nsys_db_path)
     try:
         # schema_inspect should work on any SQLite db
         result = agent.run_skill("schema_inspect")

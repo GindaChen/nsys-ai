@@ -200,6 +200,137 @@ def minimal_nsys_db_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DuckDB in-memory fixture — exercises the DuckDB query code path.
+# ---------------------------------------------------------------------------
+
+# DuckDB uses "end" (double-quoted) instead of SQLite's `end` (unquoted).
+# The schema below mirrors _NSYS_SCHEMA_SQL but with DuckDB syntax.
+_DUCKDB_SCHEMA_SQL = """
+CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value VARCHAR);
+CREATE TABLE TARGET_INFO_GPU (
+    id INTEGER PRIMARY KEY, name VARCHAR, busLocation VARCHAR DEFAULT '',
+    totalMemory BIGINT DEFAULT 0, smCount INTEGER DEFAULT 0,
+    chipName VARCHAR DEFAULT '', memoryBandwidth BIGINT DEFAULT 0
+);
+CREATE TABLE TARGET_INFO_CUDA_DEVICE (
+    gpuId INTEGER, cudaId INTEGER, pid INTEGER DEFAULT 0,
+    uuid VARCHAR DEFAULT '', numMultiprocessors INTEGER DEFAULT 0
+);
+CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+    globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
+    streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+    start BIGINT NOT NULL, "end" BIGINT NOT NULL,
+    shortName INTEGER NOT NULL, demangledName INTEGER DEFAULT 0,
+    gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1, gridZ INTEGER DEFAULT 1,
+    blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1
+);
+CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY (
+    globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
+    streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+    copyKind INTEGER DEFAULT 0, bytes BIGINT DEFAULT 0,
+    srcKind INTEGER DEFAULT 0, dstKind INTEGER DEFAULT 0,
+    start BIGINT NOT NULL, "end" BIGINT NOT NULL
+);
+CREATE TABLE CUPTI_ACTIVITY_KIND_MEMSET (
+    globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
+    streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+    bytes BIGINT DEFAULT 0, value INTEGER DEFAULT 0,
+    start BIGINT NOT NULL, "end" BIGINT NOT NULL
+);
+CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+    globalTid INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+    start BIGINT NOT NULL, "end" BIGINT NOT NULL,
+    nameId INTEGER DEFAULT 0
+);
+CREATE TABLE NVTX_EVENTS (
+    globalTid INTEGER DEFAULT 0, start BIGINT NOT NULL, "end" BIGINT DEFAULT -1,
+    text VARCHAR DEFAULT '', eventType INTEGER DEFAULT 59,
+    rangeId INTEGER DEFAULT 0, textId INTEGER DEFAULT NULL
+);
+CREATE TABLE ThreadNames (
+    globalTid INTEGER, nameId INTEGER, priority INTEGER DEFAULT 0
+);
+"""
+
+
+@pytest.fixture
+def duckdb_conn():
+    """Return a DuckDB connection pre-populated with the minimal Nsight schema.
+
+    Uses the same seed data as the SQLite fixtures. The DuckDB path is
+    exercised by the ``_duckdb_query()`` method when ``Profile.db`` is set.
+    """
+    import duckdb  # noqa: F811
+
+    db = duckdb.connect()
+    # Create schema
+    for stmt in _DUCKDB_SCHEMA_SQL.strip().split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            db.execute(stmt)
+
+    # Seed data — same values as _NSYS_SEED_SQL but without SQLite comments
+    db.execute("""
+        INSERT INTO StringIds VALUES
+            (1, 'kernel_A'), (2, 'kernel_B'), (10, 'nccl_AllReduce_kernel'),
+            (20, 'cudaDeviceSynchronize'), (21, 'cudaMemcpy'),
+            (22, 'cudaMemcpyAsync'), (23, 'cudaMemset'),
+            (24, 'cudaLaunchKernel'), (25, 'cudaStreamSynchronize'),
+            (11, 'nccl_ReduceScatter_kernel')
+    """)
+    db.execute("""
+        INSERT INTO TARGET_INFO_GPU VALUES
+            (0, 'NVIDIA Test GPU', '0000:00:00.0', 8589934592, 108, 'TestChip', 0)
+    """)
+    db.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108)")
+    db.execute("""
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (100, 0, 7, 1, 1000000, 2000000, 1, 1, 32, 1, 1, 256, 1, 1),
+            (100, 0, 7, 2, 3000000, 4000000, 2, 2, 16, 1, 1, 128, 1, 1),
+            (100, 0, 8, 10, 2500000, 3500000, 10, 10, 1, 1, 1, 512, 1, 1),
+            (100, 0, 7, 12, 4500000, 5500000, 11, 11, 1, 1, 1, 256, 1, 1),
+            (100, 0, 7, 13, 8000000, 9000000, 1, 1, 32, 1, 1, 256, 1, 1)
+    """)
+    db.execute("""
+        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
+            (100, 1,   900000,  1000000, 24),
+            (100, 2,  2900000,  3000000, 24),
+            (100, 10, 2400000,  2500000, 24),
+            (100, 12, 4400000,  4500000, 24),
+            (100, 13, 7900000,  8000000, 24),
+            (100, 100, 5000000, 15000000, 20),
+            (100, 101, 16000000, 22000000, 20),
+            (100, 104, 5600000, 5800000, 25),
+            (100, 102, 23000000, 23500000, 21),
+            (100, 105, 5800000, 7800000, 20),
+            (100, 103, 24000000, 24200000, 23)
+    """)
+    db.execute("""
+        INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES
+            (100, 0, 7, 102, 1, 1048576, 1, 2, 23100000, 23400000),
+            (100, 0, 7, 200, 1, 2097152, 7, 2, 100000, 200000),
+            (100, 0, 7, 201, 1, 2097152, 7, 2, 300000, 400000),
+            (100, 0, 7, 202, 1, 104858, 7, 2, 2100000, 2200000),
+            (100, 0, 7, 203, 1, 104858, 7, 2, 5100000, 5200000)
+    """)
+    db.execute("""
+        INSERT INTO CUPTI_ACTIVITY_KIND_MEMSET VALUES
+            (100, 0, 7, 103, 4096, 0, 24050000, 24150000)
+    """)
+    db.execute("""
+        INSERT INTO NVTX_EVENTS (globalTid, start, "end", text, eventType, rangeId) VALUES
+            (100, 500000,  4500000, 'train_step', 59, 0),
+            (100, 900000,  2100000, 'forward',    59, 1)
+    """)
+    db.execute("""
+        INSERT INTO ThreadNames VALUES (100, 24, 1)
+    """)
+    yield db
+    db.close()
+
+
+
+# ---------------------------------------------------------------------------
 # Enhanced fixture with nested NVTX hierarchy (multi-layer)
 # ---------------------------------------------------------------------------
 

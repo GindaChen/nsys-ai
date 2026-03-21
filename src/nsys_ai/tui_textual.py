@@ -34,48 +34,24 @@ def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
     """Return top kernels by total GPU duration as a list of dicts.
 
     Each dict has: name, count, total_ms, avg_ms.
-    Opens the file in read-only URI mode; returns [] on any error.
+    Opens the file via accelerated Profile class; returns [] on any error.
     """
     try:
-        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
+        from .profile import open as open_profile
+
+        with open_profile(sqlite_path) as prof:
+            aggs = prof.aggregate_kernels(device=None, limit=limit)
+            return [
+                {
+                    "name": k.get("name", ""),
+                    "count": k.get("count", 0),
+                    "total_ms": k.get("total_ns", 0) / 1e6,
+                    "avg_ms": k.get("avg_ns", 0) / 1e6,
+                }
+                for k in aggs
+            ]
     except Exception:
         return []
-    try:
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        kernel_table = next(
-            (
-                t
-                for t in (
-                    "CUPTI_ACTIVITY_KIND_KERNEL",
-                    "CUPTI_ACTIVITY_KIND_KERNEL_V2",
-                    "CUPTI_ACTIVITY_KIND_KERNEL_V3",
-                )
-                if t in tables
-            ),
-            None,
-        )
-        if not kernel_table:
-            return []
-        rows = conn.execute(
-            f"""
-            SELECT s.value AS name,
-                   COUNT(*) AS count,
-                   SUM(k.[end] - k.start) / 1e6 AS total_ms,
-                   AVG(k.[end] - k.start) / 1e6 AS avg_ms
-            FROM {kernel_table} k
-            JOIN StringIds s ON k.shortName = s.id
-            GROUP BY k.shortName
-            ORDER BY total_ms DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------

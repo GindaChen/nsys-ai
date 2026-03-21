@@ -189,8 +189,7 @@ def detect_iterations(
         text_expr = "n.text"
         text_join = ""
 
-    with prof._lock:
-        pri_nvtx = prof.conn.execute(
+    pri_nvtx = prof._duckdb_query(
             f"""
             SELECT {text_expr} AS text, n.start, n.[end] FROM {nvtx_table} n
             {text_join}
@@ -199,7 +198,7 @@ def detect_iterations(
             ORDER BY n.start
         """,
             (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
-        ).fetchall()
+        )
 
     # Filter to non-overlapping (top-level only)
     iterations = []
@@ -213,15 +212,13 @@ def detect_iterations(
     # If no NVTX markers match, fall back to detecting iterations by finding
     # large gaps in kernel execution on the primary CPU thread across all streams.
     if not iterations:
-        with prof._lock:
-            # Get all kernels on the primary thread
-            rt_all = prof.conn.execute(
+            rt_all = prof._duckdb_query(
                 f"""
                 SELECT correlationId, start, [end] FROM {runtime_table}
                 WHERE globalTid = ? ORDER BY start
                 """,
                 (primary_tid,),
-            ).fetchall()
+            )
 
             if not rt_all:
                 return []
@@ -283,14 +280,13 @@ def detect_iterations(
         return []
 
     # For each iteration, count kernels and compute GPU time
-    with prof._lock:
-        rt_all = prof.conn.execute(
-            f"""
-            SELECT start, [end], correlationId FROM {runtime_table}
-            WHERE globalTid = ? ORDER BY start
+    rt_all = prof._duckdb_query(
+        f"""
+        SELECT start, [end], correlationId FROM {runtime_table}
+        WHERE globalTid = ? ORDER BY start
         """,
-            (primary_tid,),
-        ).fetchall()
+        (primary_tid,),
+    )
 
     results = []
     for i, it in enumerate(iterations):

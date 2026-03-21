@@ -97,11 +97,12 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
 ORDER BY gap_ns DESC
 LIMIT ?"""
+    from ...sql_compat import sqlite_to_duckdb
     try:
         rows = [
-            dict(r) for r in conn.execute(gap_sql, trim_params + [min_gap_ns, limit]).fetchall()
+            dict(r) for r in conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit]).fetchall()
         ]
-    except sqlite3.OperationalError as e:
+    except Exception as e:
         _log.debug("gpu_idle_gaps: %s", e)
         return []
 
@@ -126,25 +127,27 @@ SELECT COUNT(*) AS gap_count,
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     try:
-        agg = dict(conn.execute(agg_sql, trim_params + [min_gap_ns]).fetchone())
-    except sqlite3.OperationalError:
+        from ...sql_compat import sqlite_to_duckdb
+        agg = dict(conn.execute(sqlite_to_duckdb(agg_sql), trim_params + [min_gap_ns]).fetchone())
+    except Exception:
         agg = {}
 
     # Profile time range for percentage calculation
     # Gaps are summed across ALL streams, so we need to normalize by
     # the number of active streams to avoid pct > 100%.
     try:
+        from ...sql_compat import sqlite_to_duckdb
         time_range = conn.execute(
-            f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
+            sqlite_to_duckdb(f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
             trim_params,
         ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
         stream_count_row = conn.execute(
-            f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
+            sqlite_to_duckdb(f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
             trim_params,
         ).fetchone()
         n_streams = stream_count_row["n"] if stream_count_row else 1
-    except sqlite3.OperationalError:
+    except Exception:
         profile_span_ns = 0
         n_streams = 1
 
@@ -172,7 +175,8 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             gap_start = gap["start_ns"]
             gap_end = gap["end_ns"]
             try:
-                api_rows = conn.execute(
+                from ...sql_compat import sqlite_to_duckdb
+                api_rows = conn.execute(sqlite_to_duckdb(
                     f"""\
 SELECT s.value AS api_name, COUNT(*) AS call_count,
        SUM(r.[end] - r.start) AS total_ns
@@ -181,11 +185,10 @@ JOIN StringIds s ON r.nameId = s.id
 WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
 ORDER BY total_ns DESC
-LIMIT 5""",
-                    (gap_end, gap_start),
-                ).fetchall()
+LIMIT 5"""
+                ), (gap_end, gap_start)).fetchall()
                 apis = [dict(r) for r in api_rows]
-            except sqlite3.OperationalError:
+            except Exception:
                 apis = []
 
             api_names = [a["api_name"] for a in apis]

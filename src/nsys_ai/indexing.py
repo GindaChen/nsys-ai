@@ -83,6 +83,14 @@ def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
 
     Index naming convention: ``_nsysai_<table_kind>_<column(s)>``
     """
+    # DuckDB connections (Parquet cache) don't need SQLite indexes.
+    try:
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            return
+    except ImportError:
+        pass
+
     conn_id = id(conn)
     if conn_id in _indexed_connections:
         return

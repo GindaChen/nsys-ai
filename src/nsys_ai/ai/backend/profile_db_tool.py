@@ -108,13 +108,27 @@ def query_profile_db(
     else:
         q = q + f" LIMIT {effective_limit}"
 
+    from nsys_ai.sql_compat import sqlite_to_duckdb
+
+    # DuckDB translation for LLM-generated SQL
+    q = sqlite_to_duckdb(q)
+    
+    # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
+    if "sqlite_master" in q.lower():
+        q = "SHOW TABLES"
+
     try:
         cur = conn.execute(q)
+        # duckdb cursor fetchall returns list of tuples
         rows = cur.fetchall()
-        if conn.row_factory is sqlite3.Row:
+        
+        # Determine column names (works for both duckdb and sqlite)
+        names = [d[0] for d in cur.description] if cur.description else []
+        import duckdb
+        
+        if getattr(conn, "row_factory", None) is sqlite3.Row and not isinstance(conn, duckdb.DuckDBPyConnection):
             out = [dict(r) for r in rows]
         else:
-            names = [d[0] for d in cur.description] if cur.description else []
             out = [dict(zip(names, r)) for r in rows]
 
         # JSON-serializable values (sqlite3 can return bytes etc.)
@@ -174,6 +188,24 @@ def get_profile_schema(
     if not want:
         return "(No tables specified.)"
 
+    parts = []
+    
+    # Support DuckDB connection
+    import duckdb
+
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        # In DuckDB, views from parquet_cache don't have detailed DDL in duckdb_views()
+        # so we just return DESCRIBE for each table
+        for table in want:
+            try:
+                cur = conn.execute(f"DESCRIBE {table}")
+                cols = [f"  {r[0]} {r[1]}" for r in cur.fetchall()]
+                parts.append(f"CREATE TABLE {table} (\n" + ",\n".join(cols) + "\n);")
+            except duckdb.Error:
+                pass
+        return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
+        
+    # Standard SQLite path
     placeholders = ",".join("?" * len(want))
     try:
         cur = conn.execute(
@@ -216,15 +248,24 @@ def get_profile_schema_cached(conn: sqlite3.Connection, path: str | None = None)
     return schema
 
 
-def open_profile_readonly(path: str) -> sqlite3.Connection:
-    """Open a profile SQLite file in read-only mode (URI mode=ro)."""
+def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
+    """Open a profile in read-only mode, using DuckDB Parquet cache if available."""
+    from nsys_ai import parquet_cache
+
+    try:
+        if parquet_cache.is_cache_valid(path):
+            return parquet_cache.open_cached_db(path)
+    except Exception as e:
+        _log.warning("Failed to open DuckDB cache for %s, falling back to SQLite: %s", path, e)
+
+    # Fallback to SQLite
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def open_profile_readonly_for_worker(path: str) -> sqlite3.Connection:
+def open_profile_readonly_for_worker(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
     """
     Open a read-only profile connection for use from a worker thread.
 
