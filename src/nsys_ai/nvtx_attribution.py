@@ -236,9 +236,11 @@ def _sort_merge_attribute(
                 open_stack.append(nvtx_list[nvtx_idx])
                 nvtx_idx += 1
 
-            # Pop NVTX ranges that have already closed before this runtime starts
-            while open_stack and open_stack[-1][1] < r_start:
-                open_stack.pop()
+            # Remove NVTX ranges that have already closed before this runtime starts.
+            # We filter the whole list because NVTX might not be strictly nested,
+            # preventing accumulation of closed sibling ranges.
+            if open_stack:
+                open_stack = [entry for entry in open_stack if entry[1] >= r_start]
 
             # Find innermost enclosing NVTX (scan stack from top)
             best_nvtx = None

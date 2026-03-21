@@ -488,14 +488,17 @@ def _check_pipeline_imbalance(
     heaviest = max(compute_layers, key=lambda r: r["compute_ms"])
     lightest = min(compute_layers, key=lambda r: r["compute_ms"])
 
+    heaviest_label = heaviest.get("nvtx_path") or heaviest.get("nvtx_region", "?")
+    lightest_label = lightest.get("nvtx_path") or lightest.get("nvtx_region", "?")
+
     return [
         {
             "pattern": "Pipeline Imbalance",
             "severity": "warning",
             "evidence": (
                 f"Compute time varies {ratio:.1f}× across layers. "
-                f"Heaviest: '{heaviest['nvtx_region']}' ({heaviest['compute_ms']:.1f}ms), "
-                f"lightest: '{lightest['nvtx_region']}' ({lightest['compute_ms']:.1f}ms)"
+                f"Heaviest: '{heaviest_label}' ({heaviest['compute_ms']:.1f}ms), "
+                f"lightest: '{lightest_label}' ({lightest['compute_ms']:.1f}ms)"
             ),
             "recommendation": (
                 "Rebalance pipeline stage partitioning, "

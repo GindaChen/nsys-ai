@@ -35,6 +35,8 @@ def _execute(conn, **kwargs):
 
     # Optional depth filtering: only keep rows at exactly the requested depth
     if depth is not None:
+        if depth > 0 and not any(r.get("nvtx_depth", 0) > 0 for r in rows):
+            return [{"error": "Depth filtering >0 requested, but profile has no nested NVTX regions (all depth 0). Note: depth filtering requires Tier 2 sqlite attribution."}]
         rows = [r for r in rows if r.get("nvtx_depth") == depth]
         if not rows:
             return []
@@ -53,12 +55,17 @@ def _execute(conn, **kwargs):
             "nvtx_region": "",
         }
     )
+    _class_cache = {}
     for r in rows:
         text = r["nvtx_text"]
         if not text:
             continue
         dur_ns = r["k_dur_ns"]
-        kernel_class = classify_kernel(r["kernel_name"])
+        k_name = r["kernel_name"]
+        if k_name not in _class_cache:
+            _class_cache[k_name] = classify_kernel(k_name)
+        kernel_class = _class_cache[k_name]
+
         path = r.get("nvtx_path", text)
 
         stats = groups[path]
@@ -87,6 +94,7 @@ def _execute(conn, **kwargs):
         nccl_ns = stats["nccl_ns"]
         results.append(
             {
+                "_raw_total_ns": total_ns,
                 "nvtx_region": stats["nvtx_region"],
                 "nvtx_depth": stats["nvtx_depth"],
                 "nvtx_path": stats["nvtx_path"],
@@ -101,13 +109,18 @@ def _execute(conn, **kwargs):
         )
 
     # Sort by total GPU time descending, apply limit
-    results.sort(key=lambda r: -r["total_gpu_ms"])
+    results.sort(key=lambda r: -r["_raw_total_ns"])
+    for r in results:
+        r.pop("_raw_total_ns", None)
     return results[:limit]
 
 
 def _format(rows):
     if not rows:
         return "(No NVTX regions with attributed kernels found)"
+    if "error" in rows[0]:
+        return f"Error: {rows[0]['error']}"
+
     lines = [
         "── NVTX Region GPU Time Breakdown ──",
         f"{'NVTX Region':<40s}  {'Depth':>5s}  {'Kernels':>7s}  {'Total(ms)':>10s}"
@@ -115,9 +128,10 @@ def _format(rows):
         "─" * 96,
     ]
     for r in rows:
-        name = r["nvtx_region"] or "(unnamed)"
+        # Favor nvtx_path over nvtx_region for disambiguation
+        name = r.get("nvtx_path") or r.get("nvtx_region") or "(unnamed)"
         if len(name) > 38:
-            name = name[:35] + "..."
+            name = "..." + name[-35:]
         lines.append(
             f"{name:<40s}  {r['nvtx_depth']:>5d}  {r['kernel_count']:>7d}  {r['total_gpu_ms']:>10.2f}"
             f"  {r['compute_ms']:>9.2f}  {r['nccl_ms']:>9.2f}  {r['nccl_pct']:>5.1f}%"
