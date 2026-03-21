@@ -238,11 +238,13 @@ def detect_iterations(
                 if time_range is not None:
                     if k["end"] < time_range[0] or k["start"] > time_range[1]:
                         continue
-                kernel_entries.append({
-                    "kernel": k,
-                    "rt_start": rt["start"],
-                    "rt_end": rt["end"],
-                })
+                kernel_entries.append(
+                    {
+                        "kernel": k,
+                        "rt_start": rt["start"],
+                        "rt_end": rt["end"],
+                    }
+                )
 
             kernel_entries.sort(key=lambda x: x["kernel"]["start"])
 
@@ -269,11 +271,13 @@ def detect_iterations(
 
             # Construct synthetic iterations from these boundaries
             for i in range(len(boundaries) - 1):
-                iterations.append({
-                    "start": boundaries[i],
-                    "end": boundaries[i+1],
-                    "text": f"heuristic_step_{i}"
-                })
+                iterations.append(
+                    {
+                        "start": boundaries[i],
+                        "end": boundaries[i + 1],
+                        "text": f"heuristic_step_{i}",
+                    }
+                )
 
     if not iterations:
         return []

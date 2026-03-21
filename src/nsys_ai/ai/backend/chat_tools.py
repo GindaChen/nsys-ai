@@ -140,8 +140,13 @@ TOOL_COMPUTE_THEORETICAL_FLOPS = {
                         "'linear' (generic: 2*M*N*K)."
                     ),
                     "enum": [
-                        "attention", "qkv_proj", "output_proj",
-                        "mlp", "full_layer", "full_model", "linear",
+                        "attention",
+                        "qkv_proj",
+                        "output_proj",
+                        "mlp",
+                        "full_layer",
+                        "full_model",
+                        "linear",
                     ],
                 },
                 "hidden_dim": {
@@ -490,10 +495,11 @@ def _build_system_prompt(
         parts.append(mfu_ref)
 
     if skill_docs:
-        parts.append(f"\n=== SESSION SKILL CONTEXT ===\n{skill_docs}\n=== END SESSION SKILL CONTEXT ===\n")
+        parts.append(
+            f"\n=== SESSION SKILL CONTEXT ===\n{skill_docs}\n=== END SESSION SKILL CONTEXT ===\n"
+        )
 
     return "\n".join(parts)
-
 
 
 # ---------------------------------------------------------------------------

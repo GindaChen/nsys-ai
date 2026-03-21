@@ -565,11 +565,15 @@ def serve_timeline(
 
     if trim is not None:
         # Legacy: render full HTML with all data baked in
-        html = generate_timeline_html(prof, devices, trim, findings_data=findings_data, profile_path=_profile_path)
+        html = generate_timeline_html(
+            prof, devices, trim, findings_data=findings_data, profile_path=_profile_path
+        )
         _ViewerHandler._prebuilt_nvtx_mode = "full"
     else:
         # Progressive: generate shell HTML, data fetched via /api/data
-        html = generate_timeline_html(prof, devices, None, findings_data=findings_data, profile_path=_profile_path)
+        html = generate_timeline_html(
+            prof, devices, None, findings_data=findings_data, profile_path=_profile_path
+        )
         _ViewerHandler._prebuilt_nvtx_mode = "tile"
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
@@ -804,7 +808,6 @@ def serve_evidence(
 
 
 # ── Mode 4: Perfetto UI ─────────────────────────────────────────
-
 
 
 class _PerfettoHandler(BaseHTTPRequestHandler):

@@ -43,11 +43,3 @@ jobs:
       # Tier 3: all other tests
       - name: Full test suite
         run: pytest tests/ -v --tb=short
-
-      # Upload snapshot diff report on visual test failure
-      - name: Upload snapshot report
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: snapshot-report-py${{ matrix.python-version }}
-          path: snapshot_report.html

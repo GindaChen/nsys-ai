@@ -165,6 +165,7 @@ class Agent:
         # Use shared chat configuration to determine if an LLM is available
         try:
             from ..chat_config import _get_model_and_key
+
             model, api_key = _get_model_and_key()
         except Exception:
             model, api_key = None, None
@@ -288,9 +289,7 @@ class Agent:
                 selected.update(skill_names)
         return sorted(selected)
 
-    def _try_llm_synthesis(
-        self, question: str, evidence: dict[str, list[dict]]
-    ) -> str | None:
+    def _try_llm_synthesis(self, question: str, evidence: dict[str, list[dict]]) -> str | None:
         """Try to use an LLM to synthesize an answer from structured evidence.
 
         Args:
@@ -325,6 +324,7 @@ class Agent:
             if model:
                 try:
                     from .persona import build_system_prompt
+
                     system = build_system_prompt()
                 except Exception:
                     system = "You are an expert GPU profiling assistant."

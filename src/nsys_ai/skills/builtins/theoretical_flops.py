@@ -60,7 +60,13 @@ SKILL = Skill(
     execute_fn=_execute,
     format_fn=_format,
     params=[
-        SkillParam("operation", "Operation: attention/qkv_proj/output_proj/mlp/full_layer/full_model/linear", "str", True, None),
+        SkillParam(
+            "operation",
+            "Operation: attention/qkv_proj/output_proj/mlp/full_layer/full_model/linear",
+            "str",
+            True,
+            None,
+        ),
         SkillParam("hidden_dim", "Model hidden dimension (H)", "int", False, 0),
         SkillParam("seq_len", "Sequence length (S)", "int", False, 0),
         SkillParam("num_layers", "Number of transformer layers", "int", False, 1),

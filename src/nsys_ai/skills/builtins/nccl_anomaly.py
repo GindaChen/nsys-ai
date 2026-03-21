@@ -76,7 +76,9 @@ ORDER BY o.dur_ns DESC
 LIMIT {limit}""",
     format_fn=lambda rows: _format(rows),
     params=[
-        SkillParam("threshold", "Anomaly threshold: ratio to average duration", "float", False, 3.0),
+        SkillParam(
+            "threshold", "Anomaly threshold: ratio to average duration", "float", False, 3.0
+        ),
         SkillParam("limit", "Max anomalies to return", "int", False, 20),
     ],
     tags=["nccl", "anomaly", "outlier", "stall", "communication", "distributed"],
@@ -88,8 +90,7 @@ def _format(rows):
         return "(No NCCL anomalies detected — all collectives within normal range)"
     lines = [
         "── NCCL Anomalies ──",
-        f"{'Op Type':<16s} {'Duration':>10s} {'Avg':>10s} "
-        f"{'Ratio':>7s} {'Stream':>7s}",
+        f"{'Op Type':<16s} {'Duration':>10s} {'Avg':>10s} {'Ratio':>7s} {'Stream':>7s}",
         "─" * 58,
     ]
     for r in rows:

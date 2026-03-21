@@ -13,7 +13,6 @@ This is a Python-level skill that runs other skills internally
 to gather evidence, then matches against known patterns.
 """
 
-
 import logging
 import sqlite3
 
@@ -39,19 +38,68 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
     # --- GPU Bubbles (Pipeline Stalls) ---
     if idle_gaps_data:
-        large_gaps = [g for g in idle_gaps_data
-                      if g.get("gap_ms", 0) > 1.0]
+        # Extract summary from enriched gpu_idle_gaps output
+        gap_summary = next((g for g in idle_gaps_data if g.get("_summary")), None)
+        gap_rows = [g for g in idle_gaps_data if not g.get("_summary")]
+        gap_threshold = int(kwargs.get("min_gap_ns", 1_000_000))
+        large_gaps = [g for g in gap_rows if g.get("gap_ns", 0) > gap_threshold]
         if len(large_gaps) >= 3:
-            total_gap_ms = sum(g.get("gap_ms", 0) for g in large_gaps)
-            findings.append({
-                "pattern": "GPU Bubbles (Pipeline Stalls)",
-                "severity": "warning",
-                "evidence": f"{len(large_gaps)} gaps > 1ms detected, totaling {total_gap_ms:.1f}ms of idle time",
-                "recommendation": (
+            total_idle_ms = (
+                gap_summary.get("total_idle_ms", 0)
+                if gap_summary
+                else sum(g.get("gap_ns", 0) / 1e6 for g in large_gaps)
+            )
+            pct = gap_summary.get("pct_of_profile", 0) if gap_summary else 0
+
+            # Build attribution-aware recommendation
+            attr_counts: dict[str, int] = {}
+            for g in large_gaps:
+                cat = (g.get("attribution") or {}).get("category", "")
+                if cat:
+                    attr_counts[cat] = attr_counts.get(cat, 0) + 1
+            dominant = max(attr_counts, key=attr_counts.get) if attr_counts else ""
+            rec_map = {
+                "synchronization": (
+                    "Remove explicit cudaDeviceSynchronize / cudaStreamSynchronize. "
+                    "Use event-based dependencies or CUDA graphs."
+                ),
+                "cpu_stall": (
+                    "CPU is not feeding GPU fast enough. "
+                    "Increase DataLoader num_workers & prefetch_factor, "
+                    "or check for Python GIL contention."
+                ),
+                "memory_transfer": (
+                    "Gaps caused by blocking memory transfers. "
+                    "Use cudaMemcpyAsync with pinned memory and overlap with compute."
+                ),
+                "kernel_launch": (
+                    "Kernel launch overhead dominates gaps. "
+                    "Use torch.compile() to fuse ops, or CUDA graphs."
+                ),
+            }
+            rec = rec_map.get(
+                dominant,
+                (
                     "Use CUDA graphs, overlap data loading with compute, "
                     "or replace explicit cudaDeviceSynchronize with events."
                 ),
-            })
+            )
+
+            evidence = (
+                f"{len(large_gaps)} gaps > {gap_threshold / 1e6:.1f}ms detected, "
+                f"totaling {total_idle_ms:.1f}ms of idle time"
+            )
+            if pct > 0:
+                evidence += f" ({pct}% of profile)"
+
+            findings.append(
+                {
+                    "pattern": "GPU Bubbles (Pipeline Stalls)",
+                    "severity": "warning",
+                    "evidence": evidence,
+                    "recommendation": rec,
+                }
+            )
 
     # --- NCCL Serialization ---
     if overlap_data and len(overlap_data) > 0:
@@ -61,27 +109,46 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             nccl_only = ov.get("nccl_only_ms", 0)
             total = ov.get("total_ms", 1)
             if nccl_only > 0 and overlap_pct < 30:
-                rec = (
-                    "Tune DDP bucket sizes (bucket_cap_mb), "
-                    "ensure NCCL runs on separate stream, "
-                    "consider gradient compression or FSDP."
-                )
-                if overlap_pct < 0.05:
-                    rec = (
-                        "Overlap is EXACTLY 0.0%. NCCL is completely synchronous! "
-                        "Ensure your script is not calling `torch.cuda.synchronize()` "
-                        "after every step, or that your framework supports background "
-                        "communication streams (e.g. PyTorch DDP with `find_unused_parameters=False`)."
-                    )
-                findings.append({
-                    "pattern": "NCCL Serialization",
-                    "severity": "critical",
-                    "evidence": (
-                        f"NCCL overlap only {overlap_pct}%, "
-                        f"NCCL-only time: {nccl_only:.1f}ms / {total:.1f}ms"
+                # Run deeper diagnosis to determine WHY overlap is low
+                diagnosis = _diagnose_low_overlap(conn, **kwargs)
+                cause = diagnosis.get("cause", "general")
+
+                rec_map = {
+                    "same_stream": (
+                        "NCCL and compute kernels share the same CUDA stream — "
+                        "they are serialized by design. Move AllReduce to a dedicated "
+                        "stream. In PyTorch DDP, check if find_unused_parameters=True "
+                        "is forcing synchronization."
                     ),
-                    "recommendation": rec,
-                })
+                    "sync_after_nccl": (
+                        "Explicit synchronization detected after NCCL operations. "
+                        "Remove torch.cuda.synchronize() / cudaStreamSynchronize "
+                        "after communication calls. Use non_blocking=True for transfers."
+                    ),
+                    "general": (
+                        "Tune DDP bucket sizes (bucket_cap_mb), "
+                        "ensure NCCL runs on separate stream, "
+                        "consider gradient compression or FSDP."
+                    ),
+                }
+                rec = rec_map.get(cause, rec_map["general"])
+
+                evidence = (
+                    f"NCCL overlap only {overlap_pct}%, "
+                    f"NCCL-only time: {nccl_only:.1f}ms / {total:.1f}ms"
+                )
+                diag_detail = diagnosis.get("detail", "")
+                if diag_detail:
+                    evidence += f". Diagnosis: {diag_detail}"
+
+                findings.append(
+                    {
+                        "pattern": "NCCL Serialization",
+                        "severity": "critical",
+                        "evidence": evidence,
+                        "recommendation": rec,
+                    }
+                )
 
     # --- Excessive H2D Transfers ---
     mem_data = _safe_execute("memory_bandwidth", conn, **kwargs)
@@ -90,37 +157,79 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         if h2d:
             h2d_ms = h2d[0].get("total_dur_ms", 0)
             if h2d_ms > 50:  # > 50ms of H2D is suspicious
-                findings.append({
-                    "pattern": "Excessive H2D Transfers",
-                    "severity": "warning",
-                    "evidence": (
-                        f"H2D transfers: {h2d_ms:.1f}ms total, "
-                        f"{h2d[0].get('total_mb', 0):.1f}MB, "
-                        f"{h2d[0].get('op_count', 0)} ops, "
-                        f"avg bandwidth {h2d[0].get('avg_bandwidth_gbps', 0):.1f} GB/s"
-                    ),
-                    "recommendation": (
-                        "Use pin_memory=True in DataLoader, keep "
-                        "model params on GPU, accumulate metrics on GPU."
-                    ),
-                })
+                findings.append(
+                    {
+                        "pattern": "Excessive H2D Transfers",
+                        "severity": "warning",
+                        "evidence": (
+                            f"H2D transfers: {h2d_ms:.1f}ms total, "
+                            f"{h2d[0].get('total_mb', 0):.1f}MB, "
+                            f"{h2d[0].get('op_count', 0)} ops, "
+                            f"avg bandwidth {h2d[0].get('avg_bandwidth_gbps', 0):.1f} GB/s"
+                        ),
+                        "recommendation": (
+                            "Use pin_memory=True in DataLoader, keep "
+                            "model params on GPU, accumulate metrics on GPU."
+                        ),
+                    }
+                )
+
+    # --- H2D Distribution Pattern ---
+    h2d_dist_data = _safe_execute("h2d_distribution", conn, **kwargs)
+    if h2d_dist_data:
+        h2d_pattern = next((r for r in h2d_dist_data if r.get("_pattern")), None)
+        if h2d_pattern:
+            ptype = h2d_pattern.get("type", "")
+            if ptype == "spread_out":
+                findings.append(
+                    {
+                        "pattern": "Continuous H2D Transfers",
+                        "severity": "warning",
+                        "evidence": h2d_pattern.get(
+                            "detail", "H2D transfers detected in every step"
+                        ),
+                        "recommendation": (
+                            "Use pin_memory=True in DataLoader, increase num_workers, "
+                            "set prefetch_factor>=2, and ensure tensors are pre-staged on GPU. "
+                            "Check if .cpu() / .item() calls in the loop are pulling data back to host."
+                        ),
+                    }
+                )
+            elif ptype == "spike":
+                spike_secs = h2d_pattern.get("spike_seconds", [])
+                findings.append(
+                    {
+                        "pattern": "H2D Transfer Spike",
+                        "severity": "info",
+                        "evidence": h2d_pattern.get("detail", "H2D spikes detected"),
+                        "recommendation": (
+                            f"Check timeline at second(s) {spike_secs} for unexpected "
+                            f"data movement. May be checkpoint saving, dynamic batching, "
+                            f"or model reloading."
+                        ),
+                    }
+                )
 
     # --- Small Kernel Overhead ---
     if launch_data:
         # overhead_us > kernel_ms*1000 means overhead > kernel duration
-        high_overhead = [e for e in launch_data
-                         if e.get("kernel_ms", 0) > 0
-                         and e.get("overhead_us", 0) > e["kernel_ms"] * 1000]
+        high_overhead = [
+            e
+            for e in launch_data
+            if e.get("kernel_ms", 0) > 0 and e.get("overhead_us", 0) > e["kernel_ms"] * 1000
+        ]
         if len(high_overhead) >= 5:
-            findings.append({
-                "pattern": "Small Kernel Overhead",
-                "severity": "warning",
-                "evidence": f"{len(high_overhead)} kernels with launch overhead > kernel duration",
-                "recommendation": (
-                    "Use torch.compile() to fuse element-wise ops, "
-                    "enable cudnn.benchmark, or use CUDA graphs."
-                ),
-            })
+            findings.append(
+                {
+                    "pattern": "Small Kernel Overhead",
+                    "severity": "warning",
+                    "evidence": f"{len(high_overhead)} kernels with launch overhead > kernel duration",
+                    "recommendation": (
+                        "Use torch.compile() to fuse element-wise ops, "
+                        "enable cudnn.benchmark, or use CUDA graphs."
+                    ),
+                }
+            )
 
     # --- Kernel Hotspot ---
     if top_kernels_data and len(top_kernels_data) >= 2:
@@ -130,19 +239,21 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             top_k = top_kernels_data[0]
             pct = (top_k.get("total_ms", 0) / total_all_ms) * 100
             if pct > 50:
-                findings.append({
-                    "pattern": "Kernel Hotspot",
-                    "severity": "info",
-                    "evidence": (
-                        f"'{top_k.get('kernel_name', '?')}' accounts for {pct:.0f}% "
-                        f"of time in the profiled top kernels "
-                        f"({top_k.get('total_ms', 0):.1f}ms)"
-                    ),
-                    "recommendation": (
-                        "Ensure shapes are multiples of 128 (H100) / 64 (A100), "
-                        "use FlashAttention, or profile with NCU for details."
-                    ),
-                })
+                findings.append(
+                    {
+                        "pattern": "Kernel Hotspot",
+                        "severity": "info",
+                        "evidence": (
+                            f"'{top_k.get('kernel_name', '?')}' accounts for {pct:.0f}% "
+                            f"of time in the profiled top kernels "
+                            f"({top_k.get('total_ms', 0):.1f}ms)"
+                        ),
+                        "recommendation": (
+                            "Ensure shapes are multiples of 128 (H100) / 64 (A100), "
+                            "use FlashAttention, or profile with NCU for details."
+                        ),
+                    }
+                )
 
     # --- Compute-Communication Imbalance ---
     if overlap_data and len(overlap_data) > 0:
@@ -153,19 +264,21 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             if nccl_ms_total > 0 and compute_ms > 0:
                 ratio = compute_ms / nccl_ms_total
                 if ratio < 0.5:
-                    findings.append({
-                        "pattern": "Compute-Communication Imbalance",
-                        "severity": "critical",
-                        "evidence": (
-                            f"Compute/NCCL ratio = {ratio:.2f} (healthy > 2.0). "
-                            f"Compute: {compute_ms:.1f}ms, NCCL: {nccl_ms_total:.1f}ms"
-                        ),
-                        "recommendation": (
-                            "Reduce tensor parallel degree (e.g. TP=4 → TP=1 "
-                            "if model fits on one GPU), rebalance pipeline stages, "
-                            "or pad sequences to uniform length."
-                        ),
-                    })
+                    findings.append(
+                        {
+                            "pattern": "Compute-Communication Imbalance",
+                            "severity": "critical",
+                            "evidence": (
+                                f"Compute/NCCL ratio = {ratio:.2f} (healthy > 2.0). "
+                                f"Compute: {compute_ms:.1f}ms, NCCL: {nccl_ms_total:.1f}ms"
+                            ),
+                            "recommendation": (
+                                "Reduce tensor parallel degree (e.g. TP=4 → TP=1 "
+                                "if model fits on one GPU), rebalance pipeline stages, "
+                                "or pad sequences to uniform length."
+                            ),
+                        }
+                    )
 
     # --- nsys anti-pattern checks (direct SQL) ---
     # These cover the 4 expert-rule recipes from nsys:
@@ -176,19 +289,119 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     findings += _check_sync_memset(conn, **kwargs)
 
     if not findings:
-        findings.append({
-            "pattern": "No Known Anti-Patterns Detected",
-            "severity": "info",
-            "evidence": "All checks passed — profile looks healthy",
-            "recommendation": "Consider deep-diving with NCU for fine-grained analysis.",
-        })
+        findings.append(
+            {
+                "pattern": "No Known Anti-Patterns Detected",
+                "severity": "info",
+                "evidence": "All checks passed — profile looks healthy",
+                "recommendation": "Consider deep-diving with NCU for fine-grained analysis.",
+            }
+        )
 
     return findings
 
 
 # -----------------------------------------------------------------------
+# Overlap diagnosis helper
+# -----------------------------------------------------------------------
+
+
+def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
+    """Diagnose why compute/NCCL overlap is low.
+
+    Checks:
+      1. Same-stream: NCCL and compute kernels on the same CUDA stream
+      2. Sync-after-NCCL: explicit sync call shortly after NCCL launch
+
+    Returns dict with 'cause' ('same_stream', 'sync_after_nccl', 'general')
+    and 'detail' string.
+    """
+    tables = _resolve_activity_tables(conn)
+    kernel_tbl = tables.get("kernel")
+    runtime_tbl = tables.get("runtime")
+
+    if not kernel_tbl:
+        return {"cause": "general", "detail": ""}
+
+    device = int(kwargs.get("device", 0))
+
+    # --- Check 1: Same-stream detection ---
+    try:
+        same_stream_rows = conn.execute(
+            f"""
+            SELECT k.streamId,
+                SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
+                    THEN 1 ELSE 0 END) AS nccl_count,
+                SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
+                    THEN 1 ELSE 0 END) AS compute_count
+            FROM {kernel_tbl} k
+            JOIN StringIds s ON k.shortName = s.id
+            WHERE k.deviceId = ?
+            GROUP BY k.streamId
+            HAVING nccl_count > 0 AND compute_count > 0
+            """,
+            (device,),
+        ).fetchall()
+        if same_stream_rows:
+            streams = [str(r[0]) for r in same_stream_rows]
+            return {
+                "cause": "same_stream",
+                "detail": (f"Stream(s) [{', '.join(streams)}] run both NCCL and compute kernels"),
+            }
+    except sqlite3.OperationalError as e:
+        _log.debug("_diagnose_low_overlap (same_stream): %s", e)
+
+    # --- Check 2: Sync-after-NCCL detection ---
+    if runtime_tbl:
+        try:
+            # Find sync nameIds
+            sync_names = conn.execute(
+                """
+                SELECT id FROM StringIds
+                WHERE value LIKE 'cudaStreamSynchronize%'
+                   OR value LIKE 'cudaDeviceSynchronize%'
+                """
+            ).fetchall()
+            if sync_names:
+                sync_id_list = [r[0] for r in sync_names]
+                sync_placeholders = ",".join("?" for _ in sync_id_list)
+
+                # Single query: check if ANY sync call starts within 1ms
+                # after ANY NCCL kernel's end time (avoids N+1 loop).
+                found = conn.execute(
+                    f"""
+                    SELECT 1 FROM {kernel_tbl} k
+                    JOIN StringIds s ON k.shortName = s.id
+                    WHERE (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
+                      AND k.deviceId = ?
+                      AND EXISTS (
+                          SELECT 1 FROM {runtime_tbl} r
+                          WHERE r.nameId IN ({sync_placeholders})
+                            AND r.start >= k.[end]
+                            AND r.start <= k.[end] + 1000000
+                      )
+                    LIMIT 1
+                    """,
+                    [device] + sync_id_list,
+                ).fetchone()
+                if found:
+                    return {
+                        "cause": "sync_after_nccl",
+                        "detail": (
+                            "cudaStreamSynchronize/cudaDeviceSynchronize "
+                            "detected immediately after NCCL kernel completion"
+                        ),
+                    }
+        except sqlite3.OperationalError as e:
+            _log.debug("_diagnose_low_overlap (sync_after_nccl): %s", e)
+
+    return {"cause": "general", "detail": ""}
+
+
+# -----------------------------------------------------------------------
 # nsys anti-pattern checkers — inline SQL for expert-rule recipe parity
 # -----------------------------------------------------------------------
+
 
 def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
     """Detect excessive cuda*Synchronize calls.
@@ -237,36 +450,34 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         total_sync_ms = total_sync_ns / 1e6
         call_count = sum(r[1] for r in rows)
         # Strip version suffixes for cleaner display (cudaDeviceSynchronize_v3020 → cudaDeviceSynchronize)
-        api_names = ", ".join(
-            sorted({id_to_name[r[0]].split("_v")[0] for r in rows})
-        )
+        api_names = ", ".join(sorted({id_to_name[r[0]].split("_v")[0] for r in rows}))
 
         # Total GPU kernel time as baseline for percentage threshold
         total_gpu_ns = 0
         if kernel_tbl:
-            gpu_row = conn.execute(
-                f"SELECT SUM([end] - start) FROM {kernel_tbl}"
-            ).fetchone()
+            gpu_row = conn.execute(f"SELECT SUM([end] - start) FROM {kernel_tbl}").fetchone()
             total_gpu_ns = gpu_row[0] or 0 if gpu_row else 0
 
         # Percentage-based threshold: sync time > 2% of total GPU time
         # Also require absolute minimum of 1ms to filter trivial cases
         sync_pct = (total_sync_ns / total_gpu_ns * 100) if total_gpu_ns > 0 else 100
         if total_sync_ms >= 1.0 and sync_pct >= 2.0:
-            return [{
-                "pattern": "Excessive Synchronization",
-                "severity": "warning",
-                "evidence": (
-                    f"{call_count} sync calls totalling {total_sync_ms:.1f}ms "
-                    f"({sync_pct:.1f}% of GPU time). APIs: {api_names}"
-                ),
-                "recommendation": (
-                    "Remove .item()/.cpu() from the training loop, "
-                    "use torch.cuda.set_sync_debug_mode(1) to find hidden syncs, "
-                    "replace cudaDeviceSynchronize with event-based dependencies. "
-                    "Run `nsys recipe cuda_api_sync <profile.nsys-rep>` for a detailed breakdown."
-                ),
-            }]
+            return [
+                {
+                    "pattern": "Excessive Synchronization",
+                    "severity": "warning",
+                    "evidence": (
+                        f"{call_count} sync calls totalling {total_sync_ms:.1f}ms "
+                        f"({sync_pct:.1f}% of GPU time). APIs: {api_names}"
+                    ),
+                    "recommendation": (
+                        "Remove .item()/.cpu() from the training loop, "
+                        "use torch.cuda.set_sync_debug_mode(1) to find hidden syncs, "
+                        "replace cudaDeviceSynchronize with event-based dependencies. "
+                        "Run `nsys recipe cuda_api_sync <profile.nsys-rep>` for a detailed breakdown."
+                    ),
+                }
+            ]
     except sqlite3.OperationalError as e:
         _log.debug("root_cause_matcher (_check_sync_apis): %s", e)
     return []
@@ -316,19 +527,21 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
         total_ms = total_ns / 1e6
         total_mb = total_bytes / 1e6
 
-        return [{
-            "pattern": "Synchronous Memcpy",
-            "severity": "warning",
-            "evidence": (
-                f"{count} sync cudaMemcpy calls: {total_mb:.1f}MB in {total_ms:.1f}ms. "
-                f"These block the host thread."
-            ),
-            "recommendation": (
-                "Replace cudaMemcpy with cudaMemcpyAsync + pinned memory. "
-                "Use pin_memory=True in DataLoader and non_blocking=True in .to(device). "
-                "Run `nsys recipe cuda_memcpy_sync <profile.nsys-rep>` for a detailed breakdown."
-            ),
-        }]
+        return [
+            {
+                "pattern": "Synchronous Memcpy",
+                "severity": "warning",
+                "evidence": (
+                    f"{count} sync cudaMemcpy calls: {total_mb:.1f}MB in {total_ms:.1f}ms. "
+                    f"These block the host thread."
+                ),
+                "recommendation": (
+                    "Replace cudaMemcpy with cudaMemcpyAsync + pinned memory. "
+                    "Use pin_memory=True in DataLoader and non_blocking=True in .to(device). "
+                    "Run `nsys recipe cuda_memcpy_sync <profile.nsys-rep>` for a detailed breakdown."
+                ),
+            }
+        ]
     except sqlite3.OperationalError as e:
         _log.debug("root_cause_matcher (_check_sync_memcpy): %s", e)
     return []
@@ -365,19 +578,21 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
         total_ms = total_ns / 1e6
         total_mb = total_bytes / 1e6
 
-        return [{
-            "pattern": "Pageable Memory in Async Memcpy",
-            "severity": "warning",
-            "evidence": (
-                f"{count} memcpy ops using pageable memory: {total_mb:.1f}MB in "
-                f"{total_ms:.1f}ms. Pageable → async memcpy silently becomes sync."
-            ),
-            "recommendation": (
-                "Use pinned (page-locked) memory: cudaMallocHost() / "
-                "pin_memory=True in DataLoader. This enables true async H2D overlap. "
-                "Run `nsys recipe cuda_memcpy_async <profile.nsys-rep>` for details on pageable fallback."
-            ),
-        }]
+        return [
+            {
+                "pattern": "Pageable Memory in Async Memcpy",
+                "severity": "warning",
+                "evidence": (
+                    f"{count} memcpy ops using pageable memory: {total_mb:.1f}MB in "
+                    f"{total_ms:.1f}ms. Pageable → async memcpy silently becomes sync."
+                ),
+                "recommendation": (
+                    "Use pinned (page-locked) memory: cudaMallocHost() / "
+                    "pin_memory=True in DataLoader. This enables true async H2D overlap. "
+                    "Run `nsys recipe cuda_memcpy_async <profile.nsys-rep>` for details on pageable fallback."
+                ),
+            }
+        ]
     except sqlite3.OperationalError as e:
         _log.debug("root_cause_matcher (_check_pageable_memcpy): %s", e)
     return []
@@ -425,18 +640,20 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
         count, total_ns = row
         total_ms = total_ns / 1e6
 
-        return [{
-            "pattern": "Synchronous Memset",
-            "severity": "info",
-            "evidence": (
-                f"{count} sync cudaMemset calls: {total_ms:.2f}ms total. "
-                f"These block the host thread."
-            ),
-            "recommendation": (
-                "Replace cudaMemset with cudaMemsetAsync on the appropriate stream. "
-                "Run `nsys recipe cuda_memset_sync <profile.nsys-rep>` for a detailed breakdown."
-            ),
-        }]
+        return [
+            {
+                "pattern": "Synchronous Memset",
+                "severity": "info",
+                "evidence": (
+                    f"{count} sync cudaMemset calls: {total_ms:.2f}ms total. "
+                    f"These block the host thread."
+                ),
+                "recommendation": (
+                    "Replace cudaMemset with cudaMemsetAsync on the appropriate stream. "
+                    "Run `nsys recipe cuda_memset_sync <profile.nsys-rep>` for a detailed breakdown."
+                ),
+            }
+        ]
     except sqlite3.OperationalError as e:
         _log.debug("root_cause_matcher (_check_sync_memset): %s", e)
     return []
@@ -444,9 +661,11 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
 # -----------------------------------------------------------------------
 
+
 def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
     """Execute a skill, returning [] on any error."""
     from ...skills.registry import get_skill
+
     try:
         skill = get_skill(skill_name)
         if skill is None:
@@ -483,7 +702,15 @@ SKILL = Skill(
     execute_fn=_execute,
     format_fn=_format,
     params=[SkillParam("device", "GPU device ID", "int", False, 0)],
-    tags=["root-cause", "pattern", "diagnosis", "analysis", "recommendation",
-          "sync", "memcpy", "memset", "anti-pattern"],
+    tags=[
+        "root-cause",
+        "pattern",
+        "diagnosis",
+        "analysis",
+        "recommendation",
+        "sync",
+        "memcpy",
+        "memset",
+        "anti-pattern",
+    ],
 )
-

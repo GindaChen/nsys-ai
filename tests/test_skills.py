@@ -690,3 +690,192 @@ def test_root_cause_all_patterns_execute(minimal_nsys_conn):
     assert "[1]" not in text
     assert "[3]" not in text
 
+
+# ---- V3 Review Feature Tests ------------------------------------------------
+
+
+def test_h2d_distribution_init_heavy_pattern(minimal_nsys_conn):
+    """Seed data has H2D concentrated in second 0 — should classify as init_heavy."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("h2d_distribution")
+    rows = skill.execute(minimal_nsys_conn)
+    # Should have data rows + pattern metadata
+    assert len(rows) > 0
+    pattern = next((r for r in rows if r.get("_pattern")), None)
+    assert pattern is not None
+    assert pattern["type"] == "init_heavy"
+    assert (
+        "first 2 seconds" in pattern["detail"].lower()
+        or "concentrated" in pattern["detail"].lower()
+    )
+
+
+def test_h2d_distribution_format_shows_pattern(minimal_nsys_conn):
+    """Format output should include pattern classification."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("h2d_distribution")
+    rows = skill.execute(minimal_nsys_conn)
+    text = skill.format_rows(rows)
+    assert "Pattern:" in text
+    assert "init_heavy" in text
+
+
+def test_gpu_idle_gaps_aggregation(minimal_nsys_conn):
+    """gpu_idle_gaps should return summary with aggregation stats."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("gpu_idle_gaps")
+    rows = skill.execute(minimal_nsys_conn)
+    assert len(rows) > 0
+    # Last element should be summary
+    summary = next((r for r in rows if r.get("_summary")), None)
+    assert summary is not None
+    assert "total_idle_ms" in summary
+    assert "pct_of_profile" in summary
+    assert "gap_count" in summary
+    assert summary["total_idle_ms"] > 0
+
+
+def test_gpu_idle_gaps_cpu_attribution(minimal_nsys_conn):
+    """Top gaps should have CPU attribution field with category."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("gpu_idle_gaps")
+    rows = skill.execute(minimal_nsys_conn)
+    data_rows = [r for r in rows if not r.get("_summary")]
+    if data_rows:
+        # At least one gap should have attribution
+        attributed = [r for r in data_rows if r.get("attribution")]
+        assert len(attributed) > 0
+        attr = attributed[0]["attribution"]
+        assert "category" in attr
+        assert attr["category"] in (
+            "synchronization",
+            "memory_transfer",
+            "kernel_launch",
+            "cpu_stall",
+            "unknown",
+        )
+
+
+def test_gpu_idle_gaps_format_output(minimal_nsys_conn):
+    """Format output should include summary header and attribution."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("gpu_idle_gaps")
+    rows = skill.execute(minimal_nsys_conn)
+    text = skill.format_rows(rows)
+    assert "GPU Idle Gaps" in text
+    assert "Total:" in text
+    assert "Distribution:" in text
+
+
+def test_overlap_same_stream_detection(minimal_nsys_conn):
+    """Should detect same-stream NCCL+compute from seed data (stream 7)."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _diagnose_low_overlap
+
+    minimal_nsys_conn.row_factory = __import__("sqlite3").Row
+    diag = _diagnose_low_overlap(minimal_nsys_conn, device=0)
+    assert diag["cause"] == "same_stream"
+    assert "7" in diag["detail"]
+
+
+def test_overlap_diagnosis_recommendation(minimal_nsys_conn):
+    """root_cause_matcher should output diagnosis-specific recommendation."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("root_cause_matcher")
+    rows = skill.execute(minimal_nsys_conn)
+    nccl_findings = [r for r in rows if r["pattern"] == "NCCL Serialization"]
+    if nccl_findings:
+        rec = nccl_findings[0]["recommendation"]
+        # Should contain same-stream specific recommendation
+        assert "same CUDA stream" in rec or "separate stream" in rec or "DDP" in rec
+
+
+def test_overlap_no_nccl_graceful():
+    """Should not crash when profile has zero NCCL kernels."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        INSERT INTO StringIds VALUES (1, 'kernel_A');
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            deviceId INT, streamId INT, correlationId INT,
+            start INT, [end] INT, shortName INT, demangledName INT,
+            gridX INT DEFAULT 1, gridY INT DEFAULT 1, gridZ INT DEFAULT 1,
+            blockX INT DEFAULT 1, blockY INT DEFAULT 1, blockZ INT DEFAULT 1,
+            globalPid INT DEFAULT 0
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (0, 7, 1, 1000000, 2000000, 1, 1, 1,1,1,1,1,1,0);
+    """)
+
+    from nsys_ai.skills.builtins.root_cause_matcher import _diagnose_low_overlap
+
+    diag = _diagnose_low_overlap(conn, device=0)
+    assert diag["cause"] == "general"
+    conn.close()
+
+
+def test_root_cause_h2d_spread_pattern():
+    """H2D spread pattern should fire 'Continuous H2D Transfers' finding."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        INSERT INTO StringIds VALUES (1, 'kernel_A'), (24, 'cudaLaunchKernel');
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            deviceId INT, streamId INT, correlationId INT,
+            start INT, [end] INT, shortName INT, demangledName INT,
+            gridX INT DEFAULT 1, gridY INT DEFAULT 1, gridZ INT DEFAULT 1,
+            blockX INT DEFAULT 1, blockY INT DEFAULT 1, blockZ INT DEFAULT 1,
+            globalPid INT DEFAULT 0
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (0, 7, 1, 1000000000, 1001000000, 1, 1, 1,1,1,1,1,1,0);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+            globalTid INT, correlationId INT, start INT, [end] INT, nameId INT
+        );
+        CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY (
+            globalPid INT, deviceId INT, streamId INT, correlationId INT,
+            copyKind INT, bytes INT, srcKind INT, dstKind INT, start INT, [end] INT
+        );
+        -- Spread H2D across 5 seconds with similar bytes (not init-heavy)
+        INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES
+            (0, 0, 7, 10, 1, 100000, 7, 2, 100000000,  200000000),
+            (0, 0, 7, 11, 1, 100000, 7, 2, 1100000000, 1200000000),
+            (0, 0, 7, 12, 1, 100000, 7, 2, 2100000000, 2200000000),
+            (0, 0, 7, 13, 1, 100000, 7, 2, 3100000000, 3200000000),
+            (0, 0, 7, 14, 1, 100000, 7, 2, 4100000000, 4200000000);
+    """)
+
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("root_cause_matcher")
+    rows = skill.execute(conn)
+    patterns = [r["pattern"] for r in rows]
+    assert "Continuous H2D Transfers" in patterns
+    conn.close()
+
+
+def test_root_cause_includes_new_patterns(minimal_nsys_conn):
+    """Verify root_cause_matcher can detect the new V3 patterns alongside old ones."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("root_cause_matcher")
+    rows = skill.execute(minimal_nsys_conn)
+    patterns = {r["pattern"] for r in rows}
+    # Should still have old patterns
+    assert "Excessive Synchronization" in patterns
+    assert "Synchronous Memcpy" in patterns
+    # Verify no crash and reasonable output
+    assert len(rows) >= 4
+    text = skill.format_rows(rows)
+    assert len(text) > 50

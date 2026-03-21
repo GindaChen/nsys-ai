@@ -54,7 +54,9 @@ def _main():
         help="Model id (e.g. gemini/gemini-2.5-flash). Overrides NSYS_AI_MODEL if set.",
     )
     parser.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
-    parser.add_argument("question", nargs="?", default=None, help="Question to ask (or read from stdin)")
+    parser.add_argument(
+        "question", nargs="?", default=None, help="Question to ask (or read from stdin)"
+    )
     args = parser.parse_args()
 
     profile_path = args.profile
@@ -127,4 +129,3 @@ def _main():
 
 if __name__ == "__main__":
     _main()
-

@@ -39,9 +39,7 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
     try:
         tables = {
             row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     except Exception:
         return {}
@@ -96,46 +94,53 @@ def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
     kernel_table = tables.get("kernel")
     if kernel_table:
         qt = _quote_identifier(kernel_table)
-        index_stmts.extend([
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_start ON {qt}(start)",
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_corr  ON {qt}(correlationId)",
-            # shortName index — critical for kernel name lookups (region_mfu, skills)
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_short ON {qt}(shortName)",
-            # Streamwise index for window-function skills (gpu_idle_gaps, kernel_launch_pattern)
-            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_stream ON {qt}(streamId, start)",
-        ])
+        index_stmts.extend(
+            [
+                f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_start ON {qt}(start)",
+                f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_corr  ON {qt}(correlationId)",
+                # shortName index — critical for kernel name lookups (region_mfu, skills)
+                f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_short ON {qt}(shortName)",
+                # Streamwise index for window-function skills (gpu_idle_gaps, kernel_launch_pattern)
+                f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_stream ON {qt}(streamId, start)",
+            ]
+        )
 
     runtime_table = tables.get("runtime")
     if runtime_table:
         qt = _quote_identifier(runtime_table)
-        index_stmts.extend([
-            f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_corr ON {qt}(correlationId)",
-            f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_tid  ON {qt}(globalTid, start)",
-        ])
+        index_stmts.extend(
+            [
+                f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_corr ON {qt}(correlationId)",
+                f"CREATE INDEX IF NOT EXISTS _nsysai_runtime_tid  ON {qt}(globalTid, start)",
+            ]
+        )
 
     nvtx_table = tables.get("nvtx")
     if nvtx_table:
         qt = _quote_identifier(nvtx_table)
-        index_stmts.extend([
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_start   ON {qt}(start)",
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_tid     ON {qt}(globalTid, start)",
-            # Compound index for NVTX join queries (nvtx_layer_breakdown, nvtx_kernel_map)
-            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_range   ON {qt}(globalTid, start, [end])",
-        ])
+        index_stmts.extend(
+            [
+                f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_start   ON {qt}(start)",
+                f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_tid     ON {qt}(globalTid, start)",
+                # Compound index for NVTX join queries (nvtx_layer_breakdown, nvtx_kernel_map)
+                f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_range   ON {qt}(globalTid, start, [end])",
+            ]
+        )
 
     memcpy_table = tables.get("memcpy")
     if memcpy_table:
         qt = _quote_identifier(memcpy_table)
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_memcpy_corr ON {qt}(correlationId)"
+        index_stmts.extend(
+            [
+                f"CREATE INDEX IF NOT EXISTS _nsysai_memcpy_corr ON {qt}(correlationId)",
+                f"CREATE INDEX IF NOT EXISTS _nsysai_memcpy_kind ON {qt}(copyKind, start)",
+            ]
         )
 
     memset_table = tables.get("memset")
     if memset_table:
         qt = _quote_identifier(memset_table)
-        index_stmts.append(
-            f"CREATE INDEX IF NOT EXISTS _nsysai_memset_corr ON {qt}(correlationId)"
-        )
+        index_stmts.append(f"CREATE INDEX IF NOT EXISTS _nsysai_memset_corr ON {qt}(correlationId)")
 
     any_success = False
     for stmt in index_stmts:

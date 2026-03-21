@@ -135,7 +135,6 @@ def test_tools_openai():
     assert "end_s" in fit["function"]["parameters"]["properties"]
 
 
-
 def test_parse_tool_call_navigate():
     """navigate_to_kernel with required and optional args."""
     action = chat_mod._parse_tool_call(
@@ -642,6 +641,7 @@ def test_chat_completion_stream_no_db_agent(monkeypatch):
 def test_stream_agent_loop_skill_names_injected(monkeypatch, tmp_path):
     """skill_names causes SESSION SKILL CONTEXT to appear in the system prompt sent to LLM."""
     import nsys_ai.prompt_loader as pl
+
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "test_skill.md").write_text("UNIQUE_SKILL_MARKER_ABC123")
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
@@ -791,7 +791,6 @@ def test_route_skill_names_navigation_empty():
     msgs = [{"role": "user", "content": "go to the volta_gemm_kernel please zoom in"}]
     result = chat_mod._route_skill_names(msgs)
     assert result == []
-
 
 
 def test_route_skill_names_nccl():

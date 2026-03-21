@@ -13,6 +13,7 @@ def test_load_skill_success(tmp_path, monkeypatch):
     (skills_dir / "test.md").write_text("# Test Skill\nContent here.")
 
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     content = pl.load_skill("skills/test.md")
     assert "# Test Skill" in content
@@ -22,6 +23,7 @@ def test_load_skill_success(tmp_path, monkeypatch):
 def test_load_skill_missing_file(tmp_path, monkeypatch):
     """load_skill returns '' gracefully when the file does not exist."""
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     content = pl.load_skill("skills/nonexistent.md")
     assert content == ""
@@ -30,6 +32,7 @@ def test_load_skill_missing_file(tmp_path, monkeypatch):
 def test_load_skill_missing_dir(tmp_path, monkeypatch):
     """load_skill returns '' gracefully when the skill dir doesn't exist at all."""
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path / "does_not_exist")
     content = pl.load_skill("skills/mfu.md")
     assert content == ""
@@ -39,6 +42,7 @@ def test_load_principles(tmp_path, monkeypatch):
     """load_principles loads PRINCIPLES.md from SKILLS_DIR."""
     (tmp_path / "PRINCIPLES.md").write_text("# Principles\nRule 1.")
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     content = pl.load_principles()
     assert "Principles" in content
@@ -47,6 +51,7 @@ def test_load_principles(tmp_path, monkeypatch):
 def test_load_principles_missing(tmp_path, monkeypatch):
     """load_principles returns '' when PRINCIPLES.md is missing."""
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     assert pl.load_principles() == ""
 
@@ -55,6 +60,7 @@ def test_skill_block_with_header(tmp_path, monkeypatch):
     """skill_block wraps content with header/footer delimiters."""
     (tmp_path / "test.md").write_text("body content")
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     block = pl.skill_block("test.md", header="MY HEADER")
     assert "MY HEADER" in block
@@ -66,6 +72,7 @@ def test_skill_block_no_header(tmp_path, monkeypatch):
     """skill_block without header returns raw content."""
     (tmp_path / "test.md").write_text("raw content")
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     block = pl.skill_block("test.md")
     assert block == "raw content"
@@ -74,6 +81,7 @@ def test_skill_block_no_header(tmp_path, monkeypatch):
 def test_skill_block_missing_file(tmp_path, monkeypatch):
     """skill_block returns '' when file is missing."""
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     assert pl.skill_block("missing.md", header="HEADER") == ""
 
@@ -83,6 +91,7 @@ def test_load_skill_context(tmp_path, monkeypatch):
     (tmp_path / "a.md").write_text("Content A")
     (tmp_path / "b.md").write_text("Content B")
     import nsys_ai.prompt_loader as pl
+
     monkeypatch.setattr(pl, "SKILLS_DIR", tmp_path)
     result = pl.load_skill_context(["a.md", "b.md", "missing.md"])
     assert "Content A" in result
@@ -100,6 +109,7 @@ def test_env_var_override(tmp_path, monkeypatch):
     import importlib  # noqa: E401
 
     import nsys_ai.prompt_loader as pl
+
     importlib.reload(pl)  # picks up the new env var
     monkeypatch.setattr(pl, "SKILLS_DIR", skills_alt)  # ensure patched too
 

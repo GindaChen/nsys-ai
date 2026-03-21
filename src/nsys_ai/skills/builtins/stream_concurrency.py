@@ -78,11 +78,9 @@ def _format(rows):
         f"  Active streams: {r0['active_streams']}",
         f"  Total kernels:  {r0['total_kernels']}",
         f"  Global span:    {r0['global_span_ms']:.2f}ms",
-        f"  Sum GPU time:   {r0['sum_util_pct']:.1f}% of span "
-        f"(>100% = true concurrency)",
+        f"  Sum GPU time:   {r0['sum_util_pct']:.1f}% of span (>100% = true concurrency)",
         "",
-        f"{'Stream':>7s} {'Kernels':>8s} {'GPU(ms)':>10s} "
-        f"{'AvgKern':>10s} {'Util%':>7s}",
+        f"{'Stream':>7s} {'Kernels':>8s} {'GPU(ms)':>10s} {'AvgKern':>10s} {'Util%':>7s}",
         "─" * 50,
     ]
     for r in rows:
