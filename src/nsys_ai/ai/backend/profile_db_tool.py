@@ -27,8 +27,13 @@ NVTX_TABLE = "NVTX_EVENTS"
 # StringIds maps id -> value for kernel names (shortName, demangledName reference it).
 STRING_IDS_TABLE = "StringIds"
 
-# Regex: reject any mutating SQL.
-_READ_ONLY_BLOCK = re.compile(r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b")
+# Regex: reject any mutating or dangerous SQL (including DuckDB-specific statements
+# like COPY/EXPORT that can write files, ATTACH that can read arbitrary files, and
+# INSTALL/LOAD that can load extensions).
+_READ_ONLY_BLOCK = re.compile(
+    r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE"
+    r"|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|PRAGMA|SET|CALL)\b"
+)
 
 
 def _adaptive_limit(sql_upper: str, base_limit: int) -> int:

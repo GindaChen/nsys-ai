@@ -104,11 +104,30 @@ def build_cache(sqlite_path: str) -> Path:
 
     Returns the cache directory path.
     """
+    import shutil
+    import tempfile
+
     cache_dir = _cache_dir_for(sqlite_path)
+    # Build into a temp dir first, then atomically rename to avoid race
+    # conditions when multiple threads/processes open the same profile.
+    tmp_dir = Path(tempfile.mkdtemp(
+        prefix=".parquet_build_", dir=cache_dir.parent,
+    ))
+    try:
+        _build_cache_into(sqlite_path, tmp_dir)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    # Atomic swap: remove old cache (if any) and rename temp → final.
     if cache_dir.exists():
-        import shutil
         shutil.rmtree(cache_dir, ignore_errors=True)
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir.rename(cache_dir)
+    return cache_dir
+
+
+def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
+    """Internal: build the Parquet cache into the given directory."""
 
     log.info("Building analysis cache (first run only)...")
     t0 = time.monotonic()
