@@ -44,6 +44,12 @@ def _classify_gap_apis(api_names: list[str]) -> tuple[str, str]:
 
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Execute GPU idle gaps analysis with aggregation and CPU attribution."""
+    import duckdb
+
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        # DuckDB has no row_factory; _execute_inner builds dicts via cursor.description
+        return _execute_inner(conn, **kwargs)
+
     # Ensure row_factory is set for dict-like access from raw SQL
     old_factory = conn.row_factory
     conn.row_factory = sqlite3.Row
@@ -97,11 +103,16 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
 ORDER BY gap_ns DESC
 LIMIT ?"""
+    import sqlite3
+
+    import duckdb
+
+    from ...sql_compat import sqlite_to_duckdb
     try:
-        rows = [
-            dict(r) for r in conn.execute(gap_sql, trim_params + [min_gap_ns, limit]).fetchall()
-        ]
-    except sqlite3.OperationalError as e:
+        cur = conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    except (sqlite3.Error, duckdb.Error) as e:
         _log.debug("gpu_idle_gaps: %s", e)
         return []
 
@@ -126,25 +137,33 @@ SELECT COUNT(*) AS gap_count,
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     try:
-        agg = dict(conn.execute(agg_sql, trim_params + [min_gap_ns]).fetchone())
-    except sqlite3.OperationalError:
+        from ...sql_compat import sqlite_to_duckdb
+        cur_agg = conn.execute(sqlite_to_duckdb(agg_sql), trim_params + [min_gap_ns])
+        agg_row = cur_agg.fetchone()
+        if agg_row is not None:
+            agg_cols = [d[0] for d in cur_agg.description]
+            agg = dict(zip(agg_cols, agg_row))
+        else:
+            agg = {}
+    except Exception:
         agg = {}
 
     # Profile time range for percentage calculation
     # Gaps are summed across ALL streams, so we need to normalize by
     # the number of active streams to avoid pct > 100%.
     try:
+        from ...sql_compat import sqlite_to_duckdb
         time_range = conn.execute(
-            f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
+            sqlite_to_duckdb(f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
             trim_params,
         ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
         stream_count_row = conn.execute(
-            f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
+            sqlite_to_duckdb(f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
             trim_params,
         ).fetchone()
-        n_streams = stream_count_row["n"] if stream_count_row else 1
-    except sqlite3.OperationalError:
+        n_streams = stream_count_row[0] if stream_count_row else 1
+    except Exception:
         profile_span_ns = 0
         n_streams = 1
 
@@ -172,7 +191,8 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             gap_start = gap["start_ns"]
             gap_end = gap["end_ns"]
             try:
-                api_rows = conn.execute(
+                from ...sql_compat import sqlite_to_duckdb
+                cur_api = conn.execute(sqlite_to_duckdb(
                     f"""\
 SELECT s.value AS api_name, COUNT(*) AS call_count,
        SUM(r.[end] - r.start) AS total_ns
@@ -181,11 +201,12 @@ JOIN StringIds s ON r.nameId = s.id
 WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
 ORDER BY total_ns DESC
-LIMIT 5""",
-                    (gap_end, gap_start),
-                ).fetchall()
-                apis = [dict(r) for r in api_rows]
-            except sqlite3.OperationalError:
+LIMIT 5"""
+                ), (gap_end, gap_start))
+                api_rows = cur_api.fetchall()
+                api_cols = [d[0] for d in cur_api.description]
+                apis = [dict(zip(api_cols, r)) for r in api_rows]
+            except Exception:
                 apis = []
 
             api_names = [a["api_name"] for a in apis]

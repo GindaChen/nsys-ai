@@ -122,12 +122,12 @@ GROUP BY k.shortName ORDER BY ms DESC LIMIT 20
 
 ```sql
 -- All tables in this profile
-SELECT name FROM sqlite_master WHERE type='table' ORDER BY name
+SHOW TABLES
 
 -- Columns in a table
-PRAGMA table_info(CUPTI_ACTIVITY_KIND_KERNEL)
+DESCRIBE CUPTI_ACTIVITY_KIND_KERNEL
 
 -- Check if NVTX uses textId (newer) or text (older)
-PRAGMA table_info(NVTX_EVENTS)
+DESCRIBE NVTX_EVENTS
 -- If 'textId' column present → JOIN StringIds; else use n.text directly
 ```

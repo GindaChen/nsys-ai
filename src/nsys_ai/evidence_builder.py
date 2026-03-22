@@ -77,22 +77,21 @@ class EvidenceBuilder:
             try:
                 kernel_tbl = self.prof.schema.kernel_table
                 if kernel_tbl:
-                    with self.prof._lock:
-                        same_stream = self.prof.conn.execute(
-                            f"""
-                            SELECT k.streamId,
-                                SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
-                                    THEN 1 ELSE 0 END) AS nccl_count,
-                                SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
-                                    THEN 1 ELSE 0 END) AS compute_count
-                            FROM {kernel_tbl} k
-                            JOIN StringIds s ON k.shortName = s.id
-                            WHERE k.deviceId = ?
-                            GROUP BY k.streamId
-                            HAVING nccl_count > 0 AND compute_count > 0
-                            """,
-                            (self.device,),
-                        ).fetchall()
+                    same_stream = self.prof._duckdb_query(
+                        f"""
+                        SELECT k.streamId,
+                            SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
+                                THEN 1 ELSE 0 END) AS nccl_count,
+                            SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
+                                THEN 1 ELSE 0 END) AS compute_count
+                        FROM {kernel_tbl} k
+                        JOIN StringIds s ON k.shortName = s.id
+                        WHERE k.deviceId = ?
+                        GROUP BY k.streamId
+                        HAVING nccl_count > 0 AND compute_count > 0
+                        """,
+                        (self.device,),
+                    )
                     if same_stream:
                         streams = [str(r["streamId"]) for r in same_stream]
                         note += (
@@ -191,11 +190,10 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
 ORDER BY gap_ns DESC
 LIMIT ?"""
-        with self.prof._lock:
-            rows = self.prof.conn.execute(
-                sql,
-                (self.device, self.trim[0], self.trim[1], min_gap_ns, top_n),
-            ).fetchall()
+        rows = self.prof._duckdb_query(
+            sql,
+            (self.device, self.trim[0], self.trim[1], min_gap_ns, top_n),
+        )
 
         # Compute total idle stats for note enrichment
         total_idle_ns = sum(r["gap_ns"] for r in rows)
@@ -204,16 +202,15 @@ LIMIT ?"""
         # on multi-stream workloads.  Query the kernel table directly instead of
         # deriving from the limited top-N rows (which would undercount streams).
         try:
-            with self.prof._lock:
-                active_streams_row = self.prof.conn.execute(
+            active_streams_rows = self.prof._duckdb_query(
                     f"""
                     SELECT COUNT(DISTINCT k.streamId) AS n
                     FROM {self.prof.schema.kernel_table} k
                     WHERE k.deviceId = ? AND k.[end] >= ? AND k.start <= ?
                     """,
                     (self.device, self.trim[0], self.trim[1]),
-                ).fetchone()
-            active_streams = (active_streams_row["n"] or 0) if active_streams_row else 0
+                )
+            active_streams = (active_streams_rows[0]["n"] or 0) if active_streams_rows else 0
             active_streams = active_streams or 1
         except Exception:
             active_streams = 1
@@ -237,20 +234,19 @@ LIMIT ?"""
                 ]
                 if runtime_tables:
                     rt_tbl = runtime_tables[0]
-                    with self.prof._lock:
-                        api_rows = self.prof.conn.execute(
-                            f"""
-                            SELECT s.value AS api_name,
-                                   SUM(r.[end] - r.start) AS total_ns
-                            FROM {rt_tbl} r
-                            JOIN StringIds s ON r.nameId = s.id
-                            WHERE r.start < ? AND r.[end] > ?
-                            GROUP BY s.value
-                            ORDER BY total_ns DESC
-                            LIMIT 1
-                            """,
-                            (int(r["gap_end"]), int(r["gap_start"])),
-                        ).fetchall()
+                    api_rows = self.prof._duckdb_query(
+                        f"""
+                        SELECT s.value AS api_name,
+                               SUM(r.[end] - r.start) AS total_ns
+                        FROM {rt_tbl} r
+                        JOIN StringIds s ON r.nameId = s.id
+                        WHERE r.start < ? AND r.[end] > ?
+                        GROUP BY s.value
+                        ORDER BY total_ns DESC
+                        LIMIT 1
+                        """,
+                        (int(r["gap_end"]), int(r["gap_start"])),
+                    )
                     if api_rows:
                         api = api_rows[0]
                         api_name = api["api_name"].split("_v")[0]  # strip version
@@ -303,11 +299,10 @@ WHERE k.deviceId = ?
   AND k.[end] >= ? AND k.start <= ?
 ORDER BY dur_ns DESC
 LIMIT ?"""
-        with self.prof._lock:
-            rows = self.prof.conn.execute(
+        rows = self.prof._duckdb_query(
                 sql,
                 (self.device, self.trim[0], self.trim[1], top_n),
-            ).fetchall()
+            )
         return [
             Finding(
                 type="highlight",
@@ -334,11 +329,10 @@ WHERE k.deviceId = ?
   AND k.[end] >= ? AND k.start <= ?
 ORDER BY dur_ns DESC
 LIMIT ?"""
-        with self.prof._lock:
-            rows = self.prof.conn.execute(
+        rows = self.prof._duckdb_query(
                 sql,
                 (self.device, self.trim[0], self.trim[1], top_n),
-            ).fetchall()
+            )
         return [
             Finding(
                 type="highlight",
@@ -370,10 +364,9 @@ WHERE deviceId = ? AND bytes > ? AND [end] >= ? AND start <= ?
 ORDER BY dur_ns DESC
 LIMIT ?"""
         kind_names = {1: "H2D", 2: "D2H", 8: "D2D", 10: "P2P"}
-        with self.prof._lock:
-            rows = self.prof.conn.execute(
+        rows = self.prof._duckdb_query(
                 sql, (self.device, min_bytes, self.trim[0], self.trim[1], top_n)
-            ).fetchall()
+            )
         findings = []
         for r in rows:
             kind = kind_names.get(r["copyKind"], f"kind{r['copyKind']}")
@@ -422,14 +415,13 @@ WHERE m.copyKind = 1 AND m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
 GROUP BY 1
 ORDER BY total_bytes DESC"""
         try:
-            with self.prof._lock:
-                rows = self.prof.conn.execute(
+            rows = self.prof._duckdb_query(
                     sql,
                     (
                         self.device, self.trim[0], self.trim[1],
                         self.device, self.trim[0], self.trim[1],
                     ),
-                ).fetchall()
+                )
         except Exception:
             return []
 

@@ -118,16 +118,17 @@ def test_open_profile_readonly_for_worker_returns_connection(tmp_path):
     from nsys_ai.tools_profile import open_profile_readonly_for_worker
 
     db = tmp_path / "test.sqlite"
-    # Create a DB with one table
+    # Create a DB with a recognised Nsight table so the Parquet cache exports it
     setup = sqlite3.connect(str(db))
-    setup.execute("CREATE TABLE t(v INT)")
-    setup.execute("INSERT INTO t VALUES(42)")
+    setup.execute("CREATE TABLE StringIds(id INTEGER PRIMARY KEY, value TEXT)")
+    setup.execute("INSERT INTO StringIds VALUES(1, 'hello')")
     setup.commit()
     setup.close()
 
     conn = open_profile_readonly_for_worker(str(db))
-    rows = conn.execute("SELECT v FROM t").fetchall()
-    assert rows[0][0] == 42
+    rows = conn.execute("SELECT id, value FROM StringIds").fetchall()
+    assert rows[0][0] == 1
+    assert rows[0][1] == "hello"
     conn.close()
 
 

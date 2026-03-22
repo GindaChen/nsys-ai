@@ -5,6 +5,7 @@ Provides a thin wrapper around the SQLite export with typed accessors
 for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
 
+import logging
 import os
 import re
 import shutil
@@ -12,6 +13,11 @@ import sqlite3
 import subprocess  # nosec B404 — only for nsys export .nsys-rep→.sqlite, list args no shell
 import threading
 from dataclasses import dataclass, field
+
+import duckdb
+
+from nsys_ai import parquet_cache
+from nsys_ai.sql_compat import sqlite_to_duckdb
 
 # Regex for safe SQL identifiers (table/column names).
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -39,9 +45,13 @@ class NsightSchema:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self.tables: list[str] = [
-            r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        ]
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            cur = self._conn.execute("SHOW TABLES")
+            self.tables: list[str] = [r[0] for r in cur.fetchall()]
+        else:
+            cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            self.tables: list[str] = [r[0] for r in cur.fetchall()]
         self.version: str | None = self._detect_version()
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
@@ -56,8 +66,13 @@ class NsightSchema:
         if table not in self.tables:
             return {}
 
-        cur = self._conn.execute(f"PRAGMA table_info({table})")
-        cols = [row[1] for row in cur.fetchall()]  # 1 = name
+        import duckdb as _ddb
+        if isinstance(self._conn, _ddb.DuckDBPyConnection):
+            cur = self._conn.execute(f"DESCRIBE {table}")
+            cols = [row[0] for row in cur.fetchall()]  # 0 = column_name
+        else:
+            cur = self._conn.execute(f"PRAGMA table_info({table})")
+            cols = [row[1] for row in cur.fetchall()]  # 1 = name
         key_col = None
         val_col = None
 
@@ -150,7 +165,16 @@ class ProfileMeta:
 
 
 class Profile:
-    """Handle to an opened Nsight Systems SQLite database."""
+    """Handle to an opened Nsight Systems SQLite database.
+
+    Exposes two database connections:
+      - ``self.conn`` (sqlite3.Connection): the original SQLite DB, used only for
+        schema discovery (NsightSchema) and backwards compatibility.
+      - ``self.db`` (duckdb.DuckDBPyConnection): DuckDB over Parquet cache — the
+        primary query path for all analytical queries.
+    """
+
+    _log = logging.getLogger(__name__)
 
     def __init__(self, path: str):
         self.path = path
@@ -162,18 +186,31 @@ class Profile:
         self.meta = self._discover()
         self._nvtx_has_text_id: bool = self._detect_nvtx_text_id()
 
+        # DuckDB over Parquet cache — primary query path
+        try:
+            self.db: duckdb.DuckDBPyConnection = parquet_cache.open_cached_db(path)
+        except Exception as e:
+            self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
+            self.db = None  # type: ignore[assignment]
+
     @classmethod
     def _from_conn(cls, conn: sqlite3.Connection) -> "Profile":
         """Wrap an existing connection as a Profile without opening a new file.
 
         The connection is borrowed — ``close()`` will NOT close it.
+        Supports both SQLite and DuckDB connections.
         """
-        conn.row_factory = sqlite3.Row
+        import duckdb
+
+        is_duckdb = isinstance(conn, duckdb.DuckDBPyConnection)
+        if not is_duckdb:
+            conn.row_factory = sqlite3.Row
         obj = cls.__new__(cls)
         obj.conn = conn
         obj._lock = threading.Lock()
         obj._owns_conn = False
         obj.path = ""
+        obj.db = conn if is_duckdb else None  # type: ignore[assignment]
         obj.schema = NsightSchema(conn)
         obj.meta = obj._discover()
         obj._nvtx_has_text_id = obj._detect_nvtx_text_id()
@@ -184,7 +221,11 @@ class Profile:
         if "NVTX_EVENTS" not in self.schema.tables:
             return False
         try:
-            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()]
+            import duckdb
+            if isinstance(self.conn, duckdb.DuckDBPyConnection):
+                cols = [r[0] for r in self.conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
+            else:
+                cols = [r[1] for r in self.conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()]
             return "textId" in cols
         except Exception:
             return False
@@ -204,20 +245,24 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
+        import duckdb
+        is_duckdb = isinstance(self.conn, duckdb.DuckDBPyConnection)
+
         devices = [
             r[0]
             for r in self.conn.execute(
                 f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
-            )
+            ).fetchall()
         ]
 
         streams: dict[int, list[int]] = {}
         for r in self.conn.execute(
             f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
-        ):
+        ).fetchall():
             streams.setdefault(r[0], []).append(r[1])
 
-        tr = self.conn.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
+        end_col = '"end"' if is_duckdb else '[end]'
+        tr = self.conn.execute(f"SELECT MIN(start), MAX({end_col}) FROM {kernel_table}").fetchone()
 
         kc = self.conn.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
         nc = (
@@ -244,7 +289,7 @@ class Profile:
         kcounts = {}
         for r in self.conn.execute(
             f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
-        ):
+        ).fetchall():
             kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
@@ -256,13 +301,13 @@ class Profile:
                        g.chipName, g.memoryBandwidth as bw
                 FROM TARGET_INFO_GPU g
                 JOIN TARGET_INFO_CUDA_DEVICE c ON g.id = c.gpuId
-                GROUP BY c.cudaId
-            """):
-                hw[r["dev"]] = dict(
-                    name=r["name"] or "",
-                    pci_bus=r["busLocation"] or "",
-                    sm_count=r["sms"] or 0,
-                    memory_bytes=r["mem"] or 0,
+                GROUP BY c.cudaId, g.name, g.busLocation, g.smCount, g.totalMemory, g.chipName, g.memoryBandwidth
+            """).fetchall():
+                hw[r[0]] = dict(
+                    name=r[1] or "",
+                    pci_bus=r[2] or "",
+                    sm_count=r[3] or 0,
+                    memory_bytes=r[4] or 0,
                 )
 
         for dev in devices:
@@ -297,8 +342,7 @@ class Profile:
             sql += " AND k.start >= ? AND k.[end] <= ?"
             params += list(trim)
         sql += " ORDER BY k.start"
-        with self._lock:
-            return [dict(r) for r in self.conn.execute(sql, params)]
+        return self._duckdb_query(sql, params)
 
     def aggregate_kernels(
         self,
@@ -340,8 +384,7 @@ class Profile:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        with self._lock:
-            return [dict(r) for r in self.conn.execute(sql, params)]
+        return self._duckdb_query(sql, params)
 
     def aggregate_nvtx_ranges(
         self,
@@ -393,8 +436,7 @@ class Profile:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        with self._lock:
-            return [dict(r) for r in self.conn.execute(sql, params)]
+        return self._duckdb_query(sql, params)
 
     def search_nvtx_names(
         self,
@@ -450,8 +492,7 @@ class Profile:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        with self._lock:
-            return [dict(r) for r in self.conn.execute(sql, params)]
+        return self._duckdb_query(sql, params)
 
     def memcpy_in_window(
         self,
@@ -465,19 +506,18 @@ class Profile:
         out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
         if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
             return out
-        with self._lock:
-            rows = self.conn.execute(
-                """
-                SELECT copyKind, SUM([end] - start) AS total_ns
-                FROM CUPTI_ACTIVITY_KIND_MEMCPY
-                WHERE deviceId = ? AND start >= ? AND [end] <= ?
-                GROUP BY copyKind
-                """,
-                (device, trim[0], trim[1]),
-            ).fetchall()
+        rows = self._duckdb_query(
+            """
+            SELECT copyKind, SUM([end] - start) AS total_ns
+            FROM CUPTI_ACTIVITY_KIND_MEMCPY
+            WHERE deviceId = ? AND start >= ? AND [end] <= ?
+            GROUP BY copyKind
+            """,
+            [device, trim[0], trim[1]],
+        )
         for r in rows:
-            kind = int(r[0])
-            ns = int(r[1])
+            kind = int(r["copyKind"])
+            ns = int(r["total_ns"] or 0)
             if kind == 1:
                 out["h2d_ns"] = ns
             elif kind == 2:
@@ -489,56 +529,53 @@ class Profile:
 
     def kernel_map(self, device: int) -> dict[int, dict]:
         """Build correlationId -> kernel info for ALL kernels on a device."""
-        with self._lock:
-            return {
-                r["correlationId"]: dict(
-                    start=r["start"],
-                    end=r["end"],
-                    stream=r["streamId"],
-                    name=r["name"],
-                    demangled=r["demangled"],
-                )
-                for r in self.conn.execute(
-                    f"""
-                        SELECT k.start, k.[end], k.streamId, k.correlationId,
-                               s.value as name, d.value as demangled
-                        FROM {self.schema.kernel_table} k
-                        JOIN StringIds s ON k.shortName = s.id
-                        JOIN StringIds d ON k.demangledName = d.id
-                        WHERE k.deviceId = ?  ORDER BY k.start
-                    """,
-                    (device,),
-                )
-            }
+        return {
+            r["correlationId"]: dict(
+                start=r["start"],
+                end=r["end"],
+                stream=r["streamId"],
+                name=r["name"],
+                demangled=r["demangled"],
+            )
+            for r in self._duckdb_query(
+                f"""
+                    SELECT k.start, k.[end], k.streamId, k.correlationId,
+                           s.value as name, d.value as demangled
+                    FROM {self.schema.kernel_table} k
+                    JOIN StringIds s ON k.shortName = s.id
+                    JOIN StringIds d ON k.demangledName = d.id
+                    WHERE k.deviceId = ?  ORDER BY k.start
+                """,
+                [device],
+            )
+        }
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
-        with self._lock:
-            return {
-                r[0]
-                for r in self.conn.execute(
-                    f"""
-                SELECT DISTINCT r.globalTid
-                FROM CUPTI_ACTIVITY_KIND_RUNTIME r
-                JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
-                WHERE k.deviceId = ?
-            """,
-                    (device,),
-                )
-            }
+        return {
+            r["globalTid"]
+            for r in self._duckdb_query(
+                f"""
+            SELECT DISTINCT r.globalTid
+            FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+            JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
+            WHERE k.deviceId = ?
+        """,
+                [device],
+            )
+        }
 
     def runtime_index(self, threads: set[int], window: tuple[int, int]) -> dict[int, list]:
         """Load CUDA runtime calls for threads, indexed by globalTid."""
         idx = {}
-        with self._lock:
-            for tid in threads:
-                idx[tid] = self.conn.execute(
-                    """
-                    SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
-                    WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
-                """,
-                    (tid, window[0], window[1]),
-                ).fetchall()
+        for tid in threads:
+            idx[tid] = self._duckdb_query(
+                """
+                SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+                WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
+            """,
+                [tid, window[0], window[1]],
+            )
         return idx
 
     def nvtx_events(self, threads: set[int], window: tuple[int, int]) -> list:
@@ -551,37 +588,73 @@ class Profile:
         if "NVTX_EVENTS" not in self.schema.tables or not threads:
             return []
         tids = ",".join(map(str, threads))
-        with self._lock:
-            if self._nvtx_has_text_id:
-                return self.conn.execute(
-                    f"""
-                    SELECT COALESCE(n.text, s.value) AS text,
-                           n.globalTid, n.start, n.[end]
-                    FROM NVTX_EVENTS n
-                    LEFT JOIN StringIds s ON n.textId = s.id
-                    WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
-                      AND n.[end] > n.start
-                      AND n.start >= ? AND n.start <= ?
-                      AND n.globalTid IN ({tids})
-                    ORDER BY n.start
-                """,
-                    window,
-                ).fetchall()
-            else:
-                return self.conn.execute(
-                    f"""
-                    SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
-                    WHERE text IS NOT NULL AND [end] > start
-                      AND start >= ? AND start <= ?
-                      AND globalTid IN ({tids})
-                    ORDER BY start
-                """,
-                    window,
-                ).fetchall()
+        if self._nvtx_has_text_id:
+            return self._duckdb_query(
+                f"""
+                SELECT COALESCE(n.text, s.value) AS text,
+                       n.globalTid, n.start, n.[end]
+                FROM NVTX_EVENTS n
+                LEFT JOIN StringIds s ON n.textId = s.id
+                WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
+                  AND n.[end] > n.start
+                  AND n.start >= ? AND n.start <= ?
+                  AND n.globalTid IN ({tids})
+                ORDER BY n.start
+            """,
+                list(window),
+            )
+        else:
+            return self._duckdb_query(
+                f"""
+                SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
+                WHERE text IS NOT NULL AND [end] > start
+                  AND start >= ? AND start <= ?
+                  AND globalTid IN ({tids})
+                ORDER BY start
+            """,
+                list(window),
+            )
+
+    def _duckdb_query(self, sql: str, params=None) -> list[dict]:
+        """Execute a SQL query via DuckDB, falling back to SQLite.
+
+        Translates SQLite-dialect SQL (``[end]``) to DuckDB (``"end"``).
+        Returns results as a list of dicts.
+        """
+        conn = self.db if self.db is not None else self.conn
+
+        if isinstance(conn, duckdb.DuckDBPyConnection):
+            ddb_sql = sqlite_to_duckdb(sql)
+            with self._lock:
+                cur = conn.execute(ddb_sql, params or [])
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        else:
+            if not getattr(self, "_warned_sqlite_fallback", False):
+                self._log.warning(
+                    "DuckDB unavailable, falling back to SQLite (slower)"
+                )
+                self._warned_sqlite_fallback = True
+            with self._lock:
+                return [dict(r) for r in conn.execute(sql, params or [])]
 
     def close(self):
+        # Close the primary connection only if we own it.
         if getattr(self, "_owns_conn", True):
             self.conn.close()
+
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+
+        # If db is just an alias to a borrowed conn, do not close it.
+        if db is self.conn and not getattr(self, "_owns_conn", True):
+            return
+
+        try:
+            db.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "Profile":
         return self
@@ -648,15 +721,29 @@ def resolve_profile_path(path: str) -> str:
     return out
 
 
-def get_first_gpu_name(conn: sqlite3.Connection) -> str:
-    """Return the first GPU name from TARGET_INFO_GPU (for peak TFLOPS lookup). Empty if tables missing."""
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-    if "TARGET_INFO_GPU" not in tables or "TARGET_INFO_CUDA_DEVICE" not in tables:
+def get_first_gpu_name(conn) -> str:
+    """Return the first GPU name from TARGET_INFO_GPU (for peak TFLOPS lookup). Empty if tables missing.
+
+    Accepts both sqlite3.Connection and duckdb.DuckDBPyConnection.
+    """
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        try:
+            tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+        except duckdb.Error:
+            return ""
+    else:
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    if "TARGET_INFO_GPU" not in tables and "gpu_info" not in tables:
         return ""
-    row = conn.execute("""
+    if "TARGET_INFO_CUDA_DEVICE" not in tables and "cuda_device" not in tables:
+        return ""
+    # Use Parquet view names if available, otherwise original SQLite names
+    gpu_tbl = "gpu_info" if "gpu_info" in tables else "TARGET_INFO_GPU"
+    dev_tbl = "cuda_device" if "cuda_device" in tables else "TARGET_INFO_CUDA_DEVICE"
+    row = conn.execute(f"""
         SELECT g.name
-        FROM TARGET_INFO_GPU g
-        JOIN TARGET_INFO_CUDA_DEVICE c ON g.id = c.gpuId
+        FROM {gpu_tbl} g
+        JOIN {dev_tbl} c ON g.id = c.gpuId
         ORDER BY c.cudaId
         LIMIT 1
     """).fetchone()

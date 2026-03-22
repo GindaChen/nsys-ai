@@ -167,8 +167,7 @@ def build_timeline_gpu_data(
                 WHERE k.deviceId = ? AND k.[end] >= ? AND k.start <= ?
                 ORDER BY k.start
             """
-            with prof._lock:
-                rows = prof.conn.execute(kernel_sql, (dev, trim[0], trim[1])).fetchall()
+            rows = prof._duckdb_query(kernel_sql, (dev, trim[0], trim[1]))
 
             for r in rows:
                 start_ns = int(r["start_ns"])
@@ -195,8 +194,7 @@ def build_timeline_gpu_data(
                     WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
                     ORDER BY m.start
                 """
-                with prof._lock:
-                    memcpy_rows = prof.conn.execute(memcpy_sql, (dev, trim[0], trim[1])).fetchall()
+                memcpy_rows = prof._duckdb_query(memcpy_sql, (dev, trim[0], trim[1]))
 
                 for r in memcpy_rows:
                     start_ns = int(r["start_ns"])
@@ -224,8 +222,7 @@ def build_timeline_gpu_data(
                     WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
                     ORDER BY m.start
                 """
-                with prof._lock:
-                    memset_rows = prof.conn.execute(memset_sql, (dev, trim[0], trim[1])).fetchall()
+                memset_rows = prof._duckdb_query(memset_sql, (dev, trim[0], trim[1]))
 
                 for r in memset_rows:
                     start_ns = int(r["start_ns"])

@@ -7,8 +7,8 @@ and produces a structured analysis report. Works without LLM by default
 extra installed, can delegate to an LLM for natural language analysis.
 """
 
-import sqlite3
 
+from ..profile import Profile
 from ..skills.registry import get_skill, run_skill
 
 
@@ -86,10 +86,11 @@ class Agent:
         if trim_ns:
             self._trim_kwargs["trim_start_ns"] = trim_ns[0]
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
-        self.conn = sqlite3.connect(profile_path)
+        self.profile = Profile(profile_path)
+        self.conn = self.profile.db if self.profile.db is not None else self.profile.conn
 
     def close(self):
-        self.conn.close()
+        self.profile.close()
 
     def analyze(self) -> str:
         """Run a full auto-analysis of the profile.
