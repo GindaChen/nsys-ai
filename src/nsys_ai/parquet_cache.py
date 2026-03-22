@@ -121,7 +121,8 @@ def build_cache(sqlite_path: str) -> Path:
 
     # Atomic swap: rename old cache aside, rename new into place, then clean up.
     # This avoids a window where the cache directory is missing for concurrent readers.
-    old_dir = cache_dir.parent / (cache_dir.name + ".old")
+    # Use PID in the old-dir name so concurrent builders don't collide.
+    old_dir = cache_dir.parent / f"{cache_dir.name}.old.{os.getpid()}"
     if old_dir.exists():
         shutil.rmtree(old_dir, ignore_errors=True)
     if cache_dir.exists():

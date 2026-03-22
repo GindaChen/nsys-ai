@@ -37,7 +37,8 @@ _READ_ONLY_BLOCK = re.compile(
     r"|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|PRAGMA|SET|CALL"
     r"|READ_CSV_AUTO|PARQUET_SCAN|READ_PARQUET|JSON_SCAN|CSV_AUTO_SCAN"
     r"|READ_CSV|READ_JSON|READ_JSON_AUTO)\b"
-    r"|\bFROM\s+['\"]"  # FROM 'path.parquet' / FROM "path"
+    r"|\bFROM\s+'"                           # FROM 'path' (single-quoted = file)
+    r'|\bFROM\s+"(?=[^"]*[\\\\/.])[^"]*"'    # FROM "path/with.sep" (file path)
     r")"
 )
 
