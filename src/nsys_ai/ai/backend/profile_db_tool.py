@@ -145,8 +145,8 @@ def query_profile_db(
     # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
     effective_limit = _adaptive_limit(upper, max_limit)
 
-    # Enforce LIMIT only on SELECT queries to avoid syntax errors on PRAGMA/SHOW
-    if upper.startswith("SELECT "):
+    # Enforce LIMIT only on SELECT/WITH/FROM queries to avoid syntax errors on PRAGMA/SHOW
+    if upper.startswith(("SELECT", "WITH", "(", "FROM")):
         limit_match = re.search(r"\bLIMIT\s+(\d+)", upper, re.IGNORECASE)
         if limit_match:
             n = int(limit_match.group(1))

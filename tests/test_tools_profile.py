@@ -210,6 +210,6 @@ def test_query_profile_db_helper_commands_sqlite():
     out2 = query_profile_db(conn, "DESCRIBE test_table")
     assert "id" in out2
     assert "name" in out2
-    # Ensure DESCRIBE with trailing garbarge doesn't break
+    # Ensure DESCRIBE with trailing garbage doesn't break
     out3 = query_profile_db(conn, "DESCRIBE test_table LIMIT 10")
     assert "id" in out3
