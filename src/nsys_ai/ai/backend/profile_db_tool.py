@@ -10,6 +10,10 @@ import logging
 import re
 import sqlite3
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import duckdb
 
 _log = logging.getLogger(__name__)
 
@@ -23,8 +27,20 @@ NVTX_TABLE = "NVTX_EVENTS"
 # StringIds maps id -> value for kernel names (shortName, demangledName reference it).
 STRING_IDS_TABLE = "StringIds"
 
-# Regex: reject any mutating SQL.
-_READ_ONLY_BLOCK = re.compile(r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b")
+# Regex: reject any mutating or dangerous SQL (including DuckDB-specific statements
+# like COPY/EXPORT that can write files, ATTACH that can read arbitrary files,
+# INSTALL/LOAD that can load extensions, and table functions like read_csv_auto /
+# parquet_scan that can read arbitrary host files).
+_READ_ONLY_BLOCK = re.compile(
+    r"(?i)("
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE"
+    r"|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|PRAGMA|SET|CALL"
+    r"|READ_CSV_AUTO|PARQUET_SCAN|READ_PARQUET|JSON_SCAN|CSV_AUTO_SCAN"
+    r"|READ_CSV|READ_JSON|READ_JSON_AUTO)\b"
+    r"|\bFROM\s+'"                           # FROM 'path' (single-quoted = file)
+    r'|\bFROM\s+"(?=[^"]*[\\\\/.])[^"]*"'    # FROM "path/with.sep" (file path)
+    r")"
+)
 
 
 def _adaptive_limit(sql_upper: str, base_limit: int) -> int:
@@ -57,16 +73,20 @@ def _adaptive_limit(sql_upper: str, base_limit: int) -> int:
 
 
 def query_profile_db(
-    conn: sqlite3.Connection,
+    conn,
     sql_query: str,
     *,
     max_limit: int = DEFAULT_MAX_LIMIT,
 ) -> str:
     """
-    Execute a read-only SELECT on the profile DB and return rows as a JSON string.
+    Execute a read-only query on the profile DB and return rows as a JSON string.
+
+    Supports SELECT queries, as well as SHOW TABLES and DESCRIBE <table> helpers.
+    Accepts both sqlite3.Connection and duckdb.DuckDBPyConnection.
+    DuckDB connections get automatic SQL dialect translation via sqlite_to_duckdb().
 
     - Guardrail 1: Rejects any query containing INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/etc.
-    - Guardrail 2: If no LIMIT or LIMIT > max_limit, enforces LIMIT max_limit.
+    - Guardrail 2: Enforces LIMIT max_limit on SELECT/WITH/FROM queries to prevent OOM.
     - Guardrail 3: Rejects broad SELECT * queries to avoid token explosion.
     - Returns: "[{\"col\": \"val\"}, ...]" or an error string for the model.
     """
@@ -74,7 +94,7 @@ def query_profile_db(
         return "Error: Empty query."
 
     if _READ_ONLY_BLOCK.search(sql_query):
-        return "Error: Read-only. Only SELECT queries are allowed."
+        return "Error: Read-only. Only SELECT/SHOW/DESCRIBE queries are allowed."
 
     q = sql_query.strip().rstrip(";")
     upper = q.upper()
@@ -90,31 +110,69 @@ def query_profile_db(
             "SELECT start, [end], shortName FROM <table> WHERE ... LIMIT 20"
         )
 
+    import sqlite3
+
+    import duckdb
+
+    # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
+    if "SQLITE_MASTER" in upper and isinstance(conn, duckdb.DuckDBPyConnection):
+        q = "SHOW TABLES"
+        upper = "SHOW TABLES"
+
+    # SQLite fallback: support DuckDB-style helper commands used in docs.
+    # This keeps schema discovery working even when DuckDB is unavailable.
+    if isinstance(conn, sqlite3.Connection):
+        if upper == "SHOW TABLES":
+            q = (
+                "SELECT name AS table_name "
+                "FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            upper = q.upper()
+        elif upper.startswith("DESCRIBE "):
+            rest = q[9:].strip()
+            table_token = rest.split(None, 1)[0] if rest else ""
+            table_name = table_token.strip("'\"`[]")
+            safe_table_name = table_name.replace("'", "''")
+            q = f"PRAGMA table_info('{safe_table_name}')"
+            upper = q.upper()
+
+    # DuckDB translation for LLM-generated SQL
+    if isinstance(conn, duckdb.DuckDBPyConnection) and "SHOW TABLES" not in upper and "DESCRIBE " not in upper:
+        from nsys_ai.sql_compat import sqlite_to_duckdb
+        q = sqlite_to_duckdb(q)
+        upper = q.upper()
+
     # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
     effective_limit = _adaptive_limit(upper, max_limit)
 
-    # Enforce LIMIT: if no LIMIT append; if LIMIT > effective_limit rewrite.
-    limit_match = re.search(r"\bLIMIT\s+(\d+)", upper, re.IGNORECASE)
-    if limit_match:
-        n = int(limit_match.group(1))
-        if n > effective_limit:
-            q = re.sub(
-                r"\bLIMIT\s+" + str(n) + r"\b",
-                f"LIMIT {effective_limit}",
-                q,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-    else:
-        q = q + f" LIMIT {effective_limit}"
+    # Enforce LIMIT only on SELECT/WITH/FROM queries to avoid syntax errors on PRAGMA/SHOW
+    if upper.startswith(("SELECT", "WITH", "(", "FROM")):
+        limit_match = re.search(r"\bLIMIT\s+(\d+)", upper, re.IGNORECASE)
+        if limit_match:
+            n = int(limit_match.group(1))
+            if n > effective_limit:
+                q = re.sub(
+                    r"\bLIMIT\s+" + str(n) + r"\b",
+                    f"LIMIT {effective_limit}",
+                    q,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+        else:
+            q = q + f" LIMIT {effective_limit}"
 
     try:
         cur = conn.execute(q)
+        # duckdb cursor fetchall returns list of tuples
         rows = cur.fetchall()
-        if conn.row_factory is sqlite3.Row:
+
+        # Determine column names (works for both duckdb and sqlite)
+        names = [d[0] for d in cur.description] if cur.description else []
+
+        if getattr(conn, "row_factory", None) is sqlite3.Row and not isinstance(conn, duckdb.DuckDBPyConnection):
             out = [dict(r) for r in rows]
         else:
-            names = [d[0] for d in cur.description] if cur.description else []
             out = [dict(zip(names, r)) for r in rows]
 
         # JSON-serializable values (sqlite3 can return bytes etc.)
@@ -141,12 +199,12 @@ def query_profile_db(
                 "(e.g. start, [end], shortName) or reduce the LIMIT."
             )
         return json_str
-    except sqlite3.Error as e:
+    except (sqlite3.Error, duckdb.Error) as e:
         return f"Error: Database error: {e}"
 
 
 def get_profile_schema(
-    conn: sqlite3.Connection,
+    conn: "sqlite3.Connection | duckdb.DuckDBPyConnection",
     table_names: tuple[str, ...] | None = None,
 ) -> str:
     """
@@ -156,7 +214,7 @@ def get_profile_schema(
     sqlite_master for that table and NVTX_EVENTS (if present).
     """
     try:
-        from .profile import NsightSchema
+        from nsys_ai.profile import NsightSchema
 
         ns = NsightSchema(conn)
         kernel_table = ns.kernel_table
@@ -174,6 +232,24 @@ def get_profile_schema(
     if not want:
         return "(No tables specified.)"
 
+    parts = []
+
+    # Support DuckDB connection
+    import duckdb
+
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        # In DuckDB, views from parquet_cache don't have detailed DDL in duckdb_views()
+        # so we just return DESCRIBE for each table
+        for table in want:
+            try:
+                cur = conn.execute(f"DESCRIBE {table}")
+                cols = [f"  {r[0]} {r[1]}" for r in cur.fetchall()]
+                parts.append(f"CREATE TABLE {table} (\n" + ",\n".join(cols) + "\n);")
+            except duckdb.Error:
+                pass
+        return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
+
+    # Standard SQLite path
     placeholders = ",".join("?" * len(want))
     try:
         cur = conn.execute(
@@ -197,7 +273,7 @@ _schema_cache: dict[str, str] = {}
 _schema_cache_lock = threading.Lock()
 
 
-def get_profile_schema_cached(conn: sqlite3.Connection, path: str | None = None) -> str:
+def get_profile_schema_cached(conn: "sqlite3.Connection | duckdb.DuckDBPyConnection", path: str | None = None) -> str:
     """
     Return schema for the given connection, using a cache keyed by path when provided.
     If path is None, always calls get_profile_schema(conn). Call with path when the
@@ -216,15 +292,29 @@ def get_profile_schema_cached(conn: sqlite3.Connection, path: str | None = None)
     return schema
 
 
-def open_profile_readonly(path: str) -> sqlite3.Connection:
-    """Open a profile SQLite file in read-only mode (URI mode=ro)."""
+def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
+    """Open a profile in read-only mode, using DuckDB Parquet cache if available.
+
+    Note: If the Parquet cache is missing or stale, this function will build
+    a ``<profile_basename>.nsys-cache`` directory next to the profile before
+    returning the connection.  While the query connection itself is read-only,
+    the cache-building process performs disk writes.
+    """
+    from nsys_ai import parquet_cache
+
+    try:
+        return parquet_cache.open_cached_db(path)
+    except Exception as e:
+        _log.warning("Failed to open DuckDB cache for %s, falling back to SQLite: %s", path, e)
+
+    # Fallback to SQLite
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def open_profile_readonly_for_worker(path: str) -> sqlite3.Connection:
+def open_profile_readonly_for_worker(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
     """
     Open a read-only profile connection for use from a worker thread.
 

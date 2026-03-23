@@ -18,8 +18,7 @@ def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int
     count.  This filters out cross-GPU NCCL threads that launch a few
     collectives on this device but bring unrelated NVTX context.
     """
-    with profile._lock:
-        rows = profile.conn.execute(
+    rows = profile._duckdb_query(
             f"""
             SELECT r.globalTid, COUNT(*) as cnt
             FROM CUPTI_ACTIVITY_KIND_RUNTIME r
@@ -28,12 +27,12 @@ def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int
             GROUP BY r.globalTid ORDER BY cnt DESC
         """,
             (device,),
-        ).fetchall()
+        )
     if not rows:
         return []
-    top_cnt = rows[0][1]
+    top_cnt = rows[0]["cnt"]
     threshold = top_cnt * min_pct
-    return [r[0] for r in rows if r[1] >= threshold]
+    return [r["globalTid"] for r in rows if r["cnt"] >= threshold]
 
 
 def _find_primary_thread(profile, device: int) -> int:
@@ -45,8 +44,7 @@ def _find_primary_thread(profile, device: int) -> int:
 def _get_thread_name(profile, tid: int) -> str:
     """Look up thread name from ThreadNames+StringIds tables. Returns '' if unknown."""
     try:
-        with profile._lock:
-            row = profile.conn.execute(
+        row = profile._duckdb_query(
                 """
                 SELECT s.value FROM ThreadNames t
                 JOIN StringIds s ON t.nameId = s.id
@@ -54,8 +52,8 @@ def _get_thread_name(profile, tid: int) -> str:
                 ORDER BY t.priority DESC LIMIT 1
             """,
                 (tid,),
-            ).fetchone()
-        return row[0] if row else ""
+            )
+        return row[0]["value"] if row else ""
     except Exception:
         return ""
 
@@ -70,32 +68,31 @@ def _build_single_thread_tree(
     """
     # Load NVTX for this thread only.
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
-    with profile._lock:
-        if profile._nvtx_has_text_id:
-            nvtx_rows = profile.conn.execute(
-                """
-                SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
-                FROM NVTX_EVENTS n
-                LEFT JOIN StringIds s ON n.textId = s.id
-                WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
-                  AND n.globalTid = ?
-                  AND n.[end] >= ? AND n.start <= ?
-                ORDER BY n.start
-            """,
-                (tid, trim[0] - pad, trim[1]),
-            ).fetchall()
-        else:
-            nvtx_rows = profile.conn.execute(
-                """
-                SELECT text, start, [end]
-                FROM NVTX_EVENTS
-                WHERE text IS NOT NULL AND [end] > start
-                  AND globalTid = ?
-                  AND [end] >= ? AND start <= ?
-                ORDER BY start
-            """,
-                (tid, trim[0] - pad, trim[1]),
-            ).fetchall()
+    if profile._nvtx_has_text_id:
+        nvtx_rows = profile._duckdb_query(
+            """
+            SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
+            FROM NVTX_EVENTS n
+            LEFT JOIN StringIds s ON n.textId = s.id
+            WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
+              AND n.globalTid = ?
+              AND n.[end] >= ? AND n.start <= ?
+            ORDER BY n.start
+        """,
+            (tid, trim[0] - pad, trim[1]),
+        )
+    else:
+        nvtx_rows = profile._duckdb_query(
+            """
+            SELECT text, start, [end]
+            FROM NVTX_EVENTS
+            WHERE text IS NOT NULL AND [end] > start
+              AND globalTid = ?
+              AND [end] >= ? AND start <= ?
+            ORDER BY start
+        """,
+            (tid, trim[0] - pad, trim[1]),
+        )
     if not nvtx_rows:
         return []
 
@@ -104,14 +101,13 @@ def _build_single_thread_tree(
     # stable across adjacent timeline tiles near boundaries.
     rt_lo = min(int(n["start"]) for n in nvtx_rows)
     rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
-    with profile._lock:
-        rt_rows = profile.conn.execute(
+    rt_rows = profile._duckdb_query(
             """
             SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
             WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
         """,
             (tid, rt_lo, rt_hi),
-        ).fetchall()
+        )
 
     # Build projected entries: each NVTX span → projected GPU bounds + child kernels
     entries = []  # list of {name, gpu_start, gpu_end, cpu_start, cpu_end, kernels: [...]}

@@ -189,8 +189,7 @@ def detect_iterations(
         text_expr = "n.text"
         text_join = ""
 
-    with prof._lock:
-        pri_nvtx = prof.conn.execute(
+    pri_nvtx = prof._duckdb_query(
             f"""
             SELECT {text_expr} AS text, n.start, n.[end] FROM {nvtx_table} n
             {text_join}
@@ -199,7 +198,7 @@ def detect_iterations(
             ORDER BY n.start
         """,
             (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
-        ).fetchall()
+        )
 
     # Filter to non-overlapping (top-level only)
     iterations = []
@@ -213,84 +212,81 @@ def detect_iterations(
     # If no NVTX markers match, fall back to detecting iterations by finding
     # large gaps in kernel execution on the primary CPU thread across all streams.
     if not iterations:
-        with prof._lock:
-            # Get all kernels on the primary thread
-            rt_all = prof.conn.execute(
-                f"""
-                SELECT correlationId, start, [end] FROM {runtime_table}
-                WHERE globalTid = ? ORDER BY start
-                """,
-                (primary_tid,),
-            ).fetchall()
+        rt_all = prof._duckdb_query(
+            f"""
+            SELECT correlationId, start, [end] FROM {runtime_table}
+            WHERE globalTid = ? ORDER BY start
+            """,
+            (primary_tid,),
+        )
 
-            if not rt_all:
-                return []
+        if not rt_all:
+            return []
 
-            # Keep both kernel and runtime timestamps so that heuristic
-            # boundaries can be expressed in runtime (CPU) time domain,
-            # matching the downstream rt-based iteration correlation.
-            kernel_entries = []
-            for rt in rt_all:
-                k = kmap.get(rt["correlationId"])
-                if not k:
+        # Keep both kernel and runtime timestamps so that heuristic
+        # boundaries can be expressed in runtime (CPU) time domain,
+        # matching the downstream rt-based iteration correlation.
+        kernel_entries = []
+        for rt in rt_all:
+            k = kmap.get(rt["correlationId"])
+            if not k:
+                continue
+            # Apply the same time window constraints as the NVTX path
+            if time_range is not None:
+                if k["end"] < time_range[0] or k["start"] > time_range[1]:
                     continue
-                # Apply the same time window constraints as the NVTX path
-                if time_range is not None:
-                    if k["end"] < time_range[0] or k["start"] > time_range[1]:
-                        continue
-                kernel_entries.append(
-                    {
-                        "kernel": k,
-                        "rt_start": rt["start"],
-                        "rt_end": rt["end"],
-                    }
-                )
+            kernel_entries.append(
+                {
+                    "kernel": k,
+                    "rt_start": rt["start"],
+                    "rt_end": rt["end"],
+                }
+            )
 
-            kernel_entries.sort(key=lambda x: x["kernel"]["start"])
+        kernel_entries.sort(key=lambda x: x["kernel"]["start"])
 
-            if not kernel_entries:
-                return []
+        if not kernel_entries:
+            return []
 
-            # Find gaps > 2ms (2,000,000 ns) between kernels to denote step
-            # boundaries.  Gap detection uses kernel timestamps (GPU domain),
-            # but boundaries are recorded in runtime timestamps (CPU domain)
-            # so the downstream rt-based filter works correctly.
-            GAP_THRESHOLD_NS = 2_000_000
-            boundaries = [kernel_entries[0]["rt_start"]]
+        # Find gaps > 2ms (2,000,000 ns) between kernels to denote step
+        # boundaries.  Gap detection uses kernel timestamps (GPU domain),
+        # but boundaries are recorded in runtime timestamps (CPU domain)
+        # so the downstream rt-based filter works correctly.
+        GAP_THRESHOLD_NS = 2_000_000
+        boundaries = [kernel_entries[0]["rt_start"]]
 
-            last_k_end = kernel_entries[0]["kernel"]["end"]
-            for entry in kernel_entries[1:]:
-                k = entry["kernel"]
-                if k["start"] - last_k_end > GAP_THRESHOLD_NS:
-                    # Boundary detected: new step starts at this kernel's
-                    # runtime start so the downstream filter includes it.
-                    boundaries.append(entry["rt_start"])
-                last_k_end = max(last_k_end, k["end"])
+        last_k_end = kernel_entries[0]["kernel"]["end"]
+        for entry in kernel_entries[1:]:
+            k = entry["kernel"]
+            if k["start"] - last_k_end > GAP_THRESHOLD_NS:
+                # Boundary detected: new step starts at this kernel's
+                # runtime start so the downstream filter includes it.
+                boundaries.append(entry["rt_start"])
+            last_k_end = max(last_k_end, k["end"])
 
-            boundaries.append(kernel_entries[-1]["rt_end"])
+        boundaries.append(kernel_entries[-1]["rt_end"])
 
-            # Construct synthetic iterations from these boundaries
-            for i in range(len(boundaries) - 1):
-                iterations.append(
-                    {
-                        "start": boundaries[i],
-                        "end": boundaries[i + 1],
-                        "text": f"heuristic_step_{i}",
-                    }
-                )
+        # Construct synthetic iterations from these boundaries
+        for i in range(len(boundaries) - 1):
+            iterations.append(
+                {
+                    "start": boundaries[i],
+                    "end": boundaries[i + 1],
+                    "text": f"heuristic_step_{i}",
+                }
+            )
 
     if not iterations:
         return []
 
     # For each iteration, count kernels and compute GPU time
-    with prof._lock:
-        rt_all = prof.conn.execute(
-            f"""
-            SELECT start, [end], correlationId FROM {runtime_table}
-            WHERE globalTid = ? ORDER BY start
+    rt_all = prof._duckdb_query(
+        f"""
+        SELECT start, [end], correlationId FROM {runtime_table}
+        WHERE globalTid = ? ORDER BY start
         """,
-            (primary_tid,),
-        ).fetchall()
+        (primary_tid,),
+    )
 
     results = []
     for i, it in enumerate(iterations):

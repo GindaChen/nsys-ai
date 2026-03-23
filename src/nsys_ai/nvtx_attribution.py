@@ -123,22 +123,12 @@ def _sort_merge_attribute(
     popped at most once; each runtime call is processed once).
     """
     # Detect versioned table names
-    all_tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    from .skills.base import _resolve_activity_tables
+    resolved_tables = _resolve_activity_tables(conn)
 
-    def _find(prefix: str) -> str:
-        # Prefer exact match (e.g. CUPTI_ACTIVITY_KIND_KERNEL)
-        if prefix in all_tables:
-            return prefix
-        # Otherwise pick the first sorted versioned variant, aligning
-        # with the resolution used by ensure_indexes() / _resolve_activity_tables().
-        candidates = sorted(t for t in all_tables if t.startswith(prefix + "_V"))
-        if candidates:
-            return candidates[0]
-        return prefix
-
-    kernel_table = _find("CUPTI_ACTIVITY_KIND_KERNEL")
-    runtime_table = _find("CUPTI_ACTIVITY_KIND_RUNTIME")
-    nvtx_table = _find("NVTX_EVENTS")
+    kernel_table = resolved_tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+    runtime_table = resolved_tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+    nvtx_table = resolved_tables.get("nvtx", "NVTX_EVENTS")
 
     # Trim clause for SQL queries
     trim_sql = ""
@@ -148,7 +138,8 @@ def _sort_merge_attribute(
         trim_params = (trim[0], trim[1])
 
     # Phase 1: Kernel → Runtime via correlationId (indexed, fast)
-    kr_rows = conn.execute(
+    from .sql_compat import sqlite_to_duckdb
+    kr_rows = conn.execute(sqlite_to_duckdb(
         f"""
         SELECT r.globalTid, r.start, r.[end],
                k.start AS ks, k.[end] AS ke, k.shortName
@@ -156,7 +147,7 @@ def _sort_merge_attribute(
         JOIN {runtime_table} r ON r.correlationId = k.correlationId
         WHERE 1=1 {trim_sql}
         ORDER BY r.globalTid, r.start
-        """,
+        """),
         trim_params,
     ).fetchall()
 
@@ -167,12 +158,17 @@ def _sort_merge_attribute(
     # Resolve text expression (handles textId vs text column)
     has_textid = False
     try:
-        has_textid = (
-            conn.execute(
-                f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
-            ).fetchone()[0]
-            > 0
-        )
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            cols = [c[0] for c in conn.execute(f"DESCRIBE {nvtx_table}").fetchall()]
+            has_textid = "textId" in cols
+        else:
+            has_textid = (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
+                ).fetchone()[0]
+                > 0
+            )
     except Exception:
         pass
 
@@ -183,7 +179,7 @@ def _sort_merge_attribute(
         text_expr = "n.text"
         text_join = ""
 
-    nvtx_rows = conn.execute(
+    nvtx_rows = conn.execute(sqlite_to_duckdb(
         f"""
         SELECT n.globalTid, n.start, n.[end], {text_expr} AS text
         FROM {nvtx_table} n
@@ -191,7 +187,7 @@ def _sort_merge_attribute(
         WHERE n.eventType = 59 AND n.[end] > n.start
         ORDER BY n.globalTid, n.start
         """
-    ).fetchall()
+    )).fetchall()
 
     # StringIds lookup for kernel names — only fetch the IDs we need
     short_name_ids = {r[5] for r in kr_rows if r[5] is not None}
@@ -281,7 +277,7 @@ def _sort_merge_attribute(
 
 
 def attribute_kernels_to_nvtx(
-    conn: sqlite3.Connection,
+    conn,
     sqlite_path: str | None = None,
     trim: tuple[int, int] | None = None,
 ) -> list[dict]:
@@ -303,5 +299,21 @@ def attribute_kernels_to_nvtx(
             if result:
                 return result
 
-    # Tier 2: Python sort-merge fallback
+    # DuckDB: Try reading from purely precomputed Parquet bounds!
+    try:
+        import duckdb as _ddb
+        if isinstance(conn, _ddb.DuckDBPyConnection):
+            trim_sql = ""
+            params = []
+            if trim:
+                trim_sql = "WHERE k_start >= ? AND k_end <= ?"
+                params = [trim[0], trim[1]]
+
+            cur = conn.execute(f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start", params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception:
+        pass  # Fallback to Python sweep
+
+    # Tier 2: Python sort-merge fallback on SQLite
     return _sort_merge_attribute(conn, trim)

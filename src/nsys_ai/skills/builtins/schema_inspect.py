@@ -3,6 +3,39 @@
 from ..base import Skill
 
 
+def _execute(conn, **kwargs):
+    import duckdb
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        cur = conn.execute(
+            """
+            SELECT table_name,
+                   column_name,
+                   data_type AS column_type,
+                   0 AS is_pk
+            FROM information_schema.columns
+            WHERE table_schema='main'
+               OR table_schema='src'
+            ORDER BY table_name, ordinal_position
+            """
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    else:
+        sql = """
+        SELECT m.name AS table_name,
+               p.name AS column_name,
+               p.type AS column_type,
+               p.pk AS is_pk
+        FROM sqlite_master m
+        JOIN pragma_table_info(m.name) p
+        WHERE m.type = 'table'
+          AND m.name NOT LIKE 'sqlite_%'
+        ORDER BY m.name, p.cid
+        """
+        cur = conn.execute(sql)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
 def _format(rows):
     if not rows:
         return "(No tables found in database)"
@@ -31,16 +64,7 @@ SKILL = Skill(
         "other skills. Different nsys versions may have different tables."
     ),
     category="utility",
-    sql="""\
-SELECT m.name AS table_name,
-       p.name AS column_name,
-       p.type AS column_type,
-       p.pk AS is_pk
-FROM sqlite_master m
-JOIN pragma_table_info(m.name) p
-WHERE m.type = 'table'
-  AND m.name NOT LIKE 'sqlite_%'
-ORDER BY m.name, p.cid""",
+    execute_fn=_execute,
     format_fn=_format,
     tags=["schema", "tables", "columns", "inspect", "meta", "utility"],
 )

@@ -118,16 +118,17 @@ def test_open_profile_readonly_for_worker_returns_connection(tmp_path):
     from nsys_ai.tools_profile import open_profile_readonly_for_worker
 
     db = tmp_path / "test.sqlite"
-    # Create a DB with one table
+    # Create a DB with a recognised Nsight table so the Parquet cache exports it
     setup = sqlite3.connect(str(db))
-    setup.execute("CREATE TABLE t(v INT)")
-    setup.execute("INSERT INTO t VALUES(42)")
+    setup.execute("CREATE TABLE StringIds(id INTEGER PRIMARY KEY, value TEXT)")
+    setup.execute("INSERT INTO StringIds VALUES(1, 'hello')")
     setup.commit()
     setup.close()
 
     conn = open_profile_readonly_for_worker(str(db))
-    rows = conn.execute("SELECT v FROM t").fetchall()
-    assert rows[0][0] == 42
+    rows = conn.execute("SELECT id, value FROM StringIds").fetchall()
+    assert rows[0][0] == 1
+    assert rows[0][1] == "hello"
     conn.close()
 
 
@@ -187,3 +188,28 @@ def test_query_profile_db_truncates_large_results():
     assert "Truncated" in out
     assert "refine your query" in out.lower() or "reduce the LIMIT" in out
     conn.close()
+
+
+def test_query_profile_db_helper_commands_sqlite():
+    """query_profile_db rewrites SHOW TABLES and DESCRIBE for SQLite without syntax errors."""
+    import sqlite3
+
+    from nsys_ai.ai.backend.profile_db_tool import query_profile_db
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE test_table(id INTEGER, name TEXT)")
+    conn.execute("CREATE TABLE NVTX_EVENTS(id INTEGER)")
+
+    # SHOW TABLES
+    out1 = query_profile_db(conn, "SHOW TABLES")
+    assert "test_table" in out1
+    assert "NVTX_EVENTS" in out1
+    assert "LIMIT" not in out1  # Output shouldn't be broken by syntax error
+
+    # DESCRIBE table
+    out2 = query_profile_db(conn, "DESCRIBE test_table")
+    assert "id" in out2
+    assert "name" in out2
+    # Ensure DESCRIBE with trailing garbage doesn't break
+    out3 = query_profile_db(conn, "DESCRIBE test_table LIMIT 10")
+    assert "id" in out3
