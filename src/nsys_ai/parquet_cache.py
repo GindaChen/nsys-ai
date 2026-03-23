@@ -141,102 +141,102 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
     t0 = time.monotonic()
 
     db = duckdb.connect()
-
-    # Attach the SQLite database
-    safe_sqlite_path = str(sqlite_path).replace("'", "''")
     try:
-        db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
-    except duckdb.Error:
-        # Clean up partial attach before retry with permissive typing
+        # Attach the SQLite database
+        safe_sqlite_path = str(sqlite_path).replace("'", "''")
         try:
-            db.execute("DETACH src")
+            db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
         except duckdb.Error:
-            pass
-        db.execute("SET sqlite_all_varchar = true")
-        db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
+            # Clean up partial attach before retry with permissive typing
+            try:
+                db.execute("DETACH src")
+            except duckdb.Error:
+                pass
+            db.execute("SET sqlite_all_varchar = true")
+            db.execute(f"ATTACH '{safe_sqlite_path}' AS src (TYPE SQLITE)")
 
-    # Discover which tables actually exist in the source
-    # Note: DuckDB doesn't expose sqlite_master from attached DBs.
-    # Use SHOW ALL TABLES and filter by the attached database name.
-    src_tables: set[str] = set()
-    try:
-        for row in db.execute("SHOW ALL TABLES").fetchall():
-            # row format: (database, schema, name, column_names, column_types, temporary)
-            if row[0] == "src":
-                src_tables.add(row[2])
-    except duckdb.Error:
-        # Fallback: try to list tables another way
+        # Discover which tables actually exist in the source
+        # Note: DuckDB doesn't expose sqlite_master from attached DBs.
+        # Use SHOW ALL TABLES and filter by the attached database name.
+        src_tables: set[str] = set()
         try:
-            for row in db.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src'"
-            ).fetchall():
-                src_tables.add(row[0])
+            for row in db.execute("SHOW ALL TABLES").fetchall():
+                # row format: (database, schema, name, column_names, column_types, temporary)
+                if row[0] == "src":
+                    src_tables.add(row[2])
         except duckdb.Error:
-            log.warning("Could not discover tables in attached SQLite")
+            # Fallback: try to list tables another way
+            try:
+                for row in db.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src'"
+                ).fetchall():
+                    src_tables.add(row[0])
+            except duckdb.Error:
+                log.warning("Could not discover tables in attached SQLite")
 
-    # ── Export pre-joined kernels table ────────────────────────────────
-    kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
-    if kernel_table:
-        db.execute(f"""
-            COPY (
-                SELECT k.*, s.value AS name, d.value AS demangled
-                FROM src.{kernel_table} k
-                LEFT JOIN src.StringIds s ON k.shortName = s.id
-                LEFT JOIN src.StringIds d ON k.demangledName = d.id
-            ) TO '{cache_dir}/kernels.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """)
-
-    # ── Export NVTX with resolved text ────────────────────────────────
-    nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
-    if nvtx_table:
-        # Detect whether textId column exists
-        has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
-        if has_textid:
+        # ── Export pre-joined kernels table ────────────────────────────────
+        kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
+        if kernel_table:
             db.execute(f"""
                 COPY (
-                    SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
-                           COALESCE(n.text, s.value) AS text,
-                           n.textId
-                    FROM src.{nvtx_table} n
-                    LEFT JOIN src.StringIds s ON n.textId = s.id
-                ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
-            """)
-        else:
-            db.execute(f"""
-                COPY (
-                    SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
-                           n.text
-                    FROM src.{nvtx_table} n
-                ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                    SELECT k.*, s.value AS name, d.value AS demangled
+                    FROM src.{kernel_table} k
+                    LEFT JOIN src.StringIds s ON k.shortName = s.id
+                    LEFT JOIN src.StringIds d ON k.demangledName = d.id
+                ) TO '{cache_dir}/kernels.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
 
-    for view_name, src_name in _BASE_TABLES:
-        actual = _find_table(src_tables, src_name)
-        if actual:
-            db.execute(f"""
-                COPY src.{actual}
-                TO '{cache_dir}/{view_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
-            """)
+        # ── Export NVTX with resolved text ────────────────────────────────
+        nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
+        if nvtx_table:
+            # Detect whether textId column exists
+            has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
+            if has_textid:
+                db.execute(f"""
+                    COPY (
+                        SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
+                               COALESCE(n.text, s.value) AS text,
+                               n.textId
+                        FROM src.{nvtx_table} n
+                        LEFT JOIN src.StringIds s ON n.textId = s.id
+                    ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                """)
+            else:
+                db.execute(f"""
+                    COPY (
+                        SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
+                               n.text
+                        FROM src.{nvtx_table} n
+                    ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                """)
 
-    # ── Generate nvtx_kernel_map via Tier 2 sort-merge ────────────────
-    _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
+        for view_name, src_name in _BASE_TABLES:
+            actual = _find_table(src_tables, src_name)
+            if actual:
+                db.execute(f"""
+                    COPY src.{actual}
+                    TO '{cache_dir}/{view_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                """)
 
-    # ── Write version stamp ───────────────────────────────────────────
-    (cache_dir / ".cache_version").write_text(
-        json.dumps({"version": _CACHE_VERSION, "source": os.path.basename(sqlite_path)})
-    )
+        # ── Generate nvtx_kernel_map via Tier 2 sort-merge ────────────────
+        _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
 
-    # ── Size report ───────────────────────────────────────────────────
-    total_bytes = sum(f.stat().st_size for f in cache_dir.iterdir() if f.is_file())
-    elapsed = time.monotonic() - t0
-    log.info(
-        "Cache ready: %s/ (%.0fMB, %.1fs)",
-        cache_dir.name, total_bytes / 1e6, elapsed,
-    )
+        # ── Write version stamp ───────────────────────────────────────────
+        (cache_dir / ".cache_version").write_text(
+            json.dumps({"version": _CACHE_VERSION, "source": os.path.basename(sqlite_path)})
+        )
 
-    _check_cache_size(cache_dir, sqlite_path)
+        # ── Size report ───────────────────────────────────────────────────
+        total_bytes = sum(f.stat().st_size for f in cache_dir.iterdir() if f.is_file())
+        elapsed = time.monotonic() - t0
+        log.info(
+            "Cache ready: %s/ (%.0fMB, %.1fs)",
+            cache_dir.name, total_bytes / 1e6, elapsed,
+        )
 
-    db.close()
+        _check_cache_size(cache_dir, sqlite_path)
+    finally:
+        db.close()
     return cache_dir
 
 

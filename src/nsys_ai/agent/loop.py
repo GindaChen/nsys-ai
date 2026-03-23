@@ -8,8 +8,12 @@ extra installed, can delegate to an LLM for natural language analysis.
 """
 
 
+import logging
+
 from ..profile import Profile
 from ..skills.registry import get_skill, run_skill
+
+log = logging.getLogger(__name__)
 
 
 class Agent:
