@@ -139,9 +139,15 @@ def build_cache(sqlite_path: str) -> Path:
         # Another process won the race and created cache_dir first.
         # Discard our redundant build.
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Restore old_dir if cache_dir does not exist (failed for other transient reasons)
+        if old_dir.exists() and not cache_dir.exists():
+            try:
+                old_dir.rename(cache_dir)
+            except OSError:
+                pass
 
-    # Clean up the old cache (now renamed aside).
-    if old_dir.exists():
+    # Clean up the old cache (now renamed aside) if we have a robust valid cache.
+    if old_dir.exists() and cache_dir.exists():
         shutil.rmtree(old_dir, ignore_errors=True)
     return cache_dir
 

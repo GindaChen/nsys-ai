@@ -137,6 +137,24 @@ def query_profile_db(
     if "sqlite_master" in q.lower() and isinstance(conn, duckdb.DuckDBPyConnection):
         q = "SHOW TABLES"
 
+    # SQLite fallback: support DuckDB-style helper commands used in docs.
+    # This keeps schema discovery working even when DuckDB is unavailable.
+    import sqlite3
+    if isinstance(conn, sqlite3.Connection):
+        stripped = q.strip().rstrip(";")
+        upper_stripped = stripped.upper()
+        # Support `SHOW TABLES` for SQLite
+        if upper_stripped == "SHOW TABLES":
+            q = (
+                "SELECT name AS table_name "
+                "FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        # Support `DESCRIBE <table>` for SQLite
+        elif upper_stripped.startswith("DESCRIBE "):
+            table_name = stripped[9:].strip().strip("'\"`[]")
+            q = f"PRAGMA table_info('{table_name}')"
+
     try:
         cur = conn.execute(q)
         # duckdb cursor fetchall returns list of tuples
