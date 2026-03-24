@@ -29,13 +29,13 @@ def _execute(conn, **kwargs):
     depth = kwargs.get("depth")
     if depth is not None:
         depth = int(depth)
-    
+
     raw_auto_depth = kwargs.get("auto_depth", True)
     if isinstance(raw_auto_depth, str):
         auto_depth = raw_auto_depth.strip().lower() not in ("false", "0", "no", "off", "n")
     else:
         auto_depth = bool(raw_auto_depth)
-        
+
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
     trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
@@ -92,13 +92,16 @@ def _execute(conn, **kwargs):
 
         path = r.get("nvtx_path", text)
 
-        # When auto-depth detected a layer level, group by the path component
-        # at that depth (e.g. "layer_0") instead of the full path.
+        # When auto-depth detected a layer level, group by the path prefix
+        # up to that depth (e.g. "encoder > layer_0") instead of only the
+        # single component. This preserves enough context to avoid collisions
+        # between unrelated scopes that share the same leaf name.
         if auto_group_depth is not None:
             parts = path.split(" > ")
             if auto_group_depth < len(parts):
-                group_key = parts[auto_group_depth]
-                region_name = parts[auto_group_depth]
+                prefix = parts[: auto_group_depth + 1]
+                group_key = " > ".join(prefix)
+                region_name = group_key
                 group_depth = auto_group_depth
             else:
                 group_key = path

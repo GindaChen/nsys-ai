@@ -138,7 +138,7 @@ def _find_repeated_depth(
         repeated = {name: cnt for name, cnt in counts.items() if cnt >= min_repeats}
         if not repeated:
             continue
-        
+
         # Score = number of distinct repeated operations
         # This prevents a single repeated root scope at depth 0 from outscoring
         # a deeper hierarchical level that contains many distinct repeated operations.
@@ -174,26 +174,26 @@ def is_outlier(value: float, all_values: list[float]) -> bool:
     For small sample sizes (< 4), falls back to value > median × 2.
     When IQR == 0 (uniform distribution), falls back to median × 2.
     """
+    import statistics
+
     if len(all_values) < 2:
         return False
 
-    sorted_v = sorted(all_values)
-    n = len(sorted_v)
-    median = sorted_v[n // 2]
+    med = statistics.median(all_values)
 
-    if n < 4:
+    if len(all_values) < 4:
         # Too few data points for IQR — use simple fallback
-        return value > median * 2.0
+        return value > med * 2.0
 
-    q1 = sorted_v[n // 4]
-    q3 = sorted_v[3 * n // 4]
+    # quantiles with n=4 gives [Q1, Q2, Q3]
+    q1, _, q3 = statistics.quantiles(all_values, n=4)
     iqr = q3 - q1
 
     if iqr == 0:
         # All layers nearly identical — use percentage-based fallback
-        fence = median * 2.0
+        fence = med * 2.0
     else:
         fence = q3 + 1.5 * iqr
 
     # Dual threshold: must exceed BOTH statistical AND practical
-    return value > fence and value > median * 1.5
+    return value > fence and value > med * 1.5

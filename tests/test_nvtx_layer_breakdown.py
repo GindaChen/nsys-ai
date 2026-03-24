@@ -71,7 +71,7 @@ def test_nvtx_layer_breakdown_kernel_composition(nested_nvtx_conn):
     from nsys_ai.skills.registry import get_skill
 
     skill = get_skill("nvtx_layer_breakdown")
-    rows = skill.execute(nested_nvtx_conn)
+    rows = skill.execute(nested_nvtx_conn, auto_depth=False)
     rows = [r for r in rows if not r.get("_detection_meta")]
     assert len(rows) > 0
 
