@@ -432,3 +432,53 @@ def nested_nvtx_conn():
     yield conn
     conn.close()
 
+
+# ---------------------------------------------------------------------------
+# PyTorch emit_nvtx style fixture (repeated op names, no layer numbering)
+# ---------------------------------------------------------------------------
+
+_EMIT_NVTX_SEED_SQL = """\
+INSERT INTO StringIds VALUES
+    (1, 'aten_linear_kernel'), (2, 'aten_layernorm_kernel'),
+    (24, 'cudaLaunchKernel');
+
+INSERT INTO TARGET_INFO_GPU VALUES
+    (0, 'Test GPU', '', 8589934592, 108, 'TestChip', 0);
+
+INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES
+    (0, 0, 100, '', 108);
+
+-- NVTX: model > aten::linear × 3 + aten::layer_norm × 2 (emit_nvtx style)
+INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) VALUES
+    (100, 0, 50000000, 'model', 59, 0),
+    (100, 1000000, 8000000, 'aten::linear', 59, 1),
+    (100, 9000000, 16000000, 'aten::linear', 59, 2),
+    (100, 17000000, 24000000, 'aten::linear', 59, 3),
+    (100, 25000000, 32000000, 'aten::layer_norm', 59, 4),
+    (100, 33000000, 40000000, 'aten::layer_norm', 59, 5);
+
+INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+    (100, 0, 7, 1, 2000000, 5000000, 1, 1, 32,1,1,256,1,1),
+    (100, 0, 7, 2, 10000000, 13000000, 1, 1, 32,1,1,256,1,1),
+    (100, 0, 7, 3, 18000000, 21000000, 1, 1, 32,1,1,256,1,1),
+    (100, 0, 7, 4, 26000000, 29000000, 2, 2, 16,1,1,128,1,1),
+    (100, 0, 7, 5, 34000000, 37000000, 2, 2, 16,1,1,128,1,1);
+
+INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
+    (100, 1, 1500000, 2000000, 24),
+    (100, 2, 9500000, 10000000, 24),
+    (100, 3, 17500000, 18000000, 24),
+    (100, 4, 25500000, 26000000, 24),
+    (100, 5, 33500000, 34000000, 24);
+"""
+
+
+@pytest.fixture
+def emit_nvtx_conn():
+    """SQLite conn with PyTorch emit_nvtx style: repeated op names, no numbered layers."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(_NSYS_SCHEMA_SQL)
+    conn.executescript(_EMIT_NVTX_SEED_SQL)
+    yield conn
+    conn.close()
+

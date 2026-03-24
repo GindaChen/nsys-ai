@@ -563,6 +563,8 @@ def test_nvtx_layer_breakdown_execute(minimal_nsys_conn):
     # With our seed data (NVTX 'train_step' and 'forward' with correlated kernels),
     # we should get at least one result
     for r in rows:
+        if r.get("_detection_meta"):
+            continue  # skip auto-detection metadata header
         assert "nvtx_region" in r
         assert "kernel_count" in r
         assert "total_gpu_ms" in r

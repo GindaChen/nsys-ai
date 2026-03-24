@@ -72,6 +72,7 @@ def test_nvtx_layer_breakdown_kernel_composition(nested_nvtx_conn):
 
     skill = get_skill("nvtx_layer_breakdown")
     rows = skill.execute(nested_nvtx_conn)
+    rows = [r for r in rows if not r.get("_detection_meta")]
     assert len(rows) > 0
 
     # Check that all rows have the new fields
@@ -103,6 +104,7 @@ def test_nvtx_layer_breakdown_nccl_percentage(nested_nvtx_conn):
 
     skill = get_skill("nvtx_layer_breakdown")
     rows = skill.execute(nested_nvtx_conn)
+    rows = [r for r in rows if not r.get("_detection_meta")]
     for r in rows:
         if r["total_gpu_ms"] > 0:
             expected_pct = round(100 * r["nccl_ms"] / r["total_gpu_ms"], 1)
@@ -266,8 +268,186 @@ def test_flat_nvtx_no_nesting():
 
     skill = get_skill("nvtx_layer_breakdown")
     rows = skill.execute(conn)
-    assert len(rows) >= 1
-    assert rows[0]["nvtx_region"] == "flat_region"
-    assert rows[0]["nvtx_depth"] == 0
-    assert rows[0]["compute_ms"] > 0
+    # Filter out detection metadata if present
+    data_rows = [r for r in rows if not r.get("_detection_meta")]
+    assert len(data_rows) >= 1
+    assert data_rows[0]["nvtx_region"] == "flat_region"
+    assert data_rows[0]["nvtx_depth"] == 0
+    assert data_rows[0]["compute_ms"] > 0
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Layer auto-detection tests (nvtx_layer_detect module)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_layer_depth_numbered_pattern(nested_nvtx_conn):
+    """detect_layer_depth should find numbered layers (layer_0, layer_1) at depth 2."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+    from nsys_ai.nvtx_layer_detect import detect_layer_depth
+
+    rows = attribute_kernels_to_nvtx(nested_nvtx_conn)
+    result = detect_layer_depth(rows)
+    assert result["layer_depth"] == 2
+    assert result["detection_method"] == "numbered_pattern"
+    # Should find layer_0, layer_1, layer_0_bwd, layer_1_bwd
+    assert any("layer_0" in n for n in result["layer_names"])
+    assert any("layer_1" in n for n in result["layer_names"])
+    assert result["confidence"] > 0
+
+
+def test_detect_layer_depth_repeated_siblings(emit_nvtx_conn):
+    """detect_layer_depth should find repeated ops (aten::linear × 3) in emit_nvtx."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+    from nsys_ai.nvtx_layer_detect import detect_layer_depth
+
+    rows = attribute_kernels_to_nvtx(emit_nvtx_conn)
+    result = detect_layer_depth(rows)
+    assert result["layer_depth"] is not None
+    assert result["detection_method"] == "repeated_siblings"
+    assert result["confidence"] > 0
+
+
+def test_detect_layer_depth_empty():
+    """Empty attribution rows should return fallback."""
+    from nsys_ai.nvtx_layer_detect import detect_layer_depth
+
+    result = detect_layer_depth([])
+    assert result["layer_depth"] is None
+    assert result["detection_method"] == "fallback_top_level"
+
+
+# ---------------------------------------------------------------------------
+# Auto-depth integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_auto_depth_integration(nested_nvtx_conn):
+    """Auto-depth should produce _detection_meta + depth-2 results."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn)
+    assert len(rows) > 0
+
+    # First row should be detection metadata
+    assert rows[0].get("_detection_meta") is True
+    assert rows[0]["layer_depth"] == 2
+    assert rows[0]["detection_method"] == "numbered_pattern"
+
+    # Data rows should be at depth 2
+    data_rows = [r for r in rows if not r.get("_detection_meta")]
+    assert len(data_rows) > 0
+    for r in data_rows:
+        assert r["nvtx_depth"] == 2
+
+
+def test_auto_depth_disabled(nested_nvtx_conn):
+    """auto_depth=False should return all regions without detection metadata."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows_auto = skill.execute(nested_nvtx_conn)
+    rows_no_auto = skill.execute(nested_nvtx_conn, auto_depth=False)
+    assert len(rows_no_auto) > 0
+
+    # Should NOT have detection metadata
+    assert not rows_no_auto[0].get("_detection_meta")
+
+    # Without auto-depth filtering, we should get MORE regions than with it
+    # (auto groups at depth 2, no-auto returns all innermost at depth 3)
+    auto_data = [r for r in rows_auto if not r.get("_detection_meta")]
+    assert len(rows_no_auto) >= len(auto_data)
+
+
+# ---------------------------------------------------------------------------
+# Top kernels + outlier tests
+# ---------------------------------------------------------------------------
+
+
+def test_top_kernels_embedded(nested_nvtx_conn):
+    """Each result row should have top_kernels list with kernel_name + total_ms."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn)
+    data_rows = [r for r in rows if not r.get("_detection_meta")]
+    assert len(data_rows) > 0
+
+    for r in data_rows:
+        assert "top_kernels" in r
+        assert isinstance(r["top_kernels"], list)
+        for tk in r["top_kernels"]:
+            assert "kernel_name" in tk
+            assert "total_ms" in tk
+            assert isinstance(tk["total_ms"], float)
+
+
+def test_is_outlier_basic():
+    """is_outlier should flag a clear outlier."""
+    from nsys_ai.nvtx_layer_detect import is_outlier
+
+    assert is_outlier(100, [10, 11, 12, 13]) is True
+
+
+def test_is_outlier_no_fire():
+    """is_outlier should NOT flag normal values."""
+    from nsys_ai.nvtx_layer_detect import is_outlier
+
+    assert is_outlier(15, [10, 11, 12, 13, 14, 15]) is False
+
+
+def test_is_outlier_small_sample():
+    """Small sample (n<4) should fallback to 2× median."""
+    from nsys_ai.nvtx_layer_detect import is_outlier
+
+    # n=3: median=10, threshold=20
+    assert is_outlier(25, [10, 10, 10]) is True
+    assert is_outlier(15, [10, 10, 10]) is False
+
+
+def test_root_cause_layer_outlier():
+    """_check_layer_outlier should fire on skewed layer data."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_layer_outlier
+
+    # is_outlier needs value > median * 1.5 AND > Q3 + 1.5 * IQR
+    # With n=4 and outlier IN the list, Q3=outlier itself → fence too high.
+    # Use 6+ normal layers so Q3 stays at ~12, IQR~2, fence=15,
+    # and 100 > 15 AND 100 > 12*1.5=18 → both True.
+    layer_data = [
+        {"nvtx_region": "layer_0", "total_gpu_ms": 10.0, "compute_ms": 10.0,
+         "top_kernels": [{"kernel_name": "gemm_k", "total_ms": 8.0}]},
+        {"nvtx_region": "layer_1", "total_gpu_ms": 10.5, "compute_ms": 10.5,
+         "top_kernels": []},
+        {"nvtx_region": "layer_2", "total_gpu_ms": 11.0, "compute_ms": 11.0,
+         "top_kernels": []},
+        {"nvtx_region": "layer_3", "total_gpu_ms": 11.5, "compute_ms": 11.5,
+         "top_kernels": []},
+        {"nvtx_region": "layer_4", "total_gpu_ms": 12.0, "compute_ms": 12.0,
+         "top_kernels": []},
+        {"nvtx_region": "layer_5", "total_gpu_ms": 12.5, "compute_ms": 12.5,
+         "top_kernels": []},
+        {"nvtx_region": "layer_heavy", "total_gpu_ms": 100.0, "compute_ms": 100.0,
+         "top_kernels": [{"kernel_name": "slow_kernel", "total_ms": 90.0}]},
+    ]
+    findings = _check_layer_outlier(layer_data)
+    assert len(findings) >= 1
+    assert findings[0]["pattern"] == "Layer Outlier"
+    assert "layer_heavy" in findings[0]["evidence"]
+    assert "slow_kernel" in findings[0]["evidence"]
+
+
+def test_root_cause_layer_outlier_no_fire():
+    """_check_layer_outlier should NOT fire when layers are balanced."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_layer_outlier
+
+    layer_data = [
+        {"nvtx_region": "layer_0", "total_gpu_ms": 10.0, "compute_ms": 10.0},
+        {"nvtx_region": "layer_1", "total_gpu_ms": 11.0, "compute_ms": 11.0},
+        {"nvtx_region": "layer_2", "total_gpu_ms": 12.0, "compute_ms": 12.0},
+        {"nvtx_region": "layer_3", "total_gpu_ms": 10.5, "compute_ms": 10.5},
+    ]
+    findings = _check_layer_outlier(layer_data)
+    assert len(findings) == 0
+
