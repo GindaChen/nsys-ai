@@ -773,6 +773,38 @@ def _cmd_skill(args, _profile):
         sys.exit(1)
 
 
+def _cmd_suggest(args, _profile):
+    from nsys_ai.ai.suggest import analyze_patterns, format_suggestions, generate_suggestions
+
+    with _profile.open(args.profile) as prof:
+        trim = _parse_trim(args)
+        gpu = args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        
+        print(f"Analyzing patterns in {args.profile} (GPU {gpu})...")
+        findings = analyze_patterns(prof, gpu, trim)
+        suggestions = generate_suggestions(findings)
+        
+        if not suggestions:
+            print("No new NVTX annotation suggestions found.")
+            return
+
+        print(format_suggestions(suggestions))
+
+        if getattr(args, "insert", False):
+            from nsys_ai.ai.annotator import annotate_function_calls # Or similar
+            print("\nAuto-inserting annotations...")
+            # TODO: Implement bulk insertion logic if needed
+            # For now, we'll need suggest.py to provide file/func mapping
+            for s in suggestions:
+                if s.get("file") and s.get("func"):
+                    print(f"  Annotating {s['func']} in {s['file']}...")
+                    with open(s["file"], "r") as f:
+                        source = f.read()
+                    new_source = annotate_function_calls(source, s["func"], s.get("context", ""))
+                    with open(s["file"], "w") as f:
+                        f.write(new_source)
+
+
 def _cmd_agent(args, _profile):
     from nsys_ai.agent.loop import Agent
 

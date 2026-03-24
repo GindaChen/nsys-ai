@@ -29,6 +29,7 @@ from .handlers import (
     _cmd_report,
     _cmd_search,
     _cmd_skill,
+    _cmd_suggest,
     _cmd_summary,
     _cmd_timeline,
     _cmd_timeline_html,
@@ -47,10 +48,14 @@ def _build_parser():
     )
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{open,web,timeline-web,chat,ask,report,diff,diff-web,export,help}",
+        metavar="{open,web,timeline-web,chat,ask,suggest,report,diff,diff-web,export,help}",
     )
 
     # Public commands (simplified)
+    p = sub.add_parser("suggest", help="Suggest NVTX annotations for a profile")
+    _add_gpu_trim(p, gpu_required=False, trim_required=False)
+    p.add_argument("--insert", action="store_true", help="Auto-insert suggested annotations into Python files")
+    p.set_defaults(handler=_cmd_suggest)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument(
