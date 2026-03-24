@@ -561,6 +561,8 @@ def _cmd_skill(args, _profile):
     from nsys_ai.skills.registry import all_skills, get_skill, load_custom_skills_dir
     from nsys_ai.skills.registry import run_skill as _run_skill
 
+    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError
+
     # Load custom skills from --skills-dir or env var
     skills_dir = getattr(args, "skills_dir", None) or os.environ.get("NSYS_AI_CUSTOM_SKILLS_DIR")
     if skills_dir and os.path.isdir(skills_dir):
@@ -622,7 +624,7 @@ def _cmd_skill(args, _profile):
             # Try to resolve the skill so we can validate and type-cast params.
             try:
                 skill_for_params = get_skill(args.skill_name)
-            except Exception:
+            except (SkillNotFoundError, KeyError):
                 skill_for_params = None
 
             if skill_for_params is not None and hasattr(skill_for_params, "params"):
@@ -667,20 +669,26 @@ def _cmd_skill(args, _profile):
             if fmt == "json":
                 skill = get_skill(args.skill_name)
                 if not skill:
-                    available = ", ".join(s.name for s in all_skills())
-                    print(
-                        _json.dumps(
-                            {
-                                "error": f"Unknown skill '{args.skill_name}'",
-                                "available": available,
-                            }
-                        )
+                    raise SkillNotFoundError(
+                        f"Unknown skill '{args.skill_name}'",
+                        available=[s.name for s in all_skills()],
                     )
-                    sys.exit(1)
                 rows = skill.execute(conn, **full_kwargs)
                 print(_json.dumps(rows, indent=2))
             else:
                 print(_run_skill(args.skill_name, conn, **full_kwargs))
+        except SkillNotFoundError as e:
+            if fmt == "json":
+                print(_json.dumps(e.to_dict()))
+            else:
+                print(f"Error [{e.error_code}]: {e}", file=sys.stderr)
+            sys.exit(1)
+        except (sqlite3.Error, SkillExecutionError) as e:
+            if fmt == "json":
+                print(_json.dumps({"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}))
+            else:
+                print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         finally:
             conn.close()
     elif args.skill_action == "add":
@@ -751,8 +759,10 @@ def _cmd_skill(args, _profile):
 
         skill = get_skill(args.skill_name)
         if not skill:
-            print(f"Unknown skill: {args.skill_name}", file=sys.stderr)
-            sys.exit(1)
+            raise SkillNotFoundError(
+                f"Unknown skill: {args.skill_name}",
+                available=[s.name for s in all_skills()],
+            )
         save_skill_to_markdown(skill, args.output)
         print(f"Saved '{skill.name}' → {args.output}")
     else:

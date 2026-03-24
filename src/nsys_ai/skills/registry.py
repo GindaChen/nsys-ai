@@ -14,6 +14,8 @@ from pathlib import Path
 
 from .base import Skill
 
+from ..exceptions import SkillNotFoundError
+
 _log = logging.getLogger(__name__)
 
 # Global registry
@@ -70,8 +72,11 @@ def run_skill(name: str, conn: sqlite3.Connection, **kwargs) -> str:
     """Look up and run a skill, returning formatted text."""
     skill = get_skill(name)
     if not skill:
-        available = ", ".join(list_skills())
-        raise KeyError(f"Unknown skill '{name}'. Available: {available}")
+        available = list_skills()
+        raise SkillNotFoundError(
+            f"Unknown skill '{name}'. Available: {', '.join(available)}",
+            available=available,
+        )
     return skill.run(conn, **kwargs)
 
 

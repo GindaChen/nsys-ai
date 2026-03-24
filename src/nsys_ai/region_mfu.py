@@ -31,11 +31,14 @@ with either data fields or an "error" block:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any
 
 from .hardware import get_peak_tflops
 from .profile import NsightSchema, get_first_gpu_name, resolve_profile_path
+
+_log = logging.getLogger(__name__)
 
 ErrorDict = dict[str, Any]
 RowDict = dict[str, Any]
@@ -179,7 +182,8 @@ def _detect_nvtx_text_id(conn: sqlite3.Connection) -> bool:
             cur = conn.execute("PRAGMA table_info(NVTX_EVENTS)")
             cols = [r[1] for r in cur.fetchall()]
         return "textId" in cols
-    except Exception:
+    except (sqlite3.Error, ImportError) as exc:
+        _log.debug("NVTX textId detection failed: %s", exc)
         return False
 
 

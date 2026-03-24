@@ -10,6 +10,8 @@ Widgets:
 
 from __future__ import annotations
 
+import logging
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -19,6 +21,8 @@ from textual.widgets import DataTable, Input, Static
 from ..formatting import fmt_dur as _fmt_dur
 from ..formatting import fmt_ns as _fmt_ns
 from ..tui_models import TreeNode
+
+_log = logging.getLogger(__name__)
 
 # Heat / NCCL color mapping (Rich markup colors)
 _HEAT_COLORS = {
@@ -309,8 +313,8 @@ class BookmarkPanel(Widget):
             from textual.widgets import DataTable
 
             self.app.query_one(DataTable).focus()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("Focus recovery failed: %s", exc)
 
     def action_close_panel(self) -> None:
         self.hide_panel()
@@ -376,8 +380,8 @@ class BubbleThresholdBar(Widget):
             from textual.widgets import DataTable
 
             self.app.query_one(DataTable).focus()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("Focus recovery failed: %s", exc)
 
     def show_bar(self, current_us: float) -> None:
         self.add_class("-visible")
@@ -416,8 +420,8 @@ class TrimBar(Widget):
             from textual.widgets import DataTable
 
             self.app.query_one(DataTable).focus()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("Focus recovery failed: %s", exc)
 
     def show_bar(self, trim: tuple[int, int]) -> None:
         self.add_class("-visible")

@@ -10,6 +10,10 @@ are needed because PyTorch/autograd runs backward passes on separate
 ``pt_autograd_*`` threads that are invisible from the primary training thread.
 """
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 
 def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int]:
     """Find CPU threads that are significant kernel launchers on this device.
@@ -54,7 +58,8 @@ def _get_thread_name(profile, tid: int) -> str:
                 (tid,),
             )
         return row[0]["value"] if row else ""
-    except Exception:
+    except Exception as exc:
+        _log.debug("Thread name lookup failed for tid=%d: %s", tid, exc)
         return ""
 
 

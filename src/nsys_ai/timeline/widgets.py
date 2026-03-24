@@ -10,6 +10,8 @@ Widgets:
 
 from __future__ import annotations
 
+import logging
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -21,6 +23,8 @@ from ..formatting import fmt_dur as _fmt_dur
 from ..formatting import fmt_ns as _fmt_ns
 from ..tui_models import KernelEvent
 from ..tui_models import short_kernel_name as _short_name
+
+_log = logging.getLogger(__name__)
 
 
 class BottomPanel(Widget):
@@ -211,7 +215,8 @@ class ConfigPanel(Widget):
             from .canvas import TimelineCanvas
 
             self.app.query_one("#canvas", TimelineCanvas).focus()
-        except Exception:
+        except Exception as exc:
+            _log.debug("Focus recovery failed: %s", exc)
             pass
 
 
@@ -361,7 +366,8 @@ class TimelineBookmarkPanel(Widget):
             from .canvas import TimelineCanvas
 
             self.app.query_one("#canvas", TimelineCanvas).focus()
-        except Exception:
+        except Exception as exc:
+            _log.debug("Focus recovery failed: %s", exc)
             pass
 
     def action_jump_1(self) -> None:

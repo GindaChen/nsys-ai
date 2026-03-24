@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from nsys_ai import profile as profile_mod
+from nsys_ai.exceptions import ExportError, ExportTimeoutError, ExportToolMissingError
 
 
 def test_resolve_non_nsys_rep_passthrough(tmp_path: Path):
@@ -19,7 +20,7 @@ def test_resolve_nsys_rep_missing_nsys(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(profile_mod.shutil, "which", lambda name: None)
     path = tmp_path / "foo.nsys-rep"
     path.write_bytes(b"0")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(ExportToolMissingError) as exc:
         profile_mod.resolve_profile_path(str(path))
     assert "requires 'nsys'" in str(exc.value)
 
@@ -71,7 +72,7 @@ def test_resolve_nsys_rep_failure(monkeypatch, tmp_path: Path):
 
     rep = tmp_path / "foo.nsys-rep"
     rep.write_bytes(b"0")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(ExportError) as exc:
         profile_mod.resolve_profile_path(str(rep))
     assert "nsys export failed" in str(exc.value)
     assert "nsys error" in str(exc.value)
@@ -88,6 +89,6 @@ def test_resolve_nsys_rep_timeout(monkeypatch, tmp_path: Path):
 
     rep = tmp_path / "foo.nsys-rep"
     rep.write_bytes(b"0")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(ExportTimeoutError) as exc:
         profile_mod.resolve_profile_path(str(rep))
     assert "timed out after 300 seconds" in str(exc.value)

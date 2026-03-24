@@ -7,10 +7,13 @@ as terminal/markdown/json output and later reused by a web compare UI.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .overlap import overlap_analysis
 from .profile import Profile
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,7 @@ class ProfileDiffSummary:
 def _safe_int(x) -> int:
     try:
         return int(x or 0)
-    except Exception:
+    except (TypeError, ValueError):
         return 0
 
 
@@ -366,7 +369,7 @@ def diff_profiles(
                 overlap_delta[key] = round(
                     float(overlap_after[key]) - float(overlap_before[key]), 3
                 )
-            except Exception:
+            except (TypeError, ValueError):
                 pass
 
     return ProfileDiffSummary(

@@ -5,10 +5,13 @@ Each method queries individual kernel instances (not aggregates)
 to produce findings with exact nanosecond timestamps for timeline overlay.
 """
 
+import logging
 import statistics
 
 from .annotation import EvidenceReport, Finding
 from .profile import Profile
+
+_log = logging.getLogger(__name__)
 
 
 class EvidenceBuilder:
@@ -99,7 +102,7 @@ class EvidenceBuilder:
                             f"compute — overlap is impossible on same stream."
                         )
             except Exception:
-                pass
+                _log.debug("Same-stream enrichment query failed", exc_info=True)
 
             findings.append(
                 Finding(
@@ -213,6 +216,7 @@ LIMIT ?"""
             active_streams = (active_streams_rows[0]["n"] or 0) if active_streams_rows else 0
             active_streams = active_streams or 1
         except Exception:
+            _log.debug("Active streams query failed", exc_info=True)
             active_streams = 1
         pct = (
             round(100 * total_idle_ns / (profile_span * active_streams), 1)
@@ -253,7 +257,7 @@ LIMIT ?"""
                         api_ms = api["total_ns"] / 1e6
                         note += f" — CPU: {api_name} ({api_ms:.1f}ms)"
             except Exception:
-                pass
+                _log.debug("CPU attribution query failed", exc_info=True)
 
             findings.append(
                 Finding(
@@ -423,6 +427,7 @@ ORDER BY total_bytes DESC"""
                     ),
                 )
         except Exception:
+            _log.debug("H2D spike query failed", exc_info=True)
             return []
 
         if len(rows) < 3:

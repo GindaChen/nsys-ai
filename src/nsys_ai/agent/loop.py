@@ -9,7 +9,9 @@ extra installed, can delegate to an LLM for natural language analysis.
 
 
 import logging
+import sqlite3
 
+from ..exceptions import NsysAiError
 from ..profile import Profile
 from ..skills.registry import get_skill, run_skill
 
@@ -92,7 +94,7 @@ class Agent:
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
         try:
             self.profile = Profile(profile_path)
-        except Exception as e:
+        except (NsysAiError, sqlite3.Error) as e:
             import sqlite3 as _sqlite3
             log.warning(
                 "Could not open as Nsight profile (skills may be limited): %s", e,
@@ -160,6 +162,7 @@ class Agent:
                 sections.append(text)
                 sections.append("")
             except Exception as e:
+                log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
                 sections.append(f"({skill_name}: skipped — {e})\n")
 
         # LLM synthesis with structured JSON evidence
@@ -188,6 +191,7 @@ class Agent:
 
             model, api_key = _get_model_and_key()
         except Exception:
+            log.debug("LLM model/key resolution failed", exc_info=True)
             model, api_key = None, None
         has_llm = bool(model and api_key)
 
@@ -205,6 +209,7 @@ class Agent:
                 sections.append(skill.format_rows(rows))
                 sections.append("")
         except Exception as e:
+            log.debug("Triage skill '%s' failed: %s", triage_skill, e, exc_info=True)
             sections.append(f"({triage_skill}: skipped — {e})\n")
 
         # Select Deep Dive Skills
@@ -237,6 +242,7 @@ class Agent:
                 sections.append(text)
                 sections.append("")
             except Exception as e:
+                log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
                 sections.append(f"({skill_name}: skipped — {e})\n")
 
         # Try LLM synthesis with combined structured evidence
@@ -295,6 +301,7 @@ class Agent:
                         selected.append(s)
                 return selected[:4]
         except Exception:
+            log.debug("LLM triage failed, falling back to keywords", exc_info=True)
             pass
 
         # Fallback to keywords if LLM fails
@@ -347,6 +354,7 @@ class Agent:
 
                     system = build_system_prompt()
                 except Exception:
+                    log.debug("Failed to load persona prompt", exc_info=True)
                     system = "You are an expert GPU profiling assistant."
 
                 resp = litellm.completion(
@@ -361,6 +369,7 @@ class Agent:
         except ImportError:
             pass
         except Exception as e:
+            log.debug("LLM synthesis (litellm) failed: %s", e, exc_info=True)
             return f"(LLM synthesis failed: {e})"
 
         # Fallback: direct Anthropic SDK (legacy path)
@@ -385,4 +394,5 @@ class Agent:
             )
             return message.content[0].text
         except Exception as e:
+            log.debug("LLM synthesis (anthropic) failed: %s", e, exc_info=True)
             return f"(LLM synthesis failed: {e})"

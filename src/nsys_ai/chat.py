@@ -276,6 +276,7 @@ def run_agent_loop(
                         sql = json.loads(args_str).get("sql_query", "")
                         result = query_runner(sql)
                     except Exception as e:
+                        _log.debug("Tool query_profile_db failed: %s", e, exc_info=True)
                         result = f"Error: {e}"
                     if result.startswith("Error:"):
                         consecutive_db_errors += 1
@@ -354,6 +355,7 @@ def _prepare_session(
         try:
             schema_str = get_profile_schema_cached(conn, sqlite_path)
         except Exception:
+            _log.debug("Schema cache failed, closing connection", exc_info=True)
             conn.close()
             raise
 
@@ -367,7 +369,7 @@ def _prepare_session(
         try:
             _effective_skills = _route_skill_names(messages)
         except Exception:
-            pass
+            _log.debug("Skill name routing failed", exc_info=True)
 
     _skill_docs = None
     if _effective_skills:
@@ -376,7 +378,7 @@ def _prepare_session(
 
             _skill_docs = load_skill_context(_effective_skills) or None
         except Exception:
-            pass
+            _log.debug("Skill context loading failed", exc_info=True)
 
     system_prompt = _build_system_prompt(
         ui_context, profile_schema=schema_str, skill_docs=_skill_docs
@@ -582,6 +584,7 @@ def stream_agent_loop(
             yield {"type": "done", "usage": {}}
             return
         except Exception as e:
+            _log.warning("Profile session setup failed: %s", e, exc_info=True)
             yield {"type": "text", "content": f"Error loading profile data: {e}"}
             yield {"type": "done", "usage": {}}
             return
@@ -826,6 +829,7 @@ def stream_agent_loop(
                 )
                 yield from _stream_litellm_content(stream, usage)
             except Exception as e:
+                _log.debug("Summary LLM call failed: %s", e, exc_info=True)
                 yield {
                     "type": "text",
                     "content": f"\n\n(Summary skipped: {_friendly_error(model, e)})",

@@ -132,11 +132,25 @@ def main():
         return
 
     from nsys_ai import profile as _profile
+    from nsys_ai.exceptions import NsysAiError
 
     try:
         args.handler(args, _profile)
+    except NsysAiError as e:
+        import json as _json
+        import os
+
+        if os.environ.get("NSYS_AI_AGENT"):
+            # Machine-readable output for external AI agents
+            print(_json.dumps(e.to_dict()), file=sys.stderr)
+        else:
+            # Human-readable output
+            print(f"Error [{e.error_code}]: {e}", file=sys.stderr)
+        sys.exit(1)
     except RuntimeError as e:
-        print(f"Error: {e}")
+        # Backward compatibility: catch plain RuntimeError from legacy code
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

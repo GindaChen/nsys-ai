@@ -17,6 +17,13 @@ from dataclasses import dataclass, field
 import duckdb
 
 from nsys_ai import parquet_cache
+from nsys_ai.exceptions import (
+    ExportError,
+    ExportTimeoutError,
+    ExportToolMissingError,
+    ProfileNotFoundError,
+    SchemaError,
+)
 from nsys_ai.sql_compat import sqlite_to_duckdb
 
 # Regex for safe SQL identifiers (table/column names).
@@ -227,7 +234,8 @@ class Profile:
             else:
                 cols = [r[1] for r in self.conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()]
             return "textId" in cols
-        except Exception:
+        except (sqlite3.Error, duckdb.Error):
+            self._log.debug("NVTX textId detection failed", exc_info=True)
             return False
 
     def _discover(self) -> ProfileMeta:
@@ -235,7 +243,7 @@ class Profile:
 
         if not self.schema.kernel_table:
             ver_msg = f" (Nsight version: {self.schema.version})" if self.schema.version else ""
-            raise RuntimeError(
+            raise SchemaError(
                 "This profile does not contain GPU kernel activity "
                 f"(no suitable KERNEL table found){ver_msg}. "
                 "It may have been captured without CUDA kernel tracing, "
@@ -684,7 +692,7 @@ def resolve_profile_path(path: str) -> str:
 
     nsys_exe = shutil.which("nsys")
     if not nsys_exe:
-        raise RuntimeError(
+        raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
             "Install Nsight Systems or export manually: nsys export --type sqlite -o <out.sqlite> --force-overwrite true <file.nsys-rep>"
         )
@@ -698,22 +706,22 @@ def resolve_profile_path(path: str) -> str:
             text=True,
             timeout=300,
         )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
+    except subprocess.TimeoutExpired as e:
+        raise ExportTimeoutError(
             "nsys export timed out after 300 seconds. This may indicate that nsys is waiting "
             "for interactive input (for example, a license prompt) or that the .nsys-rep file "
             "is corrupted. Try running the export manually to see the full output:\n"
             f"  nsys export --type sqlite -o {out} {path}\n"
-        )
+        ) from e
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(
+        raise ExportError(
             f"nsys export failed: {e.stderr or e.stdout or str(e)}. "
             "Export manually: nsys export --type sqlite -o <out.sqlite> --force-overwrite true <file.nsys-rep>"
-        )
+        ) from e
     if not (os.path.exists(out) and os.path.getsize(out) > 0):
         stdout = getattr(result, "stdout", None) or "(empty)"
         stderr = getattr(result, "stderr", None) or "(empty)"
-        raise RuntimeError(
+        raise ExportError(
             f"nsys export completed without error but did not produce a usable SQLite file at '{out}'. "
             "This may indicate that nsys wrote output elsewhere or hit an unexpected condition.\n"
             f"nsys stdout:\n{stdout}\nnsys stderr:\n{stderr}"

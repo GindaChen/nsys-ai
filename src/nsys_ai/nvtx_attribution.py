@@ -14,11 +14,14 @@ Provides efficient NVTX-to-kernel mapping using a two-tier strategy:
 
 import csv
 import io
+import logging
 import os
 import shutil
 import sqlite3
 import subprocess  # nosec B404 — list args, no shell
 from collections import defaultdict
+
+_log = logging.getLogger(__name__)
 
 # ── Tier 1: nsys recipe ─────────────────────────────────────────────
 
@@ -170,7 +173,7 @@ def _sort_merge_attribute(
                 > 0
             )
     except Exception:
-        pass
+        _log.debug("NVTX textId detection failed", exc_info=True)
 
     if has_textid:
         text_expr = "COALESCE(n.text, s.value)"
@@ -313,7 +316,7 @@ def attribute_kernels_to_nvtx(
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     except Exception:
-        pass  # Fallback to Python sweep
+        _log.debug("DuckDB nvtx_kernel_map query failed, fallback to Python sweep", exc_info=True)
 
     # Tier 2: Python sort-merge fallback on SQLite
     return _sort_merge_attribute(conn, trim)

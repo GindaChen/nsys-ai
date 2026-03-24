@@ -144,7 +144,8 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             agg = dict(zip(agg_cols, agg_row))
         else:
             agg = {}
-    except Exception:
+    except (sqlite3.Error, duckdb.Error) as exc:
+        _log.debug("gpu_idle_gaps aggregation query failed: %s", exc)
         agg = {}
 
     # Profile time range for percentage calculation
@@ -161,7 +162,8 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             trim_params,
         ).fetchone()
         n_streams = stream_count_row[0] if stream_count_row else 1
-    except Exception:
+    except (sqlite3.Error, duckdb.Error) as exc:
+        _log.debug("gpu_idle_gaps profile span query failed: %s", exc)
         profile_span_ns = 0
         n_streams = 1
 
@@ -203,7 +205,8 @@ LIMIT 5"""
                 api_rows = cur_api.fetchall()
                 api_cols = [d[0] for d in cur_api.description]
                 apis = [dict(zip(api_cols, r)) for r in api_rows]
-            except Exception:
+            except (sqlite3.Error, duckdb.Error) as exc:
+                _log.debug("gpu_idle_gaps CPU attribution query failed: %s", exc)
                 apis = []
 
             api_names = [a["api_name"] for a in apis]

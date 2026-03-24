@@ -7,10 +7,13 @@ Python logic and HTML/CSS/JS presentation.
 
 import html
 import json
+import logging
 import os
 from string import Template
 
 from .tree import build_nvtx_tree, to_json
+
+_log = logging.getLogger(__name__)
 
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 _CUDA_MEMCPY_KIND_LABELS = {
@@ -249,7 +252,8 @@ def build_timeline_gpu_data(
             try:
                 roots = build_nvtx_tree_all_threads(prof, dev, trim)
                 tree_json = nvtx_to_json(roots)
-            except Exception:
+            except Exception as exc:
+                _log.debug("NVTX tree build failed for device %d: %s", dev, exc, exc_info=True)
                 tree_json = []
             _collect_nvtx_annotations(tree_json, nvtx_spans, kernel_paths)
 

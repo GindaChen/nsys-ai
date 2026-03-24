@@ -41,7 +41,8 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
                 row[0]
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
-    except Exception:
+    except (sqlite3.Error, ImportError) as exc:
+        _log.debug("Failed to resolve activity tables: %s", exc)
         return {}
 
     def _find_by_prefix(prefix: str) -> str | None:
@@ -211,7 +212,8 @@ class Skill:
                         ).fetchone()[0]
                         > 0
                     )
-            except Exception:
+            except (sqlite3.Error, ImportError) as exc:
+                _log.debug("NVTX textId detection failed: %s", exc)
                 has_textid = False
             if has_textid:
                 resolved.setdefault("nvtx_text_expr", "COALESCE(n.text, s2.value)")
@@ -226,9 +228,15 @@ class Skill:
         if isinstance(conn, _ddb.DuckDBPyConnection):
             from nsys_ai.sql_compat import sqlite_to_duckdb
             sql = sqlite_to_duckdb(sql)
-        cursor = conn.execute(sql)
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            cursor = conn.execute(sql)
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except sqlite3.Error as exc:
+            from nsys_ai.exceptions import SkillExecutionError
+            raise SkillExecutionError(
+                f"Skill '{self.name}' SQL failed: {exc}",
+            ) from exc
 
     def format_rows(self, rows: list[dict]) -> str:
         """Format pre-computed rows as text (no re-execution)."""
