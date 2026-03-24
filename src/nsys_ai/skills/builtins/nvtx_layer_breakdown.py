@@ -29,7 +29,13 @@ def _execute(conn, **kwargs):
     depth = kwargs.get("depth")
     if depth is not None:
         depth = int(depth)
-    auto_depth = kwargs.get("auto_depth", True)
+    
+    raw_auto_depth = kwargs.get("auto_depth", True)
+    if isinstance(raw_auto_depth, str):
+        auto_depth = raw_auto_depth.strip().lower() not in ("false", "0", "no", "off", "n")
+    else:
+        auto_depth = bool(raw_auto_depth)
+        
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
     trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
@@ -272,7 +278,7 @@ SKILL = Skill(
             "auto_depth",
             "Enable auto-detection of layer depth (default True). "
             "Set to False to disable auto-detection and use all depths.",
-            "str",
+            "bool",
             False,
             True,
         ),

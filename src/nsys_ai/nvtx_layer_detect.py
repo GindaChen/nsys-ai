@@ -130,7 +130,7 @@ def _find_repeated_depth(
     """
     best_depth: int | None = None
     best_names: list[str] = []
-    best_cluster_size = 0
+    best_score = 0
     min_repeats = 2
 
     for depth in sorted(texts_by_depth):
@@ -138,14 +138,17 @@ def _find_repeated_depth(
         repeated = {name: cnt for name, cnt in counts.items() if cnt >= min_repeats}
         if not repeated:
             continue
-        # Score = total number of repeated occurrences
-        cluster_size = sum(repeated.values())
-        if cluster_size > best_cluster_size:
+        
+        # Score = number of distinct repeated operations
+        # This prevents a single repeated root scope at depth 0 from outscoring
+        # a deeper hierarchical level that contains many distinct repeated operations.
+        score = len(repeated)
+        if score > best_score:
             best_depth = depth
             best_names = list(repeated.keys())
-            best_cluster_size = cluster_size
+            best_score = score
 
-    if best_depth is not None and best_cluster_size >= 4:
+    if best_depth is not None and best_score >= 2:
         return (best_depth, best_names)
     return None
 
