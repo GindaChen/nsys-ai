@@ -95,6 +95,10 @@ class SkillNotFoundError(SkillError, KeyError):
         self.available = available or []
         super().__init__(message, error_code=self.error_code)
 
+    def __str__(self) -> str:
+        # Override KeyError's default repr-like quoting
+        return str(self.args[0]) if self.args else ""
+
     def to_dict(self) -> dict:
         d = super().to_dict()
         if self.available:

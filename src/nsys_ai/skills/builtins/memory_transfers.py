@@ -184,9 +184,10 @@ def _execute_h2d_dist(conn, **kwargs):
     )
     import duckdb
 
+    from nsys_ai.exceptions import SkillExecutionError
     try:
         rows = temp_skill.execute(conn, **kwargs)
-    except (sqlite3.OperationalError, duckdb.Error) as exc:
+    except (sqlite3.OperationalError, duckdb.Error, SkillExecutionError) as exc:
         err_msg = str(exc).lower()
         if "no such table" in err_msg or "does not exist" in err_msg:
             return []

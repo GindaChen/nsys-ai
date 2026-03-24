@@ -18,8 +18,11 @@ import socketserver
 import threading
 import time as _time
 import webbrowser
+import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
+
+_log = logging.getLogger(__name__)
 
 _FINDINGS_LOCK = threading.Lock()
 
@@ -184,7 +187,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
 
                 options = chat_mod.get_available_models()
                 default = chat_mod.get_default_model()
-            except (ImportError, Exception) as exc:
+            except Exception as exc:
                 _log.debug("Model listing unavailable: %s", exc)
                 options = []
                 default = None

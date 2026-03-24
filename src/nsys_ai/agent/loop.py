@@ -94,7 +94,7 @@ class Agent:
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
         try:
             self.profile = Profile(profile_path)
-        except (NsysAiError, sqlite3.Error) as e:
+        except (NsysAiError, sqlite3.Error, ValueError) as e:
             import sqlite3 as _sqlite3
             log.warning(
                 "Could not open as Nsight profile (skills may be limited): %s", e,

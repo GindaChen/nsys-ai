@@ -232,10 +232,21 @@ class Skill:
             cursor = conn.execute(sql)
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except sqlite3.Error as exc:
+        except Exception as exc:
+            import sqlite3
+            db_errors = (sqlite3.Error,)
+            try:
+                import duckdb
+                db_errors += (duckdb.Error,)
+            except ImportError:
+                pass
+            
+            if not isinstance(exc, db_errors):
+                raise
+                
             from nsys_ai.exceptions import SkillExecutionError
             raise SkillExecutionError(
-                f"Skill '{self.name}' SQL failed: {exc}",
+                f"SQL failed: {exc}", skill_name=self.name
             ) from exc
 
     def format_rows(self, rows: list[dict]) -> str:

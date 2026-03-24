@@ -685,7 +685,11 @@ def _cmd_skill(args, _profile):
             sys.exit(1)
         except (sqlite3.Error, SkillExecutionError) as e:
             if fmt == "json":
-                print(_json.dumps({"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}))
+                if isinstance(e, SkillExecutionError):
+                    payload = e.to_dict()
+                else:
+                    payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}
+                print(_json.dumps(payload))
             else:
                 print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
