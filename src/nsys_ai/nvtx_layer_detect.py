@@ -186,7 +186,7 @@ def is_outlier(value: float, all_values: list[float]) -> bool:
         return value > med * 2.0
 
     # quantiles with n=4 gives [Q1, Q2, Q3]
-    q1, _, q3 = statistics.quantiles(all_values, n=4)
+    q1, _, q3 = statistics.quantiles(all_values, n=4, method="inclusive")
     iqr = q3 - q1
 
     if iqr == 0:

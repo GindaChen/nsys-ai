@@ -169,7 +169,7 @@ def _execute(conn, **kwargs):
         if n < 4:
             fence = med * 2.0
         else:
-            q1, _, q3 = statistics.quantiles(all_times, n=4)
+            q1, _, q3 = statistics.quantiles(all_times, n=4, method="inclusive")
             iqr = q3 - q1
             fence = med * 2.0 if iqr == 0 else q3 + 1.5 * iqr
         for r in results:
