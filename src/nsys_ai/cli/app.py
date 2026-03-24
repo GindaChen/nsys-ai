@@ -142,7 +142,7 @@ def main():
 
         if os.environ.get("NSYS_AI_AGENT") == "1":
             # Machine-readable output for external AI agents
-            print(_json.dumps(e.to_dict()), file=sys.stderr)
+            print(_json.dumps(e.to_dict()))
         else:
             # Human-readable output
             print(f"Error [{e.error_code}]: {e}", file=sys.stderr)
