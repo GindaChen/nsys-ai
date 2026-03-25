@@ -82,3 +82,11 @@ def test_legacy_analyze_still_available():
     )
     assert result.returncode == 0
     assert "--gpu" in result.stdout
+def test_suggest_subcommand_help():
+    """suggest subcommand should have --help."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "suggest", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "profile" in result.stdout
+    assert "--insert" in result.stdout
