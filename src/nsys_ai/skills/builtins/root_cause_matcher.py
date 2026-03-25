@@ -288,6 +288,9 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     layer_kwargs = dict(kwargs)
     layer_kwargs.setdefault("limit", 500)
     layer_data = _safe_execute("nvtx_layer_breakdown", conn, **layer_kwargs)
+    # Filter out detection metadata row if present
+    if layer_data and layer_data[0].get("_detection_meta"):
+        layer_data = layer_data[1:]
     if layer_data and len(layer_data) >= 2:
         try:
             nccl_hotspot_pct = float(kwargs.get("nccl_hotspot_pct", 40.0))
@@ -301,6 +304,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
         findings += _check_layer_nccl_hotspot(layer_data, threshold_pct=nccl_hotspot_pct)
         findings += _check_pipeline_imbalance(layer_data, threshold_ratio=imbalance_ratio)
+        findings += _check_layer_outlier(layer_data)
 
     # --- nsys anti-pattern checks (direct SQL) ---
     # These cover the 4 expert-rule recipes from nsys:
@@ -510,6 +514,61 @@ def _check_pipeline_imbalance(
             ),
         }
     ]
+
+
+def _check_layer_outlier(
+    layer_data: list[dict],
+) -> list[dict]:
+    """Flag NVTX regions where total GPU time is a statistical outlier.
+
+    Uses IQR + median dual threshold (both must be true):
+    1. Statistical: value > Q3 + 1.5 × IQR
+    2. Practical: value > median × 1.5
+
+    Falls back to 2× median for < 4 data points or IQR == 0.
+    """
+    from ...nvtx_layer_detect import is_outlier
+
+    times = [r.get("total_gpu_ms", 0) for r in layer_data if r.get("total_gpu_ms", 0) > 0]
+    if len(times) < 3:
+        return []
+
+    findings = []
+    import statistics
+
+    for r in layer_data:
+        t = r.get("total_gpu_ms", 0)
+        if t > 0 and is_outlier(t, times):
+            path = r.get("nvtx_path") or r.get("nvtx_region", "?")
+            median_ms = statistics.median(times)
+            ratio = t / median_ms if median_ms > 0 else 0
+
+            # Include top kernels if available
+            top_k = r.get("top_kernels", [])
+            hotspot_info = ""
+            if top_k:
+                hotspot_info = (
+                    f" Top kernel: '{top_k[0]['kernel_name']}'"
+                    f" ({top_k[0]['total_ms']:.1f}ms)."
+                )
+
+            findings.append(
+                {
+                    "pattern": "Layer Outlier",
+                    "severity": "warning",
+                    "evidence": (
+                        f"'{path}' takes {t:.1f}ms "
+                        f"({ratio:.1f}× median {median_ms:.1f}ms).{hotspot_info}"
+                    ),
+                    "recommendation": (
+                        "Investigate why this layer is significantly slower. "
+                        "Check for suboptimal kernel configurations, "
+                        "excessive NCCL wait, or unbalanced pipeline stages. "
+                        "Use NCU for kernel-level root cause analysis."
+                    ),
+                }
+            )
+    return findings
 
 
 # -----------------------------------------------------------------------

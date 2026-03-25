@@ -6,6 +6,12 @@ producing a flat table of "which code region spent the most GPU time".
 
 This enables the agent to say "Layer 12 Attention backward has 15ms
 NCCL stall" instead of "some stall at timestamp X".
+
+Features:
+  - Auto-detects layer-level NVTX depth (numbered layers, repeated ops)
+  - Compute vs NCCL split per region
+  - Top-3 hotspot kernels per region (embedded in JSON output)
+  - Cross-layer outlier detection (IQR + median dual threshold)
 """
 
 from collections import defaultdict
@@ -16,12 +22,31 @@ from ..base import Skill, SkillParam
 def _execute(conn, **kwargs):
     """Execute NVTX region GPU time breakdown via attribution module."""
     from ...nvtx_attribution import attribute_kernels_to_nvtx
+    from ...nvtx_layer_detect import detect_layer_depth, is_outlier
     from ...overlap import classify_kernel
 
     limit = int(kwargs.get("limit", 20))
     depth = kwargs.get("depth")
     if depth is not None:
         depth = int(depth)
+
+    raw_auto_depth = kwargs.get("auto_depth", True)
+    if isinstance(raw_auto_depth, bool):
+        auto_depth = raw_auto_depth
+    elif isinstance(raw_auto_depth, str):
+        token = raw_auto_depth.strip().lower()
+        true_tokens = {"true", "1", "yes", "y", "on"}
+        false_tokens = {"false", "0", "no", "n", "off"}
+        if token in true_tokens:
+            auto_depth = True
+        elif token in false_tokens:
+            auto_depth = False
+        else:
+            return [{"error": f"Invalid value for auto_depth: {raw_auto_depth!r}. "
+                              f"Expected one of {sorted(true_tokens | false_tokens)}."}]
+    else:
+        auto_depth = bool(raw_auto_depth)
+
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
     trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
@@ -33,7 +58,16 @@ def _execute(conn, **kwargs):
     if not rows:
         return []
 
-    # Optional depth filtering: only keep rows at exactly the requested depth
+    # Auto-detect layer depth if not explicitly specified
+    detection_meta = None
+    auto_group_depth = None  # depth level to use for grouping by path component
+    if depth is None and auto_depth:
+        detection = detect_layer_depth(rows)
+        detection_meta = detection  # always emit, even on fallback
+        if detection["layer_depth"] is not None:
+            auto_group_depth = detection["layer_depth"]
+
+    # Explicit depth filtering: only keep rows at exactly the requested depth
     if depth is not None:
         if depth < 0:
             return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
@@ -42,7 +76,7 @@ def _execute(conn, **kwargs):
             return []
 
     # Python GROUP BY on nvtx_text with kernel classification for
-    # compute/NCCL split.
+    # compute/NCCL split, plus per-region kernel time tracking.
     groups: dict[str, dict] = defaultdict(
         lambda: {
             "total_ns": 0,
@@ -53,9 +87,10 @@ def _execute(conn, **kwargs):
             "nvtx_depth": -1,
             "nvtx_path": "",
             "nvtx_region": "",
+            "kernel_times": defaultdict(int),  # kernel_name → total_ns
         }
     )
-    _class_cache = {}
+    _class_cache: dict[str, str] = {}
     for r in rows:
         text = r["nvtx_text"]
         if not text:
@@ -68,11 +103,33 @@ def _execute(conn, **kwargs):
 
         path = r.get("nvtx_path", text)
 
-        stats = groups[path]
+        # When auto-depth detected a layer level, group by the path prefix
+        # up to that depth (e.g. "encoder > layer_0") instead of only the
+        # single component. This preserves enough context to avoid collisions
+        # between unrelated scopes that share the same leaf name.
+        if auto_group_depth is not None:
+            parts = path.split(" > ")
+            if auto_group_depth < len(parts):
+                prefix = parts[: auto_group_depth + 1]
+                group_key = " > ".join(prefix)
+                region_name = group_key
+                group_depth = auto_group_depth
+            else:
+                group_key = path
+                region_name = text
+                group_depth = r.get("nvtx_depth", 0)
+        else:
+            group_key = path
+            region_name = text
+            group_depth = r.get("nvtx_depth", 0)
+
+        stats = groups[group_key]
         stats["total_ns"] += dur_ns
         stats["count"] += 1
         if dur_ns > stats["max_ns"]:
             stats["max_ns"] = dur_ns
+        # Per-kernel time tracking
+        stats["kernel_times"][k_name] += dur_ns
         # Compute/NCCL split
         if kernel_class.startswith("nccl_"):
             stats["nccl_ns"] += dur_ns
@@ -80,11 +137,11 @@ def _execute(conn, **kwargs):
             stats["compute_ns"] += dur_ns
         # Capture depth/path from first seen entry
         if stats["nvtx_depth"] < 0:
-            stats["nvtx_depth"] = r.get("nvtx_depth", 0)
-            stats["nvtx_path"] = path
-            stats["nvtx_region"] = text
+            stats["nvtx_depth"] = group_depth
+            stats["nvtx_path"] = group_key
+            stats["nvtx_region"] = region_name
 
-    # Build aggregated results
+    # Build aggregated results (defer top-kernel extraction until after limit)
     results = []
     for path_key, stats in groups.items():
         total_ns = stats["total_ns"]
@@ -92,9 +149,11 @@ def _execute(conn, **kwargs):
         max_ns = stats["max_ns"]
         compute_ns = stats["compute_ns"]
         nccl_ns = stats["nccl_ns"]
+
         results.append(
             {
                 "_raw_total_ns": total_ns,
+                "_kernel_times": stats["kernel_times"],  # kept for deferred top-k
                 "nvtx_region": stats["nvtx_region"],
                 "nvtx_depth": stats["nvtx_depth"],
                 "nvtx_path": stats["nvtx_path"],
@@ -108,11 +167,40 @@ def _execute(conn, **kwargs):
             }
         )
 
-    # Sort by total GPU time descending, apply limit
+    # Sort by total GPU time descending
     results.sort(key=lambda r: -r["_raw_total_ns"])
+
+    # Cross-layer outlier detection — delegate to shared helper
+    all_times = [r["_raw_total_ns"] / 1e6 for r in results]
     for r in results:
+        t = r["_raw_total_ns"] / 1e6
+        r["is_outlier"] = is_outlier(t, all_times)
+
+    # Apply limit, then extract top-kernels only for kept results
+    limited = results[:limit]
+    for r in limited:
+        kernel_times = r.pop("_kernel_times")
+        top_k = sorted(kernel_times.items(), key=lambda x: -x[1])[:3]
+        r["top_kernels"] = [
+            {"kernel_name": k, "total_ms": round(v / 1e6, 3)}
+            for k, v in top_k
+        ]
         r.pop("_raw_total_ns", None)
-    return results[:limit]
+
+    # Prepend detection metadata if auto-detection was used
+    if detection_meta is not None:
+        limited.insert(
+            0,
+            {
+                "_detection_meta": True,
+                "layer_depth": detection_meta["layer_depth"],
+                "layer_names": detection_meta["layer_names"],
+                "detection_method": detection_meta["detection_method"],
+                "grouping_type": detection_meta.get("grouping_type", "flat"),
+                "confidence": detection_meta["confidence"],
+            },
+        )
+    return limited
 
 
 def _format(rows):
@@ -121,21 +209,52 @@ def _format(rows):
     if "error" in rows[0]:
         return f"Error: {rows[0]['error']}"
 
-    lines = [
+    lines = []
+
+    # Handle detection metadata header
+    if rows and rows[0].get("_detection_meta"):
+        meta = rows[0]
+        method = meta["detection_method"]
+        if method == "numbered_pattern":
+            n = len(meta["layer_names"])
+            lines.append(f"✅ Detected {n} layers at depth {meta['layer_depth']}")
+            names_preview = ", ".join(meta["layer_names"][:5])
+            if n > 5:
+                names_preview += f", … ({n - 5} more)"
+            lines.append(f"   Layers: {names_preview}")
+        elif method == "repeated_siblings":
+            lines.append(f"ℹ️  Grouped by repeated operations at depth {meta['layer_depth']}")
+            lines.append("   (No numbered layer hierarchy found — showing per-operation breakdown)")
+        else:
+            lines.append("⚠️  No layer hierarchy detected — showing per-operation breakdown")
+        lines.append("")
+        rows = rows[1:]
+
+    if not rows:
+        return "\n".join(lines) + "\n(No NVTX regions with attributed kernels found)"
+
+    lines.extend([
         "── NVTX Region GPU Time Breakdown ──",
         f"{'NVTX Region':<40s}  {'Depth':>5s}  {'Kernels':>7s}  {'Total(ms)':>10s}"
-        f"  {'Compute':>9s}  {'NCCL':>9s}  {'NCCL%':>6s}",
-        "─" * 96,
-    ]
+        f"  {'Compute':>9s}  {'NCCL':>9s}  {'NCCL%':>6s}  {'Outlier':>7s}",
+        "─" * 106,
+    ])
     for r in rows:
         # Favor nvtx_path over nvtx_region for disambiguation
         name = r.get("nvtx_path") or r.get("nvtx_region") or "(unnamed)"
         if len(name) > 38:
             name = "..." + name[-35:]
+        outlier_flag = "  ⚠️" if r.get("is_outlier") else ""
         lines.append(
             f"{name:<40s}  {r['nvtx_depth']:>5d}  {r['kernel_count']:>7d}  {r['total_gpu_ms']:>10.2f}"
-            f"  {r['compute_ms']:>9.2f}  {r['nccl_ms']:>9.2f}  {r['nccl_pct']:>5.1f}%"
+            f"  {r['compute_ms']:>9.2f}  {r['nccl_ms']:>9.2f}  {r['nccl_pct']:>5.1f}%{outlier_flag:>7s}"
         )
+        # Show top kernels indented below each region
+        for tk in r.get("top_kernels", []):
+            k_name = tk["kernel_name"]
+            if len(k_name) > 50:
+                k_name = k_name[:47] + "..."
+            lines.append(f"    └─ {k_name}  ({tk['total_ms']:.3f}ms)")
     return "\n".join(lines)
 
 
@@ -145,7 +264,9 @@ SKILL = Skill(
     description=(
         "Attributes GPU kernels to their parent NVTX regions (e.g. layers, "
         "forward/backward passes) and ranks them by total GPU time. "
-        "Shows compute vs NCCL split per region. "
+        "Shows compute vs NCCL split per region, top-3 hotspot kernels, "
+        "and flags outlier layers. Auto-detects layer-level NVTX depth "
+        "when depth is not specified. "
         "Use to identify which code region is the bottleneck."
     ),
     category="nvtx",
@@ -154,14 +275,22 @@ SKILL = Skill(
         SkillParam("limit", "Max number of NVTX regions to return", "int", False, 20),
         SkillParam(
             "depth",
-            "Filter to specific NVTX nesting depth (0=top-level). Applied when "
-            "nvtx_depth metadata is available; with Tier 1 attribution all regions "
-            "are depth 0 so depth>0 will typically return no results.",
+            "Filter to specific NVTX nesting depth (0=top-level). "
+            "When not specified, auto-detection finds the layer level "
+            "via numbered patterns or repeated siblings.",
             "int",
             False,
             None,
         ),
+        SkillParam(
+            "auto_depth",
+            "Enable auto-detection of layer depth (default True). "
+            "Set to False to disable auto-detection and use all depths.",
+            "bool",
+            False,
+            True,
+        ),
     ],
     format_fn=_format,
-    tags=["nvtx", "layer", "breakdown", "attribution", "region", "nccl", "compute"],
+    tags=["nvtx", "layer", "breakdown", "attribution", "region", "nccl", "compute", "outlier"],
 )
