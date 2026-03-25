@@ -62,7 +62,7 @@ For each of `skills/mfu.md` and `skills/triage.md`:
 ### Category 4: INDEX.md Routing (5 checks)
 
 - [ ] S4.1 Every file in `skills/*.md` (excluding SKILL_TEMPLATE, TEST) has a row in the Skill Router table
-- [ ] S4.2 Every file in `commands/*.md` has a row in the Slash Commands table
+- [ ] S4.2 Every file in `commands/*.md` (excluding evidence_schema, skill) has a row in the Slash Commands table
 - [ ] S4.3 All links in INDEX.md resolve (no broken relative paths)
 - [ ] S4.4 Slash Commands table has ≥ 4 entries
 - [ ] S4.5 Skill Router table has ≥ 5 entries

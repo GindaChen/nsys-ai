@@ -122,12 +122,16 @@ GROUP BY k.shortName ORDER BY ms DESC LIMIT 20
 
 ```sql
 -- All tables in this profile
-SHOW TABLES
+SELECT name FROM sqlite_master WHERE type='table' ORDER BY name
 
 -- Columns in a table
-DESCRIBE CUPTI_ACTIVITY_KIND_KERNEL
+PRAGMA table_info(CUPTI_ACTIVITY_KIND_KERNEL)
 
 -- Check if NVTX uses textId (newer) or text (older)
-DESCRIBE NVTX_EVENTS
+PRAGMA table_info(NVTX_EVENTS)
 -- If 'textId' column present → JOIN StringIds; else use n.text directly
 ```
+
+> **Note**: DuckDB profiles use `SHOW TABLES` and `DESCRIBE` instead.
+> The `schema_inspect` skill handles both backends automatically —
+> prefer `nsys-ai skill run schema_inspect profile.sqlite` for discovery.

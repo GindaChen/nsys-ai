@@ -91,14 +91,27 @@ The agent has **two tool sets** depending on context:
 
 | Set | When active | Tools |
 |-----|-------------|-------|
-| **Set A** — Single profile | One profile loaded | `query_profile_db`, `get_gpu_peak_tflops`, `compute_theoretical_flops`, `compute_region_mfu`, `compute_mfu`, navigation tools |
-| **Set B** — Diff mode | Two profiles loaded | All of Set A plus: `get_iteration_boundaries`, `search_nvtx_regions`, `get_top_nvtx_diffs`, `get_iteration_diff`, `get_region_diff`, `explore_nvtx_hierarchy`, `summarize_nvtx_subtree`, `get_launch_config_diff`, `get_source_code_context`, `get_gpu_imbalance_stats`, `get_global_diff`, `get_memory_profile_diff` |
+| **Set A** — Single profile | One profile loaded | `query_profile_db`, `get_gpu_peak_tflops`, `compute_theoretical_flops`, `compute_region_mfu`, `compute_mfu`, `submit_finding`, `get_gpu_overlap_stats`, `get_nccl_breakdown`, navigation tools |
+| **Set B** — Diff mode | Two profiles loaded | `get_gpu_peak_tflops`, `compute_mfu` from Set A, plus: `get_iteration_boundaries`, `search_nvtx_regions`, `get_top_nvtx_diffs`, `get_iteration_diff`, `get_region_diff`, `explore_nvtx_hierarchy`, `summarize_nvtx_subtree`, `get_launch_config_diff`, `get_source_code_context`, `get_gpu_imbalance_stats`, `get_global_diff`, `get_memory_profile_diff` |
+
+**Navigation tools** (`navigate_to_kernel`, `zoom_to_time_range`, `fit_nvtx_range`):
+These are **UI-only actions** available in `timeline-web` and `chat` TUI contexts.
+They are NOT available via CLI (`nsys-ai agent ask`). When using CLI, skip navigation
+and provide timestamp references in your output text instead.
+
+**`submit_finding`**: Emits a structured finding to the evidence sidebar in `timeline-web`.
+See `commands/evidence_schema.md` for the JSON schema.
 
 ---
 
-## Skill File List
+## Skill File List (LLM Workflow Guides)
 
 Load skill files on demand. Do not pre-load all of them.
+These are **reasoning workflows** for the LLM agent, not executable code.
+
+> **Builtin analysis skills** (executable via `nsys-ai skill run`) are documented
+> separately in [`commands/skill.md`](commands/skill.md). Those are 21 Python builtin skills
+> for targeted analysis (e.g. `top_kernels`, `gpu_idle_gaps`, `root_cause_matcher`).
 
 | When the user asks… | Load this file |
 |--------------------|----------------|

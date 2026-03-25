@@ -26,11 +26,18 @@ compute efficiency metrics, and compare runs.
 ### Step 2 — Know your two tool sets
 
 **Set A** (one profile loaded): `query_profile_db`, `get_gpu_peak_tflops`,
-`compute_theoretical_flops`, `compute_region_mfu`, `compute_mfu`, navigation tools.
+`compute_theoretical_flops`, `compute_region_mfu`, `compute_mfu`, `submit_finding`,
+`get_gpu_overlap_stats`, `get_nccl_breakdown`,
+navigation tools (UI-only: `navigate_to_kernel`, `zoom_to_time_range`, `fit_nvtx_range`).
 
-**Set B** (two profiles loaded, diff mode): everything in Set A plus diff tools:
-`get_iteration_boundaries`, `get_top_nvtx_diffs`, `get_iteration_diff`,
+**Set B** (two profiles loaded, diff mode): `get_gpu_peak_tflops`, `compute_mfu` from Set A,
+plus diff tools: `get_iteration_boundaries`, `get_top_nvtx_diffs`, `get_iteration_diff`,
 `get_region_diff`, `search_nvtx_regions`, `get_gpu_imbalance_stats`, and more.
+Set B does NOT include `query_profile_db`, `compute_theoretical_flops`, `compute_region_mfu`,
+`submit_finding`, `get_gpu_overlap_stats`, `get_nccl_breakdown`, or navigation tools.
+
+> **Note**: Navigation tools are only available in `timeline-web` / `chat` TUI.
+> Via CLI (`nsys-ai agent ask`), provide timestamp references in text instead.
 
 ### Step 3 — Know the 3 non-negotiable rules
 
@@ -47,6 +54,10 @@ compute efficiency metrics, and compare runs.
 | MFU / efficiency metric | `/nsys:mfu` |
 | Add/improve a skill | `/nsys:refine` |
 | Verify your output | `/nsys:validate` |
+
+**External agents (CLI)**: Use `nsys-ai skill run <name> profile.sqlite` to run
+specific analysis skills. See [`commands/skill.md`](commands/skill.md) for the full
+catalog of 21 builtin skills.
 
 ---
 
@@ -96,20 +107,23 @@ docs/agent_skills/
 ├── QUICKSTART.md      ← you are here
 ├── PRINCIPLES.md      ← rules + error handling + acceptance checklist
 ├── INDEX.md           ← routing table (loads in ~3 seconds of context)
-├── commands/          ← slash command SOPs
+├── commands/          ← slash command SOPs + CLI reference
 │   ├── analyze.md     /nsys:analyze
 │   ├── diff.md        /nsys:diff
 │   ├── mfu.md         /nsys:mfu
 │   ├── refine.md      /nsys:refine
 │   ├── test.md        /nsys:test
-│   └── validate.md    /nsys:validate
-└── skills/            ← load on demand
+│   ├── validate.md    /nsys:validate
+│   ├── skilldoc.md    /nsys:skilldoc (documentation audit)
+│   ├── evidence_schema.md  Finding JSON schema
+│   └── skill.md       nsys-ai skill CLI + builtin catalog (21 Python skills)
+└── skills/            ← LLM workflow guides (load on demand)
     ├── SKILL_TEMPLATE.md
     ├── TEST.md         ← test plan + results (like CLI-Anything TEST.md)
-    ├── mfu.md
-    ├── triage.md
-    ├── diff.md
-    ├── distributed.md
-    ├── variance.md
-    └── sql.md
+    ├── mfu.md          agent reasoning workflow for MFU analysis
+    ├── triage.md       agent reasoning workflow for profile triage
+    ├── diff.md         agent reasoning workflow for diff/regression
+    ├── distributed.md  agent reasoning workflow for NCCL/multi-GPU
+    ├── variance.md     agent reasoning workflow for iteration variance
+    └── sql.md          SQL reference + query recipes
 ```

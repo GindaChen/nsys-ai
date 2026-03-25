@@ -4,7 +4,7 @@
 
 This file serves two audiences:
 - **External agents** (e.g. OpenClaw) → use the [CLI Quick Reference](#cli-quick-reference) below to invoke `nsys-ai` from a terminal.
-- **Internal agent** (nsys-ai's own LLM) → use the [Skill Router](#skill-router) to load the right `.md` file.
+- **Internal agent** (nsys-ai's own LLM) → use the [Skill Router](#skill-router-llm-workflow-guides) to load the right `.md` file.
 
 ---
 
@@ -71,6 +71,12 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1.0 5.0 -o report.md
 | `nsys-ai diff-web <before> <after>` | Web diff viewer | Visual side-by-side comparison |
 | `nsys-ai agent analyze <profile>` | Full auto-analysis report | CLI auto-analysis (no LLM needed) |
 | `nsys-ai agent ask <profile> "<question>"` | Ask a targeted question | Keyword-based skill selection |
+| `nsys-ai skill list` | List all builtin analysis skills | Discover available skills |
+| `nsys-ai skill run <name> <profile> [--param K=V]` | Run a skill against a profile | Targeted analysis |
+| `nsys-ai skill add/remove/save` | Manage custom skills | Extend the skill system |
+
+> **Builtin Skills Catalog**: See [`commands/skill.md`](commands/skill.md) for the complete
+> list of 21 builtin skills with names, categories, descriptions, and parameters.
 
 ### Common agent workflows
 
@@ -151,7 +157,15 @@ nsys-ai timeline-web profile.sqlite --auto-analyze
 
 ---
 
-## Skill Router
+## Skill Router (LLM Workflow Guides)
+
+These are **agent reasoning workflows** — step-by-step procedures for the LLM
+to follow when analyzing a profile. They tell the agent *how to think*, not just
+what tools to call.
+
+> **Not the same as builtin skills.** The 21 Python builtin skills
+> (invoked via `nsys-ai skill run`) are documented in [`commands/skill.md`](commands/skill.md).
+> Those are executable analysis modules. The files below are reasoning guides.
 
 | User asks about… | Load this file |
 |-----------------|----------------|
@@ -167,11 +181,15 @@ nsys-ai timeline-web profile.sqlite --auto-analyze
 ## Tool Sets
 
 ### Set A — Single Profile
-`query_profile_db` · `get_gpu_peak_tflops` · `compute_theoretical_flops` · `compute_region_mfu` · `compute_mfu` · `navigate_to_kernel` · `zoom_to_time_range` · `fit_nvtx_range` · `get_gpu_overlap_stats` · `get_nccl_breakdown`
+`query_profile_db` · `get_gpu_peak_tflops` · `compute_theoretical_flops` · `compute_region_mfu` · `compute_mfu` · `submit_finding` · `get_gpu_overlap_stats` · `get_nccl_breakdown` · `navigate_to_kernel`* · `zoom_to_time_range`* · `fit_nvtx_range`*
+
+*\* UI-only — available in `timeline-web` and `chat` TUI, not via CLI.*
 
 ### Set B — Diff Mode (two profiles loaded)
-All of Set A, plus:
+`get_gpu_peak_tflops` · `compute_mfu` from Set A, plus:
 `search_nvtx_regions` · `get_iteration_boundaries` · `explore_nvtx_hierarchy` · `get_top_nvtx_diffs` · `get_iteration_diff` · `get_region_diff` · `summarize_nvtx_subtree` · `get_launch_config_diff` · `get_source_code_context` · `get_gpu_imbalance_stats` · `get_global_diff` · `get_memory_profile_diff`
+
+*Set B does NOT include `query_profile_db`, `compute_theoretical_flops`, `compute_region_mfu`, `submit_finding`, `get_gpu_overlap_stats`, `get_nccl_breakdown`, or navigation tools.*
 
 ---
 
