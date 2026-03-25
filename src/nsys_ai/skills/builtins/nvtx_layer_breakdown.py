@@ -22,7 +22,7 @@ from ..base import Skill, SkillParam
 def _execute(conn, **kwargs):
     """Execute NVTX region GPU time breakdown via attribution module."""
     from ...nvtx_attribution import attribute_kernels_to_nvtx
-    from ...nvtx_layer_detect import detect_layer_depth
+    from ...nvtx_layer_detect import detect_layer_depth, is_outlier
     from ...overlap import classify_kernel
 
     limit = int(kwargs.get("limit", 20))
@@ -170,25 +170,11 @@ def _execute(conn, **kwargs):
     # Sort by total GPU time descending
     results.sort(key=lambda r: -r["_raw_total_ns"])
 
-    # Cross-layer outlier detection — precompute fence once (O(n) vs O(n²))
-    if len(results) >= 2:
-        import statistics
-
-        all_times = [r["_raw_total_ns"] / 1e6 for r in results]
-        med = statistics.median(all_times)
-        n = len(all_times)
-        if n < 4:
-            fence = med * 2.0
-        else:
-            q1, _, q3 = statistics.quantiles(all_times, n=4, method="inclusive")
-            iqr = q3 - q1
-            fence = med * 2.0 if iqr == 0 else q3 + 1.5 * iqr
-        for r in results:
-            t = r["_raw_total_ns"] / 1e6
-            r["is_outlier"] = t > fence and t > med * 1.5
-    else:
-        for r in results:
-            r["is_outlier"] = False
+    # Cross-layer outlier detection — delegate to shared helper
+    all_times = [r["_raw_total_ns"] / 1e6 for r in results]
+    for r in results:
+        t = r["_raw_total_ns"] / 1e6
+        r["is_outlier"] = is_outlier(t, all_times)
 
     # Apply limit, then extract top-kernels only for kept results
     limited = results[:limit]

@@ -37,7 +37,7 @@ def detect_layer_depth(attribution_rows: list[dict]) -> dict:
 
     Args:
         attribution_rows: Output from ``attribute_kernels_to_nvtx()``,
-            each row must have ``nvtx_depth``, ``nvtx_path``, ``nvtx_text``.
+            each row must have ``nvtx_path`` and ``nvtx_text`` keys.
 
     Returns:
         dict with keys:
