@@ -818,3 +818,44 @@ def _cmd_ask(args, _profile):
         print(agent.ask(args.question))
     finally:
         agent.close()
+
+
+def _cmd_agent_guide(args, _profile):
+    """Print a machine-readable guide for external AI agents."""
+    from nsys_ai.skills.registry import skill_catalog
+
+    guide = """# nsys-ai Agent Guide
+You are an AI performance tuning agent using `nsys-ai` to analyze NVIDIA Nsight Systems GPU profiles.
+Your goal is to identify bottlenecks, correlate them with specific Python source code lines, and recommend actionable fixes.
+
+## Performance Note
+The first `skill run` on a large profile may take 60-90s for DuckDB cache initialization.
+Subsequent runs on the same profile are faster (~10-30s). Plan your tool calls accordingly.
+
+## Core Principles
+1. Never guess NVTX names or kernel strings. Run `schema_inspect` or query NVTX tables first.
+2. Always output metrics with units (ms, s, %, TFLOPS, GB/s).
+3. **MANDATORY**: Correlate findings with local Python source code (via grep/find) to provide line-level recommendations.
+
+## The 6-Stage Top-Down Triage Workflow
+1. **Orient**: Run `nsys-ai info <profile>` for quick metadata (GPU name, kernel count, time range).
+   Then run `nsys-ai skill run schema_inspect <profile>` to see available tables.
+2. **Temporal Breakdown**: Check utilization and bubbles (`gpu_idle_gaps`, `top_kernels`).
+   If `gpu_idle_gaps` returns empty, the GPU is well-utilized — this is a GOOD result, not an error.
+3. **Kernel Deep-Dive**: Identify the heaviest operations (`top_kernels`, `kernel_launch_overhead`).
+4. **NVTX Mapping**: Attribute GPU time to code regions (`nvtx_layer_breakdown`).
+   If auto-detection returns low confidence, retry with explicit `-p depth=1` or `-p depth=2`.
+5. **Cross-GPU**: IF applicable, analyze multi-GPU communication (`nccl_breakdown`, `overlap_breakdown`).
+6. **Root Cause**: Run `root_cause_matcher` for automated pattern detection. Synthesize all evidence
+   and deliver specific, code-level actionable fixes.
+
+## CLI Execution
+You execute analysis dynamically via the CLI:
+```bash
+nsys-ai info <profile.sqlite>                                      # quick metadata
+nsys-ai skill run <skill_name> <profile.sqlite> --format json [-p PARAM=VALUE]
+```
+Example: `nsys-ai skill run top_kernels baseline.sqlite --format json -p limit=5`
+"""
+    print(guide)
+    print(skill_catalog())

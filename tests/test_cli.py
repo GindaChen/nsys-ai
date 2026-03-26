@@ -37,13 +37,18 @@ def test_subcommands():
         "diff",
         "diff-web",
         "export",
+        "agent-guide",
     ]:
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"
 
     # Legacy command names should be hidden from top-level help.
     usage_line = result.stdout.splitlines()[0]
-    for hidden in ["info", "summary", "overlap", "skill", "agent"]:
+    for hidden in ["info", "summary", "overlap", "skill"]:
         assert hidden not in usage_line
+    
+    # 'agent-guide' is public, but 'agent' should be hidden
+    assert ",agent," not in usage_line
+    assert ",agent}" not in usage_line
 
 
 def test_chat_subcommand_help():
@@ -82,3 +87,14 @@ def test_legacy_analyze_still_available():
     )
     assert result.returncode == 0
     assert "--gpu" in result.stdout
+
+
+def test_agent_guide():
+    """agent-guide subcommand should print the system prompt payload."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "agent-guide"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "nsys-ai Agent Guide" in result.stdout
+    assert "Orient" in result.stdout
+    assert "Available Skills" in result.stdout

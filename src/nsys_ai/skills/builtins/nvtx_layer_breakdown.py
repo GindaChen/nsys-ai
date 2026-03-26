@@ -66,6 +66,16 @@ def _execute(conn, **kwargs):
         detection_meta = detection  # always emit, even on fallback
         if detection["layer_depth"] is not None:
             auto_group_depth = detection["layer_depth"]
+        else:
+            # Provide available depths so the agent can retry with explicit -p depth=N
+            available_depths = sorted({r.get("nvtx_depth", 0) for r in rows if r.get("nvtx_depth") is not None})
+            # Sample region names at each depth for context
+            depth_samples = {}
+            for d in available_depths[:5]:
+                samples = list({r.get("nvtx_text", "") for r in rows if r.get("nvtx_depth") == d})[:3]
+                depth_samples[d] = samples
+            detection_meta["available_depths"] = available_depths
+            detection_meta["depth_samples"] = depth_samples
 
     # Explicit depth filtering: only keep rows at exactly the requested depth
     if depth is not None:
@@ -189,17 +199,19 @@ def _execute(conn, **kwargs):
 
     # Prepend detection metadata if auto-detection was used
     if detection_meta is not None:
-        limited.insert(
-            0,
-            {
-                "_detection_meta": True,
-                "layer_depth": detection_meta["layer_depth"],
-                "layer_names": detection_meta["layer_names"],
-                "detection_method": detection_meta["detection_method"],
-                "grouping_type": detection_meta.get("grouping_type", "flat"),
-                "confidence": detection_meta["confidence"],
-            },
-        )
+        meta_entry = {
+            "_detection_meta": True,
+            "layer_depth": detection_meta["layer_depth"],
+            "layer_names": detection_meta["layer_names"],
+            "detection_method": detection_meta["detection_method"],
+            "grouping_type": detection_meta.get("grouping_type", "flat"),
+            "confidence": detection_meta["confidence"],
+        }
+        # Include depth hints when auto-detection falls back
+        if "available_depths" in detection_meta:
+            meta_entry["available_depths"] = detection_meta["available_depths"]
+            meta_entry["depth_samples"] = detection_meta["depth_samples"]
+        limited.insert(0, meta_entry)
     return limited
 
 

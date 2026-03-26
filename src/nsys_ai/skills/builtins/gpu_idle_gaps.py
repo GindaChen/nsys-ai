@@ -117,7 +117,18 @@ LIMIT ?"""
         return []
 
     if not rows:
-        return []
+        return [{
+            "_summary": True,
+            "gap_count": 0,
+            "total_idle_ms": 0,
+            "pct_of_profile": 0,
+            "min_gap_threshold_ns": min_gap_ns,
+            "note": (
+                f"No GPU idle gaps >= {min_gap_ns / 1e6:.1f}ms found. "
+                "GPU is well-utilized — this is a good result, not an error. "
+                "To find smaller gaps, try lowering min_gap_ns (e.g. -p min_gap_ns=100000)."
+            ),
+        }]
 
     # --- Phase 2: Aggregation stats ---
     # Re-query without LIMIT to get full aggregation

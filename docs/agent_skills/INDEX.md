@@ -91,6 +91,7 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1.0 5.0 -o report.md
 | `nsys-ai skill add <path.md>`* | Add a custom skill | Extend the skill system |
 | `nsys-ai skill remove <name>`* | Remove a custom skill | Manage skill system |
 | `nsys-ai skill save <name> -o <out.md>`* | Export a skill to .md file | Modify/eject builtin skills |
+| `nsys-ai agent-guide` | Print machine-readable agent guide | External agent onboarding |
 
 > **Builtin Skills Catalog**: See [`commands/skill.md`](commands/skill.md) for the complete
 > list of 21 builtin skills with names, categories, descriptions, and parameters.
@@ -158,6 +159,11 @@ nsys-ai timeline-web profile.sqlite --findings findings.json
 
 # 4c: One-step auto-analyze (quickest)
 nsys-ai timeline-web profile.sqlite --auto-analyze
+
+# Workflow 5: External agent onboarding
+# Print a machine-readable guide for external AI agents
+nsys-ai agent-guide
+# → Outputs: identity, 6-stage workflow, CLI syntax, full skill catalog
 ```
 
 ---

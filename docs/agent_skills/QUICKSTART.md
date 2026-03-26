@@ -54,6 +54,7 @@ You have two ways to interact with the profile:
 | MFU / efficiency metric | `/nsys:mfu` |
 | Add/improve a skill | `/nsys:refine` |
 | Verify your output | `/nsys:validate` |
+| External agent onboarding | `nsys-ai agent-guide` |
 
 **Analysis Skills**: Use `nsys-ai skill run <name> profile.sqlite` to run specific
 analysis modules. See [`commands/skill.md`](commands/skill.md) for the full catalog of 21 builtin skills.
@@ -123,7 +124,8 @@ docs/agent_skills/
 │   ├── validate.md    /nsys:validate
 │   ├── skilldoc.md    /nsys:skilldoc (documentation audit)
 │   ├── evidence_schema.md  Finding JSON schema
-│   └── skill.md       nsys-ai skill CLI + builtin catalog (21 Python skills)
+│   ├── skill.md       nsys-ai skill CLI + builtin catalog (21 Python skills)
+│   └── agent-guide.md nsys-ai agent-guide (external agent onboarding)
 └── skills/            ← LLM workflow guides (load on demand)
     ├── SKILL_TEMPLATE.md
     ├── TEST.md         ← test plan + results (like CLI-Anything TEST.md)

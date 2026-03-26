@@ -11,6 +11,7 @@ import argparse
 from .handlers import (
     _add_gpu_trim,
     _cmd_agent,
+    _cmd_agent_guide,
     _cmd_analyze,
     _cmd_ask,
     _cmd_chat,
@@ -47,7 +48,7 @@ def _build_parser():
     )
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{open,web,timeline-web,chat,ask,report,diff,diff-web,export,help}",
+        metavar="{open,web,timeline-web,chat,ask,agent-guide,report,diff,export,help}",
     )
 
     # Public commands (simplified)
@@ -102,6 +103,9 @@ def _build_parser():
     p.add_argument("profile", help="Path to .sqlite file")
     p.add_argument("question", help="Natural language question")
     p.set_defaults(handler=_cmd_ask)
+
+    p = sub.add_parser("agent-guide", help="Print machine-readable guide for AI agents")
+    p.set_defaults(handler=_cmd_agent_guide)
 
     p = sub.add_parser("report", help="Generate performance report")
     _add_gpu_trim(p)

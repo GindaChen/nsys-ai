@@ -57,6 +57,7 @@ def show_help():
     print("    nsys-ai skill run <name> <profile>       Run a specific skill")
     print("    nsys-ai agent analyze <profile>           Full auto-analysis")
     print('    nsys-ai agent ask <profile> "question"   Ask about a profile')
+    print("    nsys-ai agent-guide                      Print agent System Prompt")
     print()
     print("  Export:")
     print("    nsys-ai export     <profile> -o DIR       Perfetto JSON traces")
