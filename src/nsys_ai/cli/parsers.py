@@ -48,7 +48,7 @@ def _build_parser():
     )
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{open,web,timeline-web,chat,ask,agent-guide,report,diff,export,help}",
+        metavar="{open,web,timeline-web,chat,ask,agent-guide,report,diff,diff-web,export,help}",
     )
 
     # Public commands (simplified)

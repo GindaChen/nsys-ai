@@ -841,7 +841,7 @@ Subsequent runs on the same profile are faster (~10-30s). Plan your tool calls a
 1. **Orient**: Run `nsys-ai info <profile>` for quick metadata (GPU name, kernel count, time range).
    Then run `nsys-ai skill run schema_inspect <profile>` to see available tables.
 2. **Temporal Breakdown**: Check utilization and bubbles (`gpu_idle_gaps`, `top_kernels`).
-   If `gpu_idle_gaps` returns empty, the GPU is well-utilized — this is a GOOD result, not an error.
+   If `gpu_idle_gaps` returns a `_summary` row with `gap_count: 0`, the GPU is well-utilized — this is a GOOD result, not an error.
 3. **Kernel Deep-Dive**: Identify the heaviest operations (`top_kernels`, `kernel_launch_overhead`).
 4. **NVTX Mapping**: Attribute GPU time to code regions (`nvtx_layer_breakdown`).
    If auto-detection returns low confidence, retry with explicit `-p depth=1` or `-p depth=2`.
