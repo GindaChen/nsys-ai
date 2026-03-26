@@ -82,8 +82,8 @@ Produce a scored report. **Do not skip any category.**
 
 ### Category 6: Tool Usage (5 checks)
 
-- [ ] C6.1 Only Set A tools used when single profile is loaded
-- [ ] C6.2 Only Set B tools used in diff mode
+- [ ] C6.1 Only single-profile analysis tools (e.g. `compute_theoretical_flops`, `compute_region_mfu`, `navigate_to_kernel`, `fit_nvtx_range`) used when a single profile is loaded
+- [ ] C6.2 Only diff-mode tools (e.g. `get_iteration_diff`, `get_top_nvtx_diffs`) used when comparing two profiles
 - [ ] C6.3 `theoretical_flops` passed directly to next analysis step (not re-typed)
 - [ ] C6.4 `navigate_to_kernel` / `fit_nvtx_range` used correctly when navigation was needed
 - [ ] C6.5 No tool was called with parameters that weren't derived from profile data

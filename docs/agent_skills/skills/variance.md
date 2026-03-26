@@ -43,7 +43,7 @@ Step 2  Classify the variance pattern:
 
 Step 3  Zoom into one slow iteration to confirm:
         [Use navigate tools to get to the slow iteration window]
-        Fit NVTX range (nvtx_name="<iteration name>", occurrence_index=<slow iter index>)
+        `fit_nvtx_range`(nvtx_name="<iteration name>", occurrence_index=<slow iter index>)
 
         Query kernels in that window:
         SELECT s.value AS name, COUNT(*) AS cnt, SUM([end]-start)/1e6 AS ms

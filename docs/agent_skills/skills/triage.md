@@ -57,7 +57,7 @@ _How to detect parallelism_: Look at NCCL op types. Majority AllReduce → DP/FS
 - Perform Top Kernel NVTX attribution: Which NVTX range is calling `flash_bwd_kernel`?
 - Identify **which layer or operation** consumes the most GPU time.
 - If NVTX is absent: Perform heuristic kernel-to-PyTorch mapping (e.g., `ampere_sgemm` → linear layer, `flash_fwd` → attention).
-**Suggested Approach**: View the full NVTX tree (e.g., using `nsys-ai tree <profile> --depth 3`). For specific kernel mapping, consult the [commands/skill.md](../commands/skill.md) catalog for NVTX-related skills like `nvtx_layer_breakdown`.
+**Suggested Approach**: View the full NVTX tree (e.g., using `nsys-ai tui <profile> --depth 3`). For specific kernel mapping, consult the [commands/skill.md](../commands/skill.md) catalog for NVTX-related skills like `nvtx_layer_breakdown`.
 
 ---
 

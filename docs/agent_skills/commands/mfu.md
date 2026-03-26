@@ -25,7 +25,7 @@ Slash command for: computing GPU efficiency (MFU) for a specific region or whole
 
 ### Phase 0: Load Check
 - Verify a profile is loaded
-- Get GPU peak TFLOPS → record `{gpu_name, peak_tflops}`
+- Call `get_gpu_peak_tflops()` → record `{gpu_name, peak_tflops}`
 - If GPU unknown: note error; will ask user for peak_tflops when needed
 
 ### Phase 1: Discover Target
@@ -42,8 +42,8 @@ Slash command for: computing GPU efficiency (MFU) for a specific region or whole
 
 ### Phase 3: Compute FLOPs and MFU
 - Select `operation` from the FLOPs mapping table in `skills/mfu.md`
-- Compute theoretical FLOPs → capture `theoretical_flops`
-- Compute region MFU or standard MFU depending on target
+- Call `compute_theoretical_flops(...)` → capture `theoretical_flops`
+- Call `compute_region_mfu(...)` or `compute_mfu(...)` depending on target
 - Run sanity check (see `skills/mfu.md` Step 6/7)
 
 ### Phase 4: Contextualise

@@ -26,7 +26,7 @@ Use this when no second profile is loaded for comparison.
 
 ### Phase 0: Load Check
 - Verify a profile is loaded; if not, ask user to provide a `.sqlite` path
-- Get GPU peak TFLOPS to confirm profile connection and record GPU name
+- Call `get_gpu_peak_tflops` to get GPU peak TFLOPS, confirm profile connection, and record GPU name
 
 ### Phase 1: Triage (always runs)
 - Load and execute `skills/triage.md` **Workflow 0**

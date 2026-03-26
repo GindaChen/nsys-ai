@@ -21,8 +21,8 @@ Step 1  Confirm NCCL activity + breakdown by operation:
         GROUP BY op ORDER BY total_ms DESC LIMIT 10
 
 Step 2  Read overlap_pct:
-        [Single profile] Get GPU overlap stats — returns per-GPU overlap_pct.
-        [Diff context]   Get iteration diff — overlap_pct for before/after.
+        [Single profile] Use `get_gpu_overlap_stats` — returns per-GPU overlap_pct.
+        [Diff context]   Use `get_iteration_diff` — overlap_pct for before/after.
 
         overlap_pct = fraction of NCCL time that overlaps with compute kernels × 100
 
@@ -48,9 +48,9 @@ Step 3  Classify collective type → infer parallelism strategy:
         └─────────────────────────┴────────────────────────────────────────────────────┘
 
 Step 4  Per-GPU imbalance diagnosis:
-        [Single profile] Get GPU overlap stats — compare compute_only_ms
+        [Single profile] Use `get_gpu_overlap_stats` — compare compute_only_ms
         across gpu_ids. If max/min ratio > 1.2, report GPU imbalance.
-        [Diff context]   Get GPU imbalance stats (iteration_index=<N>)
+        [Diff context]   Use `get_gpu_imbalance_stats(iteration_index=<N>)`
         → Per-GPU: {compute_ms, nccl_ms, idle_ms} for both profiles
 
         Diagnose:
