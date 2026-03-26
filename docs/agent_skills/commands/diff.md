@@ -26,7 +26,7 @@ Use when the user wants to find what changed between two runs.
 ### Phase 0: Load Check
 - Verify TWO profiles are loaded (before + after)
 - If only one loaded: ask user to load the second profile
-- Get GPU peak TFLOPS to confirm the profile and record GPU
+- Run `get_gpu_peak_tflops()` to confirm the profile and record GPU
 
 ### Phase 1: Alignment Check
 - Run `get_iteration_boundaries()`
