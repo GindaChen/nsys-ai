@@ -59,6 +59,11 @@ Set B does NOT include `query_profile_db`, `compute_theoretical_flops`, `compute
 specific analysis skills. See [`commands/skill.md`](commands/skill.md) for the full
 catalog of 21 builtin skills.
 
+> **After analysis**: Encode your conclusions as `findings.json` and open
+> `nsys-ai timeline-web profile.sqlite --findings findings.json` so the user
+> can visually verify your claims. See [`commands/evidence_schema.md`](commands/evidence_schema.md)
+> for the JSON schema and end-to-end workflow.
+
 ---
 
 ## Typical First 60 Seconds

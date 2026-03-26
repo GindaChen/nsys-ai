@@ -147,3 +147,72 @@ In the viewer:
 - **Evidence sidebar** (right panel) lists all findings as numbered cards
 - **Click a finding** → timeline zooms to that time range
 - **Colored overlays** appear on the timeline at each finding's location
+
+---
+
+## External Agent End-to-End Workflow
+
+After analysis, an external AI agent should produce findings and open the web viewer.
+Three approaches, from most control to least:
+
+### Option A: Agent-Driven (recommended)
+
+The agent runs skills, reasons about results, writes conclusions, then opens viewer.
+
+```bash
+# 1. COLLECT — run skills to gather data
+nsys-ai skill run gpu_idle_gaps profile.sqlite --format json > /tmp/gaps.json
+nsys-ai skill run nccl_breakdown profile.sqlite --format json > /tmp/nccl.json
+nsys-ai skill run top_kernels profile.sqlite --format json > /tmp/kernels.json
+
+# 2. REASON — agent analyzes the collected data (LLM reasoning, not a CLI command)
+#    Cross-reference gaps, NCCL, and kernel data to identify root causes.
+
+# 3. WRITE — agent writes findings.json with conclusions + nanosecond time ranges
+cat > /tmp/findings.json << 'EOF'
+{
+  "title": "Pipeline Parallelism Bubble Analysis",
+  "findings": [
+    {
+      "type": "region",
+      "label": "PP Bubble: 21s idle caused by serialized NCCL",
+      "start_ns": 89886440111,
+      "end_ns": 110951683466,
+      "severity": "critical",
+      "note": "GPU idle for 21s after AllReduce — NCCL not overlapping with compute"
+    }
+  ]
+}
+EOF
+
+# 4. VIEW — open timeline with evidence overlay for human verification
+nsys-ai timeline-web profile.sqlite --findings /tmp/findings.json
+```
+
+### Option B: Auto-Evidence via `agent analyze`
+
+Built-in `EvidenceBuilder` runs 7 heuristic analyzers (slow iterations, GPU idle gaps,
+NCCL stalls, kernel hotspots, overlap ratio, memory anomalies, H2D spikes) and produces
+findings automatically.
+
+```bash
+# Analyze + generate evidence in one step
+nsys-ai agent analyze profile.sqlite --evidence -o /tmp/findings.json
+
+# Then open the viewer
+nsys-ai timeline-web profile.sqlite --findings /tmp/findings.json
+```
+
+### Option C: One-Step Auto-Analyze
+
+Combines analysis + viewer launch. No `findings.json` file is written to disk.
+
+```bash
+nsys-ai timeline-web profile.sqlite --auto-analyze
+```
+
+> **When to use which**: Option A produces the highest-quality findings because the
+> agent reasons about root causes. Option B/C use heuristics only (no LLM reasoning).
+> External agents should prefer Option A, falling back to B/C when speed matters more
+> than explanation quality.
+
