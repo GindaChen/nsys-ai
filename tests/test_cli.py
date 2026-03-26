@@ -45,7 +45,7 @@ def test_subcommands():
     usage_line = result.stdout.splitlines()[0]
     for hidden in ["info", "summary", "overlap", "skill"]:
         assert hidden not in usage_line
-    
+
     # 'agent-guide' is public, but 'agent' should be hidden
     assert ",agent," not in usage_line
     assert ",agent}" not in usage_line
