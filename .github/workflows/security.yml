@@ -20,4 +20,6 @@ jobs:
         run: bandit -r src/ -c pyproject.toml
 
       - name: pip-audit – dependency vulnerabilities
-        run: pip-audit
+        # CVE-2026-4539: Pygments ≤2.19.2 – no fix released yet (transitive dep via pytest/rich/textual)
+        # TODO: remove --ignore-vuln once Pygments ships a patched version
+        run: pip-audit --ignore-vuln CVE-2026-4539
