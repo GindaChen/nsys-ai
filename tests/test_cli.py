@@ -114,3 +114,38 @@ def test_skill_info():
     assert "limit" in schema["parameters"]
     assert schema["parameters"]["limit"]["type"] == "int"
     assert schema["parameters"]["limit"]["default"] == 15
+
+
+def test_skill_run_duckdb_cache(tmp_path):
+    """skill run should work end-to-end via DuckDB/Parquet cache path."""
+    import json
+    import sqlite3
+
+    # Create a minimal profile with a kernel table
+    db_path = tmp_path / "test.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            start INTEGER, "end" INTEGER, deviceId INTEGER,
+            streamId INTEGER, correlationId INTEGER,
+            shortName TEXT, mangledName TEXT
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (1000, 2000, 0, 7, 1, 'kernel_a', 'kernel_a');
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+    """)
+    conn.close()
+
+    # Use schema_inspect — it works on any schema without needing specific columns
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "run", "schema_inspect",
+         str(db_path), "--format", "json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    rows = json.loads(result.stdout)
+    assert isinstance(rows, list)
+    assert len(rows) >= 1
+    # Verify our tables appear in the schema output
+    table_names = {r.get("table_name") for r in rows}
+    assert "kernels" in table_names or "CUPTI_ACTIVITY_KIND_KERNEL" in table_names

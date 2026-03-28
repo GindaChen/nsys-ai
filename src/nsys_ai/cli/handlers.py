@@ -600,9 +600,8 @@ def _cmd_skill(args, _profile):
             for s in skills:
                 print(f"{s.name:<25s}  {s.category:<15s}  {s.description[:60]}")
     elif args.skill_action == "info":
-        try:
-            skill = get_skill(args.skill_name)
-        except (SkillNotFoundError, KeyError):
+        skill = get_skill(args.skill_name)
+        if skill is None:
             print(f"Error: Skill '{args.skill_name}' not found.", file=sys.stderr)
             sys.exit(1)
         schema = {
