@@ -599,11 +599,41 @@ def _cmd_skill(args, _profile):
             print("-" * 80)
             for s in skills:
                 print(f"{s.name:<25s}  {s.category:<15s}  {s.description[:60]}")
+    elif args.skill_action == "info":
+        skill = get_skill(args.skill_name)
+        if skill is None:
+            print(f"Error: Skill '{args.skill_name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        schema = {
+            "name": skill.name,
+            "description": skill.description,
+            "parameters": {
+                p.name: {
+                    "type": p.type,
+                    "description": getattr(p, "description", ""),
+                    "default": p.default,
+                    "required": p.required
+                } for p in skill.params
+            }
+        }
+        print(_json.dumps(schema, indent=2))
     elif args.skill_action == "run":
         import sqlite3
 
+        import duckdb
+
+        from nsys_ai.parquet_cache import open_cached_db
+
         fmt = getattr(args, "format", "text")
-        conn = sqlite3.connect(args.profile)
+        try:
+            conn = open_cached_db(args.profile)
+        except (duckdb.Error, RuntimeError, OSError) as exc:
+            # Fallback to raw SQLite if DuckDB/Parquet cache fails
+            import logging
+            logging.getLogger("nsys_ai").warning(
+                "DuckDB cache unavailable (%s), falling back to raw SQLite", exc
+            )
+            conn = sqlite3.connect(args.profile)
 
         # Build trim kwargs if --trim was provided
         trim_kwargs = {}
@@ -692,6 +722,13 @@ def _cmd_skill(args, _profile):
             else:
                 print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+        except duckdb.Error as e:
+            if fmt == "json":
+                payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}
+                print(_json.dumps(payload))
+            else:
+                print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         finally:
             conn.close()
     elif args.skill_action == "add":
@@ -769,7 +806,7 @@ def _cmd_skill(args, _profile):
         save_skill_to_markdown(skill, args.output)
         print(f"Saved '{skill.name}' → {args.output}")
     else:
-        print("Usage: nsys-ai skill {list,run,add,remove,save} ...")
+        print("Usage: nsys-ai skill {list,info,run,add,remove,save} ...")
         sys.exit(1)
 
 

@@ -98,3 +98,64 @@ def test_agent_guide():
     assert "nsys-ai Agent Guide" in result.stdout
     assert "Orient" in result.stdout
     assert "Available Skills" in result.stdout
+
+
+def test_skill_info():
+    """skill info subcommand should return a JSON schema."""
+    import json
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "info", "top_kernels"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    schema = json.loads(result.stdout)
+    assert schema["name"] == "top_kernels"
+    assert "description" in schema
+    assert "parameters" in schema
+    assert "limit" in schema["parameters"]
+    assert schema["parameters"]["limit"]["type"] == "int"
+    assert schema["parameters"]["limit"]["default"] == 15
+
+
+def test_skill_run_duckdb_cache(tmp_path):
+    """skill run should work end-to-end, preferring DuckDB/Parquet cache when available."""
+    import json
+    import sqlite3
+
+    # Create a minimal profile with tables the cache builder needs
+    db_path = tmp_path / "test.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            start INTEGER, "end" INTEGER, deviceId INTEGER,
+            streamId INTEGER, correlationId INTEGER,
+            shortName INTEGER, mangledName TEXT, demangledName INTEGER
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (1000, 2000, 0, 7, 1, 1, 'kernel_a', 1);
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        INSERT INTO StringIds VALUES (1, 'kernel_a');
+        CREATE TABLE NVTX_EVENTS (
+            start INTEGER, "end" INTEGER, globalTid INTEGER,
+            text TEXT, textId INTEGER, eventType INTEGER, rangeId INTEGER
+        );
+    """)
+    conn.close()
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "run", "schema_inspect",
+         str(db_path), "--format", "json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    rows = json.loads(result.stdout)
+    assert isinstance(rows, list)
+    assert len(rows) >= 1
+    table_names = {r.get("table_name") for r in rows}
+    assert "kernels" in table_names
+
+    # Verify the DuckDB/Parquet cache was actually built (not the SQLite fallback)
+    cache_dir = db_path.with_suffix(".nsys-cache")
+    assert cache_dir.exists(), f"Cache directory {cache_dir} was not created"
+    parquet_files = list(cache_dir.glob("*.parquet"))
+    assert len(parquet_files) >= 1, "No .parquet files found in cache directory"
+
