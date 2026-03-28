@@ -117,11 +117,11 @@ def test_skill_info():
 
 
 def test_skill_run_duckdb_cache(tmp_path):
-    """skill run should work end-to-end via DuckDB/Parquet cache path."""
+    """skill run should work end-to-end, preferring DuckDB/Parquet cache when available."""
     import json
     import sqlite3
 
-    # Create a minimal profile with a kernel table
+    # Create a minimal profile with tables the cache builder needs
     db_path = tmp_path / "test.sqlite"
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
@@ -133,10 +133,13 @@ def test_skill_run_duckdb_cache(tmp_path):
         INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
             (1000, 2000, 0, 7, 1, 'kernel_a', 'kernel_a');
         CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE NVTX_EVENTS (
+            start INTEGER, "end" INTEGER, globalTid INTEGER,
+            text TEXT, textId INTEGER, eventType INTEGER
+        );
     """)
     conn.close()
 
-    # Use schema_inspect — it works on any schema without needing specific columns
     result = subprocess.run(
         [sys.executable, "-m", "nsys_ai", "skill", "run", "schema_inspect",
          str(db_path), "--format", "json"],
@@ -146,6 +149,14 @@ def test_skill_run_duckdb_cache(tmp_path):
     rows = json.loads(result.stdout)
     assert isinstance(rows, list)
     assert len(rows) >= 1
-    # Verify our tables appear in the schema output
     table_names = {r.get("table_name") for r in rows}
     assert "kernels" in table_names or "CUPTI_ACTIVITY_KIND_KERNEL" in table_names
+
+    # If DuckDB cache was built, verify the cache directory has .parquet files.
+    # The cache may not be built if the DuckDB SQLite extension is unavailable,
+    # in which case the handler falls back to raw sqlite3 — that is also OK.
+    cache_dir = db_path.with_suffix(".nsys-cache")
+    if cache_dir.exists():
+        parquet_files = list(cache_dir.glob("*.parquet"))
+        assert len(parquet_files) >= 1, "Cache dir exists but contains no .parquet files"
+

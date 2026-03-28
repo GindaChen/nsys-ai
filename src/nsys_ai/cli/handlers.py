@@ -620,6 +620,7 @@ def _cmd_skill(args, _profile):
     elif args.skill_action == "run":
         import sqlite3
 
+        import duckdb
         from nsys_ai.parquet_cache import open_cached_db
 
         fmt = getattr(args, "format", "text")
@@ -716,11 +717,7 @@ def _cmd_skill(args, _profile):
             else:
                 print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        except Exception as e:
-            # Catch DuckDB errors when using Parquet cache
-            import duckdb as _ddb
-            if not isinstance(e, _ddb.Error):
-                raise
+        except duckdb.Error as e:
             if fmt == "json":
                 payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}
                 print(_json.dumps(payload))
