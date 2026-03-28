@@ -599,11 +599,36 @@ def _cmd_skill(args, _profile):
             print("-" * 80)
             for s in skills:
                 print(f"{s.name:<25s}  {s.category:<15s}  {s.description[:60]}")
+    elif args.skill_action == "info":
+        try:
+            skill = get_skill(args.skill_name)
+        except (SkillNotFoundError, KeyError):
+            print(f"Error: Skill '{args.skill_name}' not found.", file=sys.stderr)
+            sys.exit(1)
+        schema = {
+            "name": skill.name,
+            "description": skill.description,
+            "parameters": {
+                p.name: {
+                    "type": p.type,
+                    "description": getattr(p, "description", ""),
+                    "default": p.default,
+                    "required": p.required
+                } for p in skill.params
+            }
+        }
+        print(_json.dumps(schema, indent=2))
     elif args.skill_action == "run":
         import sqlite3
 
+        from nsys_ai.parquet_cache import open_cached_db
+
         fmt = getattr(args, "format", "text")
-        conn = sqlite3.connect(args.profile)
+        try:
+            conn = open_cached_db(args.profile)
+        except Exception:
+            # Fallback to raw SQLite if DuckDB/Parquet cache fails
+            conn = sqlite3.connect(args.profile)
 
         # Build trim kwargs if --trim was provided
         trim_kwargs = {}
@@ -688,6 +713,17 @@ def _cmd_skill(args, _profile):
                     payload = e.to_dict()
                 else:
                     payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}
+                print(_json.dumps(payload))
+            else:
+                print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            # Catch DuckDB errors when using Parquet cache
+            import duckdb as _ddb
+            if not isinstance(e, _ddb.Error):
+                raise
+            if fmt == "json":
+                payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(e)}}
                 print(_json.dumps(payload))
             else:
                 print(f"Error: {e}", file=sys.stderr)

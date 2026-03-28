@@ -293,6 +293,8 @@ def _register_legacy_commands(sub):
         default="text",
         help="Output format (default: text)",
     )
+    sp_info = skill_sub.add_parser("info", help="Get JSON schema of a skill's parameters")
+    sp_info.add_argument("skill_name", help="Name of the skill")
     sp_run = skill_sub.add_parser("run", help="Run a skill against a profile")
     sp_run.add_argument("skill_name", help="Name of the skill to run")
     sp_run.add_argument("profile", help="Path to .sqlite file")

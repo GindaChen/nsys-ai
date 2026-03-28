@@ -98,3 +98,19 @@ def test_agent_guide():
     assert "nsys-ai Agent Guide" in result.stdout
     assert "Orient" in result.stdout
     assert "Available Skills" in result.stdout
+
+
+def test_skill_info():
+    """skill info subcommand should return a JSON schema."""
+    import json
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "info", "top_kernels"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    schema = json.loads(result.stdout)
+    assert schema["name"] == "top_kernels"
+    assert "description" in schema
+    assert "parameters" in schema
+    assert "limit" in schema["parameters"]
+    assert schema["parameters"]["limit"]["type"] == "int"
+    assert schema["parameters"]["limit"]["default"] == 15
