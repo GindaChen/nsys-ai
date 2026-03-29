@@ -133,19 +133,23 @@ def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = No
     dimension (TP/PP/DP) dominates communication cost.
     """
     kernels = prof.kernels(device, trim)
-    nccl_kernels = [k for k in kernels if classify_kernel(k["name"]).startswith("nccl_")]
 
-    if not nccl_kernels:
+    nccl_data = []
+    total_nccl_ns = 0
+    for k in kernels:
+        ctype = classify_kernel(k["name"])
+        if ctype.startswith("nccl_"):
+            dur_ns = k["end"] - k["start"]
+            nccl_data.append((k["streamId"], ctype, dur_ns))
+            total_nccl_ns += dur_ns
+
+    if not nccl_data:
         return []
-
-    total_nccl_ns = sum(k["end"] - k["start"] for k in nccl_kernels)
 
     # Group by (stream_id, collective_type)
     by_stream_type: dict[tuple[int, str], list[int]] = defaultdict(list)
-    for k in nccl_kernels:
-        ctype = classify_kernel(k["name"])
-        dur_ns = k["end"] - k["start"]
-        by_stream_type[(k["streamId"], ctype)].append(dur_ns)
+    for stream_id, ctype, dur_ns in nccl_data:
+        by_stream_type[(stream_id, ctype)].append(dur_ns)
 
     # Precompute totals to avoid redundant sum() during sort
     computed_groups = [
