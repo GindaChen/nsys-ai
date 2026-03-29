@@ -6,11 +6,11 @@ import pytest
 
 
 def test_list_skills():
-    """All 21 built-in skills should be discoverable."""
+    """All 22 built-in skills should be discoverable."""
     from nsys_ai.skills import list_skills
 
     names = list_skills()
-    assert len(names) == 21
+    assert len(names) == 22
 
     expected = [
         "cpu_gpu_pipeline",
@@ -19,6 +19,7 @@ def test_list_skills():
         "iteration_timing",
         "kernel_launch_overhead",
         "kernel_launch_pattern",
+        "kernel_overlap_matrix",
         "memory_bandwidth",
         "memory_transfers",
         "nccl_anomaly",
