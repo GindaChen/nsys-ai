@@ -6,7 +6,7 @@ import pytest
 
 
 def test_list_skills():
-    """All 22 built-in skills should be discoverable."""
+    """All built-in skills should be discoverable."""
     from nsys_ai.skills import list_skills
 
     names = list_skills()

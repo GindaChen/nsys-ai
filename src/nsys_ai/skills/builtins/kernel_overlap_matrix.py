@@ -30,7 +30,7 @@ def _query_memcpy(prof, device, trim):
             memcpy_table = t
             break
     import re
-    if memcpy_table is None or not re.match(r"^[A-Za-z0-9_]+$", memcpy_table):
+    if memcpy_table is None or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", memcpy_table):
         return []
 
     sql = f"""\
