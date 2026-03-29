@@ -293,9 +293,10 @@ TOOL_GET_NCCL_BREAKDOWN = {
     "function": {
         "name": "get_nccl_breakdown",
         "description": (
-            "Break down NCCL operations by collective type (AllReduce, AllGather, "
-            "ReduceScatter, SendRecv, Broadcast). Returns count, total_ms, avg_ms, "
-            "pct for each collective. Use to infer parallelism strategy: "
+            "Break down NCCL operations by CUDA stream and collective type (AllReduce, AllGather, "
+            "ReduceScatter, SendRecv, Broadcast). Returns stream_id, count, total_ms, avg_ms, "
+            "pct for each (stream, collective) pair. Use stream_id to infer parallelism strategy: "
+            "different streams = different parallelism dimensions (TP/PP/DP). "
             "AllReduce=DDP, ReduceScatter+AllGather=FSDP/ZeRO, SendRecv=Pipeline Parallel."
         ),
         "parameters": {

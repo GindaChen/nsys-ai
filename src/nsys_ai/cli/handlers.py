@@ -882,7 +882,7 @@ Subsequent runs on the same profile are faster (~10-30s). Plan your tool calls a
 3. **Kernel Deep-Dive**: Identify the heaviest operations (`top_kernels`, `kernel_launch_overhead`).
 4. **NVTX Mapping**: Attribute GPU time to code regions (`nvtx_layer_breakdown`).
    If auto-detection returns low confidence, retry with explicit `-p depth=1` or `-p depth=2`.
-5. **Cross-GPU**: IF applicable, analyze multi-GPU communication (`nccl_breakdown`, `overlap_breakdown`, `kernel_overlap_matrix`).
+5. **Cross-GPU**: If applicable, analyze multi-GPU communication (`nccl_breakdown` for per-stream TP/PP/DP breakdown, `overlap_breakdown`, `kernel_overlap_matrix`).
 6. **Root Cause**: Run `root_cause_matcher` for automated pattern detection. Synthesize all evidence
    and deliver specific, code-level actionable fixes.
 

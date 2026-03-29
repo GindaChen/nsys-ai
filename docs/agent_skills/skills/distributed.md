@@ -11,14 +11,24 @@ Read this when the user asks about multi-GPU slowdowns, NCCL time, or GPU imbala
 ## Workflow 6: NCCL Efficiency Diagnosis
 
 ```
-Step 1  Confirm NCCL activity + breakdown by operation:
-        SELECT s.value AS op, COUNT(*) AS cnt,
-               SUM(k.[end]-k.start)/1e6 AS total_ms,
-               ROUND(100.0*SUM(k.[end]-k.start) /
-                 (SELECT MAX([end])-MIN(start) FROM CUPTI_ACTIVITY_KIND_KERNEL), 1) AS pct_of_span
-        FROM CUPTI_ACTIVITY_KIND_KERNEL k JOIN StringIds s ON k.shortName=s.id
+Step 1  Confirm NCCL activity + per-stream breakdown:
+        nsys-ai skill run nccl_breakdown <profile.sqlite> --format json
+
+        The output is grouped by CUDA stream, then by collective type.
+        Different streams typically correspond to different parallelism
+        dimensions (TP/PP/DP), so per-stream grouping directly reveals
+        which parallelism channel dominates communication cost.
+
+        Alternatively, example raw SQL (schema may vary):
+        -- NOTE: The kernel table name may be CUPTI_ACTIVITY_KIND_KERNEL,
+        --       CUPTI_ACTIVITY_KIND_KERNEL_V2/V3, etc. Run a schema
+        --       inspection (e.g., SELECT name FROM sqlite_master WHERE type='table';)
+        --       to find the actual kernel table name and substitute it below.
+        SELECT k.streamId, s.value AS op, COUNT(*) AS cnt,
+               SUM(k.[end]-k.start)/1e6 AS total_ms
+        FROM <KERNEL_TABLE> k JOIN StringIds s ON k.shortName=s.id
         WHERE LOWER(s.value) LIKE '%nccl%'
-        GROUP BY op ORDER BY total_ms DESC LIMIT 10
+        GROUP BY k.streamId, op ORDER BY k.streamId, total_ms DESC LIMIT 20
 
 Step 2  Read overlap_pct and Overlap Matrix:
         [Single profile] Use `get_gpu_overlap_stats` — returns per-GPU overlap_pct.
@@ -38,15 +48,22 @@ Step 2  Read overlap_pct and Overlap Matrix:
         Context: FSDP/ZeRO-3 with prefetch typically achieves 50–70%.
                  DDP without bucketing often achieves < 20%.
 
-Step 3  Classify collective type → infer parallelism strategy:
+Step 3  Classify collective type + stream → infer parallelism strategy:
+        Use the per-stream nccl_breakdown output. Each stream usually maps
+        to one parallelism dimension:
+
         ┌─────────────────────────┬────────────────────────────────────────────────────┐
         │ Dominant operation      │ Strategy                                           │
         ├─────────────────────────┼────────────────────────────────────────────────────┤
         │ AllReduce               │ DDP (gradient sync after backward)                 │
         │ ReduceScatter + AllGather│ FSDP / ZeRO-2/3 (sharded parameters)            │
         │ AllGather (forward only) │ Tensor Parallelism or FSDP inference             │
+        │ SendRecv                │ Pipeline Parallelism (P2P communication)           │
         │ Broadcast               │ Checkpoint sync / parameter broadcast at init     │
         └─────────────────────────┴────────────────────────────────────────────────────┘
+
+        Example: If Stream 7 shows SendRecv (74%) + AllGather (20%), and
+        Stream 37 shows AllReduce only → Stream 7 = PP, Stream 37 = DP.
 
 Step 4  Per-GPU imbalance diagnosis:
         [Single profile] Use `get_gpu_overlap_stats` — compare compute_only_ms

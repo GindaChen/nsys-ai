@@ -1,25 +1,44 @@
-"""NCCL collective operation breakdown."""
+"""NCCL collective operation breakdown — per-stream.
 
-from ..base import Skill
+Delegates to the unified ``nsys_ai.overlap.nccl_breakdown()`` engine so that
+the Agent skill, CLI, and TUI chat tool all produce identical results.
+"""
+
+from ..base import Skill, SkillParam
+
+
+def _execute(conn, **kwargs):
+    from ...overlap import nccl_breakdown
+    from ...profile import Profile
+
+    prof = Profile._from_conn(conn)
+    device = int(kwargs.get("device", 0))
+
+    trim = None
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+    if trim_start is not None and trim_end is not None:
+        trim = (int(trim_start), int(trim_end))
+
+    return nccl_breakdown(prof, device, trim)
 
 
 def _format(rows):
+    from ...overlap import format_nccl
+
+    base = format_nccl(rows)
+
+    # Add a brief diagnostic hint when no NCCL collectives are present.
+    # This mirrors the previous, more actionable behavior while still
+    # delegating core formatting to the shared overlap engine.
     if not rows:
-        return "(No NCCL operations found — is this a multi-GPU profile?)"
-    lines = [
-        "── NCCL Collective Breakdown ──",
-        f"{'Operation':<40s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Max(ms)':>9s}",
-        "─" * 82,
-    ]
-    for r in rows:
-        name = r["kernel_name"]
-        if len(name) > 38:
-            name = name[:35] + "..."
-        lines.append(
-            f"{name:<40s}  {r['count']:>7d}  {r['total_ms']:>10.2f}  "
-            f"{r['avg_ms']:>9.2f}  {r['max_ms']:>9.2f}"
+        hint = (
+            "\n\nHint: This usually means either the profile was captured on a "
+            "single GPU, or that NCCL communication was not recorded for this run."
         )
-    return "\n".join(lines)
+        return f"{base}{hint}"
+
+    return base
 
 
 SKILL = Skill(
@@ -27,21 +46,15 @@ SKILL = Skill(
     title="NCCL Collective Breakdown",
     description=(
         "Summarizes NCCL collective operations (AllReduce, AllGather, ReduceScatter, etc.) "
-        "by type, showing count, total time, and variability. Use this to assess whether "
-        "communication is a bottleneck in distributed training."
+        "per CUDA stream, showing count, total time, and variability. "
+        "Per-stream grouping helps distinguish TP vs PP vs DP communication channels, "
+        "since each parallelism dimension typically uses a dedicated stream."
     ),
     category="communication",
-    sql="""\
-SELECT s.value AS kernel_name,
-       COUNT(*) AS count,
-       ROUND(SUM(k.[end] - k.start) / 1e6, 2) AS total_ms,
-       ROUND(AVG(k.[end] - k.start) / 1e6, 2) AS avg_ms,
-       ROUND(MAX(k.[end] - k.start) / 1e6, 2) AS max_ms
-FROM {kernel_table} k
-JOIN StringIds s ON k.shortName = s.id
-WHERE (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%') {trim_clause}
-GROUP BY s.value
-ORDER BY total_ms DESC""",
+    execute_fn=_execute,
     format_fn=_format,
-    tags=["nccl", "collective", "allreduce", "communication", "distributed", "multi-gpu"],
+    params=[
+        SkillParam("device", "GPU device ID", "int", False, 0),
+    ],
+    tags=["nccl", "collective", "allreduce", "communication", "distributed", "multi-gpu", "stream"],
 )
