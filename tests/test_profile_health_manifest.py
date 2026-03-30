@@ -122,10 +122,10 @@ class TestMaxRowsTruncation:
     def test_error_payload_not_truncated_when_max_rows_zero(self):
         """Error payloads (e.g., [{'error': ...}]) should not be dropped by max-rows."""
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
-        
+
         rows = [{"error": "Something went wrong"}]
         truncated = _apply_max_rows_truncation(rows, 0)
-        
+
         # The single error row should be preserved and not replaced by a truncation marker.
         assert isinstance(truncated, list)
         assert len(truncated) == 1
