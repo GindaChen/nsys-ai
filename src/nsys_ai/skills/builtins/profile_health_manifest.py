@@ -17,6 +17,10 @@ _log = logging.getLogger(__name__)
 
 def _safe_skill_run(skill_name: str, conn, **kwargs):
     """Run a skill by name, returning [] on any error."""
+    import duckdb
+    import sqlite3
+
+    from nsys_ai.exceptions import SkillExecutionError
     from ..registry import get_skill
 
     skill = get_skill(skill_name)
@@ -24,7 +28,7 @@ def _safe_skill_run(skill_name: str, conn, **kwargs):
         return []
     try:
         return skill.execute(conn, **kwargs)
-    except Exception as exc:
+    except (sqlite3.Error, duckdb.Error, SkillExecutionError) as exc:
         _log.debug("manifest: %s failed: %s", skill_name, exc, exc_info=True)
         return []
 
@@ -81,11 +85,16 @@ def _execute(conn, **kwargs):
         trim_tuple = (trim_kwargs["trim_start_ns"], trim_kwargs["trim_end_ns"])
 
     try:
+        import duckdb
+        import sqlite3
+
+        from nsys_ai.exceptions import SkillExecutionError
+
         # Use aggregate_kernels for correct device filtering
         agg_kernels = prof.aggregate_kernels(device=device, trim=trim_tuple, limit=None)
-    except Exception as exc:
+    except (sqlite3.Error, duckdb.Error, SkillExecutionError) as exc:
         _log.debug("manifest: aggregate_kernels failed: %s", exc, exc_info=True)
-        agg_kernels = []
+        agg_kernels = [{"demangled": f"Error: {exc}", "total_ns": 0, "count": 0}]
 
     top_kernels = []
     for r in agg_kernels[:5]:
@@ -160,6 +169,9 @@ def _execute(conn, **kwargs):
             "pattern": pattern,
             "severity": r.get("severity", "info"),
         })
+        
+    sev_rank = {"critical": 0, "high": 1, "warning": 2, "medium": 3, "low": 4, "info": 5}
+    root_causes.sort(key=lambda x: sev_rank.get(x["severity"].lower(), 99))
 
     # ── Assemble manifest ────────────────────────────────────────
     manifest = {
