@@ -34,7 +34,7 @@ nsys-ai skill run top_kernels profile.sqlite --trim 1.5 3.0   # seconds
 - `--format {text,json}` — output format (default: text)
 - `--param KEY=VALUE` — pass a parameter (repeatable, shorthand: `-p`)
 - `--trim START_S END_S` — restrict analysis to time range (seconds, space-separated)
-- `--max-rows N` — truncate JSON output to at most N rows (for token budget control). Appends `{"_truncated": true, "_total_rows": <original>, "_shown_rows": N}` when clipped.
+- `--max-rows N` — limit JSON output to at most N data rows (for token budget control). When clipping occurs, the JSON array contains up to N data rows plus a final truncation metadata object: `{"_truncated": true, "_total_rows": <original>, "_shown_rows": <shown>}`.
 
 ### `nsys-ai skill [--skills-dir <dir>] add <path.md>`
 

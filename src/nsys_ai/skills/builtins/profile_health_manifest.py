@@ -44,9 +44,24 @@ def _execute(conn, **kwargs):
     # ── 1. Profile metadata ──────────────────────────────────────
     prof = Profile._from_conn(conn)
     from ...profile import get_first_gpu_name
+    # NOTE: get_first_gpu_name returns the GPU name for cudaId=0.
+    # On multi-GPU nodes with identical GPUs this is fine; for
+    # heterogeneous setups the caller should interpret accordingly.
     gpu_name = get_first_gpu_name(conn) or "unknown"
     start_ns, end_ns = prof.meta.time_range
-    profile_span_ns = end_ns - start_ns
+    # Use the trim window (if provided), clamped to the profile range,
+    # so the reported span matches the analysis window used by sub-skills.
+    effective_start_ns = start_ns
+    effective_end_ns = end_ns
+    if trim_kwargs.get("trim_start_ns") is not None:
+        effective_start_ns = max(effective_start_ns, trim_kwargs["trim_start_ns"])
+    if trim_kwargs.get("trim_end_ns") is not None:
+        effective_end_ns = min(effective_end_ns, trim_kwargs["trim_end_ns"])
+    profile_span_ns = (
+        effective_end_ns - effective_start_ns
+        if effective_end_ns > effective_start_ns
+        else 0
+    )
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
     # ── 2. Top kernels (compact: top 5 only) ─────────────────────
@@ -63,21 +78,32 @@ def _execute(conn, **kwargs):
             "total_ms": r.get("total_ms", 0),
             "count": r.get("invocations", 0),
         })
-    total_kernel_ms = sum(r.get("total_ms", 0) for r in top_k_rows)
+
+    # Compute total kernel time over all kernels, not just the top 5.
+    all_kernel_rows = _safe_skill_run(
+        "top_kernels", conn, device=device, **trim_kwargs
+    )
+    total_kernel_ms = sum(r.get("total_ms", 0) for r in all_kernel_rows)
 
     # ── 3. Compute/NCCL overlap ──────────────────────────────────
     overlap_rows = _safe_skill_run(
         "overlap_breakdown", conn, device=device, **trim_kwargs
     )
     overlap = {}
-    if overlap_rows and "error" not in overlap_rows[0]:
+    if overlap_rows:
         ov = overlap_rows[0]
-        overlap = {
-            "compute_only_ms": ov.get("compute_only_ms", 0),
-            "nccl_only_ms": ov.get("nccl_only_ms", 0),
-            "overlap_pct": ov.get("overlap_pct", 0),
-            "idle_ms": ov.get("idle_ms", 0),
-        }
+        if "error" in ov:
+            # Preserve error details from overlap_breakdown instead of dropping them.
+            # At minimum, surface the primary error message; keep any additional
+            # fields that may provide context for callers.
+            overlap = dict(ov)
+        else:
+            overlap = {
+                "compute_only_ms": ov.get("compute_only_ms", 0),
+                "nccl_only_ms": ov.get("nccl_only_ms", 0),
+                "overlap_pct": ov.get("overlap_pct", 0),
+                "idle_ms": ov.get("idle_ms", 0),
+            }
 
     # ── 4. NCCL breakdown (compact summary) ──────────────────────
     nccl_rows = _safe_skill_run(
@@ -230,7 +256,7 @@ SKILL = Skill(
     title="Profile Health Manifest",
     description=(
         "One-shot profile health summary for AI agents. Returns a compact JSON manifest "
-        "covering GPU info, top kernels, compute/NCCL overlap, per-stream NCCL breakdown, "
+        "covering GPU info, top kernels, compute/NCCL overlap and NCCL summary, "
         "idle gaps, and root cause findings — all in a single call. "
         "Use this as the FIRST skill to call on any new profile."
     ),

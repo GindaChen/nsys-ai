@@ -91,6 +91,10 @@ class TestManifestDuckDB:
 
 
 # ── Token budget protection (--max-rows) ─────────────────────────
+# TODO: These tests simulate the truncation logic from handlers.py inline
+# rather than exercising the actual CLI/handler code path.  Consider adding
+# integration-style tests that invoke the handler (or factoring truncation
+# into a helper function) so that changes to handlers.py are caught.
 
 
 class TestMaxRowsTruncation:

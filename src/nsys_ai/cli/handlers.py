@@ -706,6 +706,10 @@ def _cmd_skill(args, _profile):
 
                 # Token budget protection: truncate rows if --max-rows set
                 max_rows = getattr(args, "max_rows", None)
+                if max_rows is not None:
+                    if max_rows < 0:
+                        print("Error: --max-rows must be a non-negative integer", file=sys.stderr)
+                        sys.exit(1)
                 if max_rows is not None and isinstance(rows, list) and len(rows) > max_rows:
                     total = len(rows)
                     rows = rows[:max_rows]

@@ -15,7 +15,7 @@ You must intelligently combine these stages via the explicitly listed `nsys-ai` 
 ```bash
 nsys-ai skill run profile_health_manifest profile.sqlite --format json
 ```
-This returns GPU info, top 5 kernels, compute/NCCL overlap, per-stream NCCL breakdown, idle gaps, root cause findings, and `suspected_bottleneck` — all in a single call. Use `suspected_bottleneck` to decide which stage to drill into next. Use `--max-rows N` on any subsequent skill call to control JSON output size.
+This returns GPU info, top 5 kernels, compute/NCCL overlap, an NCCL summary (streams, counts, dominant type), idle gaps, root cause findings, and `suspected_bottleneck` — all in a single call. Use `suspected_bottleneck` to decide which stage to drill into next. Use `--max-rows N` on any subsequent skill call to control JSON output size.
 
 ### Stage 1: Orient — Establish the Workload Context
 **Goal**: Determine the basic context to avoid blindly guessing.
