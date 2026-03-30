@@ -10,6 +10,13 @@ This is a **top-down, elimination-based** pipeline. From the macro-level to the 
 
 You must intelligently combine these stages via the explicitly listed `nsys-ai` CLI tools.
 
+### Fast Path: Profile Health Manifest
+**Before diving into the 6 stages**, run the one-shot manifest which executes Stages 1-2-5-6 internally:
+```bash
+nsys-ai skill run profile_health_manifest profile.sqlite --format json
+```
+This returns GPU info, top 5 kernels, compute/NCCL overlap, per-stream NCCL breakdown, idle gaps, root cause findings, and `suspected_bottleneck` — all in a single call. Use `suspected_bottleneck` to decide which stage to drill into next. Use `--max-rows N` on any subsequent skill call to control JSON output size.
+
 ### Stage 1: Orient — Establish the Workload Context
 **Goal**: Determine the basic context to avoid blindly guessing.
 **Actions**:

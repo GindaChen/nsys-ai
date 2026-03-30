@@ -19,9 +19,10 @@ The output is a structured System Prompt payload containing:
 2. **Performance Note** — cold start warning (~60-90s for first skill run on large profiles)
 3. **Core Principles** — 3 non-negotiable rules (no guessing, units, source code correlation)
 4. **6-Stage Top-Down Triage Workflow** — the recommended analysis sequence:
+   - **Step 0 (Quick Start)**: `profile_health_manifest` — one-shot triage in a single call
    - Orient → Temporal Breakdown → Kernel Deep-Dive → NVTX Mapping → Cross-GPU → Root Cause
-5. **CLI Execution syntax** — exact command templates for `nsys-ai info` and `nsys-ai skill run`
-6. **Full Skill Catalog** — dynamically generated from the Python skill registry (always up-to-date)
+5. **CLI Execution syntax** — exact command templates including `--max-rows N` for token budget control
+6. **Full Skill Catalog** — dynamically generated from the Python skill registry (23 builtin skills, always up-to-date)
 
 ## When to use
 

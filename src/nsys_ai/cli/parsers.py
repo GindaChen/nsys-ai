@@ -323,6 +323,16 @@ def _register_legacy_commands(sub):
         default=None,
         help="Time window in seconds — filters data before analysis (recommended for large profiles)",
     )
+    sp_run.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Truncate JSON output to at most N rows (for token budget control). "
+            "Appends a _truncated metadata entry when rows are clipped."
+        ),
+    )
     sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
     sp_add.add_argument("skill_file", help="Path to skill .md file")
     sp_rm = skill_sub.add_parser("remove", help="Remove a custom skill")

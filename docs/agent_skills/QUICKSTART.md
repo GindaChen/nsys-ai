@@ -57,7 +57,7 @@ You have two ways to interact with the profile:
 | External agent onboarding | `nsys-ai agent-guide` |
 
 **Analysis Skills**: Use `nsys-ai skill run <name> profile.sqlite` to run specific
-analysis modules. See [`commands/skill.md`](commands/skill.md) for the full catalog of 21 builtin skills.
+analysis modules. See [`commands/skill.md`](commands/skill.md) for the full catalog of 23 builtin skills.
 
 > **After analysis**: Encode your conclusions as `findings.json` and open
 > `nsys-ai timeline-web profile.sqlite --findings findings.json` so the user
@@ -73,11 +73,10 @@ analysis modules. See [`commands/skill.md`](commands/skill.md) for the full cata
 When a user loads a profile with no specific question:
 
 ```
-1. Load skills/triage.md (Read the workflow guide)
-2. Parse NVTX hierarchy (e.g. via `tree` or `search`). Note: NVTX markers might be well-structured, poorly structured, or entirely missing.
-3. Query top kernels by GPU time (e.g. via `top_kernels` skill)
-4. Get GPU peak TFLOPS and NCCL presence
-5. Give a 4-line summary + ask what to investigate
+1. Run `profile_health_manifest` for a one-shot triage (GPU, top kernels, overlap, NCCL, idle, root causes)
+2. Based on `suspected_bottleneck`, drill into the relevant skill (e.g. `top_kernels`, `nccl_breakdown`)
+3. Map findings to code via `nvtx_layer_breakdown`
+4. Give a 4-line summary + ask what to investigate
 ```
 
 When a user asks "what's my MFU?":

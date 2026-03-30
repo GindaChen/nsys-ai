@@ -26,6 +26,7 @@ def test_list_skills():
         "nvtx_kernel_map",
         "nvtx_layer_breakdown",
         "overlap_breakdown",
+        "profile_health_manifest",
         "region_mfu",
         "root_cause_matcher",
         "schema_inspect",

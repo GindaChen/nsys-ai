@@ -34,6 +34,7 @@ nsys-ai skill run top_kernels profile.sqlite --trim 1.5 3.0   # seconds
 - `--format {text,json}` — output format (default: text)
 - `--param KEY=VALUE` — pass a parameter (repeatable, shorthand: `-p`)
 - `--trim START_S END_S` — restrict analysis to time range (seconds, space-separated)
+- `--max-rows N` — truncate JSON output to at most N rows (for token budget control). Appends `{"_truncated": true, "_total_rows": <original>, "_shown_rows": N}` when clipped.
 
 ### `nsys-ai skill [--skills-dir <dir>] add <path.md>`
 
@@ -166,9 +167,10 @@ No required parameters. Supports `--trim`.
 
 | Skill | Title | Description |
 |-------|-------|-------------|
-| `nccl_breakdown` | NCCL Collective Breakdown | Summarizes NCCL ops (AllReduce, AllGather, etc.) by type with count, time, variability. |
+| `nccl_breakdown` | NCCL Collective Breakdown | Summarizes NCCL ops (AllReduce, AllGather, etc.) by stream × collective type with count, time, variability. Use stream_id to infer TP/PP/DP. |
 | `nccl_anomaly` | NCCL Anomaly Detection | Detects outlier NCCL operations exceeding a threshold relative to their op type average. |
 | `overlap_breakdown` | Compute/Communication Overlap | Quantifies compute vs NCCL overlap. `overlap_pct > 60%` = NCCL well-hidden. |
+| `kernel_overlap_matrix` | Kernel Overlap Matrix | Pairwise overlap between kernel categories: comm×comm, comm×compute, compute×compute. |
 
 #### `nccl_anomaly` Parameters
 
@@ -269,9 +271,16 @@ No required parameters. Supports `--trim`.
 
 | Skill | Title | Description |
 |-------|-------|-------------|
-| `schema_inspect` | Database Schema Inspector | Lists all tables and columns in the profile database (DuckDB or SQLite). Run this first to understand available data. |
+| `schema_inspect` | Database Schema Inspector | Lists all tables and columns in the profile database (DuckDB or SQLite). Run this to understand available data. |
+| `profile_health_manifest` | Profile Health Manifest | **Start here.** One-shot summary: GPU info, top 5 kernels, overlap stats, NCCL breakdown, idle gaps, root causes, and suspected bottleneck — all in a single call. |
 
-No required parameters.
+#### `profile_health_manifest` Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|:--------:|---------|-------------|
+| `device` | int | | 0 | GPU device ID |
+
+`schema_inspect` has no required parameters.
 
 ---
 
@@ -281,12 +290,12 @@ No required parameters.
 |----------|:-----:|----------------|
 | `kernels` | 7 | GPU kernel timing, launch overhead, MFU, FLOPs |
 | `memory` | 3 | H2D/D2H transfers, bandwidth, distribution |
-| `communication` | 3 | NCCL breakdown, anomalies, overlap |
+| `communication` | 4 | NCCL breakdown, anomalies, overlap, overlap matrix |
 | `nvtx` | 3 | NVTX→kernel mapping, layer breakdown, iterations |
 | `system` | 2 | CPU→GPU pipeline, thread utilization |
 | `analysis` | 2 | Root cause patterns, speedup estimates |
-| `utility` | 1 | Schema inspection |
-| **Total** | **21** | |
+| `utility` | 2 | Schema inspection, profile health manifest |
+| **Total** | **23** | |
 
 > **Note**: `memory_transfers.py` registers 2 skills (`memory_transfers` + `h2d_distribution`).
-> There are exactly 21 unique Python builtin skills derived from 20 modules.
+> There are exactly 23 unique Python builtin skills.
