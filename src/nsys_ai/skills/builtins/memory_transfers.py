@@ -44,7 +44,7 @@ ORDER BY total_ms DESC""",
 )
 
 
-def _classify_h2d_pattern(rows: list[dict]) -> dict:
+def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
     """Classify H2D transfer distribution into init_heavy / spread_out / spike."""
     if not rows:
         return {"_pattern": True, "type": "none", "detail": "No H2D transfers"}
@@ -74,6 +74,7 @@ def _classify_h2d_pattern(rows: list[dict]) -> dict:
         spikes = [r for r in rows if r["total_mb"] > 3 * median_mb]
         if spikes:
             spike_secs = ", ".join(str(r["second"]) for r in spikes[:5])
+            gpu_id = kwargs.get("device", 0) if kwargs else 0
             return {
                 "_pattern": True,
                 "type": "spike",
@@ -84,6 +85,7 @@ def _classify_h2d_pattern(rows: list[dict]) -> dict:
                 ),
                 "spike_seconds": [r["second"] for r in spikes],
                 "spikes": [{"second": r["second"], "total_mb": r["total_mb"], "window_start": r.get("window_start"), "window_end": r.get("window_end")} for r in spikes],
+                "gpu_id": gpu_id,
             }
 
     # Spread-out: transfers happen across many seconds
@@ -180,7 +182,7 @@ def _to_findings_dist(rows: list[dict]) -> list:
                         label=f"H2D Spike ({spike['total_mb']:.1f}MB)",
                         start_ns=start,
                         end_ns=end,
-                        gpu_id=0,  # device id omitted from summary row right now, finding API ignores it for regions anyway
+                        gpu_id=pattern.get("gpu_id", 0),
                         severity="warning",
                         note=f"Spike at second {spike['second']}: {spike['total_mb']:.1f}MB transferred",
                     )
@@ -224,7 +226,7 @@ def _execute_h2d_dist(conn, **kwargs):
 
     # Append pattern classification as metadata
     if rows:
-        rows.append(_classify_h2d_pattern(rows))
+        rows.append(_classify_h2d_pattern(rows, kwargs))
     return rows
 
 

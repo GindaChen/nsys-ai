@@ -195,6 +195,7 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
         "gaps_gt50ms": agg.get("gaps_gt50ms") or 0,
         "profile_start_ns": time_range[0] if time_range else 0,
         "profile_end_ns": time_range[1] if time_range else 0,
+        "gpu_id": device,
     }
 
     # --- Phase 3: CPU attribution for top 5 gaps ---
@@ -310,8 +311,8 @@ def _to_findings(rows: list[dict]) -> list:
                         label=f"GPU Idle Summary ({pct}% of profile)",
                         start_ns=r["profile_start_ns"],
                         end_ns=r["profile_end_ns"],
-                        gpu_id=0,  # device ID not included in summary row directly, but ok since it's global
-                        severity="info",
+                        gpu_id=r.get("gpu_id", 0),
+                        severity="info" if pct < 15 else "warning",
                         note=(
                             f"Total: {r.get('total_idle_ms', 0):.1f}ms idle across "
                             f"{r.get('gap_count', 0)} gaps ({pct}% of profiled span)"

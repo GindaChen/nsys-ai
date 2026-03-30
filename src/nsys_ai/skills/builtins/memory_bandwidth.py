@@ -27,7 +27,6 @@ def _execute(conn, **kwargs):
     import duckdb
 
     from ...profile import Profile
-    from ...sql_compat import sqlite_to_duckdb
 
     prof = Profile._from_conn(conn)
     device = int(kwargs.get("device", 0))
@@ -89,7 +88,7 @@ LIMIT {limit}"""
 
     anomalies = []
     try:
-        anomalies = prof._duckdb_query(anomaly_sql, [device] + (trim_params * 2 if trim_params else []))
+        anomalies = prof._duckdb_query(anomaly_sql, [device] + (trim_params if trim_params else []))
     except (sqlite3.Error, duckdb.Error):
         pass
 

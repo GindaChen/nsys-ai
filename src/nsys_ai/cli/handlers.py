@@ -725,11 +725,11 @@ def _cmd_skill(args, _profile):
 
             prof_iter = Profile._from_conn(conn)
             marker = getattr(args, "marker", "sample_0")
-            
+
             # Extract device from raw params (if provided via -p device=<n>)
             device_val = next((p.split("=")[1] for p in getattr(args, "param", []) if p.startswith("device=")), "0")
             device = int(device_val) if device_val.isdigit() else 0
-            
+
             iters = detect_iterations(prof_iter, device, marker=marker)
             if not iters:
                 print("Error: no iterations detected (NVTX marker not found)", file=sys.stderr)

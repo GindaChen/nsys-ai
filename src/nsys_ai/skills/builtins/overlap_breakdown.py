@@ -5,9 +5,11 @@ overlaps with NCCL communication.  This is a Python-level skill (execute_fn)
 rather than a SQL skill because it needs interval merging and intersection
 logic that can't be expressed in a single SQL query.
 """
+import logging
 
 from ..base import Skill, SkillParam
 
+_log = logging.getLogger(__name__)
 
 def _execute(conn, **kwargs):
     from ...overlap import overlap_analysis
