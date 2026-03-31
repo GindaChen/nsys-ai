@@ -23,7 +23,7 @@ Navigate GPU kernel timelines, diagnose performance bottlenecks with AI, and exp
 pip install nsys-ai
 ```
 
-That's it. No system dependencies, no CUDA required. Just Python 3.10+.
+No CUDA required. Just Python 3.10+. Core dependencies (`duckdb`, `rich`, `textual`) install automatically.
 
 ---
 
@@ -260,7 +260,7 @@ Tweak settings live with ↑/↓ to select and ←/→ to adjust:
 
 ## 📚 Documentation
 
-The `docs/` directory includes comprehensive guides for Nsight Systems profiling:
+### Nsight Systems Guides
 
 | Guide | Topic |
 |-------|-------|
@@ -273,14 +273,12 @@ The `docs/` directory includes comprehensive guides for Nsight Systems profiling
 | [Containers](docs/07-container-profiling.md) | Profiling inside Docker/Slurm |
 | [Focused Profiling](docs/08-focused-profiling.md) | Targeted profiling strategies |
 
-### 🔍 Interactive SQLite Schema Explorer
+### AI Agent Documentation
+The [`docs/agent_skills/`](docs/agent_skills/) directory contains the full agent documentation — [quickstart](docs/agent_skills/QUICKSTART.md), [skill index](docs/agent_skills/INDEX.md), [design principles](docs/agent_skills/PRINCIPLES.md), 11 command references, and 8 skill methodology guides.
 
-The [`docs/sqlite-explorer/`](docs/sqlite-explorer/) contains an **interactive HTML tool** for exploring the Nsight SQLite schema — tables, foreign keys, example queries, and key concepts. Open `docs/sqlite-explorer/index.html` in a browser:
-
-- Browse all Nsight SQLite tables with column types
-- See foreign key relationships visualized
-- Copy-paste ready SQL query examples
-- Cross-highlighted concept explanations
+### Other Resources
+- [**Book of Root Causes**](docs/root-causes/) — common GPU performance anti-patterns and their diagnostic signatures
+- [**SQLite Schema Explorer**](docs/sqlite-explorer/) — interactive HTML tool for exploring Nsight SQLite tables, foreign keys, and example queries
 
 ---
 
@@ -335,29 +333,34 @@ Options:
 
 | Command | Description |
 |---------|-------------|
+| `open` | **Quick profile opener (auto-selects UI)** |
+| `timeline-web` | **Web-based multi-GPU timeline** (default) |
+| `web` | Interactive web viewer with NVTX + kernel detail |
+| `chat` / `ask` | Interactive AI chat / Single AI question |
+| `agent analyze` | Full auto-analysis with LLM-backed diagnostics |
+| `evidence build`| Run heuristic analyzers → findings JSON |
+| `analyze` | Full auto-report: bottlenecks, overlap, iters, NVTX |
 | `info` | Profile metadata & GPU hardware |
 | `summary` | Top kernels, stream breakdown, auto-commentary |
 | `overlap` | Compute / NCCL overlap analysis |
 | `nccl` | NCCL collective breakdown by type |
 | `iters` | Auto-detect training iterations |
-| `tree` | NVTX hierarchy as text |
 | `diff` | **Before/after profile comparison (CLI)** |
 | `diff-web` | **Side-by-side comparison web viewer** |
 | `tui` | **Interactive tree TUI** |
 | `timeline` | **Interactive timeline TUI** |
-| `timeline-web` | **Web-based multi-GPU timeline** (progressive rendering) |
+| `tree` | NVTX hierarchy as text |
 | `search` | Search kernels / NVTX by name |
+| `viewer` | Interactive HTML report |
 | `export` | Perfetto JSON traces |
 | `export-csv` | Flat CSV for spreadsheets |
 | `export-json` | Flat JSON for scripting |
-| `viewer` | Interactive HTML report |
-| `markdown` | NVTX hierarchy as markdown |
 
 ---
 
 ## 🧩 Skills (Analysis Building Blocks)
 
-nsys-ai ships with 8 built-in SQL skills — self-contained analysis units that work without any LLM:
+nsys-ai ships with **25 built-in analysis skills** — self-contained SQL-powered units that work without any LLM:
 
 ```bash
 # List all available skills
@@ -365,63 +368,56 @@ nsys-ai skill list
 
 # Run a specific skill
 nsys-ai skill run top_kernels profile.sqlite
-nsys-ai skill run gpu_idle_gaps profile.sqlite
-nsys-ai skill run nccl_breakdown profile.sqlite
+nsys-ai skill run region_mfu profile.sqlite -p operation=full_model
+nsys-ai skill run root_cause_matcher profile.sqlite --format json
 ```
 
-| Skill | What it does |
-|-------|-------------|
-| `top_kernels` | Heaviest GPU kernels by total time |
-| `memory_transfers` | H2D/D2H/D2D transfer breakdown |
-| `nvtx_kernel_map` | NVTX annotation → kernel mapping |
-| `gpu_idle_gaps` | Pipeline bubbles between kernels |
-| `nccl_breakdown` | NCCL collective operation summary |
-| `kernel_launch_overhead` | CPU→GPU dispatch latency |
-| `thread_utilization` | CPU thread bottleneck detection |
-| `schema_inspect` | Database tables and columns |
+| Category | Skills |
+|----------|--------|
+| **Kernel** | `top_kernels`, `kernel_instances`, `kernel_launch_overhead`, `kernel_launch_pattern`, `kernel_overlap_matrix` |
+| **Memory** | `memory_transfers`, `memory_bandwidth` |
+| **Pipeline** | `gpu_idle_gaps`, `cpu_gpu_pipeline`, `stream_concurrency`, `overlap_breakdown` |
+| **NVTX** | `nvtx_kernel_map`, `nvtx_layer_breakdown` |
+| **NCCL** | `nccl_breakdown`, `nccl_anomaly` |
+| **Iteration** | `iteration_timing`, `iteration_detail` |
+| **Performance** | `region_mfu`, `theoretical_flops`, `speedup_estimator` |
+| **Diagnostics** | `root_cause_matcher`, `profile_health_manifest`, `thread_utilization`, `schema_inspect` |
 
-Skills are extensible — add your own by creating a Python file that exports a `SKILL` constant.
+Skills are extensible — add your own with `nsys-ai skill add`.
 
 ---
 
-## 🤖 AI Agent
+## 🤖 AI Agent & Analysis
 
-The agent is a CUDA ML systems expert that runs skills automatically and diagnoses problems:
+The 25 built-in skills run SQL queries directly — **no API key needed**:
 
 ```bash
-# Full auto-analysis
-nsys-ai agent analyze profile.sqlite
-
-# Ask a specific question
-nsys-ai agent ask profile.sqlite "why are there bubbles in the pipeline?"
-nsys-ai agent ask profile.sqlite "is NCCL overlapping with compute?"
+nsys-ai analyze profile.sqlite                                  # full auto-report
+nsys-ai evidence build profile.sqlite -o findings.json           # heuristic diagnostics
+nsys-ai timeline-web profile.sqlite --findings findings.json     # overlay findings on timeline
 ```
 
-With `pip install nsys-ai[agent]`, the agent can use an LLM to synthesize natural language analysis from skill results.
+With `pip install nsys-ai[agent]`, add LLM-backed analysis:
+
+```bash
+nsys-ai agent analyze profile.sqlite                             # LLM-narrated auto-analysis
+nsys-ai agent ask profile.sqlite "why are there pipeline bubbles?"
+nsys-ai chat profile.sqlite                                      # interactive AI chat TUI
+```
+
+The agent auto-selects skills, diagnoses root causes, calculates MFU, and generates evidence findings with nanosecond-precision timestamps.
 
 ---
 
 ## 📦 Install Tiers
 
 ```bash
-pip install nsys-ai          # Core: CLI + TUI + skills (rich + textual)
-pip install nsys-ai[agent]   # + LLM-backed agent analysis (requires anthropic)
-pip install nsys-ai[all]     # Everything
+pip install nsys-ai            # Core: CLI + TUI + skills (duckdb, rich, textual)
+pip install nsys-ai[agent]     # + LLM agent (anthropic, litellm)
+pip install nsys-ai[chat]      # + AI chat TUI (litellm)
+pip install nsys-ai[all]       # Everything
+pip install nsys-ai[dev]       # + dev tools (pytest, ruff)
 ```
-
----
-
-## 🤖 AI Analysis (Optional)
-
-nsys-ai includes an optional AI module that can analyze your profiles:
-
-```bash
-pip install nsys-ai[ai]
-```
-
-- **Auto-commentary** on kernel distributions and performance patterns
-- **NVTX annotation suggestions** for un-annotated code regions
-- **Performance bottleneck detection** with actionable recommendations
 
 ---
 
