@@ -153,11 +153,11 @@ def _register_skill_parser(sub, *, include_management=False):
 def _register_evidence_parser(sub):
     """Register the ``evidence`` subcommand tree on *sub*."""
     p = sub.add_parser("evidence", help="Build evidence findings for timeline overlay")
-    evidence_sub = p.add_subparsers(dest="evidence_action")
+    evidence_sub = p.add_subparsers(dest="evidence_action", required=True)
     sp_build = evidence_sub.add_parser(
         "build", help="Run heuristic analyzers → findings JSON"
     )
-    sp_build.add_argument("profile", help="Path to .sqlite profile")
+    sp_build.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     sp_build.add_argument(
         "--format",
         choices=["text", "json"],

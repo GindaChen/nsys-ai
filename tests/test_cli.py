@@ -128,6 +128,15 @@ def test_hidden_skill_management_commands():
     assert "skill_file" in result.stdout
 
 
+def test_evidence_requires_subcommand():
+    """'nsys-ai evidence' without a sub-action should fail fast (exit != 0)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "evidence"], capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "build" in result.stderr  # argparse should mention valid choices
+
+
 def test_skill_run_duckdb_cache(tmp_path):
     """skill run should work end-to-end, preferring DuckDB/Parquet cache when available."""
     import json
