@@ -81,7 +81,6 @@ def main():
     from .parsers import _build_legacy_parser, _build_parser
 
     legacy_commands = {
-        "info",
         "analyze",
         "summary",
         "overlap",
@@ -97,9 +96,7 @@ def main():
         "perfetto",
         "tui",
         "timeline",
-        "skill",
         "agent",
-        "evidence",
     }
     if len(sys.argv) > 1 and sys.argv[1] in legacy_commands:
         parser = _build_legacy_parser()

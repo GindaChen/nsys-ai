@@ -38,12 +38,15 @@ def test_subcommands():
         "diff-web",
         "export",
         "agent-guide",
+        "info",
+        "skill",
+        "evidence",
     ]:
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"
 
     # Legacy command names should be hidden from top-level help.
     usage_line = result.stdout.splitlines()[0]
-    for hidden in ["info", "summary", "overlap", "skill"]:
+    for hidden in ["summary", "overlap", "analyze"]:
         assert hidden not in usage_line
 
     # 'agent-guide' is public, but 'agent' should be hidden

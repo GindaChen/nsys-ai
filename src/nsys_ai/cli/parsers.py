@@ -42,6 +42,156 @@ from .handlers import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Shared parser registration helpers — used by both main and legacy parsers
+# ---------------------------------------------------------------------------
+
+
+def _register_info_parser(sub):
+    """Register the ``info`` subcommand on *sub*."""
+    p = sub.add_parser("info", help="Show profile metadata and GPU info")
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    p.set_defaults(handler=_cmd_info)
+    return p
+
+
+def _register_skill_parser(sub, *, include_management=False):
+    """Register the ``skill`` subcommand tree on *sub*.
+
+    When *include_management* is True the admin sub-actions (add, remove, save)
+    are also registered; otherwise only the agent-facing actions (list, info,
+    run) are included.
+    """
+    p = sub.add_parser("skill", help="List or run analysis skills")
+    p.add_argument(
+        "--skills-dir",
+        default=None,
+        help="Directory for custom skills (.md files)",
+    )
+    skill_sub = p.add_subparsers(dest="skill_action")
+    sp_list = skill_sub.add_parser("list", help="List all available skills")
+    sp_list.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    sp_info = skill_sub.add_parser(
+        "info",
+        help="Get JSON schema for a skill (name, description, parameters)",
+    )
+    sp_info.add_argument("skill_name", help="Name of the skill")
+    sp_run = skill_sub.add_parser("run", help="Run a skill against a profile")
+    sp_run.add_argument("skill_name", help="Name of the skill to run")
+    sp_run.add_argument("profile", help="Path to .sqlite file")
+    sp_run.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    sp_run.add_argument(
+        "--param",
+        "-p",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Skill parameter, e.g. -p operation=full_model -p hidden_dim=2560",
+    )
+    sp_run.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds — filters data before analysis (recommended for large profiles)",
+    )
+    sp_run.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Truncate JSON output to at most N data rows (for token budget control). "
+            "When rows are clipped, a final _truncated metadata entry is appended (so "
+            "the array may contain N+1 items)."
+        ),
+    )
+    sp_run.add_argument(
+        "--iteration",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Auto-trim to the N-th training iteration (0-based). "
+            "Cannot be used with --trim. Uses NVTX markers when available and "
+            "falls back to a kernel-gap heuristic when markers are missing."
+        ),
+    )
+    sp_run.add_argument(
+        "--marker",
+        type=str,
+        default="sample_0",
+        help=(
+            "NVTX marker for iteration boundary detection when using --iteration "
+            "(default: sample_0)."
+        ),
+    )
+
+    if include_management:
+        sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
+        sp_add.add_argument("skill_file", help="Path to skill .md file")
+        sp_rm = skill_sub.add_parser("remove", help="Remove a custom skill")
+        sp_rm.add_argument("skill_name", help="Name of the skill to remove")
+        sp_save = skill_sub.add_parser("save", help="Export a skill to .md file")
+        sp_save.add_argument("skill_name", help="Name of the skill to export")
+        sp_save.add_argument("-o", "--output", required=True, help="Output .md file")
+
+    p.set_defaults(handler=_cmd_skill)
+    return p
+
+
+def _register_evidence_parser(sub):
+    """Register the ``evidence`` subcommand tree on *sub*."""
+    p = sub.add_parser("evidence", help="Build evidence findings for timeline overlay")
+    evidence_sub = p.add_subparsers(dest="evidence_action")
+    sp_build = evidence_sub.add_parser(
+        "build", help="Run heuristic analyzers → findings JSON"
+    )
+    sp_build.add_argument("profile", help="Path to .sqlite profile")
+    sp_build.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    sp_build.add_argument(
+        "--analyzers",
+        default=None,
+        help="Comma-separated analyzer names: slow_iterations,idle_gaps,"
+        "nccl_stalls,kernel_hotspots,overlap_ratio,memory_anomalies,h2d_spikes",
+    )
+    sp_build.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds",
+    )
+    sp_build.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
+    sp_build.add_argument(
+        "-o", "--output", default=None, help="Write findings JSON to file"
+    )
+    p.set_defaults(handler=_cmd_evidence)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Main parser — public CLI surface visible to ``nsys-ai --help``
+# ---------------------------------------------------------------------------
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="nsys-ai",
@@ -49,7 +199,10 @@ def _build_parser():
     )
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{open,web,timeline-web,chat,ask,agent-guide,report,diff,diff-web,export,help}",
+        metavar=(
+            "{open,web,timeline-web,chat,ask,agent-guide,"
+            "info,skill,evidence,report,diff,diff-web,export,help}"
+        ),
     )
 
     # Public commands (simplified)
@@ -183,6 +336,11 @@ def _build_parser():
     p.add_argument("-o", "--output", default=".", help="Output directory")
     p.set_defaults(handler=_cmd_export)
 
+    # Agent-facing commands (promoted from legacy so --help exposes them)
+    _register_info_parser(sub)
+    _register_skill_parser(sub, include_management=False)
+    _register_evidence_parser(sub)
+
     sub.add_parser("help", help="Show getting-started guide and available commands")
 
     return parser
@@ -190,9 +348,7 @@ def _build_parser():
 
 def _register_legacy_commands(sub):
     """Register legacy commands on the provided subparser collection."""
-    p = sub.add_parser("info", help="Show profile metadata and GPU info")
-    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
-    p.set_defaults(handler=_cmd_info)
+    _register_info_parser(sub)
 
     p = sub.add_parser(
         "analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy"
@@ -280,89 +436,7 @@ def _register_legacy_commands(sub):
     p.add_argument("--min-ms", type=float, default=0, help="Min duration to show (ms)")
     p.set_defaults(handler=_cmd_timeline)
 
-    p = sub.add_parser("skill", help="List or run analysis skills")
-    p.add_argument(
-        "--skills-dir",
-        default=None,
-        help="Directory for custom skills (.md files)",
-    )
-    skill_sub = p.add_subparsers(dest="skill_action")
-    sp_list = skill_sub.add_parser("list", help="List all available skills")
-    sp_list.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
-    sp_info = skill_sub.add_parser(
-        "info",
-        help="Get JSON schema for a skill (name, description, parameters)",
-    )
-    sp_info.add_argument("skill_name", help="Name of the skill")
-    sp_run = skill_sub.add_parser("run", help="Run a skill against a profile")
-    sp_run.add_argument("skill_name", help="Name of the skill to run")
-    sp_run.add_argument("profile", help="Path to .sqlite file")
-    sp_run.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
-    sp_run.add_argument(
-        "--param",
-        "-p",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Skill parameter, e.g. -p operation=full_model -p hidden_dim=2560",
-    )
-    sp_run.add_argument(
-        "--trim",
-        nargs=2,
-        type=float,
-        metavar=("START_S", "END_S"),
-        default=None,
-        help="Time window in seconds — filters data before analysis (recommended for large profiles)",
-    )
-    sp_run.add_argument(
-        "--max-rows",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Truncate JSON output to at most N data rows (for token budget control). "
-            "When rows are clipped, a final _truncated metadata entry is appended (so "
-            "the array may contain N+1 items)."
-        ),
-    )
-    sp_run.add_argument(
-        "--iteration",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Auto-trim to the N-th training iteration (0-based). "
-            "Cannot be used with --trim. Uses NVTX markers when available and "
-            "falls back to a kernel-gap heuristic when markers are missing."
-        ),
-    )
-    sp_run.add_argument(
-        "--marker",
-        type=str,
-        default="sample_0",
-        help=(
-            "NVTX marker for iteration boundary detection when using --iteration "
-            "(default: sample_0)."
-        ),
-    )
-    sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
-    sp_add.add_argument("skill_file", help="Path to skill .md file")
-    sp_rm = skill_sub.add_parser("remove", help="Remove a custom skill")
-    sp_rm.add_argument("skill_name", help="Name of the skill to remove")
-    sp_save = skill_sub.add_parser("save", help="Export a skill to .md file")
-    sp_save.add_argument("skill_name", help="Name of the skill to export")
-    sp_save.add_argument("-o", "--output", required=True, help="Output .md file")
-    p.set_defaults(handler=_cmd_skill)
+    _register_skill_parser(sub, include_management=True)
 
     p = sub.add_parser("agent", help="AI agent for profile analysis")
     agent_sub = p.add_subparsers(dest="agent_action")
@@ -391,37 +465,7 @@ def _register_legacy_commands(sub):
     p.set_defaults(handler=_cmd_agent)
 
     # ── evidence ──────────────────────────────────────────────────
-    p = sub.add_parser("evidence", help="Build evidence findings for timeline overlay")
-    evidence_sub = p.add_subparsers(dest="evidence_action")
-    sp_build = evidence_sub.add_parser(
-        "build", help="Run heuristic analyzers → findings JSON"
-    )
-    sp_build.add_argument("profile", help="Path to .sqlite profile")
-    sp_build.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="json",
-        help="Output format (default: json)",
-    )
-    sp_build.add_argument(
-        "--analyzers",
-        default=None,
-        help="Comma-separated analyzer names: slow_iterations,idle_gaps,"
-        "nccl_stalls,kernel_hotspots,overlap_ratio,memory_anomalies,h2d_spikes",
-    )
-    sp_build.add_argument(
-        "--trim",
-        nargs=2,
-        type=float,
-        metavar=("START_S", "END_S"),
-        default=None,
-        help="Time window in seconds",
-    )
-    sp_build.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
-    sp_build.add_argument(
-        "-o", "--output", default=None, help="Write findings JSON to file"
-    )
-    p.set_defaults(handler=_cmd_evidence)
+    _register_evidence_parser(sub)
 
     sub.add_parser("help", help="Show getting-started guide and available commands")
 
