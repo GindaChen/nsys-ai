@@ -41,7 +41,6 @@ from .handlers import (
     _cmd_web,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared parser registration helpers — used by both main and legacy parsers
 # ---------------------------------------------------------------------------
