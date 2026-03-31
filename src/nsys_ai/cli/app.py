@@ -98,7 +98,12 @@ def main():
         "timeline",
         "agent",
     }
-    if len(sys.argv) > 1 and sys.argv[1] in legacy_commands:
+    use_legacy_skill_mgmt = (
+        len(sys.argv) > 2
+        and sys.argv[1] == "skill"
+        and sys.argv[2] in {"add", "remove", "save"}
+    )
+    if len(sys.argv) > 1 and (sys.argv[1] in legacy_commands or use_legacy_skill_mgmt):
         parser = _build_legacy_parser()
     else:
         parser = _build_parser()

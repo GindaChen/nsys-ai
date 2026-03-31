@@ -119,6 +119,15 @@ def test_skill_info():
     assert schema["parameters"]["limit"]["default"] == 15
 
 
+def test_hidden_skill_management_commands():
+    """Hidden skill management subcommands like add/remove/save should still parse correctly."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "add", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "skill_file" in result.stdout
+
+
 def test_skill_run_duckdb_cache(tmp_path):
     """skill run should work end-to-end, preferring DuckDB/Parquet cache when available."""
     import json
