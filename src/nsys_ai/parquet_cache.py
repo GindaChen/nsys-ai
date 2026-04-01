@@ -712,13 +712,19 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
 
 def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
     """Create views that alias ``src.TABLE_NAME → TABLE_NAME`` for consumer SQL."""
+    src_tables: set[str] = set()
     try:
-        src_tables: set[str] = set()
         for row in db.execute("SHOW ALL TABLES").fetchall():
             if row[0] == "src":
                 src_tables.add(row[2])
     except duckdb.Error:
-        return
+        try:
+            for row in db.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src'"
+            ).fetchall():
+                src_tables.add(row[0])
+        except duckdb.Error:
+            pass
 
     for table_name in src_tables:
         try:

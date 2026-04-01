@@ -192,6 +192,12 @@ class Profile:
         self.meta = self._discover()
         self._nvtx_has_text_id: bool = self._detect_nvtx_text_id()
 
+        if cache_mode not in ("auto", "parquet", "direct"):
+            raise ValueError(
+                f"Unknown cache_mode: {cache_mode!r}. "
+                f"Expected 'auto', 'parquet', or 'direct'."
+            )
+
         # DuckDB connection strategy — see parquet_cache module
         try:
             if cache_mode == "direct":
@@ -211,8 +217,9 @@ class Profile:
                         _sys.stderr.write(
                             f"[nsys-ai] Large profile ({size_mb:.0f}MB), "
                             f"using direct query mode (instant startup).\n"
-                            f"[nsys-ai] Re-run without --no-cache to build "
-                            f"Parquet cache for faster repeated queries.\n"
+                            f"[nsys-ai] To build a Parquet cache for faster repeated "
+                            f"queries, re-run with cache_mode='parquet' or pre-build "
+                            f"the cache.\n"
                         )
                         _sys.stderr.flush()
                         self.db = parquet_cache.open_direct_sqlite(path)
