@@ -709,8 +709,13 @@ def _cmd_skill(args, _profile):
         from nsys_ai.parquet_cache import open_cached_db
 
         fmt = getattr(args, "format", "text")
+        no_cache = getattr(args, "no_cache", False)
         try:
-            conn = open_cached_db(args.profile)
+            if no_cache:
+                from nsys_ai.parquet_cache import open_direct_sqlite
+                conn = open_direct_sqlite(args.profile)
+            else:
+                conn = open_cached_db(args.profile)
         except (duckdb.Error, RuntimeError, OSError) as exc:
             # Fallback to raw SQLite if DuckDB/Parquet cache fails
             import logging

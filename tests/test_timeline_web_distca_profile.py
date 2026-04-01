@@ -21,7 +21,7 @@ def test_distca_timeline_web_contains_flash_backward_on_gpu3():
     trim = (int(50_232.700 * 1e6), int(50_233.300 * 1e6))
     gpu = 3
 
-    with Profile(str(DISTCA_SQLITE)) as prof:
+    with Profile(str(DISTCA_SQLITE), cache_mode="parquet") as prof:
         gpu_payload = build_timeline_gpu_data(prof, gpu, trim)[0]
         events = gpu_payload["kernels"]
         kernels = [e for e in events if e.get("type") == "kernel"]
@@ -52,7 +52,7 @@ def test_distca_timeline_web_contains_flash_backward_on_gpu3():
 def test_distca_timeline_web_includes_memcpy_memset_23s_to_24s():
     trim = (int(23.0 * 1e9), int(24.0 * 1e9))
 
-    with Profile(str(DISTCA_SQLITE)) as prof:
+    with Profile(str(DISTCA_SQLITE), cache_mode="parquet") as prof:
         devices = list(prof.meta.devices)
         payload_by_gpu = {
             gpu: build_timeline_gpu_data(prof, gpu, trim)[0]["kernels"] for gpu in devices
@@ -99,7 +99,7 @@ def test_distca_nvtx_path_depth_stable_across_adjacent_tiles():
     left_trim = (int(40.0 * 1e9), int(45.0 * 1e9))
     right_trim = (int(45.0 * 1e9), int(50.0 * 1e9))
 
-    with Profile(str(DISTCA_SQLITE)) as prof:
+    with Profile(str(DISTCA_SQLITE), cache_mode="parquet") as prof:
         left_spans = build_timeline_gpu_data(
             prof, gpu, left_trim, include_kernels=False, include_nvtx=True
         )[0]["nvtx_spans"]

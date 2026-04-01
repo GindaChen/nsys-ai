@@ -136,6 +136,14 @@ def _register_skill_parser(sub, *, include_management=False):
             "(default: sample_0)."
         ),
     )
+    sp_run.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "Skip Parquet cache, query SQLite directly via DuckDB. "
+            "Faster startup for large profiles at the cost of slower queries."
+        ),
+    )
 
     if include_management:
         sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
