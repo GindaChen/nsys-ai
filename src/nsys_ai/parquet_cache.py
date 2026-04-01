@@ -31,7 +31,7 @@ import duckdb
 log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3  # bumped: CUPTI_ACTIVITY_KIND_RUNTIME now uses column projection
 
 # Tables to export as-is from SQLite → Parquet.
 # (view_name, source_table_name)
@@ -182,7 +182,10 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # output without synchronization — significant speedup for large
         # COPY operations.  Safe because we never rely on implicit row order.
         db.execute("SET preserve_insertion_order = false")
-        db.execute("SET enable_progress_bar = true")
+        # Disable DuckDB's built-in progress bar — it writes \r escape sequences
+        # to stderr that interleave with our own \r-based progress reporting,
+        # producing garbled output in terminals and CI logs.
+        db.execute("SET enable_progress_bar = false")
 
         # Attach the SQLite database
         safe_sqlite_path = str(sqlite_path).replace("'", "''")
@@ -234,8 +237,8 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
 
         # ── Export pre-joined kernels table ────────────────────────────────
         kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
-        _progress("kernels.parquet")
         if kernel_table:
+            _progress("kernels.parquet")
             db.execute(f"""
                 COPY (
                     SELECT k.*, s.value AS name, d.value AS demangled
@@ -247,8 +250,8 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
 
         # ── Export NVTX with resolved text ────────────────────────────────
         nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
-        _progress("nvtx.parquet")
         if nvtx_table:
+            _progress("nvtx.parquet")
             # Detect whether textId column exists
             has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
             if has_textid:
@@ -712,6 +715,7 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
 
 def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
     """Create views that alias ``src.TABLE_NAME → TABLE_NAME`` for consumer SQL."""
+    _log = logging.getLogger(__name__)
     src_tables: set[str] = set()
     try:
         for row in db.execute("SHOW ALL TABLES").fetchall():
@@ -724,7 +728,10 @@ def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
             ).fetchall():
                 src_tables.add(row[0])
         except duckdb.Error:
-            pass
+            _log.warning("_create_sqlite_alias_views: could not discover tables in attached SQLite; direct-mode queries may fail")
+
+    if not src_tables:
+        _log.warning("_create_sqlite_alias_views: no tables found in attached 'src' database")
 
     for table_name in src_tables:
         try:
@@ -732,5 +739,5 @@ def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
                 f'CREATE VIEW IF NOT EXISTS "{table_name}" '
                 f'AS SELECT * FROM src."{table_name}"'
             )
-        except duckdb.Error:
-            pass
+        except duckdb.Error as e:
+            _log.debug("Could not create alias view for %r: %s", table_name, e)

@@ -213,15 +213,12 @@ class Profile:
                 else:
                     size_mb = os.path.getsize(path) / 1e6
                     if size_mb > 50:
-                        import sys as _sys
-                        _sys.stderr.write(
-                            f"[nsys-ai] Large profile ({size_mb:.0f}MB), "
-                            f"using direct query mode (instant startup).\n"
-                            f"[nsys-ai] To build a Parquet cache for faster repeated "
-                            f"queries, re-run with cache_mode='parquet' or pre-build "
-                            f"the cache.\n"
+                        self._log.info(
+                            "Large profile (%.0fMB), using direct query mode (instant startup).\n"
+                            "To build a Parquet cache for faster repeated queries, re-run with "
+                            "cache_mode='parquet' or pre-build the cache.",
+                            size_mb
                         )
-                        _sys.stderr.flush()
                         self.db = parquet_cache.open_direct_sqlite(path)
                     else:
                         # Small file — build cache now (seconds)
