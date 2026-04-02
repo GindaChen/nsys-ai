@@ -292,7 +292,12 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             db.execute(f"""
                 COPY (
                     SELECT k.*, COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name, d.value AS demangled,
-                           CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS is_tc_eligible,
+                           CAST(CASE
+                   WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
+                     OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                   THEN 1
+                   ELSE 0
+               END AS INTEGER) AS is_tc_eligible,
                            CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc
                     FROM src.{kernel_table} k
                     LEFT JOIN src.StringIds s ON k.shortName = s.id
@@ -751,7 +756,12 @@ def _tc_enriched_sql(table_name: str) -> str:
         SELECT k.*,
                COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name,
                d.value AS demangled,
-               CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS is_tc_eligible,
+               CAST(CASE
+                   WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
+                     OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                   THEN 1
+                   ELSE 0
+               END AS INTEGER) AS is_tc_eligible,
                CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc
         FROM src."{table_name}" k
         LEFT JOIN src.StringIds s ON k.shortName = s.id
@@ -782,7 +792,9 @@ def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
         _log.warning("_create_sqlite_alias_views: no tables found in attached 'src' database")
 
     # Set of known TC-eligible kernel table names (from _ALIASES)
-    _known_kernel_tables = {t.upper() for aliases in _ALIASES.values() for t in aliases if "KERNEL" in t.upper()}
+    _known_kernel_tables = {
+        t.upper() for aliases in _ALIASES.values() for t in aliases if "KERNEL" in t.upper()
+    }
 
     for table_name in src_tables:
         escaped = table_name.replace('"', '""')

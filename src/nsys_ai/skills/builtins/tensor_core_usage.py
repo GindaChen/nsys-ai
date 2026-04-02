@@ -38,10 +38,14 @@ def _execute(conn, **kwargs):
         rows = conn.execute(sql, params).fetchall()
         cols = ["name", "total_ns", "call_count", "tc_active_ns", "tc_active_calls"]
         rows = [dict(zip(cols, r)) for r in rows]
-    except Exception as e:
+    except Exception:
         return [
             {
-                "error": f"Tensor Core analysis requires DuckDB cache. Please do not force --backend sqlite. (Details: {e})"
+                "error": (
+                    "Tensor Core analysis requires a database connection that exposes "
+                    "a 'kernels' view with 'is_tc_eligible' and 'uses_tc' columns, or a "
+                    "compatible profiling backend."
+                )
             }
         ]
 

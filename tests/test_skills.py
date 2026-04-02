@@ -904,3 +904,64 @@ def test_root_cause_includes_new_patterns(minimal_nsys_conn):
     assert len(rows) >= 4
     text = skill.format_rows(rows)
     assert len(text) > 50
+
+
+def test_tensor_core_usage_fallback(minimal_nsys_conn):
+    """Fallback error matches Copilot review feedback on pure SQLite."""
+    from nsys_ai.skills.registry import get_skill
+    
+    skill = get_skill("tensor_core_usage")
+    # This DB has no duckdb or `kernels` view mapped, so it hits the except block.
+    rows = skill.execute(minimal_nsys_conn)
+    assert len(rows) == 1
+    assert "error" in rows[0]
+    assert "exposes a 'kernels' view" in rows[0]["error"]
+    
+    text = skill.format_rows(rows)
+    assert "Error: Tensor Core analysis requires" in text
+
+
+def test_tensor_core_usage_duckdb():
+    """Verify DuckDB execution handles tensor_core_usage."""
+    import duckdb
+    from nsys_ai.skills.registry import get_skill
+
+    conn = duckdb.connect()
+    # Mock DuckDB schema
+    conn.execute(
+        """
+        CREATE VIEW kernels AS SELECT * FROM (VALUES 
+            ('ampere_sgemm_128x128', 100, 200, 1, 1),
+            ('vectorized_elementwise', 300, 400, 0, 0),
+            ('ampere_fp16_fallback', 500, 600, 1, 0)
+        ) AS t(name, start, "end", is_tc_eligible, uses_tc)
+        """
+    )
+    
+    skill = get_skill("tensor_core_usage")
+    rows = skill.execute(conn)
+    
+    # vectorized_elementwise is NOT eligible
+    assert len(rows) == 2
+    
+    # Both eligible kernels have duration = 100ns (end - start)
+    # The ORDER BY total_ns will keep them in defined insert order since durations equal.
+    
+    # Fallback
+    assert rows[1]["kernel_name"] == "ampere_fp16_fallback"
+    assert rows[1]["total_gpu_ms"] == 100 / 1e6
+    assert rows[1]["tc_active_ms"] == 0
+    assert rows[1]["tc_achieved_pct"] == 0.0
+    assert rows[1]["is_outlier"] is True
+    
+    # Active
+    assert rows[0]["kernel_name"] == "ampere_sgemm_128x128"
+    assert rows[0]["total_gpu_ms"] == 100 / 1e6
+    assert rows[0]["tc_active_ms"] == 100 / 1e6
+    assert rows[0]["tc_achieved_pct"] == 100.0
+    assert rows[0]["is_outlier"] is False
+
+    text = skill.format_rows(rows)
+    assert "ampere_fp16_fallback" in text
+    assert "ampere_sgemm_128x128" in text
+    assert "⚠️" in text

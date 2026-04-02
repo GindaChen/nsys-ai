@@ -205,7 +205,7 @@ def _execute(conn, **kwargs):
                 SUM(CASE WHEN lower(k.name) ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS nccl_ns,
                 SUM(CASE WHEN lower(k.name) NOT ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS compute_ns,
                 SUM(CASE WHEN k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_eligible_ns,
-                SUM(CASE WHEN k.uses_tc = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_active_ns,
+                SUM(CASE WHEN k.uses_tc = 1 AND k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_active_ns,
                 COUNT(*) AS count,
                 MAX(n.k_dur_ns) AS max_ns
             FROM nvtx_kernel_map n
@@ -280,6 +280,19 @@ def _execute(conn, **kwargs):
             stats["nvtx_path"] = group_key
             stats["nvtx_region"] = region_name
 
+    # Phase 2.5: Re-group fallback k_times_by_group for consistent iteration
+    if not has_nkm:
+        new_k_times = defaultdict(lambda: defaultdict(int))
+        for old_path, k_dict in k_times_by_group.items():
+            path_parts = old_path.split(" > ") if old_path else [""]
+            if auto_group_depth is not None and auto_group_depth < len(path_parts):
+                new_key = " > ".join(path_parts[: auto_group_depth + 1])
+            else:
+                new_key = old_path
+            for k_name, dura in k_dict.items():
+                new_k_times[new_key][k_name] += dura
+        k_times_by_group = new_k_times
+
     # Phase 3: Fast SQL grouping for top kernels (if natively supported)
     if has_nkm:
         sql_kernels = f"""
@@ -329,9 +342,7 @@ def _execute(conn, **kwargs):
                 "compute_ms": round(compute_ns / 1e6, 2),
                 "nccl_ms": round(nccl_ns / 1e6, 2),
                 "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
-                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1)
-                if tc_elig > 0
-                else 0.0,
+                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1) if tc_elig > 0 else 0.0,
                 "avg_kernel_ms": round(total_ns / count / 1e6, 3) if count else 0,
                 "max_kernel_ms": round(stats["max_ns"] / 1e6, 3),
                 "top_kernels": top_kernels,

@@ -8,8 +8,8 @@ def _format(rows):
         return "(No kernels found)"
     lines = [
         "── Top GPU Kernels by Total Time ──",
-        f"{'TC':<3s}  {'Kernel':<57s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Min(ms)':>9s}  {'Max(ms)':>9s}",
-        "─" * 115,
+        f"{'TC':<4s}  {'Kernel':<57s}  {'Count':>7s}  {'Total(ms)':>10s}  {'Avg(ms)':>9s}  {'Min(ms)':>9s}  {'Max(ms)':>9s}",
+        "-" * 116,
     ]
     for r in rows:
         name = r["kernel_name"]
@@ -21,7 +21,7 @@ def _format(rows):
             tc_status = "[✓]" if r.get("tc_active") else "[⚠️]"
 
         lines.append(
-            f"{tc_status:<3s}  {name:<57s}  {r['invocations']:>7d}  {r['total_ms']:>10.2f}  "
+            f"{tc_status:<4s}  {name:<57s}  {r['invocations']:>7d}  {r['total_ms']:>10.2f}  "
             f"{r['avg_ms']:>9.2f}  {r['min_ms']:>9.2f}  {r['max_ms']:>9.2f}"
         )
     return "\n".join(lines)
@@ -81,16 +81,16 @@ def _execute(conn, **kwargs):
 
         trim_clause = ""
         if trim_start is not None and trim_end is not None:
-            trim_clause = "AND k.start >= ? AND k.[end] <= ?"
+            trim_clause = 'AND k.start >= ? AND k."end" <= ?'
             params.extend([trim_start, trim_end])
 
         sql = f"""
             SELECT COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
                    COUNT(*) AS invocations,
-                   ROUND(SUM(k.[end] - k.start) / 1e6, 2) AS total_ms,
-                   ROUND(AVG(k.[end] - k.start) / 1e6, 2) AS avg_ms,
-                   ROUND(MIN(k.[end] - k.start) / 1e6, 2) AS min_ms,
-                   ROUND(MAX(k.[end] - k.start) / 1e6, 2) AS max_ms,
+                   ROUND(SUM(k."end" - k.start) / 1e6, 2) AS total_ms,
+                   ROUND(AVG(k."end" - k.start) / 1e6, 2) AS avg_ms,
+                   ROUND(MIN(k."end" - k.start) / 1e6, 2) AS min_ms,
+                   ROUND(MAX(k."end" - k.start) / 1e6, 2) AS max_ms,
                    0 AS tc_eligible,
                    0 AS tc_active
             FROM {kernel_table} k
