@@ -87,7 +87,7 @@ def _format(rows):
 
     lines = [
         "── Tensor Core Utilization (Eligible Kernels Only) ──",
-        f"{'Kernel Name':<50s}  {'Calls':>8s}  {'TC Calls':>10s}  {'Time(ms)':>10s}  {'TC Ops%':>8s}  {'Flag':>6s}",
+        f"{'Kernel Name':<50s}  {'Calls':>8s}  {'TC Calls%':>10s}  {'Time(ms)':>10s}  {'TC Ops%':>8s}  {'Flag':>6s}",
         "─" * 100,
     ]
 

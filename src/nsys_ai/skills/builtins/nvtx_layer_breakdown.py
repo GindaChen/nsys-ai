@@ -99,8 +99,8 @@ def _execute(conn, **kwargs):
                 "total_ns": 0,
                 "nccl_ns": 0,
                 "compute_ns": 0,
-                "tc_elig": 0,
-                "tc_act": 0,
+                "tc_elig": None,
+                "tc_act": None,
                 "count": 0,
                 "max_ns": 0,
             }
@@ -342,7 +342,9 @@ def _execute(conn, **kwargs):
                 "compute_ms": round(compute_ns / 1e6, 2),
                 "nccl_ms": round(nccl_ns / 1e6, 2),
                 "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
-                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1) if tc_elig > 0 else 0.0,
+                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1)
+                if tc_elig
+                else (None if tc_elig is None else 0.0),
                 "avg_kernel_ms": round(total_ns / count / 1e6, 3) if count else 0,
                 "max_kernel_ms": round(stats["max_ns"] / 1e6, 3),
                 "top_kernels": top_kernels,
@@ -422,10 +424,13 @@ def _format(rows):
         if len(name) > 38:
             name = "..." + name[-35:]
         outlier_flag = "  ⚠️" if r.get("is_outlier") else ""
+        tc_pct_str = (
+            f"{r['tc_achieved_pct']:>6.1f}%" if r["tc_achieved_pct"] is not None else "    N/A"
+        )
         lines.append(
             f"{name:<40s}  {r['nvtx_depth']:>5d}  {r['kernel_count']:>7d}  {r['total_gpu_ms']:>10.2f}"
             f"  {r['compute_ms']:>9.2f}  {r['nccl_ms']:>9.2f}  {r['nccl_pct']:>5.1f}%"
-            f"  {r['tc_achieved_pct']:>6.1f}%{outlier_flag:>7s}"
+            f"  {tc_pct_str:>7s}{outlier_flag:>7s}"
         )
         # Show top kernels indented below each region
         for tk in r.get("top_kernels", []):

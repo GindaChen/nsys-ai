@@ -945,22 +945,22 @@ def test_tensor_core_usage_duckdb():
     # vectorized_elementwise is NOT eligible
     assert len(rows) == 2
 
-    # Both eligible kernels have duration = 100ns (end - start)
-    # The ORDER BY total_ns will keep them in defined insert order since durations equal.
+    # Make assertions independent of row order by indexing rows by kernel_name.
+    rows_by_name = {row["kernel_name"]: row for row in rows}
 
     # Fallback
-    assert rows[1]["kernel_name"] == "ampere_fp16_fallback"
-    assert rows[1]["total_gpu_ms"] == 100 / 1e6
-    assert rows[1]["tc_active_ms"] == 0
-    assert rows[1]["tc_achieved_pct"] == 0.0
-    assert rows[1]["is_outlier"] is True
+    fallback = rows_by_name["ampere_fp16_fallback"]
+    assert fallback["total_gpu_ms"] == 100 / 1e6
+    assert fallback["tc_active_ms"] == 0
+    assert fallback["tc_achieved_pct"] == 0.0
+    assert fallback["is_outlier"] is True
 
     # Active
-    assert rows[0]["kernel_name"] == "ampere_sgemm_128x128"
-    assert rows[0]["total_gpu_ms"] == 100 / 1e6
-    assert rows[0]["tc_active_ms"] == 100 / 1e6
-    assert rows[0]["tc_achieved_pct"] == 100.0
-    assert rows[0]["is_outlier"] is False
+    active = rows_by_name["ampere_sgemm_128x128"]
+    assert active["total_gpu_ms"] == 100 / 1e6
+    assert active["tc_active_ms"] == 100 / 1e6
+    assert active["tc_achieved_pct"] == 100.0
+    assert active["is_outlier"] is False
 
     text = skill.format_rows(rows)
     assert "ampere_fp16_fallback" in text
