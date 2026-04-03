@@ -4,7 +4,24 @@ Uses Python-level interval merging (O(n log n) sort + O(n) sweep) instead
 of SQL window functions, which are prohibitively slow on large profiles.
 """
 
+import logging
+import sqlite3
+
 from ..base import Skill, _resolve_activity_tables
+
+logger = logging.getLogger(__name__)
+
+
+class _NoDuckDB:
+    pass
+
+
+try:
+    import duckdb
+
+    _DB_ERRORS = (sqlite3.Error, duckdb.Error)
+except ImportError:
+    _DB_ERRORS = (sqlite3.Error,)
 
 
 def _format(rows):
@@ -47,8 +64,8 @@ def _execute(conn, **kwargs):
                 f'SELECT deviceId, start, "end" FROM {kernel_table} {trim_clause_k}',
                 params_k,
             ).fetchall()
-        except Exception:
-            pass
+        except _DB_ERRORS as e:
+            logger.debug(f"Failed to fetch kernel intervals from {kernel_table}: {e}")
 
     # --- Fetch memcpy intervals per device (if available) ---
     memcpy_rows = []
@@ -63,8 +80,8 @@ def _execute(conn, **kwargs):
                 f'SELECT deviceId, start, "end" FROM {memcpy_table} {trim_clause_m}',
                 params_m,
             ).fetchall()
-        except Exception:
-            pass
+        except _DB_ERRORS as e:
+            logger.debug(f"Failed to fetch memcpy intervals from {memcpy_table}: {e}")
 
     # --- Fetch memset intervals per device (if available) ---
     memset_rows = []
@@ -79,8 +96,8 @@ def _execute(conn, **kwargs):
                 f'SELECT deviceId, start, "end" FROM {memset_table} {trim_clause_s}',
                 params_s,
             ).fetchall()
-        except Exception:
-            pass
+        except _DB_ERRORS as e:
+            logger.debug(f"Failed to fetch memset intervals from {memset_table}: {e}")
 
     # --- Group intervals by deviceId ---
     from collections import defaultdict
