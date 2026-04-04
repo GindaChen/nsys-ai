@@ -7,85 +7,9 @@ Since Nsight Systems .sqlite does NOT contain per-kernel FLOPs or bytes-moved
 (only NCU has that), this skill performs an **aggregate roofline estimation**.
 """
 
+from nsys_ai.hardware import get_peak_tflops
+
 from ..base import Skill, SkillParam, _resolve_activity_tables
-
-# ---------------------------------------------------------------------------
-# GPU spec lookup table: chipName → (peak FP16 TFLOPS, HBM BW GB/s)
-# Sources: NVIDIA datasheets, Wikipedia, techpowerup.com
-# ---------------------------------------------------------------------------
-_GPU_SPECS: dict[str, tuple[float, float]] = {
-    # ── Hopper ────────────────────────────────────────────────────
-    # H100 SXM: FP16/BF16 TC dense 989 TFLOPS, HBM3 3350 GB/s
-    # Note: 1979 TFLOPS is the SPARSE (2:4) figure — MFU uses dense.
-    "GH100": (989.0, 3350),
-    "H100": (989.0, 3350),
-    "H100_SXM": (989.0, 3350),
-    # H100 PCIe: FP16/BF16 TC dense 756 TFLOPS, HBM2e 2000 GB/s
-    "H100_PCIE": (756.0, 2000),
-    "H100_NVL": (835.0, 2000),
-    # H200: same GH100 die → same 989 TFLOPS dense, HBM3e 4800 GB/s
-    "H200": (989.0, 4800),
-    # ── Ampere (data center) ──────────────────────────────────────
-    # A100 SXM: FP16 TC dense 312 TFLOPS, HBM2e 2039 GB/s (80GB)
-    "GA100": (312.0, 2039),
-    "A100": (312.0, 2039),
-    "A100_SXM": (312.0, 2039),
-    "A100_PCIE": (312.0, 1555),
-    "A100_80GB": (312.0, 2039),
-    # A10: FP16 TC 125 TFLOPS, GDDR6 600 GB/s
-    "GA102": (125.0, 600),
-    "A10": (125.0, 600),
-    # A30: FP16 TC 165 TFLOPS, HBM2e 933 GB/s
-    "A30": (165.0, 933),
-    # A40: FP16 TC 149.7 TFLOPS, GDDR6 696 GB/s
-    "A40": (149.7, 696),
-    # ── Volta ─────────────────────────────────────────────────────
-    # V100 SXM2: FP16 TC 125 TFLOPS, HBM2 900 GB/s
-    "GV100": (125.0, 900),
-    "V100": (125.0, 900),
-    "V100_SXM2": (125.0, 900),
-    "V100_PCIE": (112.0, 900),
-    # ── Ada Lovelace ──────────────────────────────────────────────
-    # L40S: FP16 TC dense 362 TFLOPS, GDDR6 864 GB/s
-    "AD102": (362.0, 864),
-    "L40S": (362.0, 864),
-    # L40: FP16 TC dense 181 TFLOPS, GDDR6 864 GB/s
-    "L40": (181.0, 864),
-    # L4: FP16 TC dense 121 TFLOPS, GDDR6 300 GB/s
-    "L4": (121.0, 300),
-    # RTX 4090: FP16 TC dense 165.2 TFLOPS, GDDR6X 1008 GB/s
-    "RTX4090": (165.2, 1008),
-    # RTX 3090: FP16 TC dense 142 TFLOPS, GDDR6X 936 GB/s
-    "RTX3090": (142.0, 936),
-    # ── Blackwell ─────────────────────────────────────────────────
-    # B100: FP16/BF16 TC dense 1750 TFLOPS, HBM3e 8000 GB/s
-    "GB100": (1750.0, 8000),
-    "B100": (1750.0, 8000),
-    # B200: FP16/BF16 TC dense 2250 TFLOPS, HBM3e 8000 GB/s
-    "B200": (2250.0, 8000),
-}
-
-
-def _lookup_gpu_spec(chip_name: str) -> tuple[float, float] | None:
-    """Match chipName against the spec table using prefix/substring matching.
-
-    Returns (peak_fp16_tflops, hbm_bw_gbps) or None.
-    """
-    if not chip_name:
-        return None
-
-    # Exact match first
-    upper = chip_name.upper().replace(" ", "_").replace("-", "_")
-    for key, val in _GPU_SPECS.items():
-        if key.upper() == upper:
-            return val
-
-    # Substring match (e.g. "NVIDIA H100 80GB HBM3" → matches "H100")
-    for key, val in sorted(_GPU_SPECS.items(), key=lambda kv: -len(kv[0])):
-        if key.upper() in upper:
-            return val
-
-    return None
 
 
 def _execute(conn, **kwargs):
@@ -112,10 +36,16 @@ def _execute(conn, **kwargs):
     except Exception:
         pass
 
-    # Lookup from table, fallback to DB value
-    spec = _lookup_gpu_spec(chip_name) or _lookup_gpu_spec(gpu_name)
-    if spec:
-        peak_tflops, hbm_bw_gbps = spec
+    # Lookup from centralized hardware table, fallback to DB value
+    spec1 = get_peak_tflops(chip_name)
+    spec2 = get_peak_tflops(gpu_name)
+
+    if "error" not in spec1:
+        peak_tflops = spec1.get("peak_tflops", 312.0)
+        hbm_bw_gbps = spec1.get("hbm_bw_gbps", 2039.0)
+    elif "error" not in spec2:
+        peak_tflops = spec2.get("peak_tflops", 312.0)
+        hbm_bw_gbps = spec2.get("hbm_bw_gbps", 2039.0)
     else:
         # Fallback: use memoryBandwidth from DB (bytes/s → GB/s)
         peak_tflops = float(kwargs.get("peak_tflops", 312.0))  # A100 default
@@ -127,6 +57,10 @@ def _execute(conn, **kwargs):
     if kwargs.get("hbm_bw_gbps") is not None:
         hbm_bw_gbps = float(kwargs["hbm_bw_gbps"])
 
+    bytes_moved = kwargs.get("bytes_moved")
+    if bytes_moved is not None:
+        bytes_moved = float(bytes_moved)
+
     # --- Compute total kernel time on device ---
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
@@ -137,15 +71,31 @@ def _execute(conn, **kwargs):
         params.extend([trim_start, trim_end])
 
     try:
-        rows = conn.execute(
+        cursor = conn.execute(
             f'SELECT start, "end" FROM {kernel_table} '
-            f"WHERE deviceId = ? {trim_clause}",
+            f"WHERE deviceId = ? {trim_clause} ORDER BY start",
             params,
-        ).fetchall()
+        )
 
-        from nsys_ai.region_mfu import _merge_intervals
-        total_kernel_ns = _merge_intervals([(row[0], row[1]) for row in rows])
-        kernel_count = len(rows)
+        total_kernel_ns = 0
+        kernel_count = 0
+        cur_s, cur_e = None, None
+
+        for row in cursor:
+            kernel_count += 1
+            s, e = row[0], row[1]
+            if cur_s is None:
+                cur_s, cur_e = s, e
+            elif s <= cur_e:
+                if e > cur_e:
+                    cur_e = e
+            else:
+                total_kernel_ns += cur_e - cur_s
+                cur_s, cur_e = s, e
+
+        if cur_s is not None:
+            total_kernel_ns += cur_e - cur_s
+
     except Exception:
         total_kernel_ns = 0
         kernel_count = 0
@@ -166,39 +116,60 @@ def _execute(conn, **kwargs):
     mfu_pct = (achieved_tflops / peak_tflops) * 100.0 if peak_tflops > 0 else 0.0
     ridge_point = (peak_tflops * 1e12) / (hbm_bw_gbps * 1e9) if hbm_bw_gbps > 0 else 0.0
 
+    op_intensity = None
+    if bytes_moved is not None and bytes_moved > 0:
+        op_intensity = theoretical_flops / bytes_moved
+
     # Classification
-    if mfu_pct >= 50:
-        classification = "High utilization (likely compute-bound)"
-        severity = "info"
-        recommendation = (
-            "Workload has good utilization. "
-            "For further gains, consider kernel-level optimization with NCU "
-            "(occupancy, warp efficiency, instruction mix)."
-        )
-    elif mfu_pct >= 15:
-        classification = "Moderate utilization (mixed bound)"
-        severity = "warning"
-        recommendation = (
-            "Workload is in a transition zone. "
-            "Consider increasing batch size to raise arithmetic intensity, "
-            "using FlashAttention for attention kernels, or fusing small ops with torch.compile()."
-        )
-    elif mfu_pct >= 5:
-        classification = "Low utilization (likely memory-bound)"
-        severity = "warning"
-        recommendation = (
-            "Kernels are likely bottlenecked by HBM bandwidth rather than compute. "
-            "Increase batch size, use operator fusion (torch.compile), "
-            "enable FlashAttention, or check for excessive memory-bound element-wise ops."
-        )
+    if op_intensity is not None and ridge_point > 0:
+        if op_intensity < ridge_point:
+            classification = f"Memory-bound (AI={op_intensity:.1f} < Ridge={ridge_point:.1f})"
+            severity = "warning"
+            recommendation = (
+                "Workload is mathematically memory-bound (Arithmetic Intensity < Ridge Point). "
+                "Increase batch size, use operator fusion, or verify memory access patterns."
+            )
+        else:
+            classification = f"Compute-bound (AI={op_intensity:.1f} >= Ridge={ridge_point:.1f})"
+            severity = "info"
+            recommendation = (
+                "Workload is mathematically compute-bound. "
+                "Optimize kernel occupancy, warp efficiency, and Tensor Core usage."
+            )
     else:
-        classification = "Severely under-utilized"
-        severity = "critical"
-        recommendation = (
-            "GPU is severely under-utilized. Common causes: excessive CPU overhead, "
-            "pipeline bubbles, small batch sizes, or profiling during warmup. "
-            "Run gpu_idle_gaps and root_cause_matcher to diagnose."
-        )
+        # Fallback heuristic based solely on MFU
+        if mfu_pct >= 50:
+            classification = "High utilization (likely compute-bound)"
+            severity = "info"
+            recommendation = (
+                "Workload has good utilization. "
+                "For further gains, consider kernel-level optimization with NCU "
+                "(occupancy, warp efficiency, instruction mix)."
+            )
+        elif mfu_pct >= 15:
+            classification = "Moderate utilization (mixed bound)"
+            severity = "warning"
+            recommendation = (
+                "Workload is in a transition zone. "
+                "Consider increasing batch size to raise arithmetic intensity, "
+                "using FlashAttention for attention kernels, or fusing small ops with torch.compile()."
+            )
+        elif mfu_pct >= 5:
+            classification = "Low utilization (likely memory-bound)"
+            severity = "warning"
+            recommendation = (
+                "Kernels are likely bottlenecked by HBM bandwidth rather than compute. "
+                "Increase batch size, use operator fusion (torch.compile), "
+                "enable FlashAttention, or check for excessive memory-bound element-wise ops."
+            )
+        else:
+            classification = "Severely under-utilized"
+            severity = "critical"
+            recommendation = (
+                "GPU is severely under-utilized. Common causes: excessive CPU overhead, "
+                "pipeline bubbles, small batch sizes, or profiling during warmup. "
+                "Run gpu_idle_gaps and root_cause_matcher to diagnose."
+            )
 
     return [
         {
@@ -262,6 +233,13 @@ SKILL = Skill(
             "Total FLOPs for the profiled workload (use theoretical_flops skill to compute)",
             "float",
             True,
+            None,
+        ),
+        SkillParam(
+            "bytes_moved",
+            "Total bytes moved to/from HBM. If provided, computes true arithmetic intensity.",
+            "float",
+            False,
             None,
         ),
         SkillParam("device", "GPU device ID", "int", False, 0),
