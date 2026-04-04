@@ -142,7 +142,7 @@ def _execute(conn, **kwargs):
             f"WHERE deviceId = ? {trim_clause}",
             params,
         ).fetchall()
-        
+
         from nsys_ai.region_mfu import _merge_intervals
         total_kernel_ns = _merge_intervals([(row[0], row[1]) for row in rows])
         kernel_count = len(rows)
