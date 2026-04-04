@@ -120,7 +120,7 @@ def parse_entry(text: str, source: str = "user", file_path: str = "") -> RootCau
 
     entry = RootCauseEntry(
         name=meta.get("name", "Untitled"),
-        severity=meta.get("severity", "warning"),
+        severity=meta.get("severity", ""),
         tags=meta.get("tags", []) if isinstance(meta.get("tags"), list) else [],
         detection_skill=meta.get("detection_skill", ""),
         source=source,
@@ -286,7 +286,9 @@ def validate_entry(entry: RootCauseEntry) -> list[str]:
     errors = []
     if not entry.name or entry.name == "Untitled":
         errors.append("Missing 'name' in frontmatter")
-    if entry.severity not in ("info", "warning", "critical"):
+    if not entry.severity:
+        errors.append("Missing 'severity' in frontmatter")
+    elif entry.severity not in ("info", "warning", "critical"):
         errors.append(f"Invalid severity '{entry.severity}' — must be info/warning/critical")
     if not entry.symptom:
         errors.append("Missing '## Symptom' section")

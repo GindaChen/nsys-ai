@@ -163,6 +163,7 @@ Parameters marked **required** must be provided via `--param`.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
 | `theoretical_flops` | float | ✅ | — | Total FLOPs for the profiled workload (use `theoretical_flops` skill to compute) |
+| `bytes_moved` | float | | — | Total bytes moved to/from HBM. If provided, computes true arithmetic intensity. |
 | `device` | int | | 0 | GPU device ID |
 | `peak_tflops` | float | | auto | Override GPU peak FP16 TFLOPS (auto-detected from chipName if omitted) |
 | `hbm_bw_gbps` | float | | auto | Override HBM bandwidth in GB/s (auto-detected if omitted) |

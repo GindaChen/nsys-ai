@@ -36,6 +36,7 @@ GPU_SPECS: dict[str, tuple[float, float]] = {
     "H100 PCIe": (756.0, 2039),  # H100 PCIe — BF16 dense, 2TB/s HBM2e
     "H100 NVL": (835.0, 3900),   # H100 NVL — BF16 dense, 3.9TB/s HBM3
     "H800": (989.0, 3350),       # H800 (China variant, same die)
+    "GH100": (989.0, 3350),      # ASIC code
     # === Ada Lovelace (2022-2023) ===
     "L40S": (362.0, 864),        # L40S — BF16/FP16 dense, GDDR6
     "L40": (181.0, 864),         # L40 — BF16/FP16 dense, GDDR6
@@ -45,7 +46,8 @@ GPU_SPECS: dict[str, tuple[float, float]] = {
     "RTX 5000 Ada": (200.0, 576),# RTX 5000 Ada
     "RTX 4500 Ada": (160.0, 432),# RTX 4500 Ada
     "RTX 4000 Ada": (102.0, 360),# RTX 4000 Ada
-    "RTX 4090": (330.0, 1008),   # GeForce RTX 4090 — BF16/FP16 w/ FP32 accum (dense, effective)
+    "RTX 4090": (165.2, 1008),   # GeForce RTX 4090 — BF16/FP16 dense (w/ FP32 accum)
+    "AD102": (362.0, 864),       # ASIC code
     "RTX 4080 SUPER": (204.0, 736),
     "RTX 4080": (204.0, 716),    # GeForce RTX 4080 — BF16/FP16 dense
     "RTX 4070 Ti SUPER": (184.0, 672),
@@ -60,6 +62,7 @@ GPU_SPECS: dict[str, tuple[float, float]] = {
     "A100 80GB": (312.0, 2039),  # A100 80GB (SXM or PCIe) — BF16 dense
     "A100 PCIe": (312.0, 1555),
     "A100": (312.0, 2039),
+    "GA100": (312.0, 2039),      # ASIC code
     "A30": (165.0, 933),
     "A10": (125.0, 600),
     "RTX A6000": (310.0, 768),   # RTX A6000 Ampere
