@@ -170,23 +170,23 @@ def _execute(conn, **kwargs):
 
     # Classification
     if mfu_pct >= 50:
-        classification = "Compute-bound (healthy)"
+        classification = "High utilization (likely compute-bound)"
         severity = "info"
         recommendation = (
-            "Workload is compute-bound with good utilization. "
+            "Workload has good utilization. "
             "For further gains, consider kernel-level optimization with NCU "
             "(occupancy, warp efficiency, instruction mix)."
         )
     elif mfu_pct >= 15:
-        classification = "Mixed — moderate utilization"
+        classification = "Moderate utilization (mixed bound)"
         severity = "warning"
         recommendation = (
-            "Workload is in the transition zone between compute-bound and memory-bound. "
+            "Workload is in a transition zone. "
             "Consider increasing batch size to raise arithmetic intensity, "
             "using FlashAttention for attention kernels, or fusing small ops with torch.compile()."
         )
     elif mfu_pct >= 5:
-        classification = "Memory-bound or under-utilized"
+        classification = "Low utilization (likely memory-bound)"
         severity = "warning"
         recommendation = (
             "Kernels are likely bottlenecked by HBM bandwidth rather than compute. "

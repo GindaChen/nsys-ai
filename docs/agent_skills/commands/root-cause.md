@@ -57,7 +57,7 @@ The submitted Markdown file MUST contain:
 If validation passes, the file is copied to `~/.nsys-ai/root-causes/` (or the directory specified by `--root-causes-dir`).
 
 **Options**:
-- `--root-causes-dir <dir>`: (Global option) Override the default `~/.nsys-ai/root-causes/` directory for user-local files. Use it *before* the `root-cause` subcommand (e.g., `nsys-ai --root-causes-dir /tmp root-cause list`).
+- `--root-causes-dir <dir>`: Override the default `~/.nsys-ai/root-causes/` directory for user-local files. Pass it *after* the `root-cause` subcommand (e.g., `nsys-ai root-cause --root-causes-dir /tmp list`).
 
 ---
 

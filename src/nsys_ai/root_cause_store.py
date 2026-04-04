@@ -88,7 +88,8 @@ def _extract_sections(body: str) -> dict[str, str]:
     parts = _SECTION_RE.split(body)
     # parts = [preamble, heading1, content1, heading2, content2, ...]
     for i in range(1, len(parts) - 1, 2):
-        heading = parts[i].strip()
+        # Strip trailing whitespace and colons (e.g. "## Symptom:")
+        heading = re.sub(r"[:\s]+$", "", parts[i]).strip()
         content = parts[i + 1].strip()
         sections[heading.lower()] = content
     return sections
@@ -143,7 +144,7 @@ def _parse_book_md(book_path: str | Path) -> list[RootCauseEntry]:
     """Parse the structured book.md into individual entries.
 
     book.md uses H2 headings (## N. Title) to separate entries,
-    with H3 sub-headings for sections.
+    and bold markers (e.g., **Symptom:**) to demarcate sections.
     """
     path = Path(book_path)
     if not path.exists():
