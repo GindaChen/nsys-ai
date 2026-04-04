@@ -43,7 +43,7 @@ all = ["nsys-ai[agent,tui,chat]"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-nsys_ai = ["templates/*.html", "templates/*.css", "templates/*.js", "prompts/*.txt"]
+nsys_ai = ["templates/*.html", "templates/*.css", "templates/*.js", "prompts/*.txt", "data/*.md"]
 
 [tool.ruff]
 line-length = 100

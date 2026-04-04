@@ -40,22 +40,30 @@ def _execute(conn, **kwargs):
     spec1 = get_peak_tflops(chip_name)
     spec2 = get_peak_tflops(gpu_name)
 
-    if "error" not in spec1:
-        peak_tflops = spec1.get("peak_tflops", 312.0)
-        hbm_bw_gbps = spec1.get("hbm_bw_gbps", 2039.0)
-    elif "error" not in spec2:
-        peak_tflops = spec2.get("peak_tflops", 312.0)
-        hbm_bw_gbps = spec2.get("hbm_bw_gbps", 2039.0)
-    else:
-        # Fallback: use memoryBandwidth from DB (bytes/s → GB/s)
-        peak_tflops = float(kwargs.get("peak_tflops", 312.0))  # A100 default
-        hbm_bw_gbps = hbm_bw_raw / 1e9 if hbm_bw_raw > 0 else 2039.0
+    peak_tflops = kwargs.get("peak_tflops")
+    hbm_bw_gbps = kwargs.get("hbm_bw_gbps")
 
-    # Allow user override
-    if kwargs.get("peak_tflops") is not None:
-        peak_tflops = float(kwargs["peak_tflops"])
-    if kwargs.get("hbm_bw_gbps") is not None:
-        hbm_bw_gbps = float(kwargs["hbm_bw_gbps"])
+    if peak_tflops is None or hbm_bw_gbps is None:
+        if "error" not in spec1:
+            peak_tflops = peak_tflops if peak_tflops is not None else spec1.get("peak_tflops")
+            hbm_bw_gbps = hbm_bw_gbps if hbm_bw_gbps is not None else spec1.get("hbm_bw_gbps")
+        elif "error" not in spec2:
+            peak_tflops = peak_tflops if peak_tflops is not None else spec2.get("peak_tflops")
+            hbm_bw_gbps = hbm_bw_gbps if hbm_bw_gbps is not None else spec2.get("hbm_bw_gbps")
+
+    # If hbm_bw_gbps is still missing, attempt DB fallback
+    if hbm_bw_gbps is None and hbm_bw_raw > 0:
+        hbm_bw_gbps = hbm_bw_raw / 1e9
+
+    # If peak_tflops is missing, fail explicitly.
+    if peak_tflops is None:
+        return [{"error": f"GPU {gpu_name} ({chip_name}) not found in hardware specs. Cannot compute roofline. Please explicitly provide 'peak_tflops' and optionally 'hbm_bw_gbps'."}]
+
+    if hbm_bw_gbps is None:
+        hbm_bw_gbps = 2039.0  # Safe fallback for generic GPUs if missing
+
+    peak_tflops = float(peak_tflops)
+    hbm_bw_gbps = float(hbm_bw_gbps)
 
     bytes_moved = kwargs.get("bytes_moved")
     if bytes_moved is not None:
@@ -82,8 +90,15 @@ def _execute(conn, **kwargs):
         cur_s, cur_e = None, None
 
         for row in cursor:
-            kernel_count += 1
             s, e = row[0], row[1]
+            if trim_start is not None:
+                s = max(s, trim_start)
+            if trim_end is not None:
+                e = min(e, trim_end)
+            if s >= e:
+                continue
+
+            kernel_count += 1
             if cur_s is None:
                 cur_s, cur_e = s, e
             elif s <= cur_e:

@@ -220,14 +220,12 @@ def _default_user_dir() -> Path:
 
 
 def _find_book_md() -> Path | None:
-    """Locate docs/root-causes/book.md relative to the package."""
+    """Locate data/book.md relative to the package."""
     # __file__ = src/nsys_ai/root_cause_store.py
     pkg_dir = Path(__file__).resolve().parent  # src/nsys_ai/
-    repo_root = pkg_dir.parent.parent  # nsys-tui/
 
     candidates = [
-        repo_root / "docs" / "root-causes" / "book.md",
-        pkg_dir / "docs" / "root-causes" / "book.md",
+        pkg_dir / "data" / "book.md",
     ]
     for c in candidates:
         if c.exists():
@@ -328,6 +326,13 @@ def submit_entry(
     # Sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", entry.name.lower().replace(" ", "_"))
     dest_file = dest / f"{safe_name}.md"
+
+    if dest_file.exists():
+        return entry, [
+            f"Submission rejected: destination file already exists: {dest_file}. "
+            "Please rename the entry or remove the existing file before submitting."
+        ]
+
     shutil.copy2(str(src), str(dest_file))
 
     entry.file_path = str(dest_file)
