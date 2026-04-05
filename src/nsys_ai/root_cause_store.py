@@ -209,7 +209,7 @@ def _load_dir_entries(directory: str | Path, source: str) -> list[RootCauseEntry
             entry = parse_entry(text, source=source, file_path=str(f))
             entries.append(entry)
         except Exception as e:
-            logger.warning(f"Failed to load user root cause from {f}: {e}")
+            logger.warning(f"Failed to load {source} root cause from {f}: {e}")
             continue
     return entries
 
@@ -320,6 +320,10 @@ def submit_entry(
     # Write to destination
     dest = Path(dest_dir) if dest_dir else _default_user_dir()
     dest.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.chmod(0o700)
+    except OSError:
+        pass
 
     # Sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", entry.name.lower().replace(" ", "_"))
@@ -332,6 +336,10 @@ def submit_entry(
         ]
 
     shutil.copy2(str(src), str(dest_file))
+    try:
+        dest_file.chmod(0o600)
+    except OSError:
+        pass
 
     entry.file_path = str(dest_file)
     return entry, []

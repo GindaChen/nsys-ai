@@ -91,46 +91,39 @@ def _execute(conn, **kwargs):
         params.extend([trim_start, trim_end])
 
     try:
-        count_cursor = conn.execute(
-            f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ? {trim_clause}",
+        cursor = conn.execute(
+            f'SELECT start, "end" FROM {kernel_table} '
+            f"WHERE deviceId = ? {trim_clause} ORDER BY start",
             params,
         )
-        k_count = count_cursor.fetchone()[0]
 
-        intervals = []
+        total_kernel_ns = 0
         kernel_count = 0
+        current_start = -1
+        current_end = -1
 
-        if k_count > 500_000:
-            logger.debug(f"Large kernel count ({k_count}), falling back to fast sum approximation to avoid OOM")
-            fast_curr = conn.execute(
-                f'SELECT SUM("end" - start) FROM {kernel_table} WHERE deviceId = ? {trim_clause}',
-                params,
-            )
-            total_kernel_ns = fast_curr.fetchone()[0] or 0
-            kernel_count = k_count
-        else:
-            cursor = conn.execute(
-                f'SELECT start, "end" FROM {kernel_table} '
-                f"WHERE deviceId = ? {trim_clause} ORDER BY start",
-                params,
-            )
+        for row in cursor:
+            s, e = row[0], row[1]
+            if trim_start is not None:
+                s = max(s, trim_start)
+            if trim_end is not None:
+                e = min(e, trim_end)
+            if s >= e:
+                continue
 
-            for row in cursor:
-                s, e = row[0], row[1]
-                if trim_start is not None:
-                    s = max(s, trim_start)
-                if trim_end is not None:
-                    e = min(e, trim_end)
-                if s >= e:
-                    continue
-
-                kernel_count += 1
-                intervals.append((s, e))
-
-            from nsys_ai.overlap import merge_intervals, total_covered
-
-            merged = merge_intervals(intervals)
-            total_kernel_ns = total_covered(merged)
+            kernel_count += 1
+            if current_start == -1:
+                current_start = s
+                current_end = e
+            elif s <= current_end:
+                current_end = max(current_end, e)
+            else:
+                total_kernel_ns += (current_end - current_start)
+                current_start = s
+                current_end = e
+                
+        if current_start != -1:
+            total_kernel_ns += (current_end - current_start)
 
     except _DB_ERRORS as e:
         logger.debug(f"Failed to fetch kernel intervals: {e}")
