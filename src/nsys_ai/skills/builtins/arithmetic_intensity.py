@@ -7,9 +7,21 @@ Since Nsight Systems .sqlite does NOT contain per-kernel FLOPs or bytes-moved
 (only NCU has that), this skill performs an **aggregate roofline estimation**.
 """
 
+import logging
+import sqlite3
+
+try:
+    import duckdb
+
+    _DB_ERRORS = (sqlite3.Error, duckdb.Error)
+except ImportError:
+    _DB_ERRORS = (sqlite3.Error,)
+
 from nsys_ai.hardware import get_peak_tflops
 
 from ..base import Skill, SkillParam, _resolve_activity_tables
+
+logger = logging.getLogger(__name__)
 
 
 def _execute(conn, **kwargs):
@@ -33,8 +45,8 @@ def _execute(conn, **kwargs):
             gpu_name = row[0] or "Unknown GPU"
             chip_name = row[1] or ""
             hbm_bw_raw = row[2] or 0
-    except Exception:
-        pass
+    except _DB_ERRORS as e:
+        logger.debug(f"Failed to fetch GPU info from TARGET_INFO_GPU: {e}")
 
     # Lookup from centralized hardware table, fallback to DB value
     spec1 = get_peak_tflops(chip_name)
@@ -85,9 +97,8 @@ def _execute(conn, **kwargs):
             params,
         )
 
-        total_kernel_ns = 0
+        intervals = []
         kernel_count = 0
-        cur_s, cur_e = None, None
 
         for row in cursor:
             s, e = row[0], row[1]
@@ -99,19 +110,15 @@ def _execute(conn, **kwargs):
                 continue
 
             kernel_count += 1
-            if cur_s is None:
-                cur_s, cur_e = s, e
-            elif s <= cur_e:
-                if e > cur_e:
-                    cur_e = e
-            else:
-                total_kernel_ns += cur_e - cur_s
-                cur_s, cur_e = s, e
+            intervals.append((s, e))
 
-        if cur_s is not None:
-            total_kernel_ns += cur_e - cur_s
+        from nsys_ai.overlap import merge_intervals, total_covered
 
-    except Exception:
+        merged = merge_intervals(intervals)
+        total_kernel_ns = total_covered(merged)
+
+    except _DB_ERRORS as e:
+        logger.debug(f"Failed to fetch kernel intervals: {e}")
         total_kernel_ns = 0
         kernel_count = 0
 
@@ -154,15 +161,15 @@ def _execute(conn, **kwargs):
     else:
         # Fallback heuristic based solely on MFU
         if mfu_pct >= 50:
-            classification = "High utilization (likely compute-bound)"
+            classification = "High kernel throughput (likely compute-bound)"
             severity = "info"
             recommendation = (
-                "Workload has good utilization. "
+                "Workload has good kernel throughput. "
                 "For further gains, consider kernel-level optimization with NCU "
                 "(occupancy, warp efficiency, instruction mix)."
             )
         elif mfu_pct >= 15:
-            classification = "Moderate utilization (mixed bound)"
+            classification = "Moderate kernel throughput (mixed bound)"
             severity = "warning"
             recommendation = (
                 "Workload is in a transition zone. "
@@ -170,7 +177,7 @@ def _execute(conn, **kwargs):
                 "using FlashAttention for attention kernels, or fusing small ops with torch.compile()."
             )
         elif mfu_pct >= 5:
-            classification = "Low utilization (likely memory-bound)"
+            classification = "Low kernel throughput (likely memory-bound)"
             severity = "warning"
             recommendation = (
                 "Kernels are likely bottlenecked by HBM bandwidth rather than compute. "
@@ -178,10 +185,10 @@ def _execute(conn, **kwargs):
                 "enable FlashAttention, or check for excessive memory-bound element-wise ops."
             )
         else:
-            classification = "Severely under-utilized"
+            classification = "Severely low kernel throughput"
             severity = "critical"
             recommendation = (
-                "GPU is severely under-utilized. Common causes: excessive CPU overhead, "
+                "GPU has severely low kernel throughput vs peak. Common causes: excessive CPU overhead, "
                 "pipeline bubbles, small batch sizes, or profiling during warmup. "
                 "Run gpu_idle_gaps and root_cause_matcher to diagnose."
             )

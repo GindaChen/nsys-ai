@@ -5,7 +5,7 @@ Manage, view, and submit root cause patterns in the local knowledge base.
 `nsys-ai` maintains a store of known GPU performance anti-patterns. These patterns provide the underlying knowledge for diagnostic skills like `root_cause_matcher`.
 
 The knowledge base is divided into three tiers:
-1. **Builtin**: Shipped with the package (`docs/root-causes/book.md`).
+1. **Builtin**: Shipped with the package (`src/nsys_ai/data/book.md`).
 2. **Community**: Contributed patterns (`docs/root-causes/community/*.md`).
 3. **User-local**: Custom patterns stored on the current machine (`~/.nsys-ai/root-causes/`).
 
