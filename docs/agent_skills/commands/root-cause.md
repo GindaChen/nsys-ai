@@ -6,7 +6,7 @@ Manage, view, and submit root cause patterns in the local knowledge base.
 
 The knowledge base is divided into three tiers:
 1. **Builtin**: Shipped with the package (`src/nsys_ai/data/book.md`).
-2. **Community**: Contributed patterns (`docs/root-causes/community/*.md`).
+2. **Community**: Contributed patterns (`docs/root-causes/community/*.md` — source checkout / editable installs only).
 3. **User-local**: Custom patterns stored on the current machine (`~/.nsys-ai/root-causes/`).
 
 ---

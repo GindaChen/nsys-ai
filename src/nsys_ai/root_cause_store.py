@@ -1,8 +1,8 @@
 """Root cause pattern store — parse, validate, submit, and list entries.
 
-Supports three sources:
-1. Built-in entries from ``docs/root-causes/book.md`` (shipped with the package)
-2. Community entries from ``docs/root-causes/community/*.md`` (PR-contributed)
+Supports packaged, user-local, and source-checkout markdown sources:
+1. Built-in entries from the package's bundled data (e.g., ``src/nsys_ai/data/book.md``)
+2. Community entries from ``docs/root-causes/community/*.md`` (source-checkout / editable install only)
 3. User-local entries from ``~/.nsys-ai/root-causes/*.md`` (personal)
 
 Each entry is a markdown file with YAML frontmatter.
@@ -275,8 +275,6 @@ def list_entries(root_causes_dir: str | None = None) -> list[RootCauseEntry]:
 # ---------------------------------------------------------------------------
 # Validation + submission
 # ---------------------------------------------------------------------------
-
-_REQUIRED_SECTIONS = {"symptom", "fix"}
 
 
 def validate_entry(entry: RootCauseEntry) -> list[str]:
