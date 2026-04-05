@@ -72,7 +72,15 @@ def _execute(conn, **kwargs):
         return [{"error": f"GPU {gpu_name} ({chip_name}) not found in hardware specs. Cannot compute roofline. Please explicitly provide 'peak_tflops' and optionally 'hbm_bw_gbps'."}]
 
     if hbm_bw_gbps is None:
-        hbm_bw_gbps = 2039.0  # Safe fallback for generic GPUs if missing
+        # Cannot determine HBM bandwidth — skip roofline classification,
+        # fall through to the MFU-only heuristic (ridge_point will be 0).
+        logger.warning(
+            "HBM bandwidth not detected for %s (%s); "
+            "roofline classification unavailable. "
+            "Provide 'hbm_bw_gbps' explicitly for full analysis.",
+            gpu_name, chip_name,
+        )
+        hbm_bw_gbps = 0.0
 
     peak_tflops = float(peak_tflops)
     hbm_bw_gbps = float(hbm_bw_gbps)
@@ -97,12 +105,20 @@ def _execute(conn, **kwargs):
             params,
         )
 
+        # O(1) streaming interval union: the query returns rows ORDER BY start,
+        # so we can compute the merged union in a single pass without materialising
+        # the full interval list.  This is deliberately inlined rather than using
+        # nsys_ai.overlap.merge_intervals (which requires O(N) memory).
         total_kernel_ns = 0
         kernel_count = 0
         current_start = -1
         current_end = -1
 
-        for row in cursor:
+        while True:
+            row = cursor.fetchone()
+            if row is None:
+                break
+            
             s, e = row[0], row[1]
             if trim_start is not None:
                 s = max(s, trim_start)
@@ -235,7 +251,7 @@ def _format(rows):
         f"  Ridge Point:      {r['ridge_point_flop_per_byte']} FLOP/Byte",
         "",
         f"  Kernel Union Time:  {r['kernel_union_ms']:.2f} ms  ({r['kernel_count']} kernels)",
-        f"  Achieved TFLOPS:    {r['achieved_tflops']}",
+        f"  Achieved TFLOPS:    {r['achieved_tflops']} TFLOPS",
         f"  MFU:                {r['mfu_pct']:.1f}%",
         "",
         f"  Classification:     {r['classification']}",

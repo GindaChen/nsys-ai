@@ -55,7 +55,22 @@ _SECTION_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Extract YAML frontmatter and body from markdown text."""
+    """Extract YAML frontmatter and body from markdown text.
+
+    This is a **minimal** parser that avoids a PyYAML dependency.
+    Supported constructs:
+
+    - ``key: value`` (scalar strings, numbers)
+    - ``key: [a, b, c]`` (inline lists)
+    - Multi-line lists::
+
+        key:
+        - item1
+        - item2
+
+    Unsupported: nested mappings, multi-line strings (``|``, ``>``),
+    anchors/aliases, and flow mappings.
+    """
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}, text
@@ -64,21 +79,30 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
     # Minimal YAML parser (no PyYAML dependency)
     meta: dict = {}
+    current_key: str | None = None
     for line in raw_yaml.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        if ":" not in line:
+        # Multi-line list item: "- value"
+        if stripped.startswith("- ") and current_key is not None:
+            if not isinstance(meta.get(current_key), list):
+                meta[current_key] = []
+            meta[current_key].append(stripped[2:].strip().strip("'\""))
             continue
-        key, _, val = line.partition(":")
+        if ":" not in stripped:
+            continue
+        key, _, val = stripped.partition(":")
         key = key.strip()
         val = val.strip()
-        # Handle list syntax: [a, b, c]
+        current_key = key
+        # Handle inline list syntax: [a, b, c]
         if val.startswith("[") and val.endswith("]"):
             items = [x.strip().strip("'\"") for x in val[1:-1].split(",")]
             meta[key] = [x for x in items if x]
-        else:
+        elif val:
             meta[key] = val.strip("'\"")
+        # else: val is empty, next lines may be "- item" list entries
     return meta, body
 
 
