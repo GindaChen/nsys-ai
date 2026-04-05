@@ -187,7 +187,7 @@ def _parse_book_md(book_path: str | Path) -> list[RootCauseEntry]:
     for i in range(1, len(parts) - 1, 2):
         title = parts[i].strip()
         content = parts[i + 1].strip()
-        
+
         entry_end_match = entry_end_pattern.search(content)
         if entry_end_match:
             content = content[:entry_end_match.start()].rstrip()
