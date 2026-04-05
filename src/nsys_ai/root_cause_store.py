@@ -186,10 +186,10 @@ def _parse_book_md(book_path: str | Path) -> list[RootCauseEntry]:
         title = parts[i].strip()
         content = parts[i + 1].strip()
 
-        # Extract sub-sections (### headings within this entry)
+        # Extract sub-sections using bold markers within this entry
         sub_sections: dict[str, str] = {}
-        h3_pattern = re.compile(r"^\*\*(.+?)\*\*(?:\s|:)", re.MULTILINE)
-        sub_parts = h3_pattern.split(content)
+        bold_section_pattern = re.compile(r"^\*\*(.+?)\*\*(?:\s|:)", re.MULTILINE)
+        sub_parts = bold_section_pattern.split(content)
         for j in range(1, len(sub_parts) - 1, 2):
             sub_heading = sub_parts[j].strip().rstrip(":").lower()
             sub_content = sub_parts[j + 1].strip()
