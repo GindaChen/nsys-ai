@@ -139,8 +139,8 @@ class Skill:
 
 
         # Compute profiler overhead union duration dynamically.
-        # Try the SELECT directly and catch DB_ERRORS if the table is absent,
-        # avoiding a redundant catalog scan (resolve_activity_tables already did one).
+        # Probe the known profiler overhead table-name variants directly and
+        # treat DB_ERRORS as "table not present" so we can fall back cleanly.
         if "overhead_ns" not in resolved:
             overhead_ns = 0
             for oh_table in ("profiler_overhead", "PROFILER_OVERHEAD"):
