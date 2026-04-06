@@ -203,6 +203,10 @@ def _execute(conn, **kwargs):
 
 def _infer_bottleneck(m: dict) -> str:
     """Heuristic bottleneck inference from manifest data."""
+    dq = m.get("data_quality", {})
+    if dq.get("overhead_pct", 0) > 1.0:
+        return f"Profiler Overhead ({dq['overhead_pct']}%) contaminated the profile"
+
     overlap = m.get("overlap", {})
     idle = m.get("idle", {})
     nccl = m.get("nccl", {})
@@ -226,10 +230,6 @@ def _infer_bottleneck(m: dict) -> str:
     # Check NCCL dominance
     if nccl.get("total_nccl_ms", 0) > overlap.get("compute_only_ms", float("inf")):
         return "Communication-bound (NCCL > compute)"
-
-    dq = m.get("data_quality", {})
-    if dq.get("overhead_pct", 0) > 1.0:
-        return f"Profiler Overhead ({dq['overhead_pct']}%) contaminated the profile"
 
     return ""
 

@@ -39,6 +39,7 @@ class TestManifestExecute:
             "idle",
             "root_cause_count",
             "root_causes",
+            "data_quality",
         ]
         for key in required_keys:
             assert key in m, f"Missing key '{key}' in manifest"
@@ -67,6 +68,17 @@ class TestManifestExecute:
         assert len(rows) == 1
         m = rows[0]
         assert m["nccl"]["streams"] == 0
+
+    def test_data_quality_metrics(self, minimal_nsys_conn, manifest_skill):
+        """Ensure data_quality metrics are properly computed."""
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        dq = rows[0]["data_quality"]
+
+        assert "profiler_overhead_ms" in dq
+        assert "overhead_pct" in dq
+
+        assert isinstance(dq["profiler_overhead_ms"], (int, float))
+        assert isinstance(dq["overhead_pct"], (int, float))
 
 
 class TestManifestFormat:
