@@ -8,7 +8,9 @@ Enhanced with:
 import logging
 import sqlite3
 
-from ..base import Skill, SkillParam, _resolve_activity_tables
+from nsys_ai.connection import DB_ERRORS, wrap_connection
+
+from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
 
@@ -44,25 +46,8 @@ def _classify_gap_apis(api_names: list[str]) -> tuple[str, str]:
 
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Execute GPU idle gaps analysis with aggregation and CPU attribution."""
-    import duckdb
-
-    if isinstance(conn, duckdb.DuckDBPyConnection):
-        # DuckDB has no row_factory; _execute_inner builds dicts via cursor.description
-        return _execute_inner(conn, **kwargs)
-
-    # Ensure row_factory is set for dict-like access from raw SQL
-    old_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        return _execute_inner(conn, **kwargs)
-    finally:
-        conn.row_factory = old_factory
-
-
-def _execute_inner(conn: sqlite3.Connection, **kwargs):
-    """Inner implementation (row_factory managed by _execute)."""
-
-    tables = _resolve_activity_tables(conn)
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
     kernel_tbl = tables.get("kernel")
     runtime_tbl = tables.get("runtime")
     if not kernel_tbl:
@@ -105,17 +90,11 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
 ORDER BY gap_ns DESC
 LIMIT ?"""
-    import sqlite3
-
-    import duckdb
-
-    from ...sql_compat import sqlite_to_duckdb
-
     try:
-        cur = conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit])
+        cur = adapter.execute(gap_sql, trim_params + [min_gap_ns, limit])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("gpu_idle_gaps: %s", e, exc_info=True)
         return []
 
@@ -153,14 +132,14 @@ SELECT COUNT(*) AS gap_count,
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     try:
-        cur_agg = conn.execute(sqlite_to_duckdb(agg_sql), trim_params + [min_gap_ns])
+        cur_agg = adapter.execute(agg_sql, trim_params + [min_gap_ns])
         agg_row = cur_agg.fetchone()
         if agg_row is not None:
             agg_cols = [d[0] for d in cur_agg.description]
             agg = dict(zip(agg_cols, agg_row))
         else:
             agg = {}
-    except (sqlite3.Error, duckdb.Error) as exc:
+    except DB_ERRORS as exc:
         _log.debug("gpu_idle_gaps aggregation query failed: %s", exc, exc_info=True)
         agg = {}
 
@@ -168,21 +147,17 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     # Gaps are summed across ALL streams, so we need to normalize by
     # the number of active streams to avoid pct > 100%.
     try:
-        time_range = conn.execute(
-            sqlite_to_duckdb(
-                f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"
-            ),
+        time_range = adapter.execute(
+            f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
             trim_params,
         ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
-        stream_count_row = conn.execute(
-            sqlite_to_duckdb(
-                f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"
-            ),
+        stream_count_row = adapter.execute(
+            f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
             trim_params,
         ).fetchone()
         n_streams = stream_count_row[0] if stream_count_row else 1
-    except (sqlite3.Error, duckdb.Error) as exc:
+    except DB_ERRORS as exc:
         _log.debug("gpu_idle_gaps profile span query failed: %s", exc, exc_info=True)
         profile_span_ns = 0
         n_streams = 1
@@ -214,9 +189,8 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             gap_start = gap["start_ns"]
             gap_end = gap["end_ns"]
             try:
-                cur_api = conn.execute(
-                    sqlite_to_duckdb(
-                        f"""\
+                cur_api = adapter.execute(
+                    f"""\
 SELECT s.value AS api_name, COUNT(*) AS call_count,
        SUM(r.[end] - r.start) AS total_ns
 FROM {runtime_tbl} r
@@ -224,14 +198,13 @@ JOIN StringIds s ON r.nameId = s.id
 WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
 ORDER BY total_ns DESC
-LIMIT 5"""
-                    ),
+LIMIT 5""",
                     (gap_end, gap_start),
                 )
                 api_rows = cur_api.fetchall()
                 api_cols = [d[0] for d in cur_api.description]
                 apis = [dict(zip(api_cols, r)) for r in api_rows]
-            except (sqlite3.Error, duckdb.Error) as exc:
+            except DB_ERRORS as exc:
                 _log.debug("gpu_idle_gaps CPU attribution query failed: %s", exc, exc_info=True)
                 apis = []
 

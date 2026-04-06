@@ -9,20 +9,13 @@ from ..base import Skill, SkillParam
 
 def _execute(conn: Any, *, limit: int = 10, **_kwargs):
     """Check for COMPOSITE_EVENTS table before querying."""
-    import duckdb as _ddb
+    from nsys_ai.connection import wrap_connection
+    adapter = wrap_connection(conn)
 
-    if isinstance(conn, _ddb.DuckDBPyConnection):
-        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    else:
-        tables = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
+    tables = adapter.get_table_names()
 
     if "COMPOSITE_EVENTS" not in tables:
         return []
-
-    from nsys_ai.sql_compat import sqlite_to_duckdb
 
     sql = f"""\
 SELECT ce.globalTid % 0x1000000 AS tid,
@@ -38,9 +31,7 @@ GROUP BY ce.globalTid
 ORDER BY cpu_pct DESC
 LIMIT {int(limit)}"""
 
-    if isinstance(conn, _ddb.DuckDBPyConnection):
-        sql = sqlite_to_duckdb(sql)
-    cursor = conn.execute(sql)
+    cursor = adapter.execute(sql)
     columns = [desc[0] for desc in cursor.description] if cursor.description else []
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 

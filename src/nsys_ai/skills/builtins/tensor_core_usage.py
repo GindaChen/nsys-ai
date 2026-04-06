@@ -5,6 +5,8 @@ acceleration (e.g. GEMM, Convolutions) and checks whether they successfully
 utilized the hardware Tensor Cores. Helps find FP32 fallbacks and alignment errors.
 """
 
+from nsys_ai.connection import DB_ERRORS
+
 from ..base import Skill, SkillParam
 
 
@@ -38,7 +40,7 @@ def _execute(conn, **kwargs):
         rows = conn.execute(sql, params).fetchall()
         cols = ["name", "total_ns", "call_count", "tc_active_ns", "tc_active_calls"]
         rows = [dict(zip(cols, r)) for r in rows]
-    except Exception:
+    except DB_ERRORS:
         return [
             {
                 "error": (

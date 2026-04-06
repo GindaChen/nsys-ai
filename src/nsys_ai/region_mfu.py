@@ -44,15 +44,6 @@ ErrorDict = dict[str, Any]
 RowDict = dict[str, Any]
 
 
-def _compat_execute(conn, sql, params=None):
-    """Execute SQL, translating bracket syntax for DuckDB connections."""
-    import duckdb as _ddb
-
-    if isinstance(conn, _ddb.DuckDBPyConnection):
-        from .sql_compat import sqlite_to_duckdb
-
-        sql = sqlite_to_duckdb(sql)
-    return conn.execute(sql, params or [])
 
 
 def _escape_like(value: str) -> str:
@@ -174,25 +165,7 @@ def compute_theoretical_flops(
     }
 
 
-def _detect_nvtx_text_id(conn: sqlite3.Connection) -> bool:
-    """Return True if NVTX_EVENTS uses textId -> StringIds."""
-    try:
-        import duckdb
 
-        if isinstance(conn, duckdb.DuckDBPyConnection):
-            cols = [r[0] for r in conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
-        else:
-            cur = conn.execute("PRAGMA table_info(NVTX_EVENTS)")
-            cols = [r[1] for r in cur.fetchall()]
-        return "textId" in cols
-    except (sqlite3.Error, ImportError) as exc:
-        _log.debug("NVTX textId detection failed: %s", exc, exc_info=True)
-        return False
-    except Exception as exc:
-        if type(exc).__module__.startswith("duckdb"):
-            _log.debug("NVTX textId detection failed (duckdb): %s", exc, exc_info=True)
-            return False
-        raise
 
 
 def find_nvtx_ranges(
@@ -211,7 +184,9 @@ def find_nvtx_ranges(
     if not nvtx_name:
         return []
 
-    has_text_id = _detect_nvtx_text_id(conn)
+    from .connection import wrap_connection
+    adapter = wrap_connection(conn)
+    has_text_id = adapter.detect_nvtx_text_id()
     if match_mode not in ("contains", "exact"):
         match_mode = "contains"
 
@@ -247,7 +222,7 @@ def find_nvtx_ranges(
 
     base_sql += "ORDER BY start_ns"
 
-    cur = _compat_execute(conn, base_sql, params)
+    cur = adapter.execute(base_sql, params)
     rows: list[RowDict] = []
     for text, start_ns, end_ns, global_tid in cur.fetchall():
         if text is None:
@@ -285,7 +260,8 @@ def _resolve_string_ids(
         sql = "SELECT id, value FROM StringIds WHERE value LIKE ? ESCAPE '\\'"
         params = [f"%{_escape_like(pattern)}%"]
 
-    cur = _compat_execute(conn, sql, params)
+    from .connection import wrap_connection
+    cur = wrap_connection(conn).execute(sql, params)
     return {int(row[0]): str(row[1]) for row in cur.fetchall()}
 
 
@@ -349,7 +325,8 @@ def find_kernels_by_name(
         f"ORDER BY k.start"
     )
 
-    cur = _compat_execute(conn, sql, params)
+    from .connection import wrap_connection
+    cur = wrap_connection(conn).execute(sql, params)
     kernels: list[RowDict] = []
     for short_id, start_ns, end_ns, duration_ns, dev, stream_id in cur.fetchall():
         d = int(duration_ns) if duration_ns is not None else int(end_ns) - int(start_ns)
@@ -434,7 +411,8 @@ def get_region_kernels(
         "ORDER BY start_ns"
     )
 
-    cur = _compat_execute(conn, sql, params)
+    from .connection import wrap_connection
+    cur = wrap_connection(conn).execute(sql, params)
     kernels: list[RowDict] = []
     for row in cur.fetchall():
         (

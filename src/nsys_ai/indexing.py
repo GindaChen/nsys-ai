@@ -29,50 +29,7 @@ def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
-    """Resolve Nsight activity table names (kernel/runtime/NVTX/memcpy/memset).
 
-    Nsight may emit versioned table names such as
-    ``CUPTI_ACTIVITY_KIND_KERNEL_V2``.
-    This helper finds the first matching table for each logical kind.
-    """
-    try:
-        tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
-    except Exception:
-        _log.debug("Failed to resolve activity tables for indexing", exc_info=True)
-        return {}
-
-    def _find_by_prefix(prefix: str) -> str | None:
-        if prefix in tables:
-            return prefix
-        candidates = sorted(t for t in tables if t.startswith(prefix))
-        return candidates[0] if candidates else None
-
-    kernel_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_KERNEL")
-    runtime_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_RUNTIME")
-    memcpy_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_MEMCPY")
-    memset_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_MEMSET")
-    if "NVTX_EVENTS" in tables:
-        nvtx_table: str | None = "NVTX_EVENTS"
-    else:
-        nvtx_table = _find_by_prefix("NVTX_EVENTS")
-
-    resolved: dict[str, str] = {}
-    if kernel_table:
-        resolved["kernel"] = kernel_table
-    if runtime_table:
-        resolved["runtime"] = runtime_table
-    if memcpy_table:
-        resolved["memcpy"] = memcpy_table
-    if memset_table:
-        resolved["memset"] = memset_table
-    if nvtx_table:
-        resolved["nvtx"] = nvtx_table
-
-    return resolved
 
 
 def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
@@ -85,19 +42,16 @@ def ensure_performance_indexes(conn: sqlite3.Connection) -> None:
     Index naming convention: ``_nsysai_<table_kind>_<column(s)>``
     """
     # DuckDB connections (Parquet cache) don't need SQLite indexes.
-    try:
-        import duckdb as _ddb
-
-        if isinstance(conn, _ddb.DuckDBPyConnection):
-            return
-    except ImportError:
-        pass
+    from .connection import DuckDBAdapter, wrap_connection
+    adapter = wrap_connection(conn)
+    if isinstance(adapter, DuckDBAdapter):
+        return
 
     conn_id = id(conn)
     if conn_id in _indexed_connections:
         return
 
-    tables = _resolve_activity_tables(conn)
+    tables = adapter.resolve_activity_tables()
 
     index_stmts: list[str] = []
 

@@ -10,10 +10,6 @@ import logging
 import re
 import sqlite3
 import threading
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import duckdb
 
 _log = logging.getLogger(__name__)
 
@@ -110,18 +106,19 @@ def query_profile_db(
             "SELECT start, [end], shortName FROM <table> WHERE ... LIMIT 20"
         )
 
-    import sqlite3
-
-    import duckdb
+    from nsys_ai.connection import DuckDBAdapter, SQLiteAdapter, wrap_connection
+    adapter = wrap_connection(conn)
+    is_duckdb = isinstance(adapter, DuckDBAdapter)
+    is_sqlite = isinstance(adapter, SQLiteAdapter)
 
     # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
-    if "SQLITE_MASTER" in upper and isinstance(conn, duckdb.DuckDBPyConnection):
+    if "SQLITE_MASTER" in upper and is_duckdb:
         q = "SHOW TABLES"
         upper = "SHOW TABLES"
 
     # SQLite fallback: support DuckDB-style helper commands used in docs.
     # This keeps schema discovery working even when DuckDB is unavailable.
-    if isinstance(conn, sqlite3.Connection):
+    if is_sqlite:
         if upper == "SHOW TABLES":
             q = (
                 "SELECT name AS table_name "
@@ -133,23 +130,25 @@ def query_profile_db(
             rest = q[9:].strip()
             table_token = rest.split(None, 1)[0] if rest else ""
             table_name = table_token.strip("'\"`[]")
-            safe_table_name = table_name.replace("'", "''")
-            q = f"PRAGMA table_info('{safe_table_name}')"
+
+            from nsys_ai.connection import is_safe_identifier
+            if not is_safe_identifier(table_name):
+                return f"Error: Invalid or unsafe table name '{table_name}'."
+
+            q = f"PRAGMA table_info('{table_name}')"
             upper = q.upper()
 
-    # DuckDB translation for LLM-generated SQL
-    if (
-        isinstance(conn, duckdb.DuckDBPyConnection)
-        and "SHOW TABLES" not in upper
-        and "DESCRIBE " not in upper
-    ):
-        from nsys_ai.sql_compat import sqlite_to_duckdb
-
-        q = sqlite_to_duckdb(q)
-        upper = q.upper()
+    # Adapter handles sqlite_to_duckdb automatically, so we don't need manual translation here anymore
 
     # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
     effective_limit = _adaptive_limit(upper, max_limit)
+
+    error_types = (sqlite3.Error,)
+    try:
+        import duckdb
+        error_types = error_types + (duckdb.Error,)
+    except ImportError:
+        pass
 
     # Enforce LIMIT only on SELECT/WITH/FROM queries to avoid syntax errors on PRAGMA/SHOW
     if upper.startswith(("SELECT", "WITH", "(", "FROM")):
@@ -168,16 +167,14 @@ def query_profile_db(
             q = q + f" LIMIT {effective_limit}"
 
     try:
-        cur = conn.execute(q)
+        cur = adapter.execute(q)
         # duckdb cursor fetchall returns list of tuples
         rows = cur.fetchall()
 
         # Determine column names (works for both duckdb and sqlite)
         names = [d[0] for d in cur.description] if cur.description else []
 
-        if getattr(conn, "row_factory", None) is sqlite3.Row and not isinstance(
-            conn, duckdb.DuckDBPyConnection
-        ):
+        if getattr(conn, "row_factory", None) is sqlite3.Row and is_sqlite:
             out = [dict(r) for r in rows]
         else:
             out = [dict(zip(names, r)) for r in rows]
@@ -206,12 +203,12 @@ def query_profile_db(
                 "(e.g. start, [end], shortName) or reduce the LIMIT."
             )
         return json_str
-    except (sqlite3.Error, duckdb.Error) as e:
+    except error_types as e:
         return f"Error: Database error: {e}"
 
 
 def get_profile_schema(
-    conn: "sqlite3.Connection | duckdb.DuckDBPyConnection",
+    conn,
     table_names: tuple[str, ...] | None = None,
 ) -> str:
     """
@@ -241,25 +238,26 @@ def get_profile_schema(
 
     parts = []
 
-    # Support DuckDB connection
-    import duckdb
+    from nsys_ai.connection import DB_ERRORS, DuckDBAdapter, wrap_connection
+    adapter = wrap_connection(conn)
+    is_duckdb = isinstance(adapter, DuckDBAdapter)
 
-    if isinstance(conn, duckdb.DuckDBPyConnection):
+    if is_duckdb:
         # In DuckDB, views from parquet_cache don't have detailed DDL in duckdb_views()
         # so we just return DESCRIBE for each table
         for table in want:
             try:
-                cur = conn.execute(f"DESCRIBE {table}")
+                cur = adapter.execute(f"DESCRIBE {table}")
                 cols = [f"  {r[0]} {r[1]}" for r in cur.fetchall()]
                 parts.append(f"CREATE TABLE {table} (\n" + ",\n".join(cols) + "\n);")
-            except duckdb.Error:
+            except DB_ERRORS:
                 pass
         return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
 
     # Standard SQLite path
     placeholders = ",".join("?" * len(want))
     try:
-        cur = conn.execute(
+        cur = adapter.execute(
             f"SELECT name, sql FROM sqlite_master WHERE type='table' AND name IN ({placeholders})",
             want,
         )
@@ -281,7 +279,7 @@ _schema_cache_lock = threading.Lock()
 
 
 def get_profile_schema_cached(
-    conn: "sqlite3.Connection | duckdb.DuckDBPyConnection", path: str | None = None
+    conn, path: str | None = None
 ) -> str:
     """
     Return schema for the given connection, using a cache keyed by path when provided.
@@ -301,7 +299,7 @@ def get_profile_schema_cached(
     return schema
 
 
-def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
+def open_profile_readonly(path: str):
     """Open a profile in read-only mode, using DuckDB Parquet cache if available.
 
     Note: If the Parquet cache is missing or stale, this function will build
@@ -323,7 +321,7 @@ def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Con
     return conn
 
 
-def open_profile_readonly_for_worker(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
+def open_profile_readonly_for_worker(path: str):
     """
     Open a read-only profile connection for use from a worker thread.
 

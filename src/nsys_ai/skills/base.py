@@ -21,66 +21,6 @@ _indexed_connections: set[int] = set()
 # hard-coding them here.
 
 
-def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
-    """Resolve Nsight activity table names (kernel/runtime/NVTX) from sqlite_master.
-
-    Nsight may emit versioned table names such as
-    CUPTI_ACTIVITY_KIND_KERNEL_V2.
-    This helper finds the first matching table for each logical kind.
-    """
-    try:
-        # DuckDB: use SHOW TABLES; SQLite: use sqlite_master
-        import duckdb as _ddb
-
-        if isinstance(conn, _ddb.DuckDBPyConnection):
-            tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
-        else:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-    except (sqlite3.Error, ImportError) as exc:
-        _log.debug("Failed to resolve activity tables: %s", exc, exc_info=True)
-        return {}
-    except Exception as exc:
-        # Catch duckdb.Error without importing duckdb at module level
-        if type(exc).__module__.startswith("duckdb"):
-            _log.debug("Failed to resolve activity tables (duckdb): %s", exc, exc_info=True)
-            return {}
-        raise
-
-    def _find_by_prefix(prefix: str) -> str | None:
-        if prefix in tables:
-            return prefix
-        candidates = sorted(t for t in tables if t.startswith(prefix))
-        return candidates[0] if candidates else None
-
-    kernel_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_KERNEL")
-    runtime_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_RUNTIME")
-    memcpy_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_MEMCPY")
-    memset_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_MEMSET")
-    if "NVTX_EVENTS" in tables:
-        nvtx_table = "NVTX_EVENTS"
-    else:
-        nvtx_table = _find_by_prefix("NVTX_EVENTS")
-
-    resolved: dict[str, str] = {}
-    if kernel_table:
-        resolved["kernel"] = kernel_table
-    if runtime_table:
-        resolved["runtime"] = runtime_table
-    if memcpy_table:
-        resolved["memcpy"] = memcpy_table
-    if memset_table:
-        resolved["memset"] = memset_table
-    if nvtx_table:
-        resolved["nvtx"] = nvtx_table
-
-    return resolved
-
-
 def ensure_indexes(conn: sqlite3.Connection) -> None:
     """Create performance indexes on the profile DB if they don't already exist.
 
@@ -149,6 +89,9 @@ class Skill:
         # Auto-create performance indexes (one-time per connection).
         ensure_indexes(conn)
 
+        from ..connection import wrap_connection
+        adapter = wrap_connection(conn)
+
         # Apply parameter defaults and required checks for all skill types.
         # Start from the provided kwargs so we preserve any extra arguments.
         resolved: dict[str, object] = dict(kwargs)
@@ -181,7 +124,7 @@ class Skill:
         # SQL templates use {kernel_table} etc. instead of hardcoding
         # CUPTI_ACTIVITY_KIND_KERNEL which may be _KERNEL_V2/_V3 in
         # newer Nsight Systems versions.
-        tables = _resolve_activity_tables(conn)
+        tables = adapter.resolve_activity_tables()
         resolved.setdefault(
             "kernel_table",
             tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
@@ -205,30 +148,8 @@ class Skill:
 
         # NVTX text resolution: handle both legacy (text column only)
         # and modern schemas (textId → StringIds lookup).
-        nvtx_tbl = resolved.get("nvtx_table", "NVTX_EVENTS")
         if "{nvtx_text_expr}" in self.sql or "{nvtx_text_join}" in self.sql:
-            try:
-                import duckdb as _ddb
-
-                if isinstance(conn, _ddb.DuckDBPyConnection):
-                    cols = [r[0] for r in conn.execute(f"DESCRIBE {nvtx_tbl}").fetchall()]
-                    has_textid = "textId" in cols
-                else:
-                    has_textid = (
-                        conn.execute(
-                            f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_tbl}') WHERE name='textId'"
-                        ).fetchone()[0]
-                        > 0
-                    )
-            except (sqlite3.Error, ImportError) as exc:
-                _log.debug("NVTX textId detection failed: %s", exc, exc_info=True)
-                has_textid = False
-            except Exception as exc:
-                if type(exc).__module__.startswith("duckdb"):
-                    _log.debug("NVTX textId detection failed (duckdb): %s", exc, exc_info=True)
-                    has_textid = False
-                else:
-                    raise
+            has_textid = adapter.detect_nvtx_text_id()
             if has_textid:
                 resolved.setdefault("nvtx_text_expr", "COALESCE(n.text, s2.value)")
                 resolved.setdefault("nvtx_text_join", "LEFT JOIN StringIds s2 ON n.textId = s2.id")
@@ -237,15 +158,8 @@ class Skill:
                 resolved.setdefault("nvtx_text_join", "")
 
         sql = self.sql.format(**resolved) if resolved else self.sql
-        # Apply DuckDB SQL translation if needed
-        import duckdb as _ddb
-
-        if isinstance(conn, _ddb.DuckDBPyConnection):
-            from nsys_ai.sql_compat import sqlite_to_duckdb
-
-            sql = sqlite_to_duckdb(sql)
         try:
-            cursor = conn.execute(sql)
+            cursor = adapter.execute(sql)
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
         except Exception as exc:

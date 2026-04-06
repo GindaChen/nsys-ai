@@ -8,6 +8,8 @@ logic that can't be expressed in a single SQL query.
 
 import logging
 
+from nsys_ai.connection import DB_ERRORS
+
 from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ def _execute(conn, **kwargs):
             )
             if same_stream:
                 result["same_stream_diagnosis"] = [str(r["streamId"]) for r in same_stream]
-    except Exception:
+    except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
 
     result["device_id"] = device

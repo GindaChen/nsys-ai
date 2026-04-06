@@ -215,11 +215,12 @@ class TestDuckDBCompatibilityFixes:
         assert isinstance(rows, list)
 
     def test_region_mfu_detect_nvtx_text_id(self, duckdb_conn):
-        """region_mfu._detect_nvtx_text_id should use DESCRIBE for DuckDB."""
-        from nsys_ai.region_mfu import _detect_nvtx_text_id
+        """ConnectionAdapter.detect_nvtx_text_id should use DESCRIBE for DuckDB."""
+        from nsys_ai.connection import wrap_connection
 
         # Our mock duckdb_conn has an NVTX_EVENTS table with textId
-        has_text_id = _detect_nvtx_text_id(duckdb_conn)
+        adapter = wrap_connection(duckdb_conn)
+        has_text_id = adapter.detect_nvtx_text_id()
         assert has_text_id is True
 
     def test_profile_metadata_discovery(self, duckdb_conn):

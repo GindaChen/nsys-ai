@@ -23,7 +23,6 @@ from nsys_ai.exceptions import (
     ExportToolMissingError,
     SchemaError,
 )
-from nsys_ai.sql_compat import sqlite_to_duckdb
 
 # Regex for safe SQL identifiers (table/column names).
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -51,14 +50,11 @@ class NsightSchema:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        import duckdb as _ddb
+        from .connection import wrap_connection
+        self._adapter = wrap_connection(conn)
 
-        if isinstance(conn, _ddb.DuckDBPyConnection):
-            cur = self._conn.execute("SHOW TABLES")
-            self.tables: list[str] = [r[0] for r in cur.fetchall()]
-        else:
-            cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            self.tables: list[str] = [r[0] for r in cur.fetchall()]
+        self.tables = list(self._adapter.get_table_names())
+
         self.version: str | None = self._detect_version()
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
@@ -73,14 +69,7 @@ class NsightSchema:
         if table not in self.tables:
             return {}
 
-        import duckdb as _ddb
-
-        if isinstance(self._conn, _ddb.DuckDBPyConnection):
-            cur = self._conn.execute(f"DESCRIBE {table}")
-            cols = [row[0] for row in cur.fetchall()]  # 0 = column_name
-        else:
-            cur = self._conn.execute(f"PRAGMA table_info({table})")
-            cols = [row[1] for row in cur.fetchall()]  # 1 = name
+        cols = self._adapter.get_table_columns(table)
         key_col = None
         val_col = None
 
@@ -194,9 +183,11 @@ class Profile:
         self._owns_conn = True
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        from .connection import wrap_connection
+        self.adapter = wrap_connection(self.conn)
         self.schema = NsightSchema(self.conn)
         self.meta = self._discover()
-        self._nvtx_has_text_id: bool = self._detect_nvtx_text_id()
+        self._nvtx_has_text_id: bool = self.adapter.detect_nvtx_text_id()
 
         # DuckDB connection strategy — see parquet_cache module
         try:
@@ -236,9 +227,9 @@ class Profile:
         The connection is borrowed — ``close()`` will NOT close it.
         Supports both SQLite and DuckDB connections.
         """
-        import duckdb
-
-        is_duckdb = isinstance(conn, duckdb.DuckDBPyConnection)
+        from .connection import DuckDBAdapter, wrap_connection
+        adapter = wrap_connection(conn)
+        is_duckdb = isinstance(adapter, DuckDBAdapter)
         if not is_duckdb:
             conn.row_factory = sqlite3.Row
         obj = cls.__new__(cls)
@@ -247,28 +238,13 @@ class Profile:
         obj._owns_conn = False
         obj.path = ""
         obj.db = conn if is_duckdb else None  # type: ignore[assignment]
+        obj.adapter = adapter
         obj.schema = NsightSchema(conn)
         obj.meta = obj._discover()
-        obj._nvtx_has_text_id = obj._detect_nvtx_text_id()
+        obj._nvtx_has_text_id = obj.adapter.detect_nvtx_text_id()
         return obj
 
-    def _detect_nvtx_text_id(self) -> bool:
-        """Return True if NVTX_EVENTS uses textId -> StringIds (newer schema)."""
-        if "NVTX_EVENTS" not in self.schema.tables:
-            return False
-        try:
-            import duckdb
 
-            if isinstance(self.conn, duckdb.DuckDBPyConnection):
-                cols = [r[0] for r in self.conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
-            else:
-                cols = [
-                    r[1] for r in self.conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()
-                ]
-            return "textId" in cols
-        except (sqlite3.Error, duckdb.Error):
-            self._log.debug("NVTX textId detection failed", exc_info=True)
-            return False
 
     def _discover(self) -> ProfileMeta:
         tables = self.schema.tables
@@ -285,29 +261,24 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        import duckdb
-
-        is_duckdb = isinstance(self.conn, duckdb.DuckDBPyConnection)
-
         devices = [
             r[0]
-            for r in self.conn.execute(
+            for r in self.adapter.execute(
                 f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
             ).fetchall()
         ]
 
         streams: dict[int, list[int]] = {}
-        for r in self.conn.execute(
+        for r in self.adapter.execute(
             f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
         ).fetchall():
             streams.setdefault(r[0], []).append(r[1])
 
-        end_col = '"end"' if is_duckdb else "[end]"
-        tr = self.conn.execute(f"SELECT MIN(start), MAX({end_col}) FROM {kernel_table}").fetchone()
+        tr = self.adapter.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
 
-        kc = self.conn.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
+        kc = self.adapter.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
         nc = (
-            self.conn.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
+            self.adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
             if "NVTX_EVENTS" in tables
             else 0
         )
@@ -664,18 +635,24 @@ class Profile:
         """
         conn = self.db if self.db is not None else self.conn
 
-        if isinstance(conn, duckdb.DuckDBPyConnection):
-            ddb_sql = sqlite_to_duckdb(sql)
-            with self._lock:
-                cur = conn.execute(ddb_sql, params or [])
+        from .connection import DuckDBAdapter, wrap_connection
+        # Always wrap the actual connection being used — self.adapter may
+        # reference self.conn (SQLite) while conn here is self.db (DuckDB).
+        adapter = wrap_connection(conn)
+
+        is_duckdb = isinstance(adapter, DuckDBAdapter)
+
+        if not is_duckdb and not getattr(self, "_warned_sqlite_fallback", False):
+            self._log.warning("DuckDB cache unavailable or not in use; falling back to SQLite (slower)")
+            self._warned_sqlite_fallback = True
+
+        with self._lock:
+            cur = adapter.execute(sql, params or [])
+            if is_duckdb:
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
-        else:
-            if not getattr(self, "_warned_sqlite_fallback", False):
-                self._log.warning("DuckDB unavailable, falling back to SQLite (slower)")
-                self._warned_sqlite_fallback = True
-            with self._lock:
-                return [dict(r) for r in conn.execute(sql, params or [])]
+            else:
+                return [dict(r) for r in cur.fetchall()]
 
     def close(self):
         # Close the primary connection only if we own it.
@@ -765,13 +742,9 @@ def get_first_gpu_name(conn) -> str:
 
     Accepts both sqlite3.Connection and duckdb.DuckDBPyConnection.
     """
-    if isinstance(conn, duckdb.DuckDBPyConnection):
-        try:
-            tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
-        except duckdb.Error:
-            return ""
-    else:
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    from .connection import wrap_connection
+    adapter = wrap_connection(conn)
+    tables = adapter.get_table_names()
     if "TARGET_INFO_GPU" not in tables and "gpu_info" not in tables:
         return ""
     if "TARGET_INFO_CUDA_DEVICE" not in tables and "cuda_device" not in tables:
@@ -779,7 +752,7 @@ def get_first_gpu_name(conn) -> str:
     # Use Parquet view names if available, otherwise original SQLite names
     gpu_tbl = "gpu_info" if "gpu_info" in tables else "TARGET_INFO_GPU"
     dev_tbl = "cuda_device" if "cuda_device" in tables else "TARGET_INFO_CUDA_DEVICE"
-    row = conn.execute(f"""
+    row = adapter.execute(f"""
         SELECT g.name
         FROM {gpu_tbl} g
         JOIN {dev_tbl} c ON g.id = c.gpuId

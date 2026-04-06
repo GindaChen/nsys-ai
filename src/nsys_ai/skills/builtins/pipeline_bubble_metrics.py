@@ -7,7 +7,9 @@ of SQL window functions, which are prohibitively slow on large profiles.
 import logging
 import sqlite3
 
-from ..base import Skill, _resolve_activity_tables
+from nsys_ai.connection import wrap_connection
+
+from ..base import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ def _format(rows):
 
 
 def _execute(conn, **kwargs):
-    tables = _resolve_activity_tables(conn)
+    tables = wrap_connection(conn).resolve_activity_tables()
     kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
     memcpy_table = tables.get("memcpy")
     memset_table = tables.get("memset")

@@ -4,10 +4,11 @@ from ..base import Skill
 
 
 def _execute(conn, **kwargs):
-    import duckdb
+    from nsys_ai.connection import DuckDBAdapter, wrap_connection
+    adapter = wrap_connection(conn)
 
-    if isinstance(conn, duckdb.DuckDBPyConnection):
-        cur = conn.execute(
+    if isinstance(adapter, DuckDBAdapter):
+        cur = adapter.execute(
             """
             SELECT table_name,
                    column_name,
@@ -33,7 +34,7 @@ def _execute(conn, **kwargs):
           AND m.name NOT LIKE 'sqlite_%'
         ORDER BY m.name, p.cid
         """
-        cur = conn.execute(sql)
+        cur = adapter.execute(sql)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 

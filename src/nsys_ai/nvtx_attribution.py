@@ -39,10 +39,9 @@ def _sort_merge_attribute(
     Overall complexity is O(N+M) per thread (each NVTX is pushed and
     popped at most once; each runtime call is processed once).
     """
-    # Detect versioned table names
-    from .skills.base import _resolve_activity_tables
-
-    resolved_tables = _resolve_activity_tables(conn)
+    from .connection import wrap_connection
+    adapter = wrap_connection(conn)
+    resolved_tables = adapter.resolve_activity_tables()
 
     kernel_table = resolved_tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
     runtime_table = resolved_tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
@@ -55,20 +54,14 @@ def _sort_merge_attribute(
         trim_sql = "AND k.start >= ? AND k.[end] <= ?"
         trim_params = (trim[0], trim[1])
 
-    # Phase 1: Kernel → Runtime via correlationId (indexed, fast)
-    from .sql_compat import sqlite_to_duckdb
-
-    kr_rows = conn.execute(
-        sqlite_to_duckdb(
+    kr_rows = adapter.execute(
             f"""
         SELECT r.globalTid, r.start, r.[end],
                k.start AS ks, k.[end] AS ke, k.shortName
         FROM {kernel_table} k
         JOIN {runtime_table} r ON r.correlationId = k.correlationId
         WHERE 1=1 {trim_sql}
-        ORDER BY r.globalTid, r.start
-        """
-        ),
+        """,
         trim_params,
     ).fetchall()
 
@@ -76,23 +69,7 @@ def _sort_merge_attribute(
         return []
 
     # Phase 2: Load NVTX ranges (eventType 59 = NVTX push/pop range)
-    # Resolve text expression (handles textId vs text column)
-    has_textid = False
-    try:
-        import duckdb as _ddb
-
-        if isinstance(conn, _ddb.DuckDBPyConnection):
-            cols = [c[0] for c in conn.execute(f"DESCRIBE {nvtx_table}").fetchall()]
-            has_textid = "textId" in cols
-        else:
-            has_textid = (
-                conn.execute(
-                    f"SELECT COUNT(*) FROM pragma_table_info('{nvtx_table}') WHERE name='textId'"
-                ).fetchone()[0]
-                > 0
-            )
-    except Exception:
-        _log.debug("NVTX textId detection failed", exc_info=True)
+    has_textid = adapter.detect_nvtx_text_id()
 
     if has_textid:
         text_expr = "COALESCE(n.text, s.value)"
@@ -101,8 +78,7 @@ def _sort_merge_attribute(
         text_expr = "n.text"
         text_join = ""
 
-    nvtx_rows = conn.execute(
-        sqlite_to_duckdb(
+    nvtx_rows = adapter.execute(
             f"""
         SELECT n.globalTid, n.start, n.[end], {text_expr} AS text
         FROM {nvtx_table} n
@@ -110,14 +86,13 @@ def _sort_merge_attribute(
         WHERE n.eventType = 59 AND n.[end] > n.start
         ORDER BY n.globalTid, n.start
         """
-        )
     ).fetchall()
 
     # StringIds lookup for kernel names — only fetch the IDs we need
     short_name_ids = {r[5] for r in kr_rows if r[5] is not None}
     if short_name_ids:
         placeholders = ",".join("?" for _ in short_name_ids)
-        sid_rows = conn.execute(
+        sid_rows = adapter.execute(
             f"SELECT id, value FROM StringIds WHERE id IN ({placeholders})",
             tuple(short_name_ids),
         ).fetchall()
@@ -218,16 +193,17 @@ def attribute_kernels_to_nvtx(
 
     # DuckDB: Try reading from purely precomputed Parquet bounds!
     try:
-        import duckdb as _ddb
+        from .connection import DuckDBAdapter, wrap_connection
+        adapter = wrap_connection(conn)
 
-        if isinstance(conn, _ddb.DuckDBPyConnection):
+        if isinstance(adapter, DuckDBAdapter):
             trim_sql = ""
             params = []
             if trim:
                 trim_sql = "WHERE k_start >= ? AND k_end <= ?"
                 params = [trim[0], trim[1]]
 
-            cur = conn.execute(f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start", params)
+            cur = adapter.execute(f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start", params)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     except Exception:

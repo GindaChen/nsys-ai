@@ -17,9 +17,10 @@ try:
 except ImportError:
     _DB_ERRORS = (sqlite3.Error,)
 
+from nsys_ai.connection import wrap_connection
 from nsys_ai.hardware import get_peak_tflops
 
-from ..base import Skill, SkillParam, _resolve_activity_tables
+from ..base import Skill, SkillParam
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def _execute(conn, **kwargs):
     theoretical_flops = float(kwargs["theoretical_flops"])
     device = int(kwargs.get("device", 0))
 
-    tables = _resolve_activity_tables(conn)
+    tables = wrap_connection(conn).resolve_activity_tables()
     kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
 
     # --- Get GPU hardware spec ---

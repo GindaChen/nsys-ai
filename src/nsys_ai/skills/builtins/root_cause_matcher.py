@@ -16,11 +16,9 @@ to gather evidence, then matches against known patterns.
 import logging
 import sqlite3
 
-import duckdb
+from nsys_ai.connection import DB_ERRORS, wrap_connection
 
-from nsys_ai.sql_compat import sqlite_to_duckdb
-
-from ..base import Skill, SkillParam, _resolve_activity_tables
+from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
 
@@ -342,7 +340,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
     Returns dict with 'cause' ('same_stream', 'sync_after_nccl', 'general')
     and 'detail' string.
     """
-    tables = _resolve_activity_tables(conn)
+    tables = wrap_connection(conn).resolve_activity_tables()
     kernel_tbl = tables.get("kernel")
     runtime_tbl = tables.get("runtime")
 
@@ -374,7 +372,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
                 "cause": "same_stream",
                 "detail": (f"Stream(s) [{', '.join(streams)}] run both NCCL and compute kernels"),
             }
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("_diagnose_low_overlap (same_stream): %s", e, exc_info=True)
 
     # --- Check 2: Sync-after-NCCL detection ---
@@ -394,8 +392,8 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
 
                 # Single query: check if ANY sync call starts within 1ms
                 # after ANY NCCL kernel's end time (avoids N+1 loop).
-                found = conn.execute(
-                    sqlite_to_duckdb(
+                adapter = wrap_connection(conn)
+                found = adapter.execute(
                         f"""
                     SELECT 1 FROM {kernel_tbl} k
                     JOIN StringIds s ON k.shortName = s.id
@@ -408,8 +406,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
                             AND r.start <= k.[end] + 1000000
                       )
                     LIMIT 1
-                    """
-                    ),
+                    """,
                     [device] + sync_id_list,
                 ).fetchone()
                 if found:
@@ -420,7 +417,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
                             "detected immediately after NCCL kernel completion"
                         ),
                     }
-        except (sqlite3.Error, duckdb.Error) as e:
+        except DB_ERRORS as e:
             _log.debug("_diagnose_low_overlap (sync_after_nccl): %s", e, exc_info=True)
 
     return {"cause": "general", "detail": ""}
@@ -584,9 +581,8 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
     Note: Nsight exports use versioned API names (e.g. cudaDeviceSynchronize_v3020),
     so we use LIKE prefix matching via a two-step nameId resolution.
     """
-    from ...sql_compat import sqlite_to_duckdb
-
-    tables = _resolve_activity_tables(conn)
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
     runtime_tbl = tables.get("runtime")
     kernel_tbl = tables.get("kernel")
     if not runtime_tbl:
@@ -594,14 +590,14 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: resolve nameIds from StringIds (fast, tiny table)
-        sync_names = conn.execute(
-            sqlite_to_duckdb("""
+        sync_names = adapter.execute(
+            """
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaDeviceSynchronize%'
                OR value LIKE 'cudaStreamSynchronize%'
                OR value LIKE 'cudaEventSynchronize%'
                OR value LIKE 'cudaStreamWaitEvent%'
-        """)
+        """
         ).fetchall()
         if not sync_names:
             return []
@@ -610,14 +606,14 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: count sync calls by nameId (fast with index)
-        rows = conn.execute(
-            sqlite_to_duckdb(f"""
+        rows = adapter.execute(
+            f"""
             SELECT nameId, COUNT(*) AS call_count,
                    SUM([end] - start) AS total_ns
             FROM {runtime_tbl}
             WHERE nameId IN ({placeholders})
             GROUP BY nameId
-        """)
+        """
         ).fetchall()
         if not rows:
             return []
@@ -633,8 +629,8 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         # Total GPU kernel time as baseline for percentage threshold
         total_gpu_ns = 0
         if kernel_tbl:
-            gpu_row = conn.execute(
-                sqlite_to_duckdb(f"SELECT SUM([end] - start) FROM {kernel_tbl}")
+            gpu_row = adapter.execute(
+                f"SELECT SUM([end] - start) FROM {kernel_tbl}"
             ).fetchone()
             total_gpu_ns = gpu_row[0] or 0 if gpu_row else 0
 
@@ -658,7 +654,7 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
                     ),
                 }
             ]
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("root_cause_matcher (_check_sync_apis): %s", e, exc_info=True)
     return []
 
@@ -672,9 +668,8 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
     Note: Nsight exports use versioned API names (e.g. cudaMemcpy_v3020).
     We match any name starting with 'cudaMemcpy' but NOT 'cudaMemcpyAsync'.
     """
-    from ...sql_compat import sqlite_to_duckdb
-
-    tables = _resolve_activity_tables(conn)
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
     runtime_tbl = tables.get("runtime")
     memcpy_tbl = tables.get("memcpy")
     if not runtime_tbl or not memcpy_tbl:
@@ -682,12 +677,12 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: find nameIds for sync cudaMemcpy (NOT async)
-        sync_names = conn.execute(
-            sqlite_to_duckdb("""
+        sync_names = adapter.execute(
+            """
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaMemcpy%'
               AND value NOT LIKE 'cudaMemcpyAsync%'
-        """)
+        """
         ).fetchall()
         if not sync_names:
             return []
@@ -696,15 +691,15 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: find memcpy ops correlated with sync runtime calls
-        row = conn.execute(
-            sqlite_to_duckdb(f"""
+        row = adapter.execute(
+            f"""
             SELECT COUNT(*) AS count,
                    COALESCE(SUM(m.bytes), 0) AS total_bytes,
                    COALESCE(SUM(m.[end] - m.start), 0) AS total_ns
             FROM {runtime_tbl} r
             JOIN {memcpy_tbl} m ON r.correlationId = m.correlationId
             WHERE r.nameId IN ({placeholders})
-        """)
+        """
         ).fetchone()
         if not row or row[0] == 0:
             return []
@@ -728,7 +723,7 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
                 ),
             }
         ]
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("root_cause_matcher (_check_sync_memcpy): %s", e, exc_info=True)
     return []
 
@@ -744,22 +739,21 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
       4 = Managed, 5 = Device Static, 6 = Managed Static, 7 = Pinned
     Source: CUPTI_ACTIVITY_KIND_MEMCPY table schema, Nsight Systems export.
     """
-    from ...sql_compat import sqlite_to_duckdb
-
-    tables = _resolve_activity_tables(conn)
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
     memcpy_tbl = tables.get("memcpy")
     if not memcpy_tbl:
         return []
 
     try:
-        row = conn.execute(
-            sqlite_to_duckdb(f"""
+        row = adapter.execute(
+            f"""
             SELECT COUNT(*) AS pageable_count,
                    COALESCE(SUM(bytes), 0) AS total_bytes,
                    COALESCE(SUM([end] - start), 0) AS total_ns
             FROM {memcpy_tbl}
             WHERE srcKind = 1 OR dstKind = 1
-        """)
+        """
         ).fetchone()
         if not row or row[0] == 0:
             return []
@@ -783,7 +777,7 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
                 ),
             }
         ]
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("root_cause_matcher (_check_pageable_memcpy): %s", e, exc_info=True)
     return []
 
@@ -797,9 +791,8 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
     Note: Nsight exports use versioned API names (e.g. cudaMemset_v3020).
     We match any name starting with 'cudaMemset' but NOT 'cudaMemsetAsync'.
     """
-    from ...sql_compat import sqlite_to_duckdb
-
-    tables = _resolve_activity_tables(conn)
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
     runtime_tbl = tables.get("runtime")
     memset_tbl = tables.get("memset")
     if not runtime_tbl or not memset_tbl:
@@ -807,12 +800,12 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: find nameIds for sync cudaMemset (NOT async)
-        sync_names = conn.execute(
-            sqlite_to_duckdb("""
+        sync_names = adapter.execute(
+            """
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaMemset%'
               AND value NOT LIKE 'cudaMemsetAsync%'
-        """)
+        """
         ).fetchall()
         if not sync_names:
             return []
@@ -821,14 +814,14 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: find memset ops correlated with sync runtime calls
-        row = conn.execute(
-            sqlite_to_duckdb(f"""
+        row = adapter.execute(
+            f"""
             SELECT COUNT(*) AS count,
                    COALESCE(SUM(ms.[end] - ms.start), 0) AS total_ns
             FROM {runtime_tbl} r
             JOIN {memset_tbl} ms ON r.correlationId = ms.correlationId
             WHERE r.nameId IN ({placeholders})
-        """)
+        """
         ).fetchone()
         if not row or row[0] == 0:
             return []
@@ -850,7 +843,7 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
                 ),
             }
         ]
-    except (sqlite3.Error, duckdb.Error) as e:
+    except DB_ERRORS as e:
         _log.debug("root_cause_matcher (_check_sync_memset): %s", e, exc_info=True)
     return []
 
@@ -863,20 +856,14 @@ def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
     from ...exceptions import SkillExecutionError
     from ...skills.registry import get_skill
 
-    error_types = [sqlite3.Error, SkillExecutionError]
-    try:
-        import duckdb
-
-        error_types.extend([duckdb.Error, duckdb.CatalogException])
-    except ImportError:
-        pass
+    _safe_errors = DB_ERRORS + (SkillExecutionError,)
 
     try:
         skill = get_skill(skill_name)
         if skill is None:
             return []
         return skill.execute(conn, **kwargs)
-    except tuple(error_types) as e:
+    except _safe_errors as e:
         _log.debug("root_cause_matcher (%s): %s", skill_name, e, exc_info=True)
         return []
 

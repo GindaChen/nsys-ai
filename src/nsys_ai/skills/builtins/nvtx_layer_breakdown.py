@@ -16,6 +16,8 @@ Features:
 
 from collections import defaultdict
 
+from nsys_ai.connection import DB_ERRORS
+
 from ..base import Skill, SkillParam
 
 
@@ -56,7 +58,7 @@ def _execute(conn, **kwargs):
     try:
         conn.execute("SELECT 1 FROM nvtx_kernel_map LIMIT 1")
         has_nkm = True
-    except Exception:
+    except DB_ERRORS:
         has_nkm = False
 
     if not has_nkm:
