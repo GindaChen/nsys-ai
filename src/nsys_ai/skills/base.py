@@ -162,25 +162,26 @@ class Skill:
             tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
         )
 
-        # Compute profiler overhead union duration dynamically
+        # Compute profiler overhead union duration dynamically.
+        # Try the SELECT directly and catch DB_ERRORS if the table is absent,
+        # avoiding a redundant catalog scan (resolve_activity_tables already did one).
         overhead_ns = 0
-        try:
-            table_names = adapter.get_table_names()
-            oh_table = None
-            if "profiler_overhead" in table_names:
-                oh_table = "profiler_overhead"
-            elif "PROFILER_OVERHEAD" in table_names:
-                oh_table = "PROFILER_OVERHEAD"
-
-            if oh_table:
+        for oh_table in ("profiler_overhead", "PROFILER_OVERHEAD"):
+            try:
                 conds = []
+                params: list[object] = []
                 if trim_start is not None:
-                    conds.append(f"[end] >= {int(trim_start)}")
+                    conds.append("[end] >= ?")
+                    params.append(int(trim_start))
                 if trim_end is not None:
-                    conds.append(f"start <= {int(trim_end)}")
+                    conds.append("start <= ?")
+                    params.append(int(trim_end))
 
                 where_clause = "WHERE " + " AND ".join(conds) if conds else ""
-                cur = adapter.execute(f"SELECT start, [end] FROM {oh_table} {where_clause}")
+                cur = adapter.execute(
+                    f"SELECT start, [end] FROM {oh_table} {where_clause}",
+                    params,
+                )
                 rows = cur.fetchall()
                 if rows:
                     intervals = []
@@ -193,8 +194,11 @@ class Skill:
                         if s < e:
                             intervals.append((s, e))
                     overhead_ns = _compute_interval_union(intervals)
-        except DB_ERRORS as exc:
-            _log.debug("Failed to calculate profiler overhead: %s", exc)
+                break  # Table found and queried successfully
+            except DB_ERRORS:
+                continue  # Table doesn't exist under this name, try next
+        if overhead_ns == 0:
+            _log.debug("No profiler overhead data found (table absent or empty)")
 
         resolved["overhead_ns"] = overhead_ns
 
