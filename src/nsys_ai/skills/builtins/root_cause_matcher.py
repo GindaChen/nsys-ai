@@ -113,7 +113,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             )
             if pct > 0:
                 evidence += f" ({pct}% of profile)"
-                
+
             # If Sync Cost Analysis indicates massive CPU blockage, overwrite the guess!
             if sync_data and "error" not in sync_data[0]:
                 sync_ms = sync_data[0].get("total_sync_wall_ms", 0)

@@ -68,7 +68,7 @@ def _execute(conn, **kwargs):
             sync_data = sync_skill.execute(conn, **kwargs)
             if sync_data and "error" not in sync_data[0]:
                 result["sync_ms"] = sync_data[0].get("total_sync_wall_ms", 0)
-    except Exception as exc:
+    except Exception:
         _log.debug("Failed to enrich sync cost", exc_info=True)
 
     result["device_id"] = device
