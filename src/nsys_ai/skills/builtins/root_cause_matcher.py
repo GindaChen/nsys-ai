@@ -37,20 +37,46 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     # Auto-detect an active device if the current device has no kernel data.
     # This prevents GPU Bubbles (and sync override) from being silently skipped
     # on multi-GPU profiles where the default device is unused.
-    if idle_gaps_data:
-        gap_summary_check = next((g for g in idle_gaps_data if g.get("_summary")), None)
-        if gap_summary_check and gap_summary_check.get("gap_count", 0) == 0:
-            try:
-                active_devs = conn.execute(
-                    "SELECT DISTINCT deviceId FROM CUPTI_ACTIVITY_KIND_KERNEL "
-                    "ORDER BY deviceId LIMIT 1"
-                ).fetchall()
-                if active_devs and active_devs[0][0] != kwargs.get("device", 0):
-                    active_device = active_devs[0][0]
-                    kwargs = {**kwargs, "device": active_device}
-                    idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
-            except Exception:
-                pass
+    try:
+        from ...connection import wrap_connection
+        adapter = wrap_connection(conn)
+        kernel_table = adapter.resolve_activity_tables().get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+        
+        current_device = kwargs.get("device", 0)
+        trim_conds = []
+        trim_params = []
+        if "trim_start_ns" in kwargs:
+            trim_conds.append("start >= ?")
+            trim_params.append(kwargs["trim_start_ns"])
+        if "trim_end_ns" in kwargs:
+            trim_conds.append("[end] <= ?")
+            trim_params.append(kwargs["trim_end_ns"])
+            
+        trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
+        
+        # Check current device kernel count
+        cur_count = conn.execute(
+            f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ? {trim_sql}",
+            [current_device] + trim_params
+        ).fetchone()[0]
+        
+        if cur_count == 0:
+            # Find an active device
+            active_devs = conn.execute(
+                f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
+                f"WHERE 1=1 {trim_sql} "
+                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
+                trim_params
+            ).fetchall()
+            
+            if active_devs and active_devs[0][0] != current_device:
+                active_device = active_devs[0][0]
+                kwargs = {**kwargs, "device": active_device}
+                # Rerun device-scoped skills
+                top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
+                idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
+    except Exception:
+        pass
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
     # Kernel launch overhead

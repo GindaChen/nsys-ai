@@ -174,6 +174,10 @@ _TABLE_PROJECTIONS: dict[str, str] = {
     "CUPTI_ACTIVITY_KIND_RUNTIME": 'start, "end", correlationId, globalTid, nameId',
     "CUPTI_ACTIVITY_KIND_RUNTIME_V2": 'start, "end", correlationId, globalTid, nameId',
     "CUPTI_ACTIVITY_KIND_RUNTIME_V3": 'start, "end", correlationId, globalTid, nameId',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION": 'start, "end", globalPid, syncType',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V2": 'start, "end", globalPid, syncType',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V3": 'start, "end", globalPid, syncType',
+    "ENUM_CUPTI_SYNC_TYPE": 'id, name',
 }
 
 _TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul)'"

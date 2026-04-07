@@ -1,8 +1,8 @@
 """Sync Cost Analysis skill.
 
 Examines CUPTI_ACTIVITY_KIND_SYNCHRONIZATION to compute the true wall-clock
-duration that the CPU was blocked by synchonizations, identifying explicit pipeline
-stalls vs naturally overlapping communications.
+duration that the CPU was blocked by synchronizations, distinguishing explicit pipeline
+stalls from naturally overlapping communications.
 """
 
 from collections import defaultdict
@@ -11,11 +11,30 @@ from ...connection import DB_ERRORS, wrap_connection
 from ..base import Skill, _compute_interval_union
 
 
+def _resolve_table_name(conn, candidate: str) -> str:
+    """Resolve an Nsight table name, allowing for version-suffixed variants."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name LIKE ?
+            ORDER BY name DESC LIMIT 1
+            """,
+            (candidate + "%",),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+    except Exception:
+        pass
+    return candidate
+
+
 def _execute_sync_analysis(conn, **kwargs) -> list[dict]:
     adapter = wrap_connection(conn)
-    tables = adapter.resolve_activity_tables()
-    sync_table = tables.get("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
-    type_table = tables.get("sync_type", "ENUM_CUPTI_SYNC_TYPE")
+    sync_table = _resolve_table_name(conn, "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+    type_table = _resolve_table_name(conn, "ENUM_CUPTI_SYNC_TYPE")
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
