@@ -137,12 +137,6 @@ def _execute_sync_analysis_impl(conn, **kwargs) -> list[dict]:
     if trim_start is not None and trim_end is not None:
         profile_span_ns = max(0, int(trim_end) - int(trim_start))
 
-    # Fallback to absolute min/max if no span provided
-    if profile_span_ns == 0 and global_intervals:
-        min_s = min([ival[0] for ival in global_intervals])
-        max_e = max([ival[1] for ival in global_intervals])
-        profile_span_ns = max_e - min_s
-
     total_sync_wall_ms = total_sync_wall_ns / 1e6
     profile_span_ms = profile_span_ns / 1e6
 

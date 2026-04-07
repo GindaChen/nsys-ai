@@ -2,8 +2,8 @@ import sqlite3
 
 import pytest
 
-from nsys_ai.skills.registry import get_skill
 from nsys_ai.skills.builtins.sync_cost_analysis import _sync_result_cache
+from nsys_ai.skills.registry import get_skill
 
 
 @pytest.fixture(autouse=True)

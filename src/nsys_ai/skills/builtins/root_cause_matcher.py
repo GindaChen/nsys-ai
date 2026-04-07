@@ -39,24 +39,24 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
 
         current_device = kwargs.get("device", 0)
 
-        # Build optional trim filter
+        # Build optional trim filter (use "end" not [end] for DuckDB compat)
         trim_conds: list[str] = []
         trim_params: list = []
         if "trim_start_ns" in kwargs:
             trim_conds.append("start >= ?")
             trim_params.append(kwargs["trim_start_ns"])
         if "trim_end_ns" in kwargs:
-            trim_conds.append("[end] <= ?")
+            trim_conds.append('"end" <= ?')
             trim_params.append(kwargs["trim_end_ns"])
         trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
 
-        cur_count = conn.execute(
+        cur_count = adapter.execute(
             f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ?{trim_sql}",
             [current_device] + trim_params,
         ).fetchone()[0]
 
         if cur_count == 0:
-            active_devs = conn.execute(
+            active_devs = adapter.execute(
                 f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
                 f"WHERE 1=1{trim_sql} "
                 f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
