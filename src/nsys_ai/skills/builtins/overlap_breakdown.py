@@ -61,6 +61,16 @@ def _execute(conn, **kwargs):
     except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
 
+    try:
+        from ...skills.registry import get_skill
+        sync_skill = get_skill("sync_cost_analysis")
+        if sync_skill:
+            sync_data = sync_skill.execute(conn, **kwargs)
+            if sync_data and "error" not in sync_data[0]:
+                result["sync_ms"] = sync_data[0].get("total_sync_wall_ms", 0)
+    except Exception as exc:
+        _log.debug("Failed to enrich sync cost", exc_info=True)
+
     result["device_id"] = device
     return [result]
 
@@ -71,17 +81,22 @@ def _format(rows):
     r = rows[0]
     if "error" in r:
         return f"(Overlap analysis: {r['error']})"
-    return (
-        "── Compute/Communication Overlap ──\n"
-        f"  Total span:    {r['total_ms']:.1f}ms\n"
-        f"  Compute only:  {r['compute_only_ms']:.1f}ms\n"
-        f"  NCCL only:     {r['nccl_only_ms']:.1f}ms\n"
+    lines = [
+        "── Compute/Communication Overlap ──",
+        f"  Total span:    {r['total_ms']:.1f}ms",
+        f"  Compute only:  {r['compute_only_ms']:.1f}ms",
+        f"  NCCL only:     {r['nccl_only_ms']:.1f}ms",
         f"  Overlap:       {r['overlap_ms']:.1f}ms"
-        f" ({r['overlap_pct']}% of NCCL overlapped)\n"
-        f"  Idle:          {r['idle_ms']:.1f}ms\n"
+        f" ({r['overlap_pct']}% of NCCL overlapped)",
+        f"  Idle:          {r['idle_ms']:.1f}ms",
+    ]
+    if r.get("sync_ms"):
+        lines.append(f"  ⚡ CPU Sync:     {r['sync_ms']:.1f}ms (global host-side blocking)")
+    lines.append(
         f"  Kernels:       {r['compute_kernels']} compute"
         f" + {r['nccl_kernels']} NCCL"
     )
+    return "\n".join(lines)
 
 
 def _to_findings(rows: list[dict]) -> list:

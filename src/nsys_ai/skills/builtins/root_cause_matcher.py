@@ -33,10 +33,30 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
     # GPU idle gaps
     idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
+
+    # Auto-detect an active device if the current device has no kernel data.
+    # This prevents GPU Bubbles (and sync override) from being silently skipped
+    # on multi-GPU profiles where the default device is unused.
+    if idle_gaps_data:
+        gap_summary_check = next((g for g in idle_gaps_data if g.get("_summary")), None)
+        if gap_summary_check and gap_summary_check.get("gap_count", 0) == 0:
+            try:
+                active_devs = conn.execute(
+                    "SELECT DISTINCT deviceId FROM CUPTI_ACTIVITY_KIND_KERNEL "
+                    "ORDER BY deviceId LIMIT 1"
+                ).fetchall()
+                if active_devs and active_devs[0][0] != kwargs.get("device", 0):
+                    active_device = active_devs[0][0]
+                    kwargs = {**kwargs, "device": active_device}
+                    idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
+            except Exception:
+                pass
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
     # Kernel launch overhead
     launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
+    # Sync Cost
+    sync_data = _safe_execute("sync_cost_analysis", conn, **kwargs)
 
     # --- GPU Bubbles (Pipeline Stalls) ---
     if idle_gaps_data:
@@ -93,6 +113,22 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             )
             if pct > 0:
                 evidence += f" ({pct}% of profile)"
+                
+            # If Sync Cost Analysis indicates massive CPU blockage, overwrite the guess!
+            if sync_data and "error" not in sync_data[0]:
+                sync_ms = sync_data[0].get("total_sync_wall_ms", 0)
+                sync_density = sync_data[0].get("sync_density_pct", 0)
+                # If sync time accounts for more than half of the idle time, or > 15% of profile:
+                if (total_idle_ms > 0 and sync_ms / total_idle_ms > 0.5) or sync_density > 15.0:
+                    rec = (
+                        "Critical Over-Synchronization Detected. "
+                        f"{sync_density:.1f}% of this profile is CPU-blocked by synchronization calls "
+                        f"(torch.cuda.synchronize / cudaDeviceSynchronize). "
+                        "Action: (1) Remove unnecessary sync calls, "
+                        "(2) replace device-wide sync with stream-scoped cudaStreamWaitEvent, "
+                        "(3) ensure .item() or .cpu() calls are deferred to avoid implicit sync."
+                    )
+                    evidence += f". Validated via explicit CPU sync stall of {sync_ms:.1f}ms"
 
             findings.append(
                 {

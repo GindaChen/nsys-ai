@@ -164,7 +164,16 @@ def _execute(conn, **kwargs):
         idle_summary["idle_pct"] = summary_row.get("pct_of_profile", 0)
         idle_summary["total_idle_ms"] = summary_row.get("total_idle_ms", 0)
 
-    # ── 6. Root cause findings (count + top severity) ────────────
+    # ── 6. Sync Cost Analysis ────────────────────────────────────────
+    sync_summary = {}
+    try:
+        sync_data = _safe_skill_run("sync_cost_analysis", conn, **trim_kwargs)
+        if sync_data and "error" not in sync_data[0]:
+            sync_summary = sync_data[0]
+    except Exception as exc:
+        _log.debug("manifest: sync_cost_analysis failed: %s", exc)
+
+    # ── 7. Root cause findings (count + top severity) ────────────
     rc_rows = _safe_skill_run("root_cause_matcher", conn, device=device, **trim_kwargs)
     root_causes = []
     for r in rc_rows:
@@ -189,6 +198,7 @@ def _execute(conn, **kwargs):
         "total_kernel_ms": round(total_kernel_ms, 1),
         "overlap": overlap,
         "nccl": nccl_summary,
+        "sync": sync_summary,
         "idle": idle_summary,
         "root_cause_count": len(root_causes),
         "root_causes": root_causes[:5],  # Cap at 5 to keep output compact
@@ -205,6 +215,12 @@ def _execute(conn, **kwargs):
 
 def _infer_bottleneck(m: dict) -> str:
     """Heuristic bottleneck inference from manifest data."""
+    sync = m.get("sync", {})
+    sync_density = sync.get("sync_density_pct", 0)
+    # The new threshold
+    if sync_density > 20.0:
+        return f"High CPU Synchronization Blocking ({sync_density:.1f}% of span)"
+
     dq = m.get("data_quality", {})
     overhead_pct_val = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
     if overhead_pct_val > 1.0:
@@ -287,9 +303,13 @@ def _format(rows):
 
     # Idle
     idle = m.get("idle", {})
+    sync = m.get("sync", {})
     if idle.get("gap_count", 0) > 0:
         lines.append("")
         lines.append(f"  GPU Idle: {idle['gap_count']} gaps, {idle.get('idle_pct', 0)}% of profile")
+    if sync.get("total_sync_wall_ms"):
+        lines.append("")
+        lines.append(f"  CPU Sync Block: {sync.get('total_sync_wall_ms', 0):.1f}ms ({sync.get('sync_density_pct', 0)}% of profile)")
 
     # Root causes
     rcs = m.get("root_causes", [])

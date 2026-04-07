@@ -38,6 +38,7 @@ def test_list_skills():
         "schema_inspect",
         "speedup_estimator",
         "stream_concurrency",
+        "sync_cost_analysis",
         "tensor_core_usage",
         "theoretical_flops",
         "thread_utilization",

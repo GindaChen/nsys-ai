@@ -209,6 +209,14 @@ class Skill:
             "memset_table",
             tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
         )
+        resolved.setdefault(
+            "sync_table",
+            tables.get("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"),
+        )
+        resolved.setdefault(
+            "sync_type_table",
+            tables.get("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
+        )
 
         # NVTX text resolution: handle both legacy (text column only)
         # and modern schemas (textId → StringIds lookup).

@@ -30,12 +30,18 @@ def _format(rows):
         f"{'GPU':<4s}  {'Total Span(ms)':>15s}  {'Active(ms)':>12s}  {'Bubble(ms)':>12s}  {'Bubble %':>10s}",
         "-" * 61,
     ]
+    global_sync_ms = 0
     for r in rows:
         gpu_str = str(r["deviceId"])
+        if r.get("sync_ms", 0) > 0:
+            global_sync_ms = r["sync_ms"]
         lines.append(
             f"{gpu_str:<4s}  {r['total_span_ms']:>15.2f}  {r['active_ms']:>12.2f}  "
             f"{r['bubble_ms']:>12.2f}  {r['bubble_pct']:>9.1f}%"
         )
+    if global_sync_ms > 0:
+        lines.append("-" * 61)
+        lines.append(f"  ⚡ Global CPU Sync Stall: {global_sync_ms:.1f}ms (Host-blocking limits GPU feeding)")
     return "\n".join(lines)
 
 
@@ -47,6 +53,16 @@ def _execute(conn, **kwargs):
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
+
+    if trim_start is None or trim_end is None:
+        try:
+            from ...profile import Profile
+            prof = Profile._from_conn(conn)
+            p_start, p_end = prof.meta.time_range
+            trim_start = trim_start if trim_start is not None else p_start
+            trim_end = trim_end if trim_end is not None else p_end
+        except Exception:
+            pass
 
     # --- Fetch kernel intervals per device (if available) ---
     kernel_rows = []
@@ -137,8 +153,21 @@ def _execute(conn, **kwargs):
                 "active_ms": round(active_ns / 1e6, 2),
                 "bubble_ms": round(bubble_ns / 1e6, 2),
                 "bubble_pct": round(bubble_pct, 2),
+                "sync_ms": 0.0,
             }
         )
+
+    # Attach CPU Sync Cost to the first device row as it's global host time
+    if results:
+        try:
+            from ...skills.registry import get_skill
+            sync_skill = get_skill("sync_cost_analysis")
+            if sync_skill:
+                sync_data = sync_skill.execute(conn, **kwargs)
+                if sync_data and "error" not in sync_data[0]:
+                    results[0]["sync_ms"] = sync_data[0].get("total_sync_wall_ms", 0)
+        except Exception as exc:
+            logger.debug(f"Failed to fetch sync cost data: {exc}")
 
     return results
 

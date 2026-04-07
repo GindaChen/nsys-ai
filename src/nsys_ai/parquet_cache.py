@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
 _CACHE_VERSION = (
-    5  # bumped: added profiler_overhead to _BASE_TABLES
+    6  # bumped: added CUPTI_ACTIVITY_KIND_SYNCHRONIZATION and ENUM_CUPTI_SYNC_TYPE
 )
 
 # Tables to export as-is from SQLite → Parquet.
@@ -48,6 +48,8 @@ _BASE_TABLES = [
     ("gpu_info", "TARGET_INFO_GPU"),
     ("cuda_device", "TARGET_INFO_CUDA_DEVICE"),
     ("thread_names", "ThreadNames"),
+    ("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"),
+    ("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
 ]
 
 
@@ -209,6 +211,8 @@ _ALIASES: dict[str, list[str]] = {
     "thread_names": ["ThreadNames"],
     "overhead": ["CUPTI_ACTIVITY_KIND_OVERHEAD"],
     "composite_events": ["COMPOSITE_EVENTS"],
+    "sync": ["CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"],
+    "sync_type": ["ENUM_CUPTI_SYNC_TYPE"],
 }
 
 
