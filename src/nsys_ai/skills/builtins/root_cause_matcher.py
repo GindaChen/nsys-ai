@@ -23,6 +23,52 @@ from ..base import Skill, SkillParam
 _log = logging.getLogger(__name__)
 
 
+def _resolve_active_device(conn, kwargs: dict) -> dict:
+    """Return kwargs with 'device' set to an active GPU if the current one has no kernels.
+
+    Multi-GPU profiles (e.g. Megatron) often have device 0 unused while devices
+    1-7 run all computation.  Without this fallback, root-cause patterns that
+    depend on per-device kernel data silently produce empty results.
+    """
+    try:
+        from ...connection import wrap_connection
+        adapter = wrap_connection(conn)
+        kernel_table = adapter.resolve_activity_tables().get(
+            "kernel", "CUPTI_ACTIVITY_KIND_KERNEL"
+        )
+
+        current_device = kwargs.get("device", 0)
+
+        # Build optional trim filter
+        trim_conds: list[str] = []
+        trim_params: list = []
+        if "trim_start_ns" in kwargs:
+            trim_conds.append("start >= ?")
+            trim_params.append(kwargs["trim_start_ns"])
+        if "trim_end_ns" in kwargs:
+            trim_conds.append("[end] <= ?")
+            trim_params.append(kwargs["trim_end_ns"])
+        trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
+
+        cur_count = conn.execute(
+            f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ?{trim_sql}",
+            [current_device] + trim_params,
+        ).fetchone()[0]
+
+        if cur_count == 0:
+            active_devs = conn.execute(
+                f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
+                f"WHERE 1=1{trim_sql} "
+                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
+                trim_params,
+            ).fetchall()
+            if active_devs and active_devs[0][0] != current_device:
+                return {**kwargs, "device": active_devs[0][0]}
+    except Exception:
+        pass
+    return kwargs
+
+
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Run all pattern matchers against the profile."""
     findings = []
@@ -34,49 +80,13 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     # GPU idle gaps
     idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
 
-    # Auto-detect an active device if the current device has no kernel data.
-    # This prevents GPU Bubbles (and sync override) from being silently skipped
-    # on multi-GPU profiles where the default device is unused.
-    try:
-        from ...connection import wrap_connection
-        adapter = wrap_connection(conn)
-        kernel_table = adapter.resolve_activity_tables().get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+    # If the current device has no kernels, pivot to an active device and re-fetch.
+    resolved_kwargs = _resolve_active_device(conn, kwargs)
+    if resolved_kwargs.get("device") != kwargs.get("device", 0):
+        kwargs = resolved_kwargs
+        top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
+        idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
 
-        current_device = kwargs.get("device", 0)
-        trim_conds = []
-        trim_params = []
-        if "trim_start_ns" in kwargs:
-            trim_conds.append("start >= ?")
-            trim_params.append(kwargs["trim_start_ns"])
-        if "trim_end_ns" in kwargs:
-            trim_conds.append("[end] <= ?")
-            trim_params.append(kwargs["trim_end_ns"])
-
-        trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
-
-        # Check current device kernel count
-        cur_count = conn.execute(
-            f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ? {trim_sql}",
-            [current_device] + trim_params
-        ).fetchone()[0]
-
-        if cur_count == 0:
-            # Find an active device
-            active_devs = conn.execute(
-                f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
-                f"WHERE 1=1 {trim_sql} "
-                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
-                trim_params
-            ).fetchall()
-
-            if active_devs and active_devs[0][0] != current_device:
-                active_device = active_devs[0][0]
-                kwargs = {**kwargs, "device": active_device}
-                # Rerun device-scoped skills
-                top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
-                idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
-    except Exception:
-        pass
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
     # Kernel launch overhead

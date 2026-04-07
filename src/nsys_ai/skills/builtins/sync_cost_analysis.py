@@ -31,7 +31,28 @@ def _resolve_table_name(conn, candidate: str) -> str:
     return candidate
 
 
+_sync_result_cache: dict[tuple, list[dict]] = {}
+
+
 def _execute_sync_analysis(conn, **kwargs) -> list[dict]:
+    # Module-level cache keyed by (connection identity, trim window).
+    # Avoids redundant re-execution when called by multiple consumer skills
+    # (manifest, root_cause, overlap, bubble) within the same profile session.
+    cache_key = (
+        id(conn),
+        kwargs.get("trim_start_ns"),
+        kwargs.get("trim_end_ns"),
+    )
+    cached = _sync_result_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = _execute_sync_analysis_impl(conn, **kwargs)
+    _sync_result_cache[cache_key] = result
+    return result
+
+
+def _execute_sync_analysis_impl(conn, **kwargs) -> list[dict]:
     adapter = wrap_connection(conn)
     sync_table = _resolve_table_name(conn, "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
     type_table = _resolve_table_name(conn, "ENUM_CUPTI_SYNC_TYPE")

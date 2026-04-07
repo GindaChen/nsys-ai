@@ -3,6 +3,13 @@ import sqlite3
 import pytest
 
 from nsys_ai.skills.registry import get_skill
+from nsys_ai.skills.builtins.sync_cost_analysis import _sync_result_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_sync_cache():
+    """Prevent id(conn) reuse of in-memory connections from poisoning results."""
+    _sync_result_cache.clear()
 
 
 @pytest.fixture
