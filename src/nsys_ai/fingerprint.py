@@ -61,43 +61,32 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
     adapter = wrap_connection(conn)
     tables = adapter.get_table_names()
 
-    # Step A: O(1) String Search via Chunked Python Sweeps
-    # Escapes SQLite AST depth limits (large OR chains) and magic LIMIT caps
-    found_frameworks: set[str] = set()
+    # Step A: O(1) String Search via C-engine SQLite LIMIT Sweeps
+    # We sweep by priority. The moment we find vLLM, it breaks,
+    # scanning exactly 1 matching row avoiding parsing bounds.
+    framework = "Generic CUDA"
 
-    def _scan_table_strings(query: str):
+    def _check_framework(table: str, column: str) -> str | None:
         try:
-            cur = adapter.execute(query)
-            while True:
-                rows = cur.fetchmany(10000)
-                if not rows:
-                    break
-                for row in rows:
-                    val_lower = str(row[0]).lower()
-                    for fw, lower_keywords in _LOWERCASE_FRAMEWORK_PRIORITY:
-                        if fw not in found_frameworks:
-                            if any(kw in val_lower for kw in lower_keywords):
-                                found_frameworks.add(fw)
-                # If we've found the highest-possible priority framework, short-circuit
-                if FRAMEWORK_PRIORITY[0][0] in found_frameworks:
-                    break
+            for fw, lower_keywords in _LOWERCASE_FRAMEWORK_PRIORITY:
+                like_conds = " OR ".join(f"{column} LIKE '%{kw}%'" for kw in lower_keywords)
+                cur = adapter.execute(f"SELECT 1 FROM {table} WHERE {like_conds} LIMIT 1")
+                if cur.fetchone():
+                    return fw
         except DB_ERRORS:
             pass
+        return None
 
     if "StringIds" in tables:
-        _scan_table_strings("SELECT value FROM StringIds WHERE value IS NOT NULL")
+        found = _check_framework("StringIds", "value")
+        if found:
+            framework = found
 
-    if not found_frameworks and "NVTX_EVENTS" in tables:
-        _scan_table_strings(
-            "SELECT DISTINCT text FROM NVTX_EVENTS WHERE text IS NOT NULL LIMIT 1000"
-        )
-
-    # Match framework with strict explicit prioritization
-    framework = "Generic CUDA"
-    for fw, _ in FRAMEWORK_PRIORITY:
-        if fw in found_frameworks:
-            framework = fw
-            break
+    if framework == "Generic CUDA" and "NVTX_EVENTS" in tables:
+        # Fallback to direct event traces if no canonical stringIds are hit
+        found = _check_framework("NVTX_EVENTS", "text")
+        if found:
+            framework = found
 
     # Step B: Topology Search
     multi_node = False
