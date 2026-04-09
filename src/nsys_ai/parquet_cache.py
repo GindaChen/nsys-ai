@@ -31,7 +31,7 @@ import duckdb
 log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 6  # bumped: added CUPTI_ACTIVITY_KIND_SYNCHRONIZATION and ENUM_CUPTI_SYNC_TYPE
+_CACHE_VERSION = 7  # bumped: preserve NVTX blobs and payload schema tables
 
 # Tables to export as-is from SQLite → Parquet.
 # (view_name, source_table_name)
@@ -48,6 +48,11 @@ _BASE_TABLES = [
     ("thread_names", "ThreadNames"),
     ("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"),
     ("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
+    ("nic_info", "TARGET_INFO_NIC_INFO"),
+    ("nvtx_payload_schemas", "NVTX_PAYLOAD_SCHEMAS"),
+    ("nvtx_payload_schema_entries", "NVTX_PAYLOAD_SCHEMA_ENTRIES"),
+    ("nvtx_payload_enums", "NVTX_PAYLOAD_ENUMS"),
+    ("nvtx_payload_enum_entries", "NVTX_PAYLOAD_ENUM_ENTRIES"),
 ]
 
 
@@ -210,11 +215,20 @@ _ALIASES: dict[str, list[str]] = {
     "string_ids": ["StringIds"],
     "gpu_info": ["TARGET_INFO_GPU"],
     "cuda_device": ["TARGET_INFO_CUDA_DEVICE"],
+    "nic_info": ["TARGET_INFO_NIC_INFO"],
     "thread_names": ["ThreadNames"],
     "overhead": ["CUPTI_ACTIVITY_KIND_OVERHEAD"],
     "composite_events": ["COMPOSITE_EVENTS"],
     "sync": ["CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"],
     "sync_type": ["ENUM_CUPTI_SYNC_TYPE"],
+    "nvtx_payload_schemas": ["NVTX_PAYLOAD_SCHEMAS"],
+    "nvtx_payload_schema_entries": ["NVTX_PAYLOAD_SCHEMA_ENTRIES"],
+    "nvtx_payload_enums": ["NVTX_PAYLOAD_ENUMS"],
+    "nvtx_payload_enum_entries": ["NVTX_PAYLOAD_ENUM_ENTRIES"],
+}
+
+_PARQUETDIR_BINARY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "NVTX_EVENTS": ("binaryData",),
 }
 
 
@@ -316,26 +330,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
         if nvtx_table:
             _progress("nvtx.parquet")
-            # Detect whether textId column exists
-            has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
-            if has_textid:
-                db.execute(f"""
-                    COPY (
-                        SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
-                               COALESCE(n.text, s.value) AS text,
-                               n.textId
-                        FROM src.{nvtx_table} n
-                        LEFT JOIN src.StringIds s ON n.textId = s.id
-                    ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
-                """)
-            else:
-                db.execute(f"""
-                    COPY (
-                        SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
-                               n.text
-                        FROM src.{nvtx_table} n
-                    ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
-                """)
+            _export_nvtx_with_blobs(sqlite_path, nvtx_table, cache_dir)
 
         for view_name, src_name in _BASE_TABLES:
             actual = _find_table(src_tables, src_name)
@@ -417,17 +412,30 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         safe_fpath = str(parquet_file).replace("'", "''")
         db.execute(f"CREATE VIEW \"{view_name}\" AS SELECT * FROM '{safe_fpath}'")
 
-    existing_views = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
-    for parquet_name, aliases in _ALIASES.items():
-        if parquet_name not in existing_views:
-            continue
-        for alias in aliases:
-            if alias not in existing_views:
-                try:
-                    db.execute(f'CREATE VIEW "{alias}" AS SELECT * FROM {parquet_name}')
-                except duckdb.Error:
-                    pass  # View already exists or name conflict
+    _create_existing_alias_views(db)
 
+    return db
+
+
+def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection over an Nsight `parquetdir` export."""
+    parquet_dir = Path(parquetdir_path)
+    parquet_files = sorted(parquet_dir.glob("*.parquet"))
+    if not parquet_files:
+        raise RuntimeError(
+            f"Parquet directory at {parquet_dir} does not contain any .parquet files"
+        )
+
+    db = duckdb.connect()
+    try:
+        _register_parquetdir_tables(db, parquet_dir, parquet_files)
+        _create_existing_alias_views(db)
+    except Exception:
+        try:
+            db.close()
+        except Exception:
+            pass
+        raise
     return db
 
 
@@ -449,6 +457,165 @@ def _table_has_column(db: duckdb.DuckDBPyConnection, table: str, column: str) ->
         return any(c[0] == column for c in cols)
     except duckdb.Error:
         return False
+
+
+def _create_existing_alias_views(db: duckdb.DuckDBPyConnection) -> None:
+    """Create stable aliases for whatever canonical tables already exist."""
+    existing_views = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
+    for short_name, aliases in _ALIASES.items():
+        actual = None
+        if short_name in existing_views:
+            actual = short_name
+        else:
+            for alias in aliases:
+                if alias in existing_views:
+                    actual = alias
+                    break
+            if actual is None and aliases:
+                actual = _find_table(existing_views, aliases[0])
+        if not actual:
+            continue
+        for alias in [short_name, *aliases]:
+            if alias in existing_views:
+                continue
+            try:
+                db.execute(f'CREATE VIEW "{alias}" AS SELECT * FROM "{actual}"')
+                existing_views.add(alias)
+            except duckdb.Error:
+                pass
+
+
+def _register_parquetdir_tables(
+    db: duckdb.DuckDBPyConnection,
+    parquet_dir: Path,
+    parquet_files: list[Path],
+) -> None:
+    """Create views for a raw Nsight parquetdir export.
+
+    Nsight 2026 marks `NVTX_EVENTS.binaryData` as a UTF-8 string in Parquet
+    metadata even though it contains arbitrary bytes. DuckDB rejects those
+    rows during direct Parquet scans, so we repair that column via PyArrow and
+    register the resulting Arrow table with DuckDB. Other tables can stay on
+    the normal `read_parquet()` path.
+    """
+    for parquet_file in parquet_files:
+        table_name = parquet_file.stem
+        if table_name in _PARQUETDIR_BINARY_COLUMNS:
+            arrow_name = f"_parquetdir_{table_name}"
+            table = _load_parquet_table_for_duckdb(parquet_file, table_name)
+            db.register(arrow_name, table)
+            db.execute(f'CREATE VIEW "{table_name}" AS SELECT * FROM "{arrow_name}"')
+            continue
+
+        safe_fpath = str(parquet_file).replace("'", "''")
+        db.execute(
+            f'CREATE VIEW "{table_name}" AS SELECT * FROM read_parquet(\'{safe_fpath}\')'
+        )
+
+
+def _load_parquet_table_for_duckdb(parquet_file: Path, table_name: str):
+    """Load a Parquet file into Arrow and normalize binary payload columns."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(parquet_file)
+    binary_columns = set(_PARQUETDIR_BINARY_COLUMNS.get(table_name, ()))
+    if not binary_columns:
+        return table
+
+    arrays = []
+    for field in table.schema:
+        column = table.column(field.name)
+        if field.name in binary_columns:
+            column = pc.cast(column, pa.large_binary(), safe=False)
+        arrays.append(column)
+    return pa.table(arrays, names=table.column_names)
+
+
+def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) -> None:
+    """Export NVTX rows via a varchar-only attachment so mixed TEXT/BLOB columns survive.
+
+    The regular typed SQLite scanner cannot read NVTX `binaryData` when the
+    SQLite export mixes TEXT and BLOB affinity in that column. A separate
+    DuckDB connection with `sqlite_all_varchar=true` avoids that issue; we
+    cast numeric columns back to their intended types and store the blob as a
+    hex string for cache portability.
+    """
+    safe_sqlite_path = sqlite_path.replace("'", "''")
+    db = duckdb.connect()
+    try:
+        db.execute("SET sqlite_all_varchar = true")
+        db.execute(f"ATTACH '{safe_sqlite_path}' AS srcv (TYPE SQLITE, READ_ONLY)")
+        table_ref = f"srcv.{nvtx_table}"
+
+        def _expr(column: str, sql_type: str, alias: str | None = None) -> str:
+            alias = alias or column
+            if _table_has_column(db, table_ref, column):
+                return f'CAST(n."{column}" AS {sql_type}) AS "{alias}"'
+            return f'CAST(NULL AS {sql_type}) AS "{alias}"'
+
+        has_textid = _table_has_column(db, f"srcv.{nvtx_table}", "textId")
+        has_text = _table_has_column(db, table_ref, "text")
+        has_json_text = _table_has_column(db, table_ref, "jsonText")
+        has_binary = _table_has_column(db, table_ref, "binaryData")
+        binary_expr = "hex(n.binaryData) AS binaryData" if has_binary else "CAST(NULL AS VARCHAR) AS binaryData"
+        json_text_expr = "n.jsonText AS jsonText" if has_json_text else "CAST(NULL AS VARCHAR) AS jsonText"
+        text_expr = "n.text" if has_text else "CAST(NULL AS VARCHAR)"
+        if has_textid:
+            db.execute(f"""
+                COPY (
+                    SELECT {_expr("globalTid", "BIGINT")},
+                           {_expr("start", "BIGINT")},
+                           {_expr("end", "BIGINT")},
+                           {_expr("eventType", "INTEGER")},
+                           {_expr("rangeId", "BIGINT")},
+                           {_expr("category", "BIGINT")},
+                           {_expr("color", "BIGINT")},
+                           {_expr("endGlobalTid", "BIGINT")},
+                           {_expr("domainId", "BIGINT")},
+                           {_expr("uint64Value", "BIGINT")},
+                           {_expr("int64Value", "BIGINT")},
+                           {_expr("doubleValue", "DOUBLE")},
+                           {_expr("uint32Value", "BIGINT")},
+                           {_expr("int32Value", "BIGINT")},
+                           {_expr("floatValue", "DOUBLE")},
+                           {_expr("jsonTextId", "BIGINT")},
+                           {json_text_expr},
+                           {binary_expr},
+                           COALESCE({text_expr}, s.value) AS text,
+                           {_expr("textId", "BIGINT")}
+                    FROM srcv.{nvtx_table} n
+                    LEFT JOIN srcv.StringIds s ON n.textId = s.id
+                ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+        else:
+            db.execute(f"""
+                COPY (
+                    SELECT {_expr("globalTid", "BIGINT")},
+                           {_expr("start", "BIGINT")},
+                           {_expr("end", "BIGINT")},
+                           {_expr("eventType", "INTEGER")},
+                           {_expr("rangeId", "BIGINT")},
+                           {_expr("category", "BIGINT")},
+                           {_expr("color", "BIGINT")},
+                           {_expr("endGlobalTid", "BIGINT")},
+                           {_expr("domainId", "BIGINT")},
+                           {_expr("uint64Value", "BIGINT")},
+                           {_expr("int64Value", "BIGINT")},
+                           {_expr("doubleValue", "DOUBLE")},
+                           {_expr("uint32Value", "BIGINT")},
+                           {_expr("int32Value", "BIGINT")},
+                           {_expr("floatValue", "DOUBLE")},
+                           {_expr("jsonTextId", "BIGINT")},
+                           {json_text_expr},
+                           {binary_expr},
+                           {text_expr} AS text
+                    FROM srcv.{nvtx_table} n
+                ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+    finally:
+        db.close()
 
 
 def _build_nvtx_kernel_map(

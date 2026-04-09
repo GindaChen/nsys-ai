@@ -53,7 +53,7 @@ class NsightSchema:
     and exposes canonical table choices (e.g., kernel activity table).
     """
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn):
         self._conn = conn
         from .connection import wrap_connection
 
@@ -93,7 +93,7 @@ class NsightSchema:
             return {}
 
         kv: dict[str, str] = {}
-        cur = self._conn.execute(f"SELECT {key_col}, {val_col} FROM {table}")
+        cur = self._adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")
         for k, v in cur.fetchall():
             if k is not None and v is not None:
                 kv[str(k)] = str(v)
@@ -179,53 +179,58 @@ class Profile:
 
     _log = logging.getLogger(__name__)
 
-    def __init__(self, path: str, *, cache_mode: str = "auto"):
+    def __init__(self, path: str, *, cache_mode: str = "auto", backend: str = "sqlite"):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
                 f"Unknown cache_mode: {cache_mode!r}. Expected 'auto', 'parquet', or 'direct'."
             )
+        if backend not in ("sqlite", "parquetdir"):
+            raise ValueError(f"Unknown backend: {backend!r}. Expected 'sqlite' or 'parquetdir'.")
         self.path = path
+        self.backend = backend
         self._lock = threading.Lock()
         self._owns_conn = True
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        from .connection import wrap_connection
-
-        self.adapter = wrap_connection(self.conn)
-        self.schema = NsightSchema(self.conn)
-        self.meta = self._discover()
-        self._nvtx_has_text_id: bool = self.adapter.detect_nvtx_text_id()
-
-        # DuckDB connection strategy — see parquet_cache module
-        try:
-            if cache_mode == "direct":
-                # Force direct SQLite via DuckDB — zero ETL, instant startup
-                self.db: duckdb.DuckDBPyConnection = parquet_cache.open_direct_sqlite(path)
-            elif cache_mode == "parquet":
-                # Original behaviour: block until cache is built
-                self.db = parquet_cache.open_cached_db(path)
-            else:
-                # "auto" mode: use cache if valid, else smart fallback
-                if parquet_cache.is_cache_valid(path):
+        if backend == "parquetdir":
+            self.db = parquet_cache.open_parquetdir_db(path)
+            self.conn = self.db
+        else:
+            self.conn = sqlite3.connect(path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            try:
+                if cache_mode == "direct":
+                    # Force direct SQLite via DuckDB — zero ETL, instant startup
+                    self.db = parquet_cache.open_direct_sqlite(path)
+                elif cache_mode == "parquet":
+                    # Original behaviour: block until cache is built
                     self.db = parquet_cache.open_cached_db(path)
                 else:
-                    size_mb = os.path.getsize(path) / 1e6
-                    if size_mb > 50:
-                        self._log.info(
-                            "Large profile (%.0fMB), using direct query mode (instant startup).",
-                            size_mb,
-                        )
-                        self._log.info(
-                            "To build a Parquet cache for faster repeated queries, re-run with "
-                            "cache_mode='parquet' or pre-build the cache."
-                        )
-                        self.db = parquet_cache.open_direct_sqlite(path)
-                    else:
-                        # Small file — build cache now (seconds)
+                    # "auto" mode: use cache if valid, else smart fallback
+                    if parquet_cache.is_cache_valid(path):
                         self.db = parquet_cache.open_cached_db(path)
-        except Exception as e:
-            self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
-            self.db = None  # type: ignore[assignment]
+                    else:
+                        size_mb = os.path.getsize(path) / 1e6
+                        if size_mb > 50:
+                            self._log.info(
+                                "Large profile (%.0fMB), using direct query mode (instant startup).",
+                                size_mb,
+                            )
+                            self._log.info(
+                                "To build a Parquet cache for faster repeated queries, re-run with "
+                                "cache_mode='parquet' or pre-build the cache."
+                            )
+                            self.db = parquet_cache.open_direct_sqlite(path)
+                        else:
+                            # Small file — build cache now (seconds)
+                            self.db = parquet_cache.open_cached_db(path)
+            except Exception as e:
+                self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
+                self.db = None  # type: ignore[assignment]
+        from .connection import wrap_connection
+
+        self.adapter = wrap_connection(self.db if self.db is not None else self.conn)
+        self.schema = NsightSchema(self.db if self.db is not None else self.conn)
+        self.meta = self._discover()
+        self._nvtx_has_text_id = self.adapter.detect_nvtx_text_id()
 
     @classmethod
     def _from_conn(cls, conn: sqlite3.Connection) -> "Profile":
@@ -245,6 +250,7 @@ class Profile:
         obj._lock = threading.Lock()
         obj._owns_conn = False
         obj.path = ""
+        obj.backend = "sqlite"
         obj.db = conn if is_duckdb else None  # type: ignore[assignment]
         obj.adapter = adapter
         obj.schema = NsightSchema(conn)
@@ -305,7 +311,8 @@ class Profile:
 
         # Kernel counts per device
         kcounts = {}
-        for r in self.conn.execute(
+        query_conn = self.db if self.db is not None else self.conn
+        for r in query_conn.execute(
             f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
         ).fetchall():
             kcounts[r[0]] = r[1]
@@ -313,7 +320,7 @@ class Profile:
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
         hw = {}
         if "TARGET_INFO_GPU" in tables and "TARGET_INFO_CUDA_DEVICE" in tables:
-            for r in self.conn.execute("""
+            for r in query_conn.execute("""
                 SELECT c.cudaId as dev, g.name, g.busLocation,
                        g.smCount as sms, g.totalMemory as mem,
                        g.chipName, g.memoryBandwidth as bw
@@ -672,10 +679,16 @@ class Profile:
     def close(self):
         # Close the primary connection only if we own it.
         if getattr(self, "_owns_conn", True):
-            self.conn.close()
+            try:
+                self.conn.close()
+            except Exception:
+                pass
 
         db = getattr(self, "db", None)
         if db is None:
+            return
+
+        if db is self.conn:
             return
 
         # If db is just an alias to a borrowed conn, do not close it.
@@ -694,12 +707,16 @@ class Profile:
         self.close()
 
 
-def resolve_profile_path(path: str) -> str:
+def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     """
-    Return a path to a .sqlite profile. If path is .nsys-rep, export via
-    `nsys export --type sqlite` and return the path to the resulting .sqlite.
-    (NVIDIA Nsight Systems exporter: docs.nvidia.com/nsight-systems/nsys-exporter)
+    Resolve a profile path for the selected backend.
+
+    `backend='sqlite'` returns a `.sqlite` file, exporting from `.nsys-rep`
+    when needed. `backend='parquetdir'` returns a Parquet directory, exporting
+    from `.nsys-rep` when needed.
     """
+    if backend == "parquetdir":
+        return _resolve_parquetdir_path(path)
     if not path.lower().endswith(".nsys-rep"):
         return path
 
@@ -710,6 +727,7 @@ def resolve_profile_path(path: str) -> str:
         and os.path.exists(out)
         and os.path.getsize(out) > 0
         and os.path.getmtime(out) >= os.path.getmtime(path)
+        and not _sqlite_needs_blob_reexport(out)
     ):
         return out
 
@@ -723,7 +741,16 @@ def resolve_profile_path(path: str) -> str:
     try:
         # path/out passed as list args to nsys, no shell; caller-controlled paths only
         result = subprocess.run(  # nosec B603
-            [nsys_exe, "export", "--type=sqlite", "-o", out, "--force-overwrite=true", path],
+            [
+                nsys_exe,
+                "export",
+                "--type=sqlite",
+                "--include-blobs=true",
+                "-o",
+                out,
+                "--force-overwrite=true",
+                path,
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -752,6 +779,114 @@ def resolve_profile_path(path: str) -> str:
     return out
 
 
+def _resolve_parquetdir_path(path: str) -> str:
+    """Return a path to an Nsight `parquetdir` export."""
+    if os.path.isdir(path):
+        parquet_files = [name for name in os.listdir(path) if name.endswith(".parquet")]
+        if parquet_files:
+            return path
+        raise ExportError(f"Parquet directory '{path}' does not contain any .parquet files.")
+
+    if not path.lower().endswith(".nsys-rep"):
+        return path
+
+    out = path[:-9] + ".parquetdir"
+    if (
+        os.path.exists(path)
+        and os.path.isdir(out)
+        and any(name.endswith(".parquet") for name in os.listdir(out))
+        and os.path.getmtime(out) >= os.path.getmtime(path)
+    ):
+        return out
+
+    nsys_exe = shutil.which("nsys")
+    if not nsys_exe:
+        raise ExportToolMissingError(
+            "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
+            "Install Nsight Systems or export manually: "
+            "nsys export --type parquetdir --include-blobs=true -o <out.parquetdir> "
+            "--force-overwrite=true <file.nsys-rep>"
+        )
+
+    try:
+        subprocess.run(  # nosec B603
+            [
+                nsys_exe,
+                "export",
+                "--type=parquetdir",
+                "--include-blobs=true",
+                "-o",
+                out,
+                "--force-overwrite=true",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ExportTimeoutError(
+            "nsys export timed out after 300 seconds while producing a parquetdir export. "
+            "Try running the export manually to inspect the full output:\n"
+            f"  nsys export --type parquetdir --include-blobs=true -o {out} {path}\n"
+        ) from e
+    except subprocess.CalledProcessError as e:
+        raise ExportError(
+            f"nsys parquetdir export failed: {e.stderr or e.stdout or str(e)}. "
+            "Export manually: nsys export --type parquetdir --include-blobs=true "
+            "-o <out.parquetdir> --force-overwrite=true <file.nsys-rep>"
+        ) from e
+
+    if not (os.path.isdir(out) and any(name.endswith(".parquet") for name in os.listdir(out))):
+        raise ExportError(
+            f"nsys export completed without error but did not produce a usable parquetdir at '{out}'."
+        )
+    return out
+
+
+def _sqlite_needs_blob_reexport(path: str) -> bool:
+    """Check whether a SQLite export is missing NVTX extended payload values.
+
+    The communicator-aware NCCL analysis relies on `binaryData` (or another
+    populated NVTX payload carrier field) being preserved during export.
+    """
+    if not (os.path.exists(path) and os.path.getsize(path) > 0):
+        return True
+    try:
+        conn = sqlite3.connect(path)
+        cur = conn.cursor()
+        tables = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "NVTX_EVENTS" not in tables or "NVTX_PAYLOAD_SCHEMAS" not in tables:
+            conn.close()
+            return False
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(NVTX_EVENTS)")}
+        payload_cols = [
+            col
+            for col in (
+                "binaryData",
+                "uint64Value",
+                "int64Value",
+                "doubleValue",
+                "uint32Value",
+                "int32Value",
+                "floatValue",
+                "jsonText",
+                "jsonTextId",
+            )
+            if col in cols
+        ]
+        if not payload_cols:
+            conn.close()
+            return True
+        predicate = " OR ".join(f"{col} IS NOT NULL" for col in payload_cols)
+        has_payload = cur.execute(f"SELECT 1 FROM NVTX_EVENTS WHERE {predicate} LIMIT 1").fetchone()
+        conn.close()
+        return has_payload is None
+    except sqlite3.Error:
+        return False
+
+
 def get_first_gpu_name(conn) -> str:
     """Return the first GPU name from TARGET_INFO_GPU (for peak TFLOPS lookup). Empty if tables missing.
 
@@ -778,16 +913,16 @@ def get_first_gpu_name(conn) -> str:
     return (row[0] or "").strip() if row else ""
 
 
-def open(path: str) -> Profile:
-    """Open an Nsight Systems SQLite database."""
-    path = resolve_profile_path(path)
+def open(path: str, *, backend: str = "sqlite", cache_mode: str = "auto") -> Profile:
+    """Open an Nsight Systems profile using the requested backend."""
+    path = resolve_profile_path(path, backend=backend)
     # Heuristic: if the given path is an empty .sqlite stub but a sibling
     # file without the .sqlite suffix exists and is a non-empty SQLite DB,
     # prefer the sibling. This helps when users accidentally point nsys-ai
     # at a placeholder file instead of the real Nsight export.
-    if path.endswith(".sqlite") and os.path.exists(path) and not os.path.getsize(path):
+    if backend == "sqlite" and path.endswith(".sqlite") and os.path.exists(path) and not os.path.getsize(path):
         base = path[:-7]
         if os.path.exists(base) and os.path.getsize(base) > 0:
             path = base
 
-    return Profile(path)
+    return Profile(path, cache_mode=cache_mode, backend=backend)

@@ -44,6 +44,10 @@ def test_agent_skill_selection(minimal_nsys_db_path):
 
         selected = agent._select_skills("is NCCL overlapping with compute?")
         assert "nccl_breakdown" in selected
+        assert "nccl_communicator_analysis" in selected
+
+        selected = agent._select_skills("which communicator is slow in tensor parallel allreduce?")
+        assert "nccl_communicator_analysis" in selected
 
         selected = agent._select_skills("what is the top kernel?")
         assert "top_kernels" in selected

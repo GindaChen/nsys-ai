@@ -88,6 +88,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
+    communicator_data = _safe_execute("nccl_communicator_analysis", conn, **kwargs)
     # Kernel launch overhead
     launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
     # Sync Cost
@@ -222,6 +223,41 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         "recommendation": rec,
                     }
                 )
+
+    # --- Inefficient NCCL Communicators ---
+    comm_rows = [r for r in communicator_data if not r.get("_diagnostic")]
+    if comm_rows:
+        low_efficiency = [
+            r
+            for r in comm_rows
+            if r.get("efficiency_pct") is not None
+            and r.get("efficiency_pct", 100) < 20.0
+            and r.get("total_ms", 0) >= 0.001
+        ]
+        if low_efficiency:
+            worst = min(low_efficiency, key=lambda r: r.get("efficiency_pct", 100))
+            dimension = worst.get("inferred_dimension", "single_rank_or_unknown")
+            dim_hint = (
+                "This looks like a subgroup communicator; check TP/PP stream placement and rank grouping."
+                if str(dimension).startswith("subgroup_parallelism")
+                else "This looks global/data-parallel; check bucket sizing, message fusion, and comm/compute overlap."
+            )
+            findings.append(
+                {
+                    "pattern": "Inefficient NCCL Communicator",
+                    "severity": "warning",
+                    "evidence": (
+                        f"{worst.get('communicator_hex', '?')} {worst.get('collective_type', '?')} "
+                        f"ran at {worst.get('bandwidth_gbps', 0):.2f} GB/s "
+                        f"({worst.get('efficiency_pct', 0):.1f}% of {worst.get('peak_source', 'peak')}). "
+                        f"Inferred dimension: {dimension}."
+                    ),
+                    "recommendation": (
+                        f"{dim_hint} If this profile has enriched NVTX payloads, use "
+                        "`nccl_communicator_analysis` to inspect communicator IDs, rank counts, and message sizes directly."
+                    ),
+                }
+            )
 
     # --- Excessive H2D Transfers ---
     mem_data = _safe_execute("memory_bandwidth", conn, **kwargs)
