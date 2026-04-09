@@ -734,7 +734,9 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     if not nsys_exe:
         raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
-            "Install Nsight Systems or export manually: nsys export --type sqlite -o <out.sqlite> --force-overwrite true <file.nsys-rep>"
+            "Install Nsight Systems or export manually: "
+            "nsys export --type sqlite --include-blobs=true -o <out.sqlite> "
+            "--force-overwrite=true <file.nsys-rep>"
         )
 
     try:
@@ -760,12 +762,13 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
             "nsys export timed out after 300 seconds. This may indicate that nsys is waiting "
             "for interactive input (for example, a license prompt) or that the .nsys-rep file "
             "is corrupted. Try running the export manually to see the full output:\n"
-            f"  nsys export --type sqlite -o {out} {path}\n"
+            f"  nsys export --type sqlite --include-blobs=true -o {out} --force-overwrite=true {path}\n"
         ) from e
     except subprocess.CalledProcessError as e:
         raise ExportError(
             f"nsys export failed: {e.stderr or e.stdout or str(e)}. "
-            "Export manually: nsys export --type sqlite -o <out.sqlite> --force-overwrite true <file.nsys-rep>"
+            "Export manually: nsys export --type sqlite --include-blobs=true "
+            "-o <out.sqlite> --force-overwrite=true <file.nsys-rep>"
         ) from e
     if not (os.path.exists(out) and os.path.getsize(out) > 0):
         stdout = getattr(result, "stdout", None) or "(empty)"
@@ -853,35 +856,36 @@ def _sqlite_needs_blob_reexport(path: str) -> bool:
     if not (os.path.exists(path) and os.path.getsize(path) > 0):
         return True
     try:
-        conn = sqlite3.connect(path)
-        cur = conn.cursor()
-        tables = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "NVTX_EVENTS" not in tables or "NVTX_PAYLOAD_SCHEMAS" not in tables:
-            conn.close()
-            return False
-        cols = {row[1] for row in cur.execute("PRAGMA table_info(NVTX_EVENTS)")}
-        payload_cols = [
-            col
-            for col in (
-                "binaryData",
-                "uint64Value",
-                "int64Value",
-                "doubleValue",
-                "uint32Value",
-                "int32Value",
-                "floatValue",
-                "jsonText",
-                "jsonTextId",
-            )
-            if col in cols
-        ]
-        if not payload_cols:
-            conn.close()
-            return True
-        predicate = " OR ".join(f"{col} IS NOT NULL" for col in payload_cols)
-        has_payload = cur.execute(f"SELECT 1 FROM NVTX_EVENTS WHERE {predicate} LIMIT 1").fetchone()
-        conn.close()
-        return has_payload is None
+        with sqlite3.connect(path) as conn:
+            cur = conn.cursor()
+            tables = {
+                row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "NVTX_EVENTS" not in tables or "NVTX_PAYLOAD_SCHEMAS" not in tables:
+                return False
+            cols = {row[1] for row in cur.execute("PRAGMA table_info(NVTX_EVENTS)")}
+            payload_cols = [
+                col
+                for col in (
+                    "binaryData",
+                    "uint64Value",
+                    "int64Value",
+                    "doubleValue",
+                    "uint32Value",
+                    "int32Value",
+                    "floatValue",
+                    "jsonText",
+                    "jsonTextId",
+                )
+                if col in cols
+            ]
+            if not payload_cols:
+                return True
+            predicate = " OR ".join(f"{col} IS NOT NULL" for col in payload_cols)
+            has_payload = cur.execute(
+                f"SELECT 1 FROM NVTX_EVENTS WHERE {predicate} LIMIT 1"
+            ).fetchone()
+            return has_payload is None
     except sqlite3.Error:
         return False
 
