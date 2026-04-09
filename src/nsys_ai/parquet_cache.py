@@ -519,6 +519,11 @@ def _load_parquet_table_for_duckdb(parquet_file: Path, table_name: str):
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
+    # TODO: pq.read_table() materializes the entire Parquet file in memory.
+    # For very large NVTX_EVENTS files this could cause memory spikes.
+    # A future optimization could use RecordBatchReader-based streaming,
+    # but the column type repair (large_string → large_binary) requires
+    # touching every value, making full materialization hard to avoid.
     table = pq.read_table(parquet_file)
     binary_columns = set(_PARQUETDIR_BINARY_COLUMNS.get(table_name, ()))
     if not binary_columns:

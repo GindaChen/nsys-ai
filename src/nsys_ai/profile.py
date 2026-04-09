@@ -862,7 +862,9 @@ def _sqlite_needs_blob_reexport(path: str) -> bool:
                 row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             if "NVTX_EVENTS" not in tables or "NVTX_PAYLOAD_SCHEMAS" not in tables:
-                return False
+                # Missing payload tables means the export was not done with
+                # --include-blobs=true → needs re-export.
+                return True
             cols = {row[1] for row in cur.execute("PRAGMA table_info(NVTX_EVENTS)")}
             payload_cols = [
                 col

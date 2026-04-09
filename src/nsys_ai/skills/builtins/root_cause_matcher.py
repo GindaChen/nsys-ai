@@ -88,7 +88,18 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
-    communicator_data = _safe_execute("nccl_communicator_analysis", conn, **kwargs)
+    # Communicator analysis — accept precomputed rows from callers (e.g.
+    # profile_health_manifest) to avoid running the expensive NVTX blob
+    # decode + kernel attribution twice.
+    communicator_data = kwargs.pop("communicator_data", None)
+    if communicator_data is None:
+        # Only run when NCCL payload tables exist (cheap check).
+        adapter = wrap_connection(conn)
+        tables = set(adapter.get_table_names())
+        if "NVTX_PAYLOAD_SCHEMAS" in tables or "nvtx_payload_schemas" in tables:
+            communicator_data = _safe_execute("nccl_communicator_analysis", conn, **kwargs)
+        else:
+            communicator_data = []
     # Kernel launch overhead
     launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
     # Sync Cost

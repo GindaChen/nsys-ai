@@ -37,6 +37,11 @@ _COLLECTIVE_NAME_HINTS = {
     "sendrecv": "sendrecv",
     "reduce": "reduce",
 }
+# Peak NVLink bandwidth in GB/s (gigabytes/sec).
+# Note: field names use the suffix ``_gbps`` for brevity, but the values and
+# all downstream computations (bandwidth_gbps, peak_gbps, efficiency_pct) are
+# in GB/s — not Gb/s (gigabits).  Renaming would be a breaking JSON schema
+# change, so we keep the suffix and document the units here.
 _NVLINK_PEAK_GBPS = {
     "B200": 1800.0,
     "GB200": 1800.0,
@@ -146,10 +151,10 @@ def analyze_nccl_communicators(
         durations = bucket.pop("durations_ns")
         total_ns = sum(durations)
         avg_ns = total_ns / len(durations)
-        bandwidth_gbps = None
+        bandwidth_gbps = None  # GB/s (see _NVLINK_PEAK_GBPS note)
         total_bytes = bucket["total_bytes"]
         if bucket["sized_count"] == bucket["count"] and total_bytes > 0 and total_ns > 0:
-            bandwidth_gbps = total_bytes / (total_ns / 1e9) / 1e9
+            bandwidth_gbps = total_bytes / (total_ns / 1e9) / 1e9  # bytes/sec → GB/s
         efficiency_pct = None
         if bandwidth_gbps is not None and peak_gbps:
             efficiency_pct = (bandwidth_gbps / peak_gbps) * 100.0

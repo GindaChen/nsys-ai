@@ -201,7 +201,12 @@ def _execute(conn, **kwargs):
         _log.debug("manifest: sync_cost_analysis failed: %s", exc)
 
     # ── 7. Root cause findings (count + top severity) ────────────
-    rc_rows = _safe_skill_run("root_cause_matcher", conn, device=device, **trim_kwargs)
+    # Pass precomputed communicator rows to avoid re-running the expensive
+    # nccl_communicator_analysis inside root_cause_matcher.
+    rc_rows = _safe_skill_run(
+        "root_cause_matcher", conn, device=device,
+        communicator_data=communicator_rows, **trim_kwargs,
+    )
     root_causes = []
     for r in rc_rows:
         pattern = r.get("pattern", "")
