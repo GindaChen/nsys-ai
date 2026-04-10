@@ -5,7 +5,7 @@ profile characteristics in a single tool call, eliminating the need for
 5-8 sequential skill invocations during agent exploration.
 
 Internally orchestrates: overlap_breakdown, nccl_breakdown,
-gpu_idle_gaps, and root_cause_matcher.
+nccl_communicator_analysis, gpu_idle_gaps, and root_cause_matcher.
 """
 
 import dataclasses
@@ -157,6 +157,31 @@ def _execute(conn, **kwargs):
         nccl_summary["dominant_pct"] = dominant.get("pct", 0)
         nccl_summary["total_nccl_ms"] = round(sum(r.get("total_ms", 0) for r in nccl_rows), 1)
 
+    communicator_rows = _safe_skill_run("nccl_communicator_analysis", conn, device=device, **trim_kwargs)
+    communicator_data = [r for r in communicator_rows if not r.get("_diagnostic")]
+    communicator_summary = {"communicators": 0, "collective_rows": 0}
+    if communicator_data:
+        communicator_summary["communicators"] = len(
+            {r.get("communicator_hex") for r in communicator_data if r.get("communicator_hex")}
+        )
+        communicator_summary["collective_rows"] = len(communicator_data)
+        dominant_comm = max(communicator_data, key=lambda r: r.get("total_ms", 0))
+        communicator_summary["dominant_collective"] = dominant_comm.get("collective_type", "?")
+        communicator_summary["dominant_dimension"] = dominant_comm.get(
+            "inferred_dimension", "single_rank_or_unknown"
+        )
+        communicator_summary["top_total_ms"] = round(dominant_comm.get("total_ms", 0), 1)
+        communicator_summary["subgroup_count"] = sum(
+            1
+            for r in communicator_data
+            if str(r.get("inferred_dimension", "")).startswith("subgroup_parallelism")
+        )
+        communicator_summary["low_efficiency_count"] = sum(
+            1
+            for r in communicator_data
+            if r.get("efficiency_pct") is not None and r.get("efficiency_pct", 100) < 20.0
+        )
+
     # ── 5. GPU idle gaps (summary only) ──────────────────────────
     idle_rows = _safe_skill_run("gpu_idle_gaps", conn, device=device, limit=1, **trim_kwargs)
     idle_summary = {"gap_count": 0, "idle_pct": 0}
@@ -176,7 +201,12 @@ def _execute(conn, **kwargs):
         _log.debug("manifest: sync_cost_analysis failed: %s", exc)
 
     # ── 7. Root cause findings (count + top severity) ────────────
-    rc_rows = _safe_skill_run("root_cause_matcher", conn, device=device, **trim_kwargs)
+    # Pass precomputed communicator rows to avoid re-running the expensive
+    # nccl_communicator_analysis inside root_cause_matcher.
+    rc_rows = _safe_skill_run(
+        "root_cause_matcher", conn, device=device,
+        communicator_data=communicator_rows, **trim_kwargs,
+    )
     root_causes = []
     for r in rc_rows:
         pattern = r.get("pattern", "")
@@ -202,6 +232,7 @@ def _execute(conn, **kwargs):
         "total_kernel_ms": round(total_kernel_ms, 1),
         "overlap": overlap,
         "nccl": nccl_summary,
+        "communicators": communicator_summary,
         "sync": sync_summary,
         "idle": idle_summary,
         "root_cause_count": len(root_causes),
@@ -314,6 +345,19 @@ def _format(rows):
         )
         lines.append(f"    Total: {nccl.get('total_nccl_ms', 0):.1f}ms")
 
+    comm = m.get("communicators", {})
+    if comm.get("communicators", 0) > 0:
+        lines.append("")
+        lines.append("  NCCL Communicators:")
+        lines.append(
+            f"    Communicators: {comm.get('communicators', 0)}, grouped rows: {comm.get('collective_rows', 0)}"
+        )
+        lines.append(
+            f"    Dominant: {comm.get('dominant_collective', '?')} / {comm.get('dominant_dimension', '?')}"
+        )
+        if comm.get("low_efficiency_count", 0):
+            lines.append(f"    Low efficiency groups: {comm.get('low_efficiency_count', 0)}")
+
     # Idle
     idle = m.get("idle", {})
     sync = m.get("sync", {})
@@ -349,8 +393,8 @@ SKILL = Skill(
     title="Profile Health Manifest",
     description=(
         "One-shot profile health summary for AI agents. Returns a compact JSON manifest "
-        "covering GPU info, top kernels, compute/NCCL overlap and NCCL summary, "
-        "idle gaps, and root cause findings — all in a single call. "
+        "covering GPU info, top kernels, compute/NCCL overlap, NCCL summary, "
+        "communicator-aware NCCL hints, idle gaps, and root cause findings — all in a single call. "
         "If Profiler Overhead is >1%, advise the user to use torch.cuda.profiler.start/stop() "
         "and --capture-range=cudaProfilerApi instead of full-script profiling. "
         "Use this as the FIRST skill to call on any new profile."

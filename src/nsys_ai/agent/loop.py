@@ -40,16 +40,33 @@ class Agent:
         "h2d": ["memory_transfers", "memory_bandwidth"],
         "copy": ["memory_transfers", "memory_bandwidth"],
         "bandwidth": ["memory_bandwidth"],
-        "nccl": ["nccl_breakdown", "overlap_breakdown", "kernel_overlap_matrix", "nccl_anomaly"],
-        "allreduce": ["nccl_breakdown", "nccl_anomaly"],
-        "collective": ["nccl_breakdown", "nccl_anomaly"],
-        "distributed": [
+        "nccl": [
             "nccl_breakdown",
+            "nccl_communicator_analysis",
             "overlap_breakdown",
             "kernel_overlap_matrix",
             "nccl_anomaly",
         ],
-        "multi-gpu": ["nccl_breakdown", "overlap_breakdown", "kernel_overlap_matrix"],
+        "allreduce": ["nccl_breakdown", "nccl_communicator_analysis", "nccl_anomaly"],
+        "collective": ["nccl_breakdown", "nccl_communicator_analysis", "nccl_anomaly"],
+        "distributed": [
+            "nccl_breakdown",
+            "nccl_communicator_analysis",
+            "overlap_breakdown",
+            "kernel_overlap_matrix",
+            "nccl_anomaly",
+        ],
+        "multi-gpu": [
+            "nccl_breakdown",
+            "nccl_communicator_analysis",
+            "overlap_breakdown",
+            "kernel_overlap_matrix",
+        ],
+        "communicator": ["nccl_communicator_analysis", "nccl_breakdown"],
+        "rank": ["nccl_communicator_analysis", "nccl_breakdown"],
+        "tensor parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
+        "pipeline parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
+        "data parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
         "anomaly": ["nccl_anomaly"],
         "outlier": ["nccl_anomaly"],
         "overlap": ["overlap_breakdown", "kernel_overlap_matrix"],
@@ -131,14 +148,15 @@ class Agent:
         3. memory_transfers
         4. memory_bandwidth
         5. nccl_breakdown
-        6. nccl_anomaly
-        7. kernel_launch_overhead
-        8. kernel_launch_pattern
-        9. stream_concurrency
-        10. overlap_breakdown
-        11. kernel_overlap_matrix
-        12. iteration_timing
-        13. nvtx_layer_breakdown
+        6. nccl_communicator_analysis
+        7. nccl_anomaly
+        8. kernel_launch_overhead
+        9. kernel_launch_pattern
+        10. stream_concurrency
+        11. overlap_breakdown
+        12. kernel_overlap_matrix
+        13. iteration_timing
+        14. nvtx_layer_breakdown
 
         Returns:
             Formatted multi-section report with optional AI synthesis.
@@ -156,6 +174,7 @@ class Agent:
             "memory_transfers",
             "memory_bandwidth",
             "nccl_breakdown",
+            "nccl_communicator_analysis",
             "nccl_anomaly",
             "kernel_launch_overhead",
             "kernel_launch_pattern",

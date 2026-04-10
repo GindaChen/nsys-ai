@@ -28,6 +28,7 @@ def test_list_skills():
         "module_loading",
         "nccl_anomaly",
         "nccl_breakdown",
+        "nccl_communicator_analysis",
         "nvtx_kernel_map",
         "nvtx_layer_breakdown",
         "overlap_breakdown",

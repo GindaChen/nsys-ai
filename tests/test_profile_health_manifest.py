@@ -36,6 +36,7 @@ class TestManifestExecute:
             "total_kernel_ms",
             "overlap",
             "nccl",
+            "communicators",
             "idle",
             "root_cause_count",
             "root_causes",
@@ -54,6 +55,12 @@ class TestManifestExecute:
         rows = manifest_skill.execute(minimal_nsys_conn, device=0)
         m = rows[0]
         assert m["nccl"]["streams"] > 0
+
+    def test_communicator_summary_defaults_without_payloads(self, minimal_nsys_conn, manifest_skill):
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        m = rows[0]
+        assert m["communicators"]["communicators"] == 0
+        assert m["communicators"]["collective_rows"] == 0
 
     def test_root_causes_capped(self, minimal_nsys_conn, manifest_skill):
         """root_causes list should never exceed 5 entries."""
