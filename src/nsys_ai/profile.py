@@ -170,8 +170,9 @@ class Profile:
     """Handle to an opened Nsight Systems SQLite database.
 
     Exposes two database connections:
-      - ``self.conn`` (sqlite3.Connection): the original SQLite DB, used only for
-        schema discovery (NsightSchema) and backwards compatibility.
+      - ``self.conn`` (sqlite3.Connection | duckdb.DuckDBPyConnection): the primary
+        backend connection. For ``backend='sqlite'`` this is the original SQLite DB;
+        for ``backend='parquetdir'`` this is the DuckDB connection over Parquet.
       - ``self.db`` (duckdb.DuckDBPyConnection): DuckDB over Parquet cache — the
         primary query path for all analytical queries.
     """
@@ -185,6 +186,10 @@ class Profile:
             )
         if backend not in ("sqlite", "parquetdir"):
             raise ValueError(f"Unknown backend: {backend!r}. Expected 'sqlite' or 'parquetdir'.")
+        if backend == "parquetdir" and cache_mode != "auto":
+            raise ValueError(
+                "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
+            )
         self.path = path
         self.backend = backend
         self._lock = threading.Lock()
@@ -709,6 +714,9 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     `backend='sqlite'` returns a `.sqlite` file, exporting from `.nsys-rep`
     when needed. `backend='parquetdir'` returns a Parquet directory, exporting
     from `.nsys-rep` when needed.
+
+    Exports always pass `--include-blobs=true` so NVTX payload-dependent
+    analysis (for example communicator-aware NCCL diagnostics) remains available.
     """
     if backend == "parquetdir":
         return _resolve_parquetdir_path(path)

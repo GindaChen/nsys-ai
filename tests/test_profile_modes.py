@@ -16,6 +16,14 @@ def test_invalid_backend(minimal_nsys_db_path):
         Profile(str(minimal_nsys_db_path), backend="invalid")
 
 
+def test_parquetdir_backend_rejects_non_auto_cache_mode(minimal_nsys_db_path):
+    with pytest.raises(
+        ValueError,
+        match="cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'.",
+    ):
+        Profile(str(minimal_nsys_db_path), backend="parquetdir", cache_mode="direct")
+
+
 def test_cache_mode_parquet(minimal_nsys_db_path):
     with Profile(str(minimal_nsys_db_path), cache_mode="parquet") as prof:
         # Execute a query using alias view syntax (which Parquet mode supports via registration)

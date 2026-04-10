@@ -532,23 +532,31 @@ def _load_parquet_table_for_duckdb(parquet_file: Path, table_name: str):
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    # TODO: pq.read_table() materializes the entire Parquet file in memory.
-    # For very large NVTX_EVENTS files this could cause memory spikes.
-    # A future optimization could use RecordBatchReader-based streaming,
-    # but the column type repair (large_string → large_binary) requires
-    # touching every value, making full materialization hard to avoid.
-    table = pq.read_table(parquet_file)
     binary_columns = set(_PARQUETDIR_BINARY_COLUMNS.get(table_name, ()))
     if not binary_columns:
-        return table
+        return pq.read_table(parquet_file)
 
-    arrays = []
-    for field in table.schema:
-        column = table.column(field.name)
+    parquet = pq.ParquetFile(parquet_file)
+    cast_targets: dict[str, pa.DataType] = {}
+    for field in parquet.schema_arrow:
         if field.name in binary_columns:
-            column = pc.cast(column, pa.large_binary(), safe=False)
-        arrays.append(column)
-    return pa.table(arrays, names=table.column_names)
+            cast_targets[field.name] = pa.large_binary()
+    if not cast_targets:
+        return parquet.read()
+
+    # Process by record batch so we do not hold both pre-cast and post-cast
+    # full tables at once for large NVTX payload datasets.
+    batches = []
+    for batch in parquet.iter_batches():
+        batch_arrays = []
+        for idx, field in enumerate(batch.schema):
+            column = batch.column(idx)
+            target_type = cast_targets.get(field.name)
+            if target_type is not None:
+                column = pc.cast(column, target_type, safe=False)
+            batch_arrays.append(column)
+        batches.append(pa.record_batch(batch_arrays, names=batch.schema.names))
+    return pa.Table.from_batches(batches)
 
 
 def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) -> None:

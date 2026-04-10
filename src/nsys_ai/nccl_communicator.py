@@ -288,6 +288,8 @@ def _load_nccl_payload_events(
             WHERE n.binaryData IS NOT NULL
               AND n.eventType = {_NVTX_RANGE_EVENT}
               AND n.[end] > n.start
+              AND COALESCE(n.text, s.value) IS NOT NULL
+              AND lower(COALESCE(n.text, s.value)) LIKE 'nccl%'
               {trim_clause}
             ORDER BY n.globalTid, n.start
             """,
