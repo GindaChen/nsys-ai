@@ -3,7 +3,8 @@
 Provides efficient NVTX-to-kernel mapping. Two strategies are used:
 
 1. **DuckDB Parquet cache** (primary): When the profile has been cached,
-   the ``nvtx_kernel_map`` view provides a pre-joined, indexed result set
+   the ``nvtx_kernel_map`` + ``nvtx_path_dict`` views (or legacy map-only rows)
+   provide a precomputed attribution table
    that is queried directly in ``nvtx_layer_breakdown``. This path is fast
    and avoids any Python-level sweep.
 
@@ -79,14 +80,27 @@ def _sort_merge_attribute(
         text_expr = "n.text"
         text_join = ""
 
+    # Restrict NVTX scan to relevant tids and runtime window. This prevents
+    # loading the full NVTX table on very large profiles.
+    tids = sorted({int(r[0]) for r in kr_rows})
+    if not tids:
+        return []
+    min_r_start = min(int(r[1]) for r in kr_rows)
+    max_r_end = max(int(r[2]) for r in kr_rows)
+    placeholders = ",".join("?" for _ in tids)
     nvtx_rows = adapter.execute(
         f"""
         SELECT n.globalTid, n.start, n.[end], {text_expr} AS text
         FROM {nvtx_table} n
         {text_join}
-        WHERE n.eventType = 59 AND n.[end] > n.start
+        WHERE n.eventType = 59
+          AND n.[end] > n.start
+          AND n.globalTid IN ({placeholders})
+          AND n.start <= ?
+          AND n.[end] >= ?
         ORDER BY n.globalTid, n.start
-        """
+        """,
+        tuple(tids) + (max_r_end, min_r_start),
     ).fetchall()
 
     # StringIds lookup for kernel names — only fetch the IDs we need
@@ -181,6 +195,7 @@ def attribute_kernels_to_nvtx(
     conn,
     sqlite_path: str | None = None,
     trim: tuple[int, int] | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
     """Attribute GPU kernels to their enclosing NVTX ranges.
 
@@ -192,9 +207,9 @@ def attribute_kernels_to_nvtx(
       kernel_name, k_start, k_end, k_dur_ns
     """
 
-    # DuckDB: Try reading from purely precomputed Parquet bounds!
+    # DuckDB: try reading from precomputed nvtx_kernel_map first.
     try:
-        from .connection import DuckDBAdapter, wrap_connection
+        from .connection import DuckDBAdapter, cached_nvtx_map_uses_path_id, wrap_connection
 
         adapter = wrap_connection(conn)
 
@@ -204,9 +219,112 @@ def attribute_kernels_to_nvtx(
             if trim:
                 trim_sql = "WHERE k_start >= ? AND k_end <= ?"
                 params = [trim[0], trim[1]]
+            limit_sql = f" LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
+
+            try:
+                uses_path_id = cached_nvtx_map_uses_path_id(adapter.raw_conn)
+
+                if uses_path_id:
+                    trim_sql_m = ""
+                    if trim:
+                        trim_sql_m = "WHERE m.k_start >= ? AND m.k_end <= ?"
+                    cur = adapter.execute(
+                        f"""
+                        SELECT m.nvtx_text, m.nvtx_depth, d.nvtx_path, m.kernel_name,
+                               m.k_start, m.k_end, m.k_dur_ns
+                        FROM nvtx_kernel_map m
+                        JOIN nvtx_path_dict d ON m.path_id = d.path_id
+                        {trim_sql_m}
+                        ORDER BY m.k_start{limit_sql}
+                        """,
+                        params,
+                    )
+                else:
+                    cur = adapter.execute(
+                        f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start{limit_sql}",
+                        params,
+                    )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+            except Exception:
+                _log.debug("nvtx_kernel_map unavailable; using on-demand DuckDB attribution")
+
+            # On-demand DuckDB SQL attribution for large profiles where the
+            # cache intentionally skips nvtx_kernel_map precomputation.
+            tables = adapter.resolve_activity_tables()
+            kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+            runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+            nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+            has_textid = adapter.detect_nvtx_text_id()
+            if has_textid:
+                text_expr = "COALESCE(n.text, ns.value)"
+                text_join = "LEFT JOIN StringIds ns ON n.textId = ns.id"
+            else:
+                text_expr = "n.text"
+                text_join = ""
+
+            trim_clause = ""
+            trim_params: list[int] = []
+            kr_where = ""
+            nvtx_where = ""
+            if trim:
+                trim_clause = "WHERE k_start >= ? AND k_end <= ?"
+                trim_start = int(trim[0])
+                trim_end = int(trim[1])
+                trim_params = [trim_start, trim_end]
+                kr_where = 'WHERE k.start >= ? AND k."end" <= ?'
+                nvtx_where = 'AND n.start <= ? AND n."end" >= ?'
+                trim_params = [trim_start, trim_end, trim_end, trim_start, trim_start, trim_end]
+            limit_sql = f" LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
 
             cur = adapter.execute(
-                f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start", params
+                f"""
+                WITH kr AS (
+                    SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
+                           k.start AS k_start, k."end" AS k_end,
+                           COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                           r.correlationId
+                    FROM {kernel_table} k
+                    JOIN {runtime_table} r ON r.correlationId = k.correlationId
+                    LEFT JOIN StringIds ks ON k.shortName = ks.id
+                    LEFT JOIN StringIds kd ON k.demangledName = kd.id
+                    {kr_where}
+                ),
+                enclosing AS (
+                    SELECT kr.k_start, kr.k_end, kr.kernel_name,
+                           kr.r_start, kr.r_end, kr.globalTid, kr.correlationId,
+                           {text_expr} AS nvtx_text,
+                           (n."end" - n.start) AS n_dur, n.start AS n_start
+                    FROM kr
+                    JOIN {nvtx_table} n
+                      ON n.globalTid = kr.globalTid
+                      AND n.eventType = 59
+                      AND n."end" > n.start
+                      AND n.start <= kr.r_start
+                      AND n."end" >= kr.r_end
+                      {nvtx_where}
+                    {text_join}
+                    WHERE {text_expr} IS NOT NULL
+                ),
+                grouped AS (
+                    SELECT
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        kernel_name,
+                        k_start,
+                        k_end,
+                        (k_end - k_start) AS k_dur_ns
+                    FROM enclosing
+                    GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
+                )
+                SELECT nvtx_text, nvtx_depth, nvtx_path, kernel_name, k_start, k_end, k_dur_ns
+                FROM grouped
+                {trim_clause}
+                ORDER BY k_start
+                {limit_sql}
+                """,
+                trim_params,
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -214,4 +332,9 @@ def attribute_kernels_to_nvtx(
         _log.debug("DuckDB nvtx_kernel_map query failed, fallback to Python sweep", exc_info=True)
 
     # Tier 2: Python sort-merge fallback on SQLite
-    return _sort_merge_attribute(conn, trim)
+    rows = _sort_merge_attribute(conn, trim)
+    if limit and int(limit) > 0:
+        import heapq
+
+        return heapq.nsmallest(int(limit), rows, key=lambda r: int(r["k_start"]))
+    return rows

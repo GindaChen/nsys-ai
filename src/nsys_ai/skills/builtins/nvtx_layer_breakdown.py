@@ -16,14 +16,59 @@ Features:
 
 from collections import defaultdict
 
-from nsys_ai.connection import DB_ERRORS
+from nsys_ai.connection import (
+    DB_ERRORS,
+    cached_nvtx_map_has_embedded_tc,
+    cached_nvtx_map_uses_path_id,
+)
 
 from ..base import Skill, SkillParam
+
+# Compact vs full output (CLI --report removed; skills still accept -p report=…).
+REPORT_FULL = "full"
+REPORT_COMPACT = "compact"
+
+
+def coerce_report_param(raw: object | None) -> tuple[str, str | None]:
+    """Return (mode, error_message). Default full; error_message if invalid."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return REPORT_FULL, None
+    token = str(raw).strip().lower()
+    if token in (REPORT_FULL, "default"):
+        return REPORT_FULL, None
+    if token in (REPORT_COMPACT, "slim", "minimal"):
+        return REPORT_COMPACT, None
+    return REPORT_FULL, (
+        f"Invalid report mode {raw!r}; expected '{REPORT_FULL}' or '{REPORT_COMPACT}'."
+    )
+
+# Leaf rows are 11-tuples:
+#   (path_id, nvtx_path, leaf_depth, leaf_text, total_ns, nccl_ns, compute_ns,
+#    tc_elig, tc_act, count, max_ns)
+# path_id is int for DuckDB paths that GROUP BY surrogate key; None on SQLite/Python.
+_LR_ID = 0
+_LR_PATH = 1
+_LR_DEPTH = 2
+_LR_TEXT = 3
+_LR_TOTAL = 4
+_LR_NCCL = 5
+_LR_COMPUTE = 6
+_LR_TC_ELIG = 7
+_LR_TC_ACT = 8
+_LR_COUNT = 9
+_LR_MAX = 10
 
 
 def _execute(conn, **kwargs):
     """Execute NVTX region GPU time breakdown via fast DuckDB SQL."""
-    from ...nvtx_layer_detect import detect_layer_depth, is_outlier
+    from ...connection import DuckDBAdapter, wrap_connection
+    from ...nvtx_layer_detect import detect_layer_depth
+
+    report, report_err = coerce_report_param(kwargs.get("report"))
+    if report_err:
+        return [{"error": report_err}]
+
+    wrapped = wrap_connection(conn)
 
     limit = int(kwargs.get("limit", 20))
     depth = kwargs.get("depth")
@@ -55,6 +100,7 @@ def _execute(conn, **kwargs):
     trim_end = kwargs.get("trim_end_ns")
 
     # Check if nvtx_kernel_map exists or can be built
+    adapter = None
     try:
         conn.execute("SELECT 1 FROM nvtx_kernel_map LIMIT 1")
         has_nkm = True
@@ -62,99 +108,214 @@ def _execute(conn, **kwargs):
         has_nkm = False
 
     if not has_nkm:
-        from ...nvtx_attribution import attribute_kernels_to_nvtx
-        from ...overlap import classify_kernel
-
-        trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
-        sqlite_path = kwargs.get("_sqlite_path")
-        rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim)
-
-        if not rows:
-            return []
-
-        detection_meta = None
-        auto_group_depth = None
-        if depth is None and auto_depth:
-            detection_meta = detect_layer_depth(rows)
-            if detection_meta["layer_depth"] is not None:
-                auto_group_depth = detection_meta["layer_depth"]
+        adapter = wrapped
+        # Fast path: when running on DuckDB but nvtx_kernel_map is deferred,
+        # aggregate via SQL directly instead of materializing full Python maps.
+        if isinstance(adapter, DuckDBAdapter):
+            tables = adapter.resolve_activity_tables()
+            kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+            runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+            nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+            has_textid = adapter.detect_nvtx_text_id()
+            if has_textid:
+                text_expr = "COALESCE(n.text, ns.value)"
+                text_join = "LEFT JOIN StringIds ns ON n.textId = ns.id"
             else:
-                available_depths = sorted(
-                    {r.get("nvtx_depth", 0) for r in rows if r.get("nvtx_depth") is not None}
+                text_expr = "n.text"
+                text_join = ""
+
+            trim_clause = ""
+            params: list[int] = []
+            kr_where = ""
+            nvtx_where = ""
+            if trim_start is not None and trim_end is not None:
+                trim_clause = "WHERE m.k_start >= ? AND m.k_end <= ?"
+                t_start = int(trim_start)
+                t_end = int(trim_end)
+                kr_where = 'WHERE k.start >= ? AND k."end" <= ?'
+                nvtx_where = 'AND n.start <= ? AND n."end" >= ?'
+                params = [t_start, t_end, t_end, t_start, t_start, t_end]
+
+            sql_agg = f"""
+                WITH kr AS (
+                    SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
+                           k.start AS k_start, k."end" AS k_end,
+                           COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                           r.correlationId
+                    FROM {kernel_table} k
+                    JOIN {runtime_table} r ON r.correlationId = k.correlationId
+                    LEFT JOIN StringIds ks ON k.shortName = ks.id
+                    LEFT JOIN StringIds kd ON k.demangledName = kd.id
+                    {kr_where}
+                ),
+                enclosing AS (
+                    SELECT kr.k_start, kr.k_end, kr.kernel_name,
+                           kr.r_start, kr.r_end, kr.globalTid, kr.correlationId,
+                           {text_expr} AS nvtx_text,
+                           (n."end" - n.start) AS n_dur, n.start AS n_start
+                    FROM kr
+                    JOIN {nvtx_table} n
+                      ON n.globalTid = kr.globalTid
+                      AND n.eventType = 59
+                      AND n."end" > n.start
+                      AND n.start <= kr.r_start
+                      AND n."end" >= kr.r_end
+                      {nvtx_where}
+                    {text_join}
+                    WHERE {text_expr} IS NOT NULL
+                ),
+                mapped AS (
+                    SELECT
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        kernel_name, k_start, k_end, (k_end - k_start) AS k_dur_ns
+                    FROM enclosing
+                    GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
+                ),
+                path_dict AS (
+                    SELECT nvtx_path, ROW_NUMBER() OVER (ORDER BY nvtx_path)::BIGINT AS path_id
+                    FROM (SELECT DISTINCT nvtx_path FROM mapped)
+                ),
+                mapped_pid AS (
+                    SELECT m.*, d.path_id
+                    FROM mapped m
+                    JOIN path_dict d ON m.nvtx_path = d.nvtx_path
                 )
-                depth_samples = {}
-                for d in available_depths[:5]:
-                    depth_samples[d] = [
-                        r.get("nvtx_text", "") for r in rows if r.get("nvtx_depth") == d
-                    ][:3]
-                detection_meta["available_depths"] = available_depths
-                detection_meta["depth_samples"] = depth_samples
+                SELECT
+                    m.path_id,
+                    MAX(m.nvtx_path) AS nvtx_path,
+                    FIRST(m.nvtx_depth) AS leaf_depth,
+                    FIRST(m.nvtx_text) AS leaf_text,
+                    SUM(m.k_dur_ns) AS total_ns,
+                    SUM(CASE WHEN lower(m.kernel_name) ILIKE '%nccl%' THEN m.k_dur_ns ELSE 0 END) AS nccl_ns,
+                    SUM(CASE WHEN lower(m.kernel_name) NOT ILIKE '%nccl%' THEN m.k_dur_ns ELSE 0 END) AS compute_ns,
+                    SUM(CASE WHEN k.is_tc_eligible = 1 THEN m.k_dur_ns ELSE 0 END) AS tc_eligible_ns,
+                    SUM(CASE WHEN k.uses_tc = 1 AND k.is_tc_eligible = 1 THEN m.k_dur_ns ELSE 0 END) AS tc_active_ns,
+                    COUNT(*) AS count,
+                    MAX(m.k_dur_ns) AS max_ns
+                FROM mapped_pid m
+                JOIN kernels k ON m.k_start = k.start AND m.k_end = k."end"
+                {trim_clause}
+                GROUP BY m.path_id
+            """
+            leaf_rows = conn.execute(sql_agg, params).fetchall()
+            if not leaf_rows:
+                return []
+            detection_meta = None
+            auto_group_depth = None
+            if depth is None and auto_depth:
+                dummy_rows = [
+                    {
+                        "nvtx_path": r[_LR_PATH],
+                        "nvtx_text": (r[_LR_PATH].split(" > ")[-1] if r[_LR_PATH] else ""),
+                        "nvtx_depth": int(r[_LR_DEPTH] or 0),
+                    }
+                    for r in leaf_rows
+                ]
+                detection_meta = detect_layer_depth(dummy_rows)
+                if detection_meta["layer_depth"] is not None:
+                    auto_group_depth = detection_meta["layer_depth"]
+            if depth is not None:
+                if depth < 0:
+                    return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
+                leaf_rows = [r for r in leaf_rows if int(r[_LR_DEPTH]) == depth]
+            k_times_by_group = defaultdict(lambda: defaultdict(int))
+        else:
+            from ...nvtx_attribution import attribute_kernels_to_nvtx
+            from ...overlap import classify_kernel
 
-        if depth is not None:
-            if depth < 0:
-                return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
+            trim = (trim_start, trim_end) if trim_start is not None and trim_end is not None else None
+            sqlite_path = kwargs.get("_sqlite_path")
+            rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim)
 
-        groups_leaf = defaultdict(
-            lambda: {
-                "leaf_depth": -1,
-                "leaf_text": "",
-                "total_ns": 0,
-                "nccl_ns": 0,
-                "compute_ns": 0,
-                "tc_elig": None,
-                "tc_act": None,
-                "count": 0,
-                "max_ns": 0,
-            }
-        )
+            if not rows:
+                return []
 
-        k_times_by_group = defaultdict(lambda: defaultdict(int))
-        _class_cache = {}
-        for r in rows:
-            text = r["nvtx_text"]
-            if not text:
-                continue
-            path = r.get("nvtx_path", text)
-            k_name = r["kernel_name"]
-            dur_ns = r["k_dur_ns"]
+            detection_meta = None
+            auto_group_depth = None
+            if depth is None and auto_depth:
+                detection_meta = detect_layer_depth(rows)
+                if detection_meta["layer_depth"] is not None:
+                    auto_group_depth = detection_meta["layer_depth"]
+                else:
+                    available_depths = sorted(
+                        {r.get("nvtx_depth", 0) for r in rows if r.get("nvtx_depth") is not None}
+                    )
+                    depth_samples = {}
+                    for d in available_depths[:5]:
+                        depth_samples[d] = [
+                            r.get("nvtx_text", "") for r in rows if r.get("nvtx_depth") == d
+                        ][:3]
+                    detection_meta["available_depths"] = available_depths
+                    detection_meta["depth_samples"] = depth_samples
 
-            if k_name not in _class_cache:
-                _class_cache[k_name] = classify_kernel(k_name)
-            is_nccl = _class_cache[k_name].startswith("nccl_")
+            if depth is not None:
+                if depth < 0:
+                    return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
 
-            stats = groups_leaf[path]
-            if stats["leaf_depth"] < 0:
-                stats["leaf_depth"] = r.get("nvtx_depth", 0)
-                stats["leaf_text"] = text
-            stats["total_ns"] += dur_ns
-            if is_nccl:
-                stats["nccl_ns"] += dur_ns
-            else:
-                stats["compute_ns"] += dur_ns
-            stats["count"] += 1
-            if dur_ns > stats["max_ns"]:
-                stats["max_ns"] = dur_ns
-
-            k_times_by_group[path][k_name] += dur_ns
-
-        leaf_rows = [
-            (
-                path,
-                v["leaf_depth"],
-                v["leaf_text"],
-                v["total_ns"],
-                v["nccl_ns"],
-                v["compute_ns"],
-                v["tc_elig"],
-                v["tc_act"],
-                v["count"],
-                v["max_ns"],
+            groups_leaf = defaultdict(
+                lambda: {
+                    "leaf_depth": -1,
+                    "leaf_text": "",
+                    "total_ns": 0,
+                    "nccl_ns": 0,
+                    "compute_ns": 0,
+                    "tc_elig": None,
+                    "tc_act": None,
+                    "count": 0,
+                    "max_ns": 0,
+                }
             )
-            for path, v in groups_leaf.items()
-        ]
 
-        if depth is not None:
-            leaf_rows = [r for r in leaf_rows if r[1] == depth]
+            k_times_by_group = defaultdict(lambda: defaultdict(int))
+            _class_cache = {}
+            for r in rows:
+                text = r["nvtx_text"]
+                if not text:
+                    continue
+                path = r.get("nvtx_path", text)
+                k_name = r["kernel_name"]
+                dur_ns = r["k_dur_ns"]
+
+                if k_name not in _class_cache:
+                    _class_cache[k_name] = classify_kernel(k_name)
+                is_nccl = _class_cache[k_name].startswith("nccl_")
+
+                stats = groups_leaf[path]
+                if stats["leaf_depth"] < 0:
+                    stats["leaf_depth"] = r.get("nvtx_depth", 0)
+                    stats["leaf_text"] = text
+                stats["total_ns"] += dur_ns
+                if is_nccl:
+                    stats["nccl_ns"] += dur_ns
+                else:
+                    stats["compute_ns"] += dur_ns
+                stats["count"] += 1
+                if dur_ns > stats["max_ns"]:
+                    stats["max_ns"] = dur_ns
+
+                k_times_by_group[path][k_name] += dur_ns
+
+            leaf_rows = [
+                (
+                    None,
+                    path,
+                    v["leaf_depth"],
+                    v["leaf_text"],
+                    v["total_ns"],
+                    v["nccl_ns"],
+                    v["compute_ns"],
+                    v["tc_elig"],
+                    v["tc_act"],
+                    v["count"],
+                    v["max_ns"],
+                )
+                for path, v in groups_leaf.items()
+            ]
+
+            if depth is not None:
+                leaf_rows = [r for r in leaf_rows if int(r[_LR_DEPTH]) == depth]
 
     else:
         # DB has nvtx_kernel_map, use fast SQL
@@ -164,64 +325,94 @@ def _execute(conn, **kwargs):
             trim_clause = "AND n.k_start >= ? AND n.k_end <= ?"
             params = [trim_start, trim_end]
 
-        # Quick dummy rows for Auto-depth detection using distinct paths
+        if depth is not None and depth < 0:
+            return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
+
+        # Phase 1: aggregate per leaf path. Prefer map-only scan when TC flags are
+        # embedded in nvtx_kernel_map (avoids a wide join to kernels — DuckDB perf).
+        # When path_id is available, GROUP BY integer key (join dict for nvtx_path string output).
+        pid = cached_nvtx_map_uses_path_id(conn)
+        join_dict = (
+            "JOIN nvtx_path_dict d ON n.path_id = d.path_id\n                "
+            if pid
+            else ""
+        )
+        path_col = "MAX(d.nvtx_path)" if pid else "n.nvtx_path"
+        group_col = "n.path_id" if pid else "n.nvtx_path"
+        head_select = (
+            "n.path_id,\n                    MAX(d.nvtx_path) AS nvtx_path,"
+            if pid
+            else f"{path_col} AS nvtx_path,"
+        )
+
+        if cached_nvtx_map_has_embedded_tc(conn):
+            sql_agg = f"""
+                SELECT
+                    {head_select}
+                    FIRST(n.nvtx_depth) AS leaf_depth,
+                    FIRST(n.nvtx_text) AS leaf_text,
+                    SUM(n.k_dur_ns) AS total_ns,
+                    SUM(CASE WHEN lower(n.kernel_name) ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS nccl_ns,
+                    SUM(CASE WHEN lower(n.kernel_name) NOT ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS compute_ns,
+                    SUM(CASE WHEN n.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_eligible_ns,
+                    SUM(CASE WHEN n.uses_tc = 1 AND n.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_active_ns,
+                    COUNT(*) AS count,
+                    MAX(n.k_dur_ns) AS max_ns
+                FROM nvtx_kernel_map n
+                {join_dict}WHERE 1=1 {trim_clause}
+                GROUP BY {group_col}
+            """
+        else:
+            sql_agg = f"""
+                SELECT
+                    {head_select}
+                    FIRST(n.nvtx_depth) AS leaf_depth,
+                    FIRST(n.nvtx_text) AS leaf_text,
+                    SUM(n.k_dur_ns) AS total_ns,
+                    SUM(CASE WHEN lower(k.name) ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS nccl_ns,
+                    SUM(CASE WHEN lower(k.name) NOT ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS compute_ns,
+                    SUM(CASE WHEN k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_eligible_ns,
+                    SUM(CASE WHEN k.uses_tc = 1 AND k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_active_ns,
+                    COUNT(*) AS count,
+                    MAX(n.k_dur_ns) AS max_ns
+                FROM nvtx_kernel_map n
+                {join_dict}JOIN kernels k ON n.k_start = k.start AND n.k_end = k."end"
+                WHERE 1=1 {trim_clause}
+                GROUP BY {group_col}
+            """
+        leaf_rows = conn.execute(sql_agg, params).fetchall()
+        if not pid:
+            leaf_rows = [(None,) + tuple(r) for r in leaf_rows]
+
+        if not leaf_rows:
+            return []
+
         detection_meta = None
         auto_group_depth = None
         if depth is None and auto_depth:
-            paths = [
-                r[0]
-                for r in conn.execute("SELECT DISTINCT nvtx_path FROM nvtx_kernel_map").fetchall()
-            ]
             dummy_rows = [
                 {
-                    "nvtx_path": p,
-                    "nvtx_text": p.split(" > ")[-1] if p else "",
-                    "nvtx_depth": p.count(" > "),
+                    "nvtx_path": r[_LR_PATH],
+                    "nvtx_text": (r[_LR_TEXT] or "") or ((r[_LR_PATH] or "").split(" > ")[-1]),
+                    "nvtx_depth": int(r[_LR_DEPTH] or 0),
                 }
-                for p in paths
+                for r in leaf_rows
             ]
             detection_meta = detect_layer_depth(dummy_rows)
             if detection_meta["layer_depth"] is not None:
                 auto_group_depth = detection_meta["layer_depth"]
             else:
-                available_depths = sorted({r["nvtx_depth"] for r in dummy_rows})
+                available_depths = sorted({row["nvtx_depth"] for row in dummy_rows})
                 depth_samples = {}
                 for d in available_depths[:5]:
-                    depth_samples[d] = [r["nvtx_text"] for r in dummy_rows if r["nvtx_depth"] == d][
-                        :3
-                    ]
+                    depth_samples[d] = [
+                        row["nvtx_text"] for row in dummy_rows if row["nvtx_depth"] == d
+                    ][:3]
                 detection_meta["available_depths"] = available_depths
                 detection_meta["depth_samples"] = depth_samples
 
         if depth is not None:
-            if depth < 0:
-                return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
-
-        # Phase 1: Pure SQL aggregation across all leaf paths
-        sql_agg = f"""
-            SELECT
-                n.nvtx_path,
-                FIRST(n.nvtx_depth) AS leaf_depth,
-                FIRST(n.nvtx_text) AS leaf_text,
-                SUM(n.k_dur_ns) AS total_ns,
-                SUM(CASE WHEN lower(k.name) ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS nccl_ns,
-                SUM(CASE WHEN lower(k.name) NOT ILIKE '%nccl%' THEN n.k_dur_ns ELSE 0 END) AS compute_ns,
-                SUM(CASE WHEN k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_eligible_ns,
-                SUM(CASE WHEN k.uses_tc = 1 AND k.is_tc_eligible = 1 THEN n.k_dur_ns ELSE 0 END) AS tc_active_ns,
-                COUNT(*) AS count,
-                MAX(n.k_dur_ns) AS max_ns
-            FROM nvtx_kernel_map n
-            JOIN kernels k ON n.k_start = k.start AND n.k_end = k."end"
-            WHERE 1=1 {trim_clause}
-            GROUP BY n.nvtx_path
-        """
-        leaf_rows = conn.execute(sql_agg, params).fetchall()
-
-        if not leaf_rows:
-            return []
-
-        if depth is not None:
-            leaf_rows = [r for r in leaf_rows if r[1] == depth]
+            leaf_rows = [r for r in leaf_rows if int(r[_LR_DEPTH]) == depth]
 
     # Phase 2: Python rollover for auto_group_depth truncation
     groups = defaultdict(
@@ -239,19 +430,25 @@ def _execute(conn, **kwargs):
         }
     )
 
+    leaf_to_group: dict[str, str] = {}
+    path_id_to_nvtx_path: dict[int, str] = {}
+    nvtx_path_to_pid: dict[str, int] = {}
     for row in leaf_rows:
-        (
-            nvtx_path,
-            leaf_depth,
-            leaf_text,
-            total_ns,
-            nccl_ns,
-            compute_ns,
-            tc_elig,
-            tc_act,
-            count,
-            max_ns,
-        ) = row
+        path_id = row[_LR_ID]
+        nvtx_path = row[_LR_PATH]
+        leaf_depth = row[_LR_DEPTH]
+        leaf_text = row[_LR_TEXT]
+        total_ns = row[_LR_TOTAL]
+        nccl_ns = row[_LR_NCCL]
+        compute_ns = row[_LR_COMPUTE]
+        tc_elig = row[_LR_TC_ELIG]
+        tc_act = row[_LR_TC_ACT]
+        count = row[_LR_COUNT]
+        max_ns = row[_LR_MAX]
+        if path_id is not None:
+            ipid = int(path_id)
+            path_id_to_nvtx_path[ipid] = nvtx_path
+            nvtx_path_to_pid[nvtx_path] = ipid
 
         path_parts = nvtx_path.split(" > ") if nvtx_path else [""]
         if auto_group_depth is not None:
@@ -268,6 +465,7 @@ def _execute(conn, **kwargs):
             region_name = leaf_text
             group_depth = leaf_depth
 
+        leaf_to_group[nvtx_path] = group_key
         stats = groups[group_key]
         stats["total_ns"] += total_ns or 0
         stats["compute_ns"] += compute_ns or 0
@@ -294,29 +492,9 @@ def _execute(conn, **kwargs):
             for k_name, dura in k_dict.items():
                 new_k_times[new_key][k_name] += dura
         k_times_by_group = new_k_times
-
-    # Phase 3: Fast SQL grouping for top kernels (if natively supported)
-    if has_nkm:
-        sql_kernels = f"""
-            SELECT n.nvtx_path, n.kernel_name, SUM(n.k_dur_ns) AS k_total
-            FROM nvtx_kernel_map n
-            WHERE 1=1 {trim_clause}
-            GROUP BY n.nvtx_path, n.kernel_name
-        """
-        kernel_rows = conn.execute(sql_kernels, params).fetchall()
+    elif has_nkm:
+        # Leaf rows came from nvtx_kernel_map SQL; per-kernel histogram is filled in Phase 3.
         k_times_by_group = defaultdict(lambda: defaultdict(int))
-        for row in kernel_rows:
-            nvtx_path, k_name, k_total = row
-            path_parts = nvtx_path.split(" > ") if nvtx_path else [""]
-            if auto_group_depth is not None:
-                if auto_group_depth < len(path_parts):
-                    group_key = " > ".join(path_parts[: auto_group_depth + 1])
-                else:
-                    group_key = nvtx_path
-            else:
-                group_key = nvtx_path
-            k_times_by_group[group_key][k_name] += k_total
-    # Else: k_times_by_group is already seeded by Fallback logic!
 
     # Final aggregation & sorting
     results = []
@@ -336,6 +514,7 @@ def _execute(conn, **kwargs):
         results.append(
             {
                 "_raw_total_ns": total_ns,
+                "_group_key": path_key,
                 "nvtx_region": stats["nvtx_region"],
                 "nvtx_depth": stats["nvtx_depth"],
                 "nvtx_path": stats["nvtx_path"],
@@ -353,16 +532,232 @@ def _execute(conn, **kwargs):
             }
         )
 
-    # Sort descending
-    results.sort(key=lambda r: -r["_raw_total_ns"])
+    # Sort descending with deterministic tie-break (matches JSON sort_spec).
+    results.sort(key=lambda r: (-r["_raw_total_ns"], r["_group_key"]))
 
-    # Outlier detection
+    # Outlier detection — O(N log N) total, not O(N² log N).
+    # Pre-compute the fence once so the per-row test is a cheap comparison.
+    import statistics as _statistics
+
     all_times = [r["_raw_total_ns"] / 1e6 for r in results]
+    _n = len(all_times)
+    if _n < 2:
+        _fence = float("inf")
+        _med = 0.0
+    elif _n < 4:
+        _med = _statistics.median(all_times)
+        _fence = _med * 2.0
+    else:
+        _med = _statistics.median(all_times)
+        _q1, _, _q3 = _statistics.quantiles(all_times, n=4, method="inclusive")
+        _iqr = _q3 - _q1
+        _fence = (_q3 + 1.5 * _iqr) if _iqr > 0 else (_med * 2.0)
+
     for r in results:
-        r["is_outlier"] = is_outlier(r["_raw_total_ns"] / 1e6, all_times)
+        v = r["_raw_total_ns"] / 1e6
+        r["is_outlier"] = _n >= 2 and v > _fence and v > _med * 1.5
         r.pop("_raw_total_ns", None)
 
     limited = results[:limit]
+
+    # Phase 3 (full report only): accurate top-kernels per visible group.
+    # Compact omits top_kernels entirely — skip this work for wall-clock savings.
+    if report == REPORT_COMPACT:
+        for r in limited:
+            r.pop("_group_key", None)
+            r.pop("top_kernels", None)
+    else:
+        selected_group_keys = {r["_group_key"] for r in limited}
+        if selected_group_keys:
+            if has_nkm:
+                selected_leaf_paths = [
+                    p for p, g in leaf_to_group.items() if g in selected_group_keys
+                ]
+                if selected_leaf_paths:
+                    uses_pid = cached_nvtx_map_uses_path_id(conn)
+                    selected_pids = [
+                        nvtx_path_to_pid[p]
+                        for p in selected_leaf_paths
+                        if p in nvtx_path_to_pid
+                    ]
+                    selected_pids = list(dict.fromkeys(selected_pids))
+                    if uses_pid and selected_pids:
+                        ph = ",".join("?" for _ in selected_pids)
+                        sql_k = (
+                            f"SELECT n.path_id, n.kernel_name, SUM(n.k_dur_ns) AS k_total "
+                            f"FROM nvtx_kernel_map n WHERE n.path_id IN ({ph})"
+                        )
+                        params_k = list(selected_pids)
+                        if trim_start is not None and trim_end is not None:
+                            sql_k += " AND n.k_start >= ? AND n.k_end <= ?"
+                            params_k.extend([int(trim_start), int(trim_end)])
+                        sql_k += " GROUP BY n.path_id, n.kernel_name"
+                        kernel_rows = conn.execute(sql_k, params_k).fetchall()
+                        k_times_by_group = defaultdict(lambda: defaultdict(int))
+                        for path_id_k, k_name, k_total in kernel_rows:
+                            nvtx_p = path_id_to_nvtx_path.get(int(path_id_k), "")
+                            gk = leaf_to_group.get(nvtx_p, nvtx_p)
+                            k_times_by_group[gk][k_name] += k_total
+                    else:
+                        placeholders = ",".join("?" for _ in selected_leaf_paths)
+                        sql_k = (
+                            f"SELECT n.nvtx_path, n.kernel_name, SUM(n.k_dur_ns) AS k_total "
+                            f"FROM nvtx_kernel_map n "
+                            f"WHERE n.nvtx_path IN ({placeholders})"
+                        )
+                        params_k = list(selected_leaf_paths)
+                        if trim_start is not None and trim_end is not None:
+                            sql_k += " AND n.k_start >= ? AND n.k_end <= ?"
+                            params_k.extend([int(trim_start), int(trim_end)])
+                        sql_k += " GROUP BY n.nvtx_path, n.kernel_name"
+                        kernel_rows = conn.execute(sql_k, params_k).fetchall()
+                        k_times_by_group = defaultdict(lambda: defaultdict(int))
+                        for nvtx_path, k_name, k_total in kernel_rows:
+                            gk = leaf_to_group.get(nvtx_path, nvtx_path)
+                            k_times_by_group[gk][k_name] += k_total
+            elif adapter is not None and isinstance(adapter, DuckDBAdapter):
+                selected_leaf_paths = [
+                    p for p, g in leaf_to_group.items() if g in selected_group_keys
+                ]
+                if selected_leaf_paths:
+                    has_textid = adapter.detect_nvtx_text_id()
+                    if has_textid:
+                        text_expr = "COALESCE(n.text, ns.value)"
+                        text_join = "LEFT JOIN StringIds ns ON n.textId = ns.id"
+                    else:
+                        text_expr = "n.text"
+                        text_join = ""
+                    tables = adapter.resolve_activity_tables()
+                    kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+                    runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+                    nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+                    kr_where = ""
+                    nvtx_where = ""
+                    params_k = []
+                    if trim_start is not None and trim_end is not None:
+                        t_start = int(trim_start)
+                        t_end = int(trim_end)
+                        kr_where = 'WHERE k.start >= ? AND k."end" <= ?'
+                        nvtx_where = 'AND n.start <= ? AND n."end" >= ?'
+                        params_k.extend([t_start, t_end, t_end, t_start])
+                    sel_pids = [
+                        nvtx_path_to_pid[p]
+                        for p in selected_leaf_paths
+                        if p in nvtx_path_to_pid
+                    ]
+                    sel_pids = list(dict.fromkeys(sel_pids))
+                    if sel_pids:
+                        ph_pids = ",".join("?" for _ in sel_pids)
+                        params_k.extend(sel_pids)
+                        sql_k = f"""
+                        WITH kr AS (
+                            SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
+                                   k.start AS k_start, k."end" AS k_end,
+                                   COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                                   r.correlationId
+                            FROM {kernel_table} k
+                            JOIN {runtime_table} r ON r.correlationId = k.correlationId
+                            LEFT JOIN StringIds ks ON k.shortName = ks.id
+                            LEFT JOIN StringIds kd ON k.demangledName = kd.id
+                            {kr_where}
+                        ),
+                        enclosing AS (
+                            SELECT kr.k_start, kr.k_end, kr.kernel_name,
+                                   kr.r_start, kr.r_end, kr.globalTid, kr.correlationId,
+                                   {text_expr} AS nvtx_text, (n."end" - n.start) AS n_dur, n.start AS n_start
+                            FROM kr
+                            JOIN {nvtx_table} n
+                              ON n.globalTid = kr.globalTid
+                              AND n.eventType = 59
+                              AND n."end" > n.start
+                              AND n.start <= kr.r_start
+                              AND n."end" >= kr.r_end
+                              {nvtx_where}
+                            {text_join}
+                            WHERE {text_expr} IS NOT NULL
+                        ),
+                        mapped AS (
+                            SELECT
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                kernel_name,
+                                k_start,
+                                k_end,
+                                (k_end - k_start) AS k_dur_ns
+                            FROM enclosing
+                            GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
+                        ),
+                        path_dict AS (
+                            SELECT nvtx_path, ROW_NUMBER() OVER (ORDER BY nvtx_path)::BIGINT AS path_id
+                            FROM (SELECT DISTINCT nvtx_path FROM mapped)
+                        ),
+                        mp AS (
+                            SELECT m.*, d.path_id
+                            FROM mapped m
+                            JOIN path_dict d ON m.nvtx_path = d.nvtx_path
+                        )
+                        SELECT mp.nvtx_path, mp.kernel_name, SUM(mp.k_dur_ns) AS k_total
+                        FROM mp
+                        WHERE mp.path_id IN ({ph_pids})
+                        GROUP BY mp.nvtx_path, mp.kernel_name
+                    """
+                    else:
+                        placeholders = ",".join("?" for _ in selected_leaf_paths)
+                        params_k.extend(selected_leaf_paths)
+                        sql_k = f"""
+                        WITH kr AS (
+                            SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
+                                   k.start AS k_start, k."end" AS k_end,
+                                   COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                                   r.correlationId
+                            FROM {kernel_table} k
+                            JOIN {runtime_table} r ON r.correlationId = k.correlationId
+                            LEFT JOIN StringIds ks ON k.shortName = ks.id
+                            LEFT JOIN StringIds kd ON k.demangledName = kd.id
+                            {kr_where}
+                        ),
+                        enclosing AS (
+                            SELECT kr.k_start, kr.k_end, kr.kernel_name,
+                                   kr.r_start, kr.r_end, kr.globalTid, kr.correlationId,
+                                   {text_expr} AS nvtx_text, (n."end" - n.start) AS n_dur, n.start AS n_start
+                            FROM kr
+                            JOIN {nvtx_table} n
+                              ON n.globalTid = kr.globalTid
+                              AND n.eventType = 59
+                              AND n."end" > n.start
+                              AND n.start <= kr.r_start
+                              AND n."end" >= kr.r_end
+                              {nvtx_where}
+                            {text_join}
+                            WHERE {text_expr} IS NOT NULL
+                        ),
+                        mapped AS (
+                            SELECT
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                kernel_name,
+                                k_start,
+                                k_end,
+                                (k_end - k_start) AS k_dur_ns
+                            FROM enclosing
+                            GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
+                        )
+                        SELECT nvtx_path, kernel_name, SUM(k_dur_ns) AS k_total
+                        FROM mapped
+                        WHERE nvtx_path IN ({placeholders})
+                        GROUP BY nvtx_path, kernel_name
+                    """
+                    kernel_rows = conn.execute(sql_k, params_k).fetchall()
+                    k_times_by_group = defaultdict(lambda: defaultdict(int))
+                    for nvtx_path, k_name, k_total in kernel_rows:
+                        gk = leaf_to_group.get(nvtx_path, nvtx_path)
+                        k_times_by_group[gk][k_name] += k_total
+
+        # Fill top kernels and strip internal group keys
+        for r in limited:
+            gk = r["_group_key"]
+            ktimes = k_times_by_group.get(gk, {})
+            top_k = sorted(ktimes.items(), key=lambda x: -x[1])[:3]
+            r["top_kernels"] = [{"kernel_name": k, "total_ms": round(v / 1e6, 3)} for k, v in top_k]
+            r.pop("_group_key", None)
 
     # Prepend metadata
     if detection_meta is not None:
@@ -378,6 +773,18 @@ def _execute(conn, **kwargs):
             meta_entry["available_depths"] = detection_meta["available_depths"]
             meta_entry["depth_samples"] = detection_meta["depth_samples"]
         limited.insert(0, meta_entry)
+
+    if report == REPORT_COMPACT:
+        for row in limited:
+            if row.get("_detection_meta"):
+                names = row.pop("layer_names", None)
+                if isinstance(names, list) and names:
+                    row["layer_names_sample"] = names[:5]
+                    row["layer_names_total"] = len(names)
+                    row["layer_names_omitted"] = True
+            else:
+                row.pop("top_kernels", None)  # no-op if already removed in compact fast path
+                row["kernels_included"] = False
 
     return limited
 
@@ -395,9 +802,15 @@ def _format(rows):
         meta = rows[0]
         method = meta["detection_method"]
         if method == "numbered_pattern":
-            n = len(meta["layer_names"])
+            names_full = meta.get("layer_names")
+            if isinstance(names_full, list):
+                n = len(names_full)
+                preview_src = names_full
+            else:
+                n = int(meta.get("layer_names_total", 0))
+                preview_src = list(meta.get("layer_names_sample") or [])
             lines.append(f"✅ Detected {n} layers at depth {meta['layer_depth']}")
-            names_preview = ", ".join(meta["layer_names"][:5])
+            names_preview = ", ".join(preview_src[:5])
             if n > 5:
                 names_preview += f", … ({n - 5} more)"
             lines.append(f"   Layers: {names_preview}")
@@ -434,12 +847,15 @@ def _format(rows):
             f"  {r['compute_ms']:>9.2f}  {r['nccl_ms']:>9.2f}  {r['nccl_pct']:>5.1f}%"
             f"  {tc_pct_str:>7s}{outlier_flag:>7s}"
         )
-        # Show top kernels indented below each region
-        for tk in r.get("top_kernels", []):
-            k_name = tk["kernel_name"]
-            if len(k_name) > 50:
-                k_name = k_name[:47] + "..."
-            lines.append(f"    └─ {k_name}  ({tk['total_ms']:.3f}ms)")
+        # Show top kernels indented below each region (omitted in compact report)
+        if r.get("kernels_included") is False:
+            lines.append("    └─ (top kernels omitted; use report=full or -p report=full)")
+        else:
+            for tk in r.get("top_kernels", []):
+                k_name = tk["kernel_name"]
+                if len(k_name) > 50:
+                    k_name = k_name[:47] + "..."
+                lines.append(f"    └─ {k_name}  ({tk['total_ms']:.3f}ms)")
     return "\n".join(lines)
 
 
@@ -474,6 +890,15 @@ SKILL = Skill(
             "bool",
             False,
             True,
+        ),
+        SkillParam(
+            "report",
+            "Output shape: 'full' (default) includes top_kernels and full layer_names; "
+            "'compact' keeps the same per-region metrics for returned rows but omits "
+            "top_kernels and truncates layer name lists (see layer_names_sample / *_total).",
+            "str",
+            False,
+            "full",
         ),
     ],
     format_fn=_format,

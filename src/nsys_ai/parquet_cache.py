@@ -9,12 +9,28 @@ Flow:
      exports tables into a sibling cache directory named
      ``<profile_basename>.nsys-cache`` (e.g., ``profile.nsys-cache``) as
      Parquet, and runs the Tier 2 sort-merge to produce
-     ``nvtx_kernel_map.parquet``.
+     ``nvtx_kernel_map.parquet`` + ``nvtx_path_dict.parquet`` (for very large SQLite files this step may be
+     deferred — see env vars below).
   2. Subsequent opens: ``open_cached_db()`` creates a DuckDB connection
      with views pointing at the cached Parquet files in that
      ``<profile_basename>.nsys-cache`` directory — sub-second startup.
 
 Cache invalidation uses mtime comparison + a version stamp file.
+
+Environment (large profiles / DuckDB tuning):
+  By default ``nvtx_kernel_map`` is always built during cache build so NVTX skills
+  stay fast on large traces (bigger files benefit most from the precomputed map).
+
+  ``NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=<float>`` — opt-in: skip map build on first
+  cache when SQLite size ≥ N MB (faster ``cache ready``, slower NVTX until rebuilt).
+
+  ``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1`` / ``NSYS_AI_DEFER_NVTX_KERNEL_MAP=0`` —
+  force never defer.
+
+  ``NSYS_AI_DUCKDB_THREADS`` — optional ``SET threads = N`` for analytical sessions.
+
+  ``NSYS_AI_DUCKDB_TEMP_DIRECTORY`` — optional spill directory for large aggregations
+  (DuckDB ``temp_directory`` pragma).
 """
 
 from __future__ import annotations
@@ -33,7 +49,7 @@ import duckdb
 log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 7  # bumped: preserve NVTX blobs and payload schema tables
+_CACHE_VERSION = 11  # bumped: nvtx_kernel_map uses path_id surrogate + nvtx_path_dict.parquet
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -236,6 +252,72 @@ _PARQUETDIR_BINARY_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _configure_duckdb_analytics_session(db: duckdb.DuckDBPyConnection) -> None:
+    """Apply DuckDB session settings from the performance guide (large scans/joins).
+
+    See: https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html
+    """
+    try:
+        db.execute("SET preserve_insertion_order = false")
+    except duckdb.Error:
+        pass
+    try:
+        db.execute("SET enable_progress_bar = false")
+    except duckdb.Error:
+        pass
+    raw = os.environ.get("NSYS_AI_DUCKDB_THREADS", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                db.execute(f"SET threads = {n}")
+        except (ValueError, duckdb.Error):
+            pass
+    # Spill directory for large GROUP BY / joins (see DuckDB "temp_directory" pragma).
+    tmp = os.environ.get("NSYS_AI_DUCKDB_TEMP_DIRECTORY", "").strip()
+    if tmp:
+        try:
+            os.makedirs(tmp, exist_ok=True)
+            safe = tmp.replace("'", "''")
+            db.execute(f"SET temp_directory = '{safe}'")
+        except (OSError, duckdb.Error):
+            pass
+
+
+def _should_defer_nvtx_kernel_map(sqlite_path: str) -> bool:
+    """Return True when nvtx_kernel_map should be skipped on first cache build.
+
+    Default is **never defer**: large profiles are exactly where the precomputed
+    map pays off for NVTX skills; deferring trades first-open seconds for much
+    slower on-demand SQL (``string_agg`` paths, etc.).
+
+    Opt-in defer is for profiles where the one-time map build is prohibitively
+    expensive (see module docstring for env vars).
+    """
+    env_always = os.environ.get("NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP", "").strip().lower()
+    if env_always in ("1", "true", "yes", "on"):
+        return False
+    env_defer = os.environ.get("NSYS_AI_DEFER_NVTX_KERNEL_MAP", "").strip().lower()
+    if env_defer in ("0", "false", "no", "off"):
+        return False
+
+    try:
+        size_mb = os.path.getsize(sqlite_path) / 1e6
+    except OSError:
+        return False
+
+    raw_mb = os.environ.get("NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB", "").strip()
+    if raw_mb:
+        try:
+            threshold_mb = float(raw_mb)
+        except ValueError:
+            log.warning("Ignoring invalid NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=%r", raw_mb)
+            return False
+        return size_mb >= threshold_mb
+
+    return False
+
+
 def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
     """Internal: build the Parquet cache into the given directory."""
 
@@ -244,15 +326,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
 
     db = duckdb.connect()
     try:
-        # ── DuckDB performance tuning ─────────────────────────────────
-        # Disable insertion-order preservation to allow multi-threaded
-        # output without synchronization — significant speedup for large
-        # COPY operations.  Safe because we never rely on implicit row order.
-        db.execute("SET preserve_insertion_order = false")
-        # Disable DuckDB's built-in progress bar — it writes \r escape sequences
-        # to stderr that interleave with our own \r-based progress reporting,
-        # producing garbled output in terminals and CI logs.
-        db.execute("SET enable_progress_bar = false")
+        _configure_duckdb_analytics_session(db)
 
         # Attach the SQLite database
         safe_sqlite_path = str(sqlite_path).replace("'", "''")
@@ -298,7 +372,10 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             total_steps += 1
         if has_nvtx:
             total_steps += 1
-        if has_kernel and has_nvtx and has_runtime:
+        defer_nvtx_map = has_kernel and has_nvtx and has_runtime and _should_defer_nvtx_kernel_map(
+            sqlite_path
+        )
+        if has_kernel and has_nvtx and has_runtime and not defer_nvtx_map:
             total_steps += 1
         step = [0]
 
@@ -353,9 +430,11 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                     """)
 
         # ── Generate nvtx_kernel_map ──────────────────────────────────────
-        if has_kernel and has_nvtx and has_runtime:
+        if has_kernel and has_nvtx and has_runtime and not defer_nvtx_map:
             _progress("nvtx_kernel_map.parquet")
             _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
+        elif defer_nvtx_map:
+            log.info("Deferring nvtx_kernel_map build for large profile (on-demand NVTX SQL enabled)")
 
         # Clear progress line
         elapsed = time.monotonic() - t0
@@ -367,6 +446,10 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             "version": _CACHE_VERSION,
             "source": os.path.basename(sqlite_path),
             "empty": len(src_tables) == 0 or not _find_table(src_tables, "StringIds"),
+            "nvtx_kernel_map_ready": bool(
+                (cache_dir / "nvtx_kernel_map.parquet").exists() or not defer_nvtx_map
+            ),
+            "deferred_nvtx_kernel_map": bool(defer_nvtx_map),
         }
         (cache_dir / ".cache_version").write_text(json.dumps(meta))
 
@@ -392,7 +475,8 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
 
     Returns a DuckDB connection with views named after each cached table:
       ``kernels``, ``nvtx``, ``runtime``, ``memcpy``, ``memset``,
-      ``string_ids``, ``gpu_info``, ``cuda_device``, ``nvtx_kernel_map``.
+      ``string_ids``, ``gpu_info``, ``cuda_device``, ``nvtx_kernel_map``,
+     ``nvtx_path_dict`` (when map uses ``path_id``).
     """
     if not is_cache_valid(sqlite_path):
         build_cache(sqlite_path)
@@ -409,6 +493,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         )
 
     db = duckdb.connect()
+    _configure_duckdb_analytics_session(db)
 
     # Create views over Parquet files
     for parquet_file in cache_dir.glob("*.parquet"):
@@ -436,6 +521,7 @@ def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
 
     db = duckdb.connect()
     try:
+        _configure_duckdb_analytics_session(db)
         _register_parquetdir_tables(db, parquet_dir, parquet_files)
         _create_existing_alias_views(db)
     except Exception:
@@ -642,6 +728,7 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
     safe_sqlite_path = sqlite_path.replace("'", "''")
     db = duckdb.connect()
     try:
+        _configure_duckdb_analytics_session(db)
         db.execute("SET sqlite_all_varchar = true")
         db.execute(f"ATTACH '{safe_sqlite_path}' AS srcv (TYPE SQLITE, READ_ONLY)")
         table_ref = f"srcv.{nvtx_table}"
@@ -727,6 +814,10 @@ def _build_nvtx_kernel_map(
     (n.start <= r.start AND n.end >= r.end), which is 20-100x faster
     than the previous Python sort-merge loop.
 
+    Hot path uses **Parquet** for ``kernels``, ``runtime``, and ``nvtx`` (already
+    exported in this cache build) so the heavy range join never scans the
+    attached SQLite ``NVTX_EVENTS`` table — significantly faster on large traces.
+
     Falls back to Python sort-merge if the SQL approach fails.
     """
     kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
@@ -737,53 +828,62 @@ def _build_nvtx_kernel_map(
         log.info("Skipping nvtx_kernel_map: missing required tables")
         return
 
-    has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
-    if has_textid:
-        text_expr = "COALESCE(n.text, ns.value)"
-        text_join = "LEFT JOIN src.StringIds ns ON n.textId = ns.id"
-    else:
-        text_expr = "n.text"
-        text_join = ""
+    kp = cache_dir / "kernels.parquet"
+    rp = cache_dir / "runtime.parquet"
+    np = cache_dir / "nvtx.parquet"
+    if not (kp.is_file() and rp.is_file() and np.is_file()):
+        log.warning("Parquet prerequisites missing for nvtx_kernel_map; using Python fallback")
+        _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
+        return
+
+    kps = _safe_path(kp)
+    rps = _safe_path(rp)
+    nps = _safe_path(np)
+
+    # nvtx.parquet already stores resolved text (export path); no StringIds join.
+    text_expr = "CAST(n.text AS VARCHAR)"
+    text_join = ""
 
     # Pure SQL approach: DuckDB will use IEJoin for the range predicate.
     #
     # Strategy:
-    #   1. Join kernel ↔ runtime via correlationId (equality, fast hash join)
-    #   2. Join runtime ↔ NVTX via globalTid (equality) + range containment
+    #   1. Join kernels.parquet ↔ runtime.parquet via correlationId (hash join)
+    #   2. Join runtime ↔ nvtx.parquet via globalTid + range containment
     #      (n.start <= r.start AND n."end" >= r."end")
-    #      DuckDB automatically picks IEJoin for this pattern.
-    #   3. GROUP BY (k_start, globalTid) to aggregate all enclosing NVTX:
+    #   3. GROUP BY kernel instance to aggregate enclosing NVTX:
     #      - string_agg(... ORDER BY n_dur DESC) builds "outer > middle > inner" path
     #      - FIRST(... ORDER BY n_dur ASC) picks the innermost NVTX text
     #      - COUNT(*) - 1 gives the nesting depth
-    sql = f"""
-    COPY (
+    #   4. Assign dense ``path_id`` (ORDER BY nvtx_path for stability) and write
+    #      ``nvtx_path_dict.parquet`` so downstream ``GROUP BY`` uses BIGINT keys.
+    grouped_sql = f"""
         WITH kr AS (
             SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
-                   k.start AS k_start, k."end" AS k_end, k.shortName,
-                   COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                   k.start AS k_start, k."end" AS k_end,
+                   k.name AS kernel_name,
+                   COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0) AS is_tc_eligible,
+                   COALESCE(CAST(k.uses_tc AS INTEGER), 0) AS uses_tc,
                    r.correlationId
-            FROM src.{kernel_table} k
-            JOIN src.{runtime_table} r ON r.correlationId = k.correlationId
-            LEFT JOIN src.StringIds ks ON k.shortName = ks.id
-            LEFT JOIN src.StringIds kd ON k.demangledName = kd.id
+            FROM read_parquet('{kps}') k
+            JOIN read_parquet('{rps}') r ON r.correlationId = k.correlationId
         ),
         enclosing AS (
             SELECT kr.k_start, kr.k_end, kr.kernel_name,
+                   kr.is_tc_eligible, kr.uses_tc,
                    kr.r_start, kr.r_end, kr.globalTid,
                    kr.correlationId,
                    {text_expr} AS nvtx_text,
                    (n."end" - n.start) AS n_dur,
                    n.start AS n_start
             FROM kr
-            JOIN src.{nvtx_table} n
+            JOIN read_parquet('{nps}') n
               ON n.globalTid = kr.globalTid
               AND n.eventType = 59
               AND n."end" > n.start
               AND n.start <= kr.r_start
               AND n."end" >= kr.r_end
             {text_join}
-            WHERE {text_expr} IS NOT NULL
+            WHERE n.text IS NOT NULL
         ),
         grouped AS (
             SELECT
@@ -793,20 +893,40 @@ def _build_nvtx_kernel_map(
                 kernel_name,
                 k_start,
                 k_end,
-                (k_end - k_start) AS k_dur_ns
+                (k_end - k_start) AS k_dur_ns,
+                MAX(is_tc_eligible) AS is_tc_eligible,
+                MAX(uses_tc) AS uses_tc
             FROM enclosing
             GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
         )
-        SELECT nvtx_text, nvtx_depth, nvtx_path, kernel_name,
-               k_start, k_end, k_dur_ns
-        FROM grouped
-    ) TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
-    (FORMAT PARQUET, COMPRESSION ZSTD)
+        SELECT * FROM grouped
     """
+    map_path = _safe_path(cache_dir / "nvtx_kernel_map.parquet")
+    dict_path = _safe_path(cache_dir / "nvtx_path_dict.parquet")
 
     try:
-        db.execute(sql)
-        log.info("nvtx_kernel_map built via pure SQL (IEJoin)")
+        db.execute(f"CREATE OR REPLACE TEMP TABLE _nkm_grouped AS {grouped_sql}")
+        db.execute("""
+            CREATE OR REPLACE TEMP TABLE _nkm_path_dict AS
+            SELECT nvtx_path, ROW_NUMBER() OVER (ORDER BY nvtx_path)::BIGINT AS path_id
+            FROM (SELECT DISTINCT nvtx_path FROM _nkm_grouped)
+        """)
+        db.execute(
+            f"COPY (SELECT path_id, nvtx_path FROM _nkm_path_dict) "
+            f"TO '{dict_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+        db.execute(
+            f"""
+            COPY (
+                SELECT d.path_id, g.nvtx_text, g.nvtx_depth, g.kernel_name,
+                       g.k_start, g.k_end, g.k_dur_ns, g.is_tc_eligible, g.uses_tc
+                FROM _nkm_grouped g
+                JOIN _nkm_path_dict d USING (nvtx_path)
+                ORDER BY g.k_start, g.k_end, g.kernel_name
+            ) TO '{map_path}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
+            """
+        )
+        log.info("nvtx_kernel_map built via pure SQL (IEJoin, parquet-only, path_id)")
     except duckdb.Error as e:
         log.warning("Pure-SQL nvtx_kernel_map failed (%s), falling back to Python sort-merge", e)
         _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
@@ -924,40 +1044,66 @@ def _build_nvtx_kernel_map_python(
     if not results:
         return
 
+    # ── Surrogate path_id + dictionary (matches SQL cache layout with path_id) ──
+    distinct_paths = sorted({r["nvtx_path"] for r in results})
+    path_to_id = {p: i + 1 for i, p in enumerate(distinct_paths)}
+
     # ── Write to Parquet via DuckDB ───────────────────────────────────
     import pyarrow as pa
 
-    schema = pa.schema(
+    map_schema = pa.schema(
         [
+            ("path_id", pa.int64()),
             ("nvtx_text", pa.string()),
             ("nvtx_depth", pa.int32()),
-            ("nvtx_path", pa.string()),
             ("kernel_name", pa.string()),
             ("k_start", pa.int64()),
             ("k_end", pa.int64()),
             ("k_dur_ns", pa.int64()),
         ]
     )
-    arrays = [
+    map_arrays = [
+        pa.array([path_to_id[r["nvtx_path"]] for r in results], type=pa.int64()),
         pa.array([r["nvtx_text"] for r in results], type=pa.string()),
         pa.array([r["nvtx_depth"] for r in results], type=pa.int32()),
-        pa.array([r["nvtx_path"] for r in results], type=pa.string()),
         pa.array([r["kernel_name"] for r in results], type=pa.string()),
         pa.array([r["k_start"] for r in results], type=pa.int64()),
         pa.array([r["k_end"] for r in results], type=pa.int64()),
         pa.array([r["k_dur_ns"] for r in results], type=pa.int64()),
     ]
-    table = pa.table(arrays, schema=schema)
+    map_table = pa.table(map_arrays, schema=map_schema)
+
+    dict_schema = pa.schema(
+        [
+            ("path_id", pa.int64()),
+            ("nvtx_path", pa.string()),
+        ]
+    )
+    dict_arrays = [
+        pa.array([path_to_id[p] for p in distinct_paths], type=pa.int64()),
+        pa.array(list(distinct_paths), type=pa.string()),
+    ]
+    dict_table = pa.table(dict_arrays, schema=dict_schema)
+
     try:
-        db.register("_nvtx_kernel_map", table)
-        db.execute(f"""
-            COPY _nvtx_kernel_map
+        db.register("_nvtx_kernel_map", map_table)
+        db.register("_nvtx_path_dict", dict_table)
+        db.execute(
+            f"COPY _nvtx_path_dict TO '{_safe_path(cache_dir / 'nvtx_path_dict.parquet')}' "
+            f"(FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+        db.execute(
+            f"""
+            COPY (SELECT * FROM _nvtx_kernel_map ORDER BY k_start, k_end, kernel_name)
             TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
-            (FORMAT PARQUET, COMPRESSION ZSTD)
-        """)
+            (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
+            """
+        )
     finally:
         db.unregister("_nvtx_kernel_map")
-        del table
+        db.unregister("_nvtx_path_dict")
+        del map_table
+        del dict_table
 
 
 def _check_cache_size(cache_dir: Path, sqlite_path: str) -> None:
@@ -995,6 +1141,7 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
       - ``--no-cache`` mode for quick diagnostics
     """
     db = duckdb.connect()
+    _configure_duckdb_analytics_session(db)
     safe_path = str(sqlite_path).replace("'", "''")
     try:
         try:

@@ -15,12 +15,12 @@ def _execute(conn, **kwargs):
     # Get the sqlite path for Tier 1 (nsys recipe) attempt
     sqlite_path = kwargs.get("_sqlite_path")
 
-    rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim)
+    rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim, limit=limit)
 
     # Select the earliest kernels by start time without fully sorting
     import heapq
-
-    rows = heapq.nsmallest(limit, rows, key=lambda r: r["k_start"])
+    if len(rows) > limit:
+        rows = heapq.nsmallest(limit, rows, key=lambda r: r["k_start"])
 
     # Format output to match expected schema
     return [

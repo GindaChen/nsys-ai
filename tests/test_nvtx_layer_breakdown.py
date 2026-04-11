@@ -143,6 +143,55 @@ def test_nvtx_layer_breakdown_format(nested_nvtx_conn):
     assert "NCCL%" in text
 
 
+def test_nvtx_layer_breakdown_compact_matches_full_metrics(nested_nvtx_conn):
+    """compact report must keep the same per-row metrics as full for the returned top-N."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    limit = 10
+    full_rows = skill.execute(nested_nvtx_conn, limit=limit, report="full")
+    compact_rows = skill.execute(nested_nvtx_conn, limit=limit, report="compact")
+    full_data = [r for r in full_rows if not r.get("_detection_meta")]
+    compact_data = [r for r in compact_rows if not r.get("_detection_meta")]
+    assert len(full_data) == len(compact_data) > 0
+    keys = (
+        "nvtx_region",
+        "nvtx_depth",
+        "nvtx_path",
+        "kernel_count",
+        "total_gpu_ms",
+        "compute_ms",
+        "nccl_ms",
+        "nccl_pct",
+        "tc_achieved_pct",
+        "avg_kernel_ms",
+        "max_kernel_ms",
+        "is_outlier",
+    )
+    for fr, cr in zip(full_data, compact_data, strict=True):
+        for k in keys:
+            assert fr[k] == cr[k], (k, fr.get(k), cr.get(k))
+        assert "top_kernels" in fr and fr["top_kernels"]
+        assert "top_kernels" not in cr
+        assert cr.get("kernels_included") is False
+
+    full_meta = next((r for r in full_rows if r.get("_detection_meta")), None)
+    compact_meta = next((r for r in compact_rows if r.get("_detection_meta")), None)
+    if full_meta and compact_meta and full_meta.get("layer_names"):
+        assert compact_meta.get("layer_names_omitted") is True
+        assert compact_meta.get("layer_names_total") == len(full_meta["layer_names"])
+        assert "layer_names" not in compact_meta
+
+
+def test_nvtx_layer_breakdown_invalid_report(nested_nvtx_conn):
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn, report="bogus")
+    assert len(rows) == 1
+    assert "error" in rows[0]
+
+
 # ---------------------------------------------------------------------------
 # Layer 3: root_cause_matcher layer-aware patterns
 # ---------------------------------------------------------------------------
