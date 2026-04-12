@@ -216,7 +216,12 @@ def attribute_kernels_to_nvtx(
 
     # DuckDB: try reading from precomputed nvtx_kernel_map first.
     try:
-        from .connection import DB_ERRORS, DuckDBAdapter, cached_nvtx_map_uses_path_id, wrap_connection
+        from .connection import (
+                DB_ERRORS,
+                DuckDBAdapter,
+                cached_nvtx_map_uses_path_id,
+                wrap_connection,
+            )
 
         adapter = wrap_connection(conn)
 
