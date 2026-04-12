@@ -541,20 +541,28 @@ def _execute(conn, **kwargs):
     results.sort(key=lambda r: (-r["_raw_total_ns"], r["_group_key"]))
 
     # Outlier detection — O(N log N) total, not O(N² log N).
-    # Pre-compute the fence once so the per-row test is a cheap comparison.
-    import statistics as _statistics
-
-    all_times = [r["_raw_total_ns"] / 1e6 for r in results]
+    # Sort once and derive median + quartiles from indices to avoid a second
+    # sort inside statistics.quantiles().
+    all_times = sorted(r["_raw_total_ns"] / 1e6 for r in results)
     _n = len(all_times)
     if _n < 2:
         _fence = float("inf")
         _med = 0.0
     elif _n < 4:
-        _med = _statistics.median(all_times)
+        mid = _n // 2
+        _med = all_times[mid] if _n % 2 else (all_times[mid - 1] + all_times[mid]) / 2
         _fence = _med * 2.0
     else:
-        _med = _statistics.median(all_times)
-        _q1, _, _q3 = _statistics.quantiles(all_times, n=4, method="inclusive")
+        # Linear interpolation at p*(N-1) — matches statistics.quantiles "inclusive" method
+        def _q(p: float) -> float:
+            pos = p * (_n - 1)
+            lo = int(pos)
+            frac = pos - lo
+            return all_times[lo] if frac == 0 else all_times[lo] + frac * (all_times[lo + 1] - all_times[lo])
+
+        _med = _q(0.5)
+        _q1 = _q(0.25)
+        _q3 = _q(0.75)
         _iqr = _q3 - _q1
         _fence = (_q3 + 1.5 * _iqr) if _iqr > 0 else (_med * 2.0)
 

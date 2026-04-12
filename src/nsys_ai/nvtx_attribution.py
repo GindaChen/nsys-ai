@@ -216,7 +216,7 @@ def attribute_kernels_to_nvtx(
 
     # DuckDB: try reading from precomputed nvtx_kernel_map first.
     try:
-        from .connection import DuckDBAdapter, cached_nvtx_map_uses_path_id, wrap_connection
+        from .connection import DB_ERRORS, DuckDBAdapter, cached_nvtx_map_uses_path_id, wrap_connection
 
         adapter = wrap_connection(conn)
 
@@ -253,7 +253,7 @@ def attribute_kernels_to_nvtx(
                     )
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
-            except Exception:
+            except DB_ERRORS:
                 _log.debug("nvtx_kernel_map unavailable; using on-demand DuckDB attribution")
 
             # On-demand DuckDB SQL attribution for large profiles where the
