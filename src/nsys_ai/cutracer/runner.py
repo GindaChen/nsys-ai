@@ -23,12 +23,12 @@ Modal
 
 from __future__ import annotations
 
-import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nsys_ai.cutracer.planner import CutracerPlan
 
 # ---------------------------------------------------------------------------
 # Run configuration
@@ -68,7 +68,7 @@ def _resolve_so(config: RunConfig) -> Path:
     if config.so_path and config.so_path.is_file():
         return config.so_path
 
-    from nsys_ai.cutracer.installer import INSTALL_DIR, _find_cutracer_so_path
+    from nsys_ai.cutracer.installer import _find_cutracer_so_path
 
     managed = _find_cutracer_so_path()
     if managed:
@@ -194,7 +194,7 @@ class ModalConfig:
 
 
 def format_modal_app(
-    plan: "CutracerPlan",  # type: ignore[name-defined]  # noqa: F821
+    plan: CutracerPlan,
     config: RunConfig,
     modal_cfg: ModalConfig | None = None,
     *,

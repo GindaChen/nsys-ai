@@ -1,6 +1,5 @@
 """Tests for nsys_ai.cutracer.kernel_classifier."""
 
-import pytest
 
 
 class TestClassifyKernel:

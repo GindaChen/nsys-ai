@@ -10,12 +10,12 @@ import argparse
 
 from .handlers import (
     _add_gpu_trim,
-    _cmd_cutracer,
     _cmd_agent,
     _cmd_agent_guide,
     _cmd_analyze,
     _cmd_ask,
     _cmd_chat,
+    _cmd_cutracer,
     _cmd_diff,
     _cmd_diff_web,
     _cmd_evidence,

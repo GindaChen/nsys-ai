@@ -22,11 +22,11 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tarfile
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
@@ -202,7 +202,10 @@ def download_nvbit(
             print(f"  Downloading NVBit {nvbit_version} …")
             print(f"    {url}")
         try:
-            urllib.request.urlretrieve(url, tarball)
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+                raise RuntimeError(f"Refusing download from non-GitHub HTTPS URL: {url!r}")
+            urllib.request.urlretrieve(url, tarball)  # nosec B310
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to download NVBit from {url}: {exc}\n"
@@ -218,7 +221,8 @@ def download_nvbit(
         if progress:
             print("  Extracting NVBit …")
         with tarfile.open(tarball, "r:bz2") as tf:
-            tf.extractall(dest_dir)  # nosec B202 — trusted NVBit release
+            # NVBit tarball from NVlabs GitHub release (see nvbit_download_url).
+            tf.extractall(dest_dir)  # nosec B202
 
     return nvbit_root
 
@@ -323,7 +327,7 @@ def _clone_and_build(
             print(f"  Using existing clone at: {clone_dir}")
     else:
         if progress:
-            print(f"  Cloning CUTracer from GitHub …")
+            print("  Cloning CUTracer from GitHub …")
             print(f"    {CUTRACER_GITHUB}")
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
@@ -460,7 +464,6 @@ def install(
         Print status messages to stdout.
     """
     errors: list[str] = []
-    warnings: list[str] = []
 
     lib_dir = install_dir / "lib"
     so_dest = lib_dir / "cutracer.so"
@@ -515,7 +518,9 @@ def install(
 
     else:
         # Local source found — use the legacy NVBit-separate build path.
-        assert cutracer_src is not None
+        if cutracer_src is None:
+            errors.append("Internal error: expected local CUTracer source path.")
+            return InstallResult(success=False, errors=errors)
         nvbit_cache = install_dir / "nvbit"
         try:
             nvbit_root = download_nvbit(nvbit_cache, nvbit_version, progress=progress)

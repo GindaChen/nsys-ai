@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # RunConfig
@@ -317,6 +315,7 @@ class TestFormatModalApp:
     def test_valid_python_syntax(self, tmp_path):
         """Generated Modal script must be syntactically valid Python."""
         import ast
+
         from nsys_ai.cutracer.runner import format_modal_app
 
         plan, config = _make_plan_and_config(tmp_path)

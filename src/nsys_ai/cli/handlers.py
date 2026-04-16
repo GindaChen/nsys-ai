@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 
-
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------
@@ -138,6 +137,7 @@ def _cutracer_analyze(args, _profile):
 def _cutracer_run(args, _profile):
     """Run training with CUTracer instrumentation (local or Modal)."""
     from pathlib import Path as _Path
+
     from nsys_ai.cutracer.planner import build_plan
     from nsys_ai.cutracer.runner import ModalConfig, RunConfig, format_modal_app, run_local
 
@@ -196,7 +196,8 @@ def _cutracer_run(args, _profile):
             print(f"Run with: modal run {save_path}")
         elif backend == "modal-run":
             # Actually invoke modal run
-            import tempfile, stat as _stat
+            import stat as _stat
+            import tempfile
             with tempfile.NamedTemporaryFile(suffix="_cutracer.py", mode="w", delete=False) as tf:
                 tf.write(script)
                 tmp = _Path(tf.name)
@@ -215,7 +216,7 @@ def _cutracer_run(args, _profile):
             if not dry_run:
                 csv_count = len(list(output_dir.glob("*_hist.csv")))
                 print(f"\n==> Done. {csv_count} histogram CSV(s) in: {output_dir}")
-                print(f"    Analyze with:")
+                print("    Analyze with:")
                 print(f"      nsys-ai cutracer analyze {profile_path} {output_dir}")
         except FileNotFoundError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -228,6 +229,7 @@ def _cutracer_run(args, _profile):
 def _cutracer_install(args):
     """Build and install the CUTracer NVBit .so."""
     from pathlib import Path as _Path
+
     from nsys_ai.cutracer.installer import (
         INSTALL_DIR,
         NVBIT_VERSION,

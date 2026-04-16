@@ -125,7 +125,6 @@ def _format(rows: list[dict]) -> str:
     if rows and "error" in rows[0]:
         return f"Error: {rows[0]['error']}"
 
-    from nsys_ai.cutracer.parser import KernelHistogram
     from nsys_ai.cutracer.report import InstrMix, KernelReport, format_kernel_report
 
     lines = []
