@@ -228,12 +228,18 @@ def format_plan_script(
     ]
 
     # ── Configuration ────────────────────────────────────────────────────────
+    escaped_output_dir = (
+        output_dir.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
     lines += [
         '# Path to CUTracer NVBit .so — override with: export CUTRACER_SO=/your/path',
         'CUTRACER_SO="${CUTRACER_SO:-$HOME/.nsys-ai/cutracer/lib/cutracer.so}"',
         "",
         "# Output directory for histogram CSVs",
-        f'OUTPUT_DIR="${{1:-{output_dir}}}"',
+        f'OUTPUT_DIR="${{1:-{escaped_output_dir}}}"',
         'mkdir -p "$OUTPUT_DIR"',
         "",
     ]

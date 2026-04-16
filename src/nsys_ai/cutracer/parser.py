@@ -114,10 +114,19 @@ def parse_histogram_csv(path: Path) -> KernelHistogram | None:
                 cyc = int(row.get("cycles", 0))
                 counts[opcode] = counts.get(opcode, 0) + cnt
                 cycles[opcode] = cycles.get(opcode, 0) + cyc
+                warp_id = row.get("warp_id")
+                if warp_id is None:
+                    continue
+                warp_id = warp_id.strip()
+                if not warp_id:
+                    continue
                 try:
-                    warps.add(int(row.get("warp_id", -1)))
+                    warp = int(warp_id)
                 except ValueError:
                     pass
+                else:
+                    if warp >= 0:
+                        warps.add(warp)
     except (OSError, csv.Error, ValueError) as exc:
         _log.warning("Failed to parse histogram %s: %s", path, exc)
         return None

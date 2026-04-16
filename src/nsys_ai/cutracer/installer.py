@@ -155,10 +155,6 @@ def _run_version_cmd(cmd: list[str], pattern: str) -> str | None:
 
 def detect_cuda_version() -> tuple[int, int] | None:
     """Return (major, minor) CUDA version from nvcc, or None."""
-    raw = _run_version_cmd(["nvcc", "--version"], r"release (\d+)\.(\d+)")
-    if not raw:
-        return None
-    # pattern above captures two groups — redo with two-group match
     try:
         out = subprocess.check_output(  # nosec B603 B607
             ["nvcc", "--version"], stderr=subprocess.STDOUT, text=True
@@ -166,7 +162,7 @@ def detect_cuda_version() -> tuple[int, int] | None:
         m = re.search(r"release (\d+)\.(\d+)", out)
         if m:
             return int(m.group(1)), int(m.group(2))
-    except Exception:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     return None
 

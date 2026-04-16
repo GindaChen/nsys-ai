@@ -96,6 +96,15 @@ def _build_cutracer_cmd(config: RunConfig, so_path: Path | None) -> list[str]:
     return cmd
 
 
+def _build_logger_mode_cmd(config: RunConfig) -> list[str]:
+    """Return the logger-only argv used when no ``cutracer.so`` is available."""
+    cmd = ["cutracer", "trace"]
+    if config.kernel_filter:
+        cmd += ["--kernel-filters", ",".join(config.kernel_filter)]
+    cmd += ["--"] + shlex.split(config.launch_cmd)
+    return cmd
+
+
 def run_local(
     config: RunConfig,
     *,
@@ -113,7 +122,7 @@ def run_local(
         so_path = None  # allow logger-only mode (no --instrument, no .so)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    argv = _build_cutracer_cmd(config, so_path)
+    argv = _build_logger_mode_cmd(config) if so_path is None else _build_cutracer_cmd(config, so_path)
 
     if progress:
         print(f"  .so     : {so_path or '(not found — kernel logger mode only)'}")
@@ -123,19 +132,14 @@ def run_local(
         print(f"  output  : {config.output_dir}")
         print(f"  cmd     : {config.launch_cmd}")
 
+    if so_path is None:
+        if progress:
+            print("  (running in kernel launch logger mode — no .so available)")
+
     if dry_run:
         print("\n[dry-run] Would run:")
         print("  " + " ".join(argv))
         return config.output_dir
-
-    # If no .so, drop --analysis and run as kernel launch logger (no trace files)
-    if so_path is None:
-        argv = ["cutracer", "trace"]
-        if config.kernel_filter:
-            argv += ["--kernel-filters", ",".join(config.kernel_filter)]
-        argv += ["--"] + shlex.split(config.launch_cmd)
-        if progress:
-            print("  (running in kernel launch logger mode — no .so available)")
 
     run_env = os.environ.copy()
     if config.max_iters is not None:
