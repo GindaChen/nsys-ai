@@ -63,5 +63,5 @@ ignore = [
 asyncio_mode = "auto"
 
 [tool.bandit]
-# B110: try_except_pass; B608: SQL; B404/B603/B607: intentional subprocess (argv, no shell) for CLI tooling
-skips = ["B110", "B608", "B404", "B603", "B607"]
+# B110: try_except_pass; B608: SQL
+skips = ["B110", "B608"]

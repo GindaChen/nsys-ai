@@ -3,15 +3,15 @@
 Two backends
 ------------
 Local
-    Builds the environment variable set, then calls ``subprocess.run`` with
-    ``LD_PRELOAD`` pointing at the CUTracer ``.so``.  Requires a local GPU and
-    a pre-built ``.so``.
+    Builds a ``cutracer trace`` command and calls ``subprocess.run``.
+    If ``cutracer.so`` is available, passes ``--cutracer-so`` and analysis flags.
+    Otherwise falls back to kernel logger mode (no ``--analysis``).
 
 Modal
     Generates a self-contained Modal app Python file.  The generated app:
 
-    * Uses a CUDA devel image with ``make`` / ``g++`` so ``nsys-ai cutracer
-      install`` can be baked into the image layer (cached after first run).
+    * Uses a CUDA devel image with ``make`` / ``g++`` and clones/builds
+      CUTracer directly inside the image layer (cached after first run).
     * Mounts a ``modal.Volume`` for output so CSVs survive the container.
     * Downloads histogram CSVs back to a local directory from the
       ``local_entrypoint``.
@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
+
+# subprocess is used for argv-based cutracer invocations.
+import subprocess  # nosec B404
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -139,7 +141,7 @@ def run_local(
     if config.max_iters is not None:
         run_env["CUTRACER_MAX_ITERS"] = str(config.max_iters)
 
-    result = subprocess.run(argv, shell=False, env=run_env)
+    result = subprocess.run(argv, shell=False, env=run_env)  # nosec B603 B607
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, argv)
 
@@ -205,8 +207,8 @@ def format_modal_app(
     """Return a complete, runnable Modal Python app as a string.
 
     The generated script:
-    - Bakes ``nsys-ai cutracer install`` into the image (cached layer).
-    - Runs the training command with CUTracer ``LD_PRELOAD`` on a GPU.
+    - Builds CUTracer directly in the Modal image (cached layer).
+    - Runs ``cutracer trace`` around the training command on a GPU.
     - Downloads histogram CSVs from the Modal Volume back to local disk.
     """
     if modal_cfg is None:

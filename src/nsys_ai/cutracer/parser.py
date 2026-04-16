@@ -195,7 +195,7 @@ def sass_resolve_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
     Kernels whose cubin cannot be disassembled are skipped with a warning.
     """
     import json
-    import subprocess
+    import subprocess  # nosec B404
     from collections import defaultdict
 
     trace_dir = Path(trace_dir)
@@ -220,13 +220,21 @@ def sass_resolve_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
 
         # Disassemble cubin → opcode_id table for the traced kernel function
         try:
-            sass_r = subprocess.run(
+            sass_r = subprocess.run(  # nosec B603 B607
                 ["cutracer", "sass", str(cubin),
                  "--stdout", "--no-source-info", "--no-line-info"],
                 capture_output=True, text=True, timeout=120,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             _log.warning("sass_resolve_dir: cutracer sass failed for %s: %s", cubin.name, exc)
+            continue
+        if sass_r.returncode != 0:
+            _log.warning(
+                "sass_resolve_dir: cutracer sass returned %d for %s: %s",
+                sass_r.returncode,
+                cubin.name,
+                (sass_r.stderr or "").strip(),
+            )
             continue
 
         # Parse SASS: build per-function {sequential_idx: mnemonic} tables

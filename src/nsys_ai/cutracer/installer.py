@@ -21,7 +21,9 @@ import logging
 import os
 import re
 import shutil
-import subprocess
+
+# subprocess is used for explicit build/install tool invocations.
+import subprocess  # nosec B404
 import tarfile
 import urllib.request
 from dataclasses import dataclass, field
@@ -122,7 +124,7 @@ def _check_libzstd() -> bool:
         with tempfile.NamedTemporaryFile(suffix=".c", mode="w", delete=False) as f:
             f.write("#include <zstd.h>\nint main(){return 0;}\n")
             fname = f.name
-        r = subprocess.run(
+        r = subprocess.run(  # nosec B603 B607
             ["gcc", "-include", "zstd.h", "-fsyntax-only", fname],
             capture_output=True,
         )
@@ -139,7 +141,7 @@ def _check_libzstd() -> bool:
 def _run_version_cmd(cmd: list[str], pattern: str) -> str | None:
     """Run *cmd* and extract the version string matching *pattern*, or None."""
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)  # nosec B603 B607
         m = re.search(pattern, out)
         return m.group(1) if m else "?"
     except (FileNotFoundError, subprocess.CalledProcessError):
@@ -158,7 +160,9 @@ def detect_cuda_version() -> tuple[int, int] | None:
         return None
     # pattern above captures two groups — redo with two-group match
     try:
-        out = subprocess.check_output(["nvcc", "--version"], stderr=subprocess.STDOUT, text=True)
+        out = subprocess.check_output(  # nosec B603 B607
+            ["nvcc", "--version"], stderr=subprocess.STDOUT, text=True
+        )
         m = re.search(r"release (\d+)\.(\d+)", out)
         if m:
             return int(m.group(1)), int(m.group(2))
@@ -179,6 +183,20 @@ def nvbit_asset_name(nvbit_version: str = NVBIT_VERSION) -> str:
 def nvbit_download_url(nvbit_version: str = NVBIT_VERSION) -> str:
     asset = nvbit_asset_name(nvbit_version)
     return f"{NVBIT_REPO}/{nvbit_version}/{asset}"
+
+
+def _safe_extract_tar(tf: tarfile.TarFile, dest_dir: Path) -> None:
+    """Extract tar members safely, rejecting path traversal and absolute paths."""
+    root = dest_dir.resolve()
+    for member in tf.getmembers():
+        member_path = root / member.name
+        try:
+            resolved = member_path.resolve()
+        except OSError as exc:
+            raise RuntimeError(f"Failed to resolve tar member path {member.name!r}: {exc}") from exc
+        if not str(resolved).startswith(str(root) + os.sep) and resolved != root:
+            raise RuntimeError(f"Unsafe path in tarball: {member.name!r}")
+    tf.extractall(dest_dir)  # nosec B202
 
 
 def download_nvbit(
@@ -222,7 +240,7 @@ def download_nvbit(
             print("  Extracting NVBit …")
         with tarfile.open(tarball, "r:bz2") as tf:
             # NVBit tarball from NVlabs GitHub release (see nvbit_download_url).
-            tf.extractall(dest_dir)  # nosec B202
+            _safe_extract_tar(tf, dest_dir)
 
     return nvbit_root
 
@@ -330,7 +348,7 @@ def _clone_and_build(
             print("  Cloning CUTracer from GitHub …")
             print(f"    {CUTRACER_GITHUB}")
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
+        r = subprocess.run(  # nosec B603 B607
             ["git", "clone", "--depth=1", CUTRACER_GITHUB, str(clone_dir)],
             capture_output=not progress,
             text=True,
@@ -345,7 +363,7 @@ def _clone_and_build(
     if not third_party_nvbit.exists():
         if progress:
             print("  Running install_third_party.sh (downloads NVBit …)")
-        r = subprocess.run(
+        r = subprocess.run(  # nosec B603 B607
             ["bash", "install_third_party.sh"],
             cwd=clone_dir,
             capture_output=not progress,
@@ -368,7 +386,7 @@ def _clone_and_build(
 
     if progress:
         print("  Building cutracer.so (this takes a few minutes) …")
-    r = subprocess.run(
+    r = subprocess.run(  # nosec B603 B607
         ["make", "-j4"],
         cwd=clone_dir,
         capture_output=not progress,
@@ -408,7 +426,7 @@ def build_so(
         print(f"  Using NVBit at: {nvbit_root}")
 
     env = {**os.environ, "NVBIT_PATH": str(nvbit_root)}
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603 B607
         ["make", "-C", str(cutracer_src), "-j4"],
         env=env,
         capture_output=True,

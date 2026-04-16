@@ -129,7 +129,7 @@ def detect_gpu_from_nvidia_smi() -> dict:
     """
     try:
         # Fixed argv; no user-controlled strings in the command.
-        result = subprocess.run(  # nosec B603,B607
+        result = subprocess.run(  # nosec B603 B607
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True,
             text=True,

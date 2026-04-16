@@ -8,7 +8,9 @@ Each handler follows the signature ``handler(args, _profile)``.
 from __future__ import annotations
 
 import os
-import subprocess
+
+# subprocess is used for explicit argv-based CLI invocation.
+import subprocess  # nosec B404
 import sys
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ def _cutracer_analyze(args, _profile):
     profile_path = args.profile
     trace_dir = Path(args.trace_dir)
     fmt = getattr(args, "format", "table")
+    # cutracer_analysis skill expects trim in nanoseconds.
     trim = _parse_trim(args)
 
     if not trace_dir.exists():
@@ -175,8 +178,8 @@ def _cutracer_run(args, _profile):
                 tmp = _Path(tf.name)
             tmp.chmod(tmp.stat().st_mode | _stat.S_IEXEC)
             print(f"==> Running: modal run {tmp}")
-            import subprocess as _sp
-            result = _sp.run(["modal", "run", str(tmp)])
+            import subprocess as _sp  # nosec B404
+            result = _sp.run(["modal", "run", str(tmp)])  # nosec B603 B607
             sys.exit(result.returncode)
         else:
             print(script, end="")
@@ -248,7 +251,8 @@ def _cutracer_plan(args, _profile):
     from nsys_ai.cutracer.planner import build_plan, format_plan_script, format_plan_summary
 
     profile_path = args.profile
-    trim = _parse_trim(args)
+    # build_plan expects (start_s, end_s) and performs ns conversion itself.
+    trim = tuple(args.trim) if getattr(args, "trim", None) else None
     top_n = getattr(args, "top_n", 5)
     device = getattr(args, "device", 0) or 0
     output_dir = getattr(args, "output_dir", "./cutracer_out") or "./cutracer_out"
