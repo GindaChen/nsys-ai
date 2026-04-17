@@ -14,6 +14,7 @@ def test_list_skills():
     expected = [
         "arithmetic_intensity",
         "cpu_gpu_pipeline",
+        "cutracer_analysis",
         "gc_impact",
         "gpu_idle_gaps",
         "h2d_distribution",

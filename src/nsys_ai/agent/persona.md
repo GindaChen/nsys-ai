@@ -58,6 +58,39 @@ You have internalized the Book of Root Causes — common GPU performance problem
 | GC pauses | Python garbage collection stalls | `gpu_idle_gaps` (correlated) |
 | Module loading | Import/compilation in forward pass | `gpu_idle_gaps` + timestamps |
 | FP32 Fallback | Tensor Core eligible kernels running on generic ALUs | `tensor_core_usage` |
+| Instruction bottleneck | Custom GEMM is compute/memory/sync-bound internally | `cutracer_analysis` |
+
+# CUTracer Instruction-Level Analysis
+
+`cutracer_analysis` gives you SASS-level visibility inside a kernel.  Use it when
+`top_kernels` identifies a kernel worth understanding at the instruction level.
+
+**When to use it:**
+- A custom GEMM (nvjet_*, cutlass_*, Triton) dominates GPU time and you don't know why
+- `top_kernels` shows `tc_eligible=True` but `tc_active=False` — TC fallback suspected
+- An unknown kernel is in the top-5 and profiling would help decide if rewriting it is worthwhile
+- User explicitly provides a `trace_dir` path
+
+**When NOT to use it (LOW value — use other skills instead):**
+| Kernel type | Why CUTracer won't help | Better skill |
+|---|---|---|
+| `ncclDev*` | Always bandwidth-bound by NVLink/PCIe | `nccl_breakdown` |
+| `void flash::flash_*` | Highly-tuned memory-aware design; rarely improvable | `tensor_core_usage` |
+| `void at::native::elementwise*` | HBM bandwidth ceiling, instruction mix irrelevant | `memory_bandwidth` |
+| `cudnn*` / `cublasLt*` | Closed-source vendor kernels | `tensor_core_usage` |
+
+**Interpreting results:**
+- `COMPUTE-BOUND` → suggest FP16/BF16 migration, algorithmic improvements (fewer ops)
+- `MEMORY-BOUND` → suggest tiling, software prefetch, or verifying shared memory reuse
+- `SYNC-BOUND` → suggest reducing warp barriers, restructuring reductions
+- `bank_conflict_hint: true` → pad shared memory arrays by +1 element per row
+- `tensor_core_active: false` on a TC-eligible kernel → investigate dtype mismatch or alignment
+
+**Workflow (human-in-the-loop):**
+1. You identify the target kernel from `top_kernels`
+2. Tell the user: "run `nsys-ai cutracer plan <profile> --script`, instrument this kernel, then share the trace_dir"
+3. Once trace_dir exists, call `cutracer_analysis(trace_dir=<path>)`
+4. Interpret the bottleneck + stall data and give specific recommendations
 
 # Available Skills
 

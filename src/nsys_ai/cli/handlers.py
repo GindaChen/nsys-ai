@@ -8,7 +8,281 @@ Each handler follows the signature ``handler(args, _profile)``.
 from __future__ import annotations
 
 import os
+
+# subprocess is used for explicit argv-based CLI invocation.
+import subprocess  # nosec B404
 import sys
+
+# ---------------------------------------------------------------------------
+# cutracer subcommand
+# ---------------------------------------------------------------------------
+
+
+def _cmd_cutracer(args, _profile):
+    """Entry point for ``nsys-ai cutracer <action>``."""
+    action = getattr(args, "cutracer_action", None)
+
+    if action == "check":
+        _cutracer_check()
+    elif action == "analyze":
+        _cutracer_analyze(args, _profile)
+    elif action == "plan":
+        _cutracer_plan(args, _profile)
+    elif action == "install":
+        _cutracer_install(args)
+    elif action == "run":
+        _cutracer_run(args, _profile)
+    else:
+        print("Usage: nsys-ai cutracer {check,analyze,plan,install,run}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cutracer_check():
+    """Verify CUTracer Python package and .so availability."""
+    import importlib.util
+
+    ok = True
+
+    # Python package
+    if importlib.util.find_spec("cutracer") is not None:
+        import cutracer as _ct  # type: ignore[import]
+        version = getattr(_ct, "__version__", "unknown")
+        print(f"  cutracer Python package : OK (v{version})")
+    else:
+        print("  cutracer Python package : NOT FOUND")
+        print("    Install: pip install cutracer")
+        ok = False
+
+    # .so instrumentation library
+    so_path = _find_cutracer_so()
+    if so_path:
+        print(f"  cutracer.so             : {so_path}")
+    else:
+        print("  cutracer.so             : NOT FOUND")
+        print("    Build: nsys-ai cutracer install  (requires CUDA toolkit + g++)")
+        ok = False
+
+    if ok:
+        print("\nAll checks passed — ready to instrument.")
+    else:
+        sys.exit(1)
+
+
+def _find_cutracer_so() -> str | None:
+    """Search for cutracer.so using the same rules as ``cutracer install``."""
+    from nsys_ai.cutracer.installer import _find_cutracer_so_path
+
+    return _find_cutracer_so_path()
+
+
+def _cutracer_analyze(args, _profile):
+    """Parse CUTracer traces and correlate with nsys profile."""
+    import json as _json
+    from pathlib import Path
+
+    profile_path = args.profile
+    trace_dir = Path(args.trace_dir)
+    fmt = getattr(args, "format", "table")
+    # cutracer_analysis skill expects trim in nanoseconds.
+    trim = _parse_trim(args)
+
+    if not trace_dir.exists():
+        print(f"Error: trace_dir not found: {trace_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    from nsys_ai.skills.builtins.cutracer_analysis import SKILL
+
+    # Open profile and run analysis within the context manager
+    with _profile.open(profile_path) as prof:
+        conn = prof.conn
+
+        skill_kwargs: dict = {"trace_dir": str(trace_dir)}
+        if trim:
+            skill_kwargs["trim_start_ns"] = trim[0]
+            skill_kwargs["trim_end_ns"] = trim[1]
+
+        results = SKILL.execute_fn(conn, **skill_kwargs)
+
+    if fmt == "json":
+        print(_json.dumps(results, indent=2))
+    else:
+        print(SKILL.format_fn(results))
+
+
+def _cutracer_run(args, _profile):
+    """Run training with CUTracer instrumentation (local or Modal)."""
+    from pathlib import Path as _Path
+
+    from nsys_ai.cutracer.planner import build_plan
+    from nsys_ai.cutracer.runner import ModalConfig, RunConfig, format_modal_app, run_local
+
+    profile_path = args.profile
+    output_dir = _Path(getattr(args, "output_dir", "./cutracer_out") or "./cutracer_out")
+    launch_cmd = getattr(args, "launch_cmd", "") or ""
+    top_n = getattr(args, "top_n", 5)
+    device = getattr(args, "device", 0) or 0
+    # build_plan expects (start_s, end_s) and performs ns conversion itself.
+    trim = tuple(args.trim) if getattr(args, "trim", None) else None
+    dry_run = getattr(args, "dry_run", False)
+    backend = getattr(args, "backend", "local")
+    modal_save = getattr(args, "modal_save", None)
+    modal_gpu = getattr(args, "modal_gpu", "H100") or "H100"
+    modal_volume = getattr(args, "modal_volume", "cutracer-histograms") or "cutracer-histograms"
+    so_path_str = getattr(args, "so_path", None)
+    max_iters = getattr(args, "max_iters", None)
+
+    with _profile.open(profile_path) as prof:
+        plan = build_plan(
+            prof.conn,
+            profile_path=profile_path,
+            top_n=top_n,
+            device=device,
+            trim=trim,
+        )
+
+    from nsys_ai.cutracer.correlator import normalize_kernel_name
+    kernel_filter = [normalize_kernel_name(t.name) for t in plan.targets]
+
+    config = RunConfig(
+        launch_cmd=launch_cmd,
+        output_dir=output_dir,
+        kernel_filter=kernel_filter,
+        so_path=_Path(so_path_str) if so_path_str else None,
+        max_iters=max_iters,
+    )
+
+    if backend in {"modal", "modal-run"} or modal_save:
+        # Detect CUDA version from the local CUDA toolkit for image suggestion.
+        # This does not read CUDA details from the Nsight profile itself.
+        from nsys_ai.cutracer.installer import detect_cuda_version
+        cuda_ver = detect_cuda_version()
+        from nsys_ai.cutracer.runner import _cuda_image_for_version
+        modal_cfg = ModalConfig(
+            gpu=modal_gpu,
+            cuda_image=_cuda_image_for_version(cuda_ver),
+            volume_name=modal_volume,
+        )
+        script = format_modal_app(plan, config, modal_cfg, profile_path=profile_path)
+
+        if modal_save:
+            import stat as _stat
+            save_path = _Path(modal_save)
+            save_path.write_text(script)
+            save_path.chmod(save_path.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+            print(f"Modal app saved to: {save_path}")
+            print(f"Run with: modal run {save_path}")
+        elif backend == "modal-run":
+            # Actually invoke modal run
+            import stat as _stat
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix="_cutracer.py", mode="w", delete=False) as tf:
+                tf.write(script)
+                tmp = _Path(tf.name)
+            tmp.chmod(tmp.stat().st_mode | _stat.S_IEXEC)
+            print(f"==> Running: modal run {tmp}")
+            import subprocess as _sp  # nosec B404
+            result = _sp.run(["modal", "run", str(tmp)])  # nosec B603 B607
+            sys.exit(result.returncode)
+        else:
+            print(script, end="")
+    else:
+        # Local backend
+        print("==> Running CUTracer locally ...")
+        try:
+            run_local(config, dry_run=dry_run, progress=True)
+            if not dry_run:
+                csv_count = len(list(output_dir.glob("*_hist.csv")))
+                print(f"\n==> Done. {csv_count} histogram CSV(s) in: {output_dir}")
+                print("    Analyze with:")
+                print(f"      nsys-ai cutracer analyze {profile_path} {output_dir}")
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as exc:
+            print(f"Error: training command exited with code {exc.returncode}", file=sys.stderr)
+            sys.exit(exc.returncode)
+
+
+def _cutracer_install(args):
+    """Build and install the CUTracer NVBit .so."""
+    from pathlib import Path as _Path
+
+    from nsys_ai.cutracer.installer import (
+        INSTALL_DIR,
+        NVBIT_VERSION,
+        check_prerequisites,
+        format_prereq_table,
+        install,
+    )
+
+    dry_run = getattr(args, "dry_run", False)
+    install_dir = _Path(getattr(args, "install_dir", None) or INSTALL_DIR)
+    nvbit_version = getattr(args, "nvbit_version", None) or NVBIT_VERSION
+    prereq_only = getattr(args, "prereq_only", False)
+
+    if prereq_only:
+        results = check_prerequisites()
+        print(format_prereq_table(results))
+        if any(not r.ok for r in results):
+            sys.exit(1)
+        return
+
+    print(f"Installing CUTracer .so to: {install_dir / 'lib' / 'cutracer.so'}")
+    if dry_run:
+        print("(dry-run mode — no changes will be made)\n")
+
+    result = install(
+        install_dir=install_dir,
+        nvbit_version=nvbit_version,
+        dry_run=dry_run,
+        progress=True,
+    )
+
+    if result.success:
+        if not dry_run:
+            print(f"\nSuccess! Set CUTRACER_SO={result.so_path}")
+            print("Or run: nsys-ai cutracer check  to verify.")
+    else:
+        for err in result.errors:
+            print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cutracer_plan(args, _profile):
+    """Generate a CUTracer instrumentation shell script from a nsys profile."""
+    from nsys_ai.cutracer.planner import build_plan, format_plan_script, format_plan_summary
+
+    profile_path = args.profile
+    # build_plan expects (start_s, end_s) and performs ns conversion itself.
+    trim = tuple(args.trim) if getattr(args, "trim", None) else None
+    top_n = getattr(args, "top_n", 5)
+    device = getattr(args, "device", 0) or 0
+    output_dir = getattr(args, "output_dir", "./cutracer_out") or "./cutracer_out"
+    launch_cmd = getattr(args, "launch_cmd", "") or ""
+    script_mode = getattr(args, "script", False)
+    save_path = getattr(args, "save", None)
+
+    with _profile.open(profile_path) as prof:
+        plan = build_plan(
+            prof.conn,
+            profile_path=profile_path,
+            top_n=top_n,
+            device=device,
+            trim=trim,
+        )
+
+    if script_mode or save_path:
+        script = format_plan_script(plan, output_dir=output_dir, launch_cmd=launch_cmd)
+        if save_path:
+            from pathlib import Path
+            Path(save_path).write_text(script)
+            import stat
+            Path(save_path).chmod(Path(save_path).stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            print(f"Script saved to: {save_path}  (chmod +x applied)")
+        else:
+            print(script, end="")
+    else:
+        print(format_plan_summary(plan))
 
 
 def _add_gpu_trim(p, gpu_required=True, trim_required=True):

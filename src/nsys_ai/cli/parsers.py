@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 
+from nsys_ai.cutracer.installer import NVBIT_VERSION
+
 from .handlers import (
     _add_gpu_trim,
     _cmd_agent,
@@ -15,6 +17,7 @@ from .handlers import (
     _cmd_analyze,
     _cmd_ask,
     _cmd_chat,
+    _cmd_cutracer,
     _cmd_diff,
     _cmd_diff_web,
     _cmd_evidence,
@@ -357,6 +360,210 @@ def _build_parser():
     _add_gpu_trim(p, gpu_required=False)
     p.add_argument("-o", "--output", default=".", help="Output directory")
     p.set_defaults(handler=_cmd_export)
+
+    # CUTracer drill-down
+    p = sub.add_parser("cutracer", help="CUTracer instruction-level drill-down")
+    ct_sub = p.add_subparsers(dest="cutracer_action", required=True)
+
+    ct_sub.add_parser("check", help="Verify CUTracer Python package and .so availability")
+
+    sp_analyze = ct_sub.add_parser(
+        "analyze", help="Parse CUTracer traces and correlate with nsys profile"
+    )
+    sp_analyze.add_argument("profile", help="Path to nsys profile (.sqlite or .nsys-rep)")
+    sp_analyze.add_argument("trace_dir", help="Path to CUTracer output directory")
+    sp_analyze.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (matches nsys --trim)",
+    )
+    sp_analyze.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
+    sp_plan = ct_sub.add_parser(
+        "plan",
+        help="Generate a CUTracer instrumentation shell script from a nsys profile",
+    )
+    sp_plan.add_argument("profile", help="Path to nsys profile (.sqlite or .nsys-rep)")
+    sp_plan.add_argument(
+        "--top-n",
+        dest="top_n",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of top kernels to target (default: 5)",
+    )
+    sp_plan.add_argument(
+        "--device",
+        type=int,
+        default=0,
+        metavar="GPU",
+        help="GPU device index (default: 0)",
+    )
+    sp_plan.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds to restrict kernel selection",
+    )
+    sp_plan.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default="./cutracer_out",
+        metavar="DIR",
+        help="Output directory for CUTracer CSVs (written into the script; default: ./cutracer_out)",
+    )
+    sp_plan.add_argument(
+        "--launch-cmd",
+        dest="launch_cmd",
+        default="",
+        metavar="CMD",
+        help="Training command to wrap (e.g. 'python train.py')",
+    )
+    sp_plan.add_argument(
+        "--script",
+        action="store_true",
+        help="Print the full bash script instead of the summary table",
+    )
+    sp_plan.add_argument(
+        "--save",
+        metavar="FILE",
+        default=None,
+        help="Save the bash script to FILE (implies --script; chmod +x applied)",
+    )
+
+    sp_run = ct_sub.add_parser(
+        "run",
+        help="Run training with CUTracer instrumentation (local or Modal)",
+    )
+    sp_run.add_argument("profile", help="Path to nsys profile (.sqlite or .nsys-rep)")
+    sp_run.add_argument(
+        "--launch-cmd",
+        dest="launch_cmd",
+        required=True,
+        metavar="CMD",
+        help="Training command to instrument (e.g. 'python train.py')",
+    )
+    sp_run.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default="./cutracer_out",
+        metavar="DIR",
+        help="Directory for histogram CSVs (default: ./cutracer_out)",
+    )
+    sp_run.add_argument(
+        "--top-n",
+        dest="top_n",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Top-N kernels to instrument (default: 5)",
+    )
+    sp_run.add_argument(
+        "--device",
+        type=int,
+        default=0,
+        metavar="GPU",
+        help="GPU device index (default: 0)",
+    )
+    sp_run.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds to restrict kernel selection",
+    )
+    sp_run.add_argument(
+        "--backend",
+        choices=["local", "modal", "modal-run"],
+        default="local",
+        help="Execution backend: local (default), modal (print script), modal-run (invoke modal CLI)",
+    )
+    sp_run.add_argument(
+        "--modal-save",
+        dest="modal_save",
+        default=None,
+        metavar="FILE",
+        help="Save Modal app script to FILE instead of printing",
+    )
+    sp_run.add_argument(
+        "--modal-gpu",
+        dest="modal_gpu",
+        default="H100",
+        metavar="GPU",
+        help="Modal GPU type (default: H100)",
+    )
+    sp_run.add_argument(
+        "--modal-volume",
+        dest="modal_volume",
+        default="cutracer-histograms",
+        metavar="NAME",
+        help="Modal Volume name for histogram CSVs (default: cutracer-histograms)",
+    )
+    sp_run.add_argument(
+        "--so-path",
+        dest="so_path",
+        default=None,
+        metavar="PATH",
+        help="Override cutracer.so path (local backend only)",
+    )
+    sp_run.add_argument(
+        "--max-iters",
+        dest="max_iters",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Limit CUTracer to N training iterations (sets CUTRACER_MAX_ITERS)",
+    )
+    sp_run.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print what would be run without executing (local backend only)",
+    )
+
+    sp_install = ct_sub.add_parser(
+        "install",
+        help="Build and install the CUTracer NVBit .so instrumentation library",
+    )
+    sp_install.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print what would be done without executing",
+    )
+    sp_install.add_argument(
+        "--install-dir",
+        dest="install_dir",
+        default=None,
+        metavar="DIR",
+        help="Override the managed install directory (default: ~/.nsys-ai/cutracer)",
+    )
+    sp_install.add_argument(
+        "--nvbit-version",
+        dest="nvbit_version",
+        default=None,
+        metavar="VER",
+        help=f"NVBit release version to download (default: {NVBIT_VERSION})",
+    )
+    sp_install.add_argument(
+        "--prereq-only",
+        dest="prereq_only",
+        action="store_true",
+        help="Only check prerequisites, do not build",
+    )
+
+    p.set_defaults(handler=_cmd_cutracer)
 
     # Agent-facing commands (promoted from legacy so --help exposes them)
     _register_info_parser(sub)

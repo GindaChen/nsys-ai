@@ -36,8 +36,9 @@ agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
 ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
 tui = ["textual>=8.0.0"]                        # backward compat; textual is now core (tree + timeline)
 chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (tui extra kept for compat)
-dev = ["pytest>=7.0", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.23"]
-all = ["nsys-ai[agent,tui,chat]"]
+cutracer = ["cutracer>=0.2.0"]                  # CUTracer CLI + instruction-level analysis
+dev = ["pytest>=8.2,<9", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.25,<1"]
+all = ["nsys-ai[agent,tui,chat,cutracer]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -62,5 +63,5 @@ ignore = [
 asyncio_mode = "auto"
 
 [tool.bandit]
-# B110: try_except_pass; B608: param to run(); B404/B603: suppressed at call site in profile.py via # nosec
+# B110: try_except_pass; B608: SQL
 skips = ["B110", "B608"]

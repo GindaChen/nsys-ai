@@ -41,6 +41,7 @@ def test_subcommands():
         "info",
         "skill",
         "evidence",
+        "cutracer",
     ]:
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"
 
@@ -81,6 +82,16 @@ def test_diff_subcommand_help():
     assert result.returncode == 0
     assert "before" in result.stdout
     assert "after" in result.stdout
+
+
+def test_cutracer_subcommand_help():
+    """cutracer subcommand should expose expected actions."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "cutracer", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    for action in ["check", "analyze", "plan", "install", "run"]:
+        assert action in result.stdout
 
 
 def test_legacy_analyze_still_available():

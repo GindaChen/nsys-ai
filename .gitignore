@@ -15,6 +15,8 @@ megatron_viewer_test.html
 nvtx_viewer.html
 timeline_test.html
 timeline_viewer.html
+cutracer_out_real/
+data/nsys-hero/
 
 *.sqlite
 *.nsys-rep

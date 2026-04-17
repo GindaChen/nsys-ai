@@ -26,6 +26,7 @@ The output is a structured System Prompt payload containing:
    - `--iteration N` for auto-trimming to a specific training iteration
    - `nsys-ai evidence build` for generating timeline-ready findings
 6. **Full Skill Catalog** — dynamically generated from the Python skill registry (always up-to-date with the current builtin skills)
+   - Includes new instruction-level tooling such as `cutracer_analysis` when available in the current install
 
 ## When to use
 
@@ -40,6 +41,12 @@ The output is a structured System Prompt payload containing:
 GUIDE=$(nsys-ai agent-guide)
 echo "$GUIDE" | your_agent_framework --system-prompt -
 ```
+
+## Naming note (`auto-guide` vs `agent-guide`)
+
+- The official command is `nsys-ai agent-guide`.
+- If your internal workflow says "auto-guide", treat it as a naming alias for the same onboarding payload.
+- For scripts/docs, prefer `agent-guide` to match the actual CLI surface.
 
 ## Implementation
 

@@ -272,6 +272,7 @@ The `docs/` directory includes comprehensive guides for Nsight Systems profiling
 | [Python/PyTorch](docs/06-python-pytorch.md) | Profiling PyTorch workloads |
 | [Containers](docs/07-container-profiling.md) | Profiling inside Docker/Slurm |
 | [Focused Profiling](docs/08-focused-profiling.md) | Targeted profiling strategies |
+| [CUTracer Instruction Analysis](docs/cutracer-instruction-analysis.md) | Instruction-level drill-down for top kernels |
 
 ### 🔍 Interactive SQLite Schema Explorer
 
@@ -346,6 +347,7 @@ Options:
 | `tui` | **Interactive tree TUI** |
 | `timeline` | **Interactive timeline TUI** |
 | `timeline-web` | **Web-based multi-GPU timeline** (progressive rendering) |
+| `cutracer` | **Instruction-level drill-down** (`check`, `install`, `plan`, `run`, `analyze`) |
 | `search` | Search kernels / NVTX by name |
 | `export` | Perfetto JSON traces |
 | `export-csv` | Flat CSV for spreadsheets |
@@ -357,7 +359,7 @@ Options:
 
 ## 🧩 Skills (Analysis Building Blocks)
 
-nsys-ai ships with 29 built-in analysis skills — self-contained analysis units that work without any LLM:
+nsys-ai ships with built-in analysis skills — self-contained analysis units that work without any LLM:
 
 ```bash
 # List all available skills
@@ -382,6 +384,7 @@ nsys-ai skill run nccl_breakdown profile.sqlite
 | `module_loading` | JIT compilation & module loading stalls |
 | `gc_impact` | GC & memory allocation stalls |
 | `pipeline_bubble_metrics` | True GPU idle percentage per device |
+| `cutracer_analysis` | Correlate CUTracer instruction mix with nsys/NVTX context |
 
 Skills are extensible — add your own by creating a Python file that exports a `SKILL` constant.
 
@@ -409,6 +412,7 @@ With `pip install nsys-ai[agent]`, the agent can use an LLM to synthesize natura
 ```bash
 pip install nsys-ai          # Core: CLI + TUI + skills (rich + textual)
 pip install nsys-ai[agent]   # + LLM-backed agent analysis (requires anthropic)
+pip install nsys-ai[cutracer] # + CUTracer instruction-level workflow
 pip install nsys-ai[all]     # Everything
 ```
 

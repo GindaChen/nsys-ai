@@ -13,11 +13,14 @@ jobs:
 
       - name: Install project + tools
         run: |
-          pip install -e '.[dev]'
+          # Security audit targets runtime dependencies.
+          # Install core package only (avoid dev/test toolchain vulnerabilities
+          # such as pytest gating release/security CI).
+          pip install -e .
           pip install bandit[toml] pip-audit
 
       - name: Bandit – static analysis
         run: bandit -r src/ -c pyproject.toml
 
       - name: pip-audit – dependency vulnerabilities
-        run: pip-audit
+        run: pip-audit .

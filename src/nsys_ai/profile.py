@@ -11,11 +11,12 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess  # nosec B404 — only for nsys export .nsys-rep→.sqlite, list args no shell
+import subprocess  # nosec B404
 import threading
 import typing
 from dataclasses import dataclass, field
 
+# subprocess: nsys export (.nsys-rep→.sqlite) only; argv list, no shell.
 if typing.TYPE_CHECKING:
     from .fingerprint import ProfileFingerprint
 
