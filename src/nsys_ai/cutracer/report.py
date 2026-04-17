@@ -81,9 +81,10 @@ def compute_mix(hist: KernelHistogram) -> InstrMix:
     cat_pct = {cat: round(cnt / total * 100, 1) for cat, cnt in cat_counts.items()}
     stall_scores.sort(key=lambda x: -x[1])
 
-    tc_active = (hist.instruction_counts.get("HMMA", 0) > 0
-                 or hist.instruction_counts.get("IMMA", 0) > 0
-                 or hist.instruction_counts.get("BMMA", 0) > 0)
+    tc_active = any(
+        count > 0 and classify_opcode(opcode) == "tensor"
+        for opcode, count in hist.instruction_counts.items()
+    )
 
     # Coarse bottleneck heuristic
     compute_pct = cat_pct.get("compute", 0) + cat_pct.get("tensor", 0)
