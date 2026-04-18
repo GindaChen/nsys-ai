@@ -107,14 +107,14 @@ they reference `M1_AUTO.md §4.1`.
 After Mode 1 delivery, suggest specialist mode only if a second critical finding exists.
 **Cap 2 chains per session** (UX invariant 7).
 
-> **Mode 2 — Comms (NCCL / overlap)**: coming Stage B1. See `M2_COMMS.md` once landed.
-> **Mode 3 — Compute (kernels / MFU)**: coming Stage B2. See `M3_COMPUTE.md`.
-> **Mode 4 — Memory (H2D / bandwidth)**: coming Stage B2. See `M4_MEMORY.md`.
-> **Mode 5 — NVTX / code mapping**: coming Stage B2. See `M5_NVTX.md`.
-> **Mode 6 — Idle / sync**: coming Stage B1. See `M6_IDLE.md`.
-> **Mode 7 — CUTracer (SASS)**: coming Stage C1. See `M7_CUTRACER.md`.
-> **Mode 8 — Diff**: coming Stage C2. See `M8_DIFF.md`.
-> **Mode 9 — Variance**: coming Stage C2. See `M9_VARIANCE.md`.
+> **Mode 2 — Comms (NCCL / overlap)**: coming Stage B1 as `M2_COMMS.md`. Today: see `DISTRIBUTED.md`.
+> **Mode 3 — Compute (kernels / MFU)**: coming Stage B2 as `M3_COMPUTE.md`. Today: see `MFU.md`.
+> **Mode 4 — Memory (H2D / bandwidth)**: coming Stage B2 as `M4_MEMORY.md`. Today: no fallback ref — use Mode 1 auto-triage.
+> **Mode 5 — NVTX / code mapping**: coming Stage B2 as `M5_NVTX.md`. Today: no fallback ref — use Mode 1 auto-triage.
+> **Mode 6 — Idle / sync**: coming Stage B1 as `M6_IDLE.md`. Today: no fallback ref — use Mode 1 auto-triage.
+> **Mode 7 — CUTracer (SASS)**: coming Stage C1 as `M7_CUTRACER.md`. Today: no fallback ref — use Mode 1 auto-triage.
+> **Mode 8 — Diff**: coming Stage C2 as `M8_DIFF.md`. Today: see `DIFF.md`.
+> **Mode 9 — Variance**: coming Stage C2 as `M9_VARIANCE.md`. Today: see `VARIANCE.md`.
 
 During Stage A (only Mode 1 lives), after auto-triage completes, emit the 3-part summary
 directly — no chain prompt until Stage B1 lands.

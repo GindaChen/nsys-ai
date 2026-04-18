@@ -37,9 +37,11 @@ If not installed: `pip install "nsys-ai[agent]"`.
 
 If 0 args AND no profile path in message, scan CWD (top 10 by mtime):
 ```bash
-ls -t *.sqlite *.nsys-rep 2>/dev/null | head -10
+(ls -t *.sqlite *.nsys-rep 2>/dev/null || true) | head -10
 ```
-If empty: `"No profile found in CWD; give me a path to a .sqlite or .nsys-rep file."`
+(The `|| true` keeps the pipeline exit code 0 when no files match, so the "If empty" branch
+below is always reachable — without it, `ls` exits non-zero on no matches and may be treated
+as a tool failure.) If empty: `"No profile found in CWD; give me a path to a .sqlite or .nsys-rep file."`
 
 Otherwise, render the menu **once per session**:
 
@@ -93,20 +95,21 @@ through to Mode 1 with a one-line notice:
 
 ## Mode routing
 
-| Mode | Reference | Status |
-|------|----------|--------|
-| 1 Auto | `references/M1_AUTO.md` | Stage A (live) |
-| 2 Comms | `references/M2_COMMS.md` | Stage B1 |
-| 3 Compute | `references/M3_COMPUTE.md` | Stage B2 |
-| 4 Memory | `references/M4_MEMORY.md` | Stage B2 |
-| 5 NVTX | `references/M5_NVTX.md` | Stage B2 |
-| 6 Idle | `references/M6_IDLE.md` | Stage B1 |
-| 7 CUTracer | `references/M7_CUTRACER.md` | Stage C1 |
-| 8 Diff | `references/M8_DIFF.md` | Stage C2 |
-| 9 Variance | `references/M9_VARIANCE.md` | Stage C2 |
+| Mode | Reference | Fallback ref (today) | Status |
+|------|-----------|----------------------|--------|
+| 1 Auto | `references/M1_AUTO.md` | — | Stage A (live) |
+| 2 Comms | `references/M2_COMMS.md` *(not yet present)* | `references/DISTRIBUTED.md` | Stage B1 planned |
+| 3 Compute | `references/M3_COMPUTE.md` *(not yet present)* | `references/MFU.md` | Stage B2 planned |
+| 4 Memory | `references/M4_MEMORY.md` *(not yet present)* | — (use Mode 1 auto-triage) | Stage B2 planned |
+| 5 NVTX | `references/M5_NVTX.md` *(not yet present)* | — (use Mode 1 auto-triage) | Stage B2 planned |
+| 6 Idle | `references/M6_IDLE.md` *(not yet present)* | — (use Mode 1 auto-triage) | Stage B1 planned |
+| 7 CUTracer | `references/M7_CUTRACER.md` *(not yet present)* | — (use Mode 1 auto-triage) | Stage C1 planned |
+| 8 Diff | `references/M8_DIFF.md` *(not yet present)* | `references/DIFF.md` | Stage C2 planned |
+| 9 Variance | `references/M9_VARIANCE.md` *(not yet present)* | `references/VARIANCE.md` | Stage C2 planned |
 
-After mode pick: load the reference; follow its six sections (Precondition / Stages / Skills
-/ Signals / Cross-mode exits / Delivery).
+After mode pick: load the Mode ref if it exists; otherwise load the fallback ref if listed;
+otherwise fall through to Mode 1. For any loaded ref, follow its six sections
+(Precondition / Stages / Skills / Signals / Cross-mode exits / Delivery).
 
 ---
 

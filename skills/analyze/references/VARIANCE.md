@@ -8,9 +8,13 @@ or the user says "the profile looks choppy" / "some iterations spike".
 ## Workflow 7: Variance Diagnosis
 
 ```
-Step 1  Get per-iteration timing (requires NVTX iteration markers):
+Step 1  Get per-iteration timing (NVTX iteration markers preferred for best accuracy):
         Prefer the CLI skill which handles schema differences automatically:
           nsys-ai skill run iteration_timing <profile> --format json
+
+        This works best with NVTX iteration markers. If markers are missing or do not match,
+        `iteration_timing` falls back to a kernel-gap heuristic — the inferred iteration
+        boundaries are approximate and may be less reliable for some workloads.
 
         If using raw SQL, first check which columns NVTX_EVENTS has:
           PRAGMA table_info(NVTX_EVENTS)
@@ -32,13 +36,25 @@ Step 1  Get per-iteration timing (requires NVTX iteration markers):
         WHERE text LIKE '%sample%' OR text LIKE '%step%' OR text LIKE '%iter%'
         ORDER BY start LIMIT 50
 
-        Compute statistics:
+        Compute statistics (branch on the same schema check as above):
+
+        [NVTX_EVENTS has textId column]
+        SELECT MIN([end]-start)/1e6 AS min_ms,
+               MAX([end]-start)/1e6 AS max_ms,
+               AVG([end]-start)/1e6 AS avg_ms,
+               COUNT(*) AS n_iters
+        FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
+        WHERE COALESCE(n.text, s.value) LIKE '%sample%'
+           OR COALESCE(n.text, s.value) LIKE '%step%'
+           OR COALESCE(n.text, s.value) LIKE '%iter%'
+
+        [NVTX_EVENTS has only text column]
         SELECT MIN([end]-start)/1e6 AS min_ms,
                MAX([end]-start)/1e6 AS max_ms,
                AVG([end]-start)/1e6 AS avg_ms,
                COUNT(*) AS n_iters
         FROM NVTX_EVENTS
-        WHERE text LIKE '%sample%' OR text LIKE '%step%'
+        WHERE text LIKE '%sample%' OR text LIKE '%step%' OR text LIKE '%iter%'
 
         [If max_ms < 1.5 × avg_ms] → variance is normal; no problem to investigate
 

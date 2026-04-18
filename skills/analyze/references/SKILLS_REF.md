@@ -29,7 +29,7 @@ nsys-ai skill run <skill_name> <profile> --format json [-p key=value ...]
 |-------|--------|-------------|
 | `top_kernels` | `limit=15` | Heaviest kernels by total time |
 | `tensor_core_usage` | — | FP32 fallback detection — are tensor cores active? |
-| `kernel_instances` | `name=<kernel>` ✅ | Exact ns timestamps per kernel instance → use for findings.json |
+| `kernel_instances` | `name=<kernel>` (optional; omit to get longest kernels across the profile) | Exact ns timestamps per kernel instance → use for findings.json |
 | `kernel_launch_overhead` | — | CPU dispatch latency per kernel |
 | `kernel_launch_pattern` | — | Per-stream burst density, sync-stall detection |
 | `stream_concurrency` | — | Multi-stream concurrency analysis |

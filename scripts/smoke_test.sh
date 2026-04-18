@@ -72,7 +72,16 @@ run_capture "profile_health_manifest" "$MANIFEST_OUT" \
 check_regex "manifest has gpu field"         "$MANIFEST_OUT" '"gpu"'
 check_regex "manifest has profile_span_ms"   "$MANIFEST_OUT" '"profile_span_ms"'
 check_regex "manifest has suspected_bottleneck" "$MANIFEST_OUT" '"suspected_bottleneck"'
-run "nvtx_layer_breakdown"     nsys-ai skill run nvtx_layer_breakdown "$PROFILE" --format json --max-rows 1
+# NVTX-dependent skills fail on profiles without an NVTX_EVENTS table.
+# Missing NVTX is a non-blocking scenario for the plugin (Mode 5 falls back to Path B),
+# so we skip rather than fail here.
+HAS_NVTX=$(sqlite3 "$PROFILE" "SELECT COUNT(*) FROM sqlite_master WHERE name='NVTX_EVENTS';" 2>/dev/null || echo 0)
+if [[ "$HAS_NVTX" -gt 0 ]]; then
+  run "nvtx_layer_breakdown"   nsys-ai skill run nvtx_layer_breakdown "$PROFILE" --format json --max-rows 1
+else
+  printf "  %-45s " "nvtx_layer_breakdown"
+  echo "SKIP (no NVTX_EVENTS table)"
+fi
 run "root_cause_matcher"       nsys-ai skill run root_cause_matcher "$PROFILE" --format json
 
 echo "== Mode 2 drill-down skills (comms) =="
@@ -101,13 +110,13 @@ run "h2d_distribution"         nsys-ai skill run h2d_distribution "$PROFILE" --f
 echo "== Mode 5 drill-down skills (code mapping) =="
 run "iteration_timing"         nsys-ai skill run iteration_timing "$PROFILE" --format json
 
-echo "== Stage A Mode 1 E2E — evidence pipeline =="
-# The plugin ends every mode with evidence build + timeline-web. We can only smoke the
-# CLI surface here (can't actually launch a browser in CI).
+echo "== Stage A Mode 1 smoke — evidence/timeline CLI surface =="
+# The plugin ends every mode with evidence build + timeline-web. In CI we only smoke
+# the CLI boundary here: build findings JSON, validate its shape, and verify the
+# timeline-web command is available. This does not start the HTTP server.
 run "evidence build"           nsys-ai evidence build "$PROFILE" --format json -o /tmp/findings_smoke.json
 run "findings JSON is valid"   bash -c "python3 -c 'import json,sys; json.load(open(\"/tmp/findings_smoke.json\"))'"
 run "findings has findings key" bash -c "python3 -c 'import json; assert \"findings\" in json.load(open(\"/tmp/findings_smoke.json\"))'"
-# timeline-web starts an HTTP server; just verify --help works (full run would block)
 run "timeline-web --help"      nsys-ai timeline-web --help
 
 echo ""
