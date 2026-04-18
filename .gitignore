@@ -21,6 +21,7 @@ data/nsys-hero/
 *.sqlite
 *.nsys-rep
 *.nsys-cache/
+*.sqlite.timeline-cache-*.json
 examples/*/output/
 snapshot_report.html
 uv.lock
