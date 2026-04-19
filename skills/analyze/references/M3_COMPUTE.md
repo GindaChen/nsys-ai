@@ -41,8 +41,8 @@ per head; `sm90_xmma_gemm_*_4096x` → H=4096). Ask only when kernel names give 
 | `specific-kernel` | `kernel_instances -p name=<name>` |
 
 Device propagation: `region_mfu` uses **`-p device_id=N`** (NOT `-p device=N`).
-`top_kernels`, `tensor_core_usage`, `kernel_launch_pattern`, `arithmetic_intensity` do not
-accept device. `kernel_instances` accepts `-p device=N`. See PRINCIPLES.md §6.
+`top_kernels`, `tensor_core_usage`, and `kernel_launch_pattern` do not accept device.
+`arithmetic_intensity` and `kernel_instances` accept `-p device=N`. See PRINCIPLES.md §6.
 
 Mode 3 is the **sole caller of `MFU.md`**. Never call `region_mfu` from Mode 1 — always
 redirect via "want an MFU number? → Mode 3 mfu sub-focus". See `MFU.md` for FLOPs formulas

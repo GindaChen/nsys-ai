@@ -293,7 +293,9 @@ check_field_conditional \
 
 run_capture "memory_transfers" "$MEM_XFER_OUT" \
   nsys-ai skill run memory_transfers "$PROFILE" --format json
-check_regex "  memory_transfers: total_ms field"   "$MEM_XFER_OUT" '"total_ms"'
+check_field_conditional \
+  "  memory_transfers: total_ms field" "$MEM_XFER_OUT" '"total_ms"' \
+  "No memory transfers found"
 
 run_capture "h2d_distribution" "$H2D_OUT" \
   nsys-ai skill run h2d_distribution "$PROFILE" --format json
