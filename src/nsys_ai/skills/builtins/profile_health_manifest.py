@@ -5,7 +5,8 @@ profile characteristics in a single tool call, eliminating the need for
 5-8 sequential skill invocations during agent exploration.
 
 Internally orchestrates: overlap_breakdown, nccl_breakdown,
-nccl_communicator_analysis, gpu_idle_gaps, and root_cause_matcher.
+nccl_communicator_analysis, gpu_idle_gaps, root_cause_matcher,
+aggregate_nvtx_ranges, and iteration_timing.
 """
 
 import dataclasses
@@ -200,6 +201,34 @@ def _execute(conn, **kwargs):
     except Exception as exc:
         _log.debug("manifest: sync_cost_analysis failed: %s", exc)
 
+    # ── 8. NVTX summary ──────────────────────────────────────────
+    nvtx_summary: dict = {"has_nvtx": False}
+    try:
+        nvtx_ranges = prof.aggregate_nvtx_ranges(limit=5, trim=trim_tuple)
+        if nvtx_ranges:
+            nvtx_summary["has_nvtx"] = True
+            nvtx_summary["top_regions"] = [
+                {
+                    "name": (r.get("text") or "?")[:50],
+                    "total_ms": round(r.get("total_ns", 0) / 1e6, 1),
+                    "count": r.get("count", 0),
+                }
+                for r in nvtx_ranges[:5]
+            ]
+    except Exception as exc:
+        _log.debug("manifest: aggregate_nvtx_ranges failed: %s", exc)
+
+    iter_rows = _safe_skill_run("iteration_timing", conn, device=device, **trim_kwargs)
+    if iter_rows:
+        nvtx_summary["iteration_count"] = len(iter_rows)
+        # Skip iter 0 (warm-up) when computing variance metrics
+        steady = iter_rows[1:] if len(iter_rows) > 1 else iter_rows
+        if steady:
+            durs = sorted(r.get("duration_ms", 0) for r in steady)
+            mid = len(durs) // 2
+            nvtx_summary["median_iter_ms"] = round(durs[mid], 1)
+            nvtx_summary["slowest_iter_ms"] = round(max(durs), 1)
+
     # ── 7. Root cause findings (count + top severity) ────────────
     # Pass precomputed communicator rows to avoid re-running the expensive
     # nccl_communicator_analysis inside root_cause_matcher.
@@ -237,6 +266,7 @@ def _execute(conn, **kwargs):
         "idle": idle_summary,
         "root_cause_count": len(root_causes),
         "root_causes": root_causes[:5],  # Cap at 5 to keep output compact
+        "nvtx": nvtx_summary,
         "data_quality": data_quality,
     }
 
@@ -284,6 +314,14 @@ def _infer_bottleneck(m: dict) -> str:
     # Check NCCL dominance
     if nccl.get("total_nccl_ms", 0) > overlap.get("compute_only_ms", float("inf")):
         return "Communication-bound (NCCL > compute)"
+
+    # Check iteration variance (spike pattern)
+    nvtx = m.get("nvtx", {})
+    median_ms = nvtx.get("median_iter_ms", 0)
+    slowest_ms = nvtx.get("slowest_iter_ms", 0)
+    if median_ms > 0 and slowest_ms > median_ms * 1.5:
+        ratio = slowest_ms / median_ms
+        return f"Iteration variance spike (slowest {slowest_ms:.0f}ms = {ratio:.1f}× median)"
 
     return ""
 
@@ -379,6 +417,21 @@ def _format(rows):
             sev_icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(rc["severity"], "⚪")
             lines.append(f"    {sev_icon} {rc['pattern']}")
 
+    # NVTX summary
+    nvtx = m.get("nvtx", {})
+    if nvtx.get("has_nvtx"):
+        lines.append("")
+        iter_count = nvtx.get("iteration_count")
+        if iter_count:
+            median_ms = nvtx.get("median_iter_ms", 0)
+            slowest_ms = nvtx.get("slowest_iter_ms", 0)
+            lines.append(f"  NVTX Iterations: {iter_count} detected, median {median_ms:.1f}ms, slowest {slowest_ms:.1f}ms")
+        top = nvtx.get("top_regions", [])
+        if top:
+            lines.append("  Top NVTX Regions:")
+            for r in top:
+                lines.append(f"    {r['name'][:48]:<50s}  {r['total_ms']:>8.1f}ms  ×{r['count']}")
+
     # Bottleneck
     bn = m.get("suspected_bottleneck", "")
     if bn:
@@ -394,10 +447,13 @@ SKILL = Skill(
     description=(
         "One-shot profile health summary for AI agents. Returns a compact JSON manifest "
         "covering GPU info, top kernels, compute/NCCL overlap, NCCL summary, "
-        "communicator-aware NCCL hints, idle gaps, and root cause findings — all in a single call. "
+        "communicator-aware NCCL hints, idle gaps, root cause findings, and NVTX summary "
+        "(top regions + iteration count/median/slowest) — all in a single call. "
         "If Profiler Overhead is >1%, advise the user to use torch.cuda.profiler.start/stop() "
         "and --capture-range=cudaProfilerApi instead of full-script profiling. "
-        "Use this as the FIRST skill to call on any new profile."
+        "Use this as the FIRST skill to call on any new profile. "
+        "The nvtx.iteration_count, nvtx.median_iter_ms, and nvtx.slowest_iter_ms fields "
+        "let you skip the first iteration_timing call for Mode 5 and Mode 9."
     ),
     category="utility",
     execute_fn=_execute,

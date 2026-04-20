@@ -110,6 +110,23 @@ otherwise fall through to Mode 1. For any loaded ref, follow its six sections
 
 ---
 
+## profile_health_manifest NVTX fields
+
+`profile_health_manifest` now includes a `nvtx` key with pre-computed NVTX data:
+
+| Field | Meaning |
+|---|---|
+| `nvtx.has_nvtx` | `true` if NVTX_EVENTS contains range annotations |
+| `nvtx.top_regions` | Top-5 NVTX ranges by total wall time (`name`, `total_ms`, `count`) |
+| `nvtx.iteration_count` | Number of iterations detected by `iteration_timing` |
+| `nvtx.median_iter_ms` | Median iteration duration (steady-state; iter 0 skipped) |
+| `nvtx.slowest_iter_ms` | Slowest iteration duration (steady-state; iter 0 skipped) |
+
+**Mode 5 / Mode 9 shortcut**: if `nvtx.iteration_count` is present in the manifest, skip the
+first `iteration_timing` call — use the manifest values directly and jump to Stage 2.
+
+---
+
 ## Non-negotiable rules (full list in PRINCIPLES.md §3)
 
 1. Never guess kernel or NVTX names — always query first.
