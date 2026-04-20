@@ -600,7 +600,7 @@ def _register_legacy_commands(sub):
     p.set_defaults(handler=_cmd_nccl)
 
     p = sub.add_parser("iters", help="Detect training iterations")
-    _add_gpu_trim(p)
+    _add_gpu_trim(p, gpu_required=False, trim_required=False)
     p.set_defaults(handler=_cmd_iters)
 
     p = sub.add_parser("tree", help="NVTX hierarchy as text")

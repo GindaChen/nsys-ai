@@ -247,3 +247,72 @@ class TestDuckDBCompatibilityFixes:
         # Should quietly return [] instead of raising duckdb.Error
         rows = skill.execute(bad_conn)
         assert rows == []
+
+    def _make_textid_db(self, nvtx_rows: list[tuple], string_rows: list[tuple]):
+        """Return a minimal DuckDB connection with textId-based NVTX schema."""
+        import duckdb
+
+        db = duckdb.connect()
+        db.execute("CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT)")
+        db.execute(
+            "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+            "(globalTid INT, deviceId INT, streamId INT, correlationId INT, "
+            "start INT, \"end\" INT, shortName INT, demangledName INT, "
+            "gridX INT, gridY INT, gridZ INT, blockX INT, blockY INT, blockZ INT)"
+        )
+        db.execute(
+            "CREATE TABLE NVTX_EVENTS "
+            "(globalTid INT, start INT, \"end\" INT, text TEXT, textId INT, eventType INT)"
+        )
+        db.execute("INSERT INTO StringIds VALUES (99, 'dummy_kernel')")
+        db.execute(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES "
+            "(0, 0, 7, 1, 0, 10000000, 99, 99, 1, 1, 1, 32, 1, 1)"
+        )
+        for row in string_rows:
+            db.execute("INSERT INTO StringIds VALUES (?, ?)", row)
+        for row in nvtx_rows:
+            db.execute("INSERT INTO NVTX_EVENTS VALUES (?, ?, ?, ?, ?, ?)", row)
+        return db
+
+    def test_aggregate_nvtx_ranges_text_id_schema(self):
+        """aggregate_nvtx_ranges must not raise DuckDB BinderException on textId schema.
+
+        Regression guard for the GROUP BY alias bug: grouping by `text` (alias) when
+        COALESCE(n.text, s.value) appears in SELECT caused DuckDB to reject the query.
+        """
+        from nsys_ai.profile import Profile
+
+        db = self._make_textid_db(
+            nvtx_rows=[
+                (0, 100, 500, None, 1, 59),   # forward, 400 ns
+                (0, 600, 900, None, 2, 59),   # backward, 300 ns
+            ],
+            string_rows=[(1, "forward"), (2, "backward")],
+        )
+
+        p = Profile._from_conn(db)
+        assert p._nvtx_has_text_id is True
+
+        rows = p.aggregate_nvtx_ranges()
+        texts = [r["text"] for r in rows]
+        assert "forward" in texts
+        assert "backward" in texts
+
+    def test_search_nvtx_names_text_id_schema(self):
+        """search_nvtx_names must not raise DuckDB BinderException on textId schema."""
+        from nsys_ai.profile import Profile
+
+        db = self._make_textid_db(
+            nvtx_rows=[
+                (0, 0, 1000, None, 1, 59),
+                (0, 1100, 2000, None, 2, 59),
+            ],
+            string_rows=[(1, "flash_fwd"), (2, "flash_bwd")],
+        )
+
+        p = Profile._from_conn(db)
+        rows = p.search_nvtx_names("flash")
+        texts = [r["text"] for r in rows]
+        assert "flash_fwd" in texts
+        assert "flash_bwd" in texts

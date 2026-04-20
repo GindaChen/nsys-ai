@@ -20,7 +20,7 @@ set -euo pipefail
 
 PROFILE="${1:-}"
 if [[ -z "$PROFILE" || ! -f "$PROFILE" ]]; then
-  echo "usage: $0 <profile.sqlite> [nvtx-profile.sqlite]" >&2
+  echo "usage: $0 <profile.sqlite> [nvtx-profile.sqlite] [before.sqlite] [after.sqlite]" >&2
   exit 2
 fi
 if [[ -n "${2:-}" ]]; then
@@ -503,7 +503,7 @@ rm -f "$DIFF_OUT"
 # ── Mode 9: Variance ──────────────────────────────────────────────────────────
 echo "== Mode 9 — Variance =="
 
-# 9a. iteration_timing (precondition gate — M9_DIFF.md §1)
+# 9a. iteration_timing (precondition gate — M9_VARIANCE.md §1)
 ITER_TIMING_OUT="$(mktemp)"
 run_capture "skill iteration_timing --format json" "$ITER_TIMING_OUT" \
   nsys-ai skill run iteration_timing "$NVTX_PROFILE" --format json
