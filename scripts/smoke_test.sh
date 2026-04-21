@@ -77,7 +77,8 @@ run_capture_json() {
   local out="$1"; shift
   printf "  %-55s " "$label"
   "$@" >"$out" 2>/dev/null || true
-  if python3 -c "import json; json.load(open('$out'))" 2>/dev/null; then
+  # Pass path as argv so paths containing quotes/backslashes don't break parsing.
+  if python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$out" 2>/dev/null; then
     echo "OK"
   else
     echo "FAIL (invalid JSON output)"
@@ -488,10 +489,11 @@ DIFF_SAME_OUT="$(mktemp)"
 run_capture "diff same-file --format json" "$DIFF_SAME_OUT" \
   nsys-ai diff "$PROFILE" "$PROFILE" --format json
 printf "  %-55s " "diff same-file: zero regressions + improvements"
-SAME_CHANGES=$(python3 -c "
-import json; d=json.load(open('$DIFF_SAME_OUT'))
-print(len(d.get('top_regressions',[])) + len(d.get('top_improvements',[])))
-" 2>/dev/null || echo 1)
+SAME_CHANGES=$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(len(d.get("top_regressions", [])) + len(d.get("top_improvements", [])))
+' "$DIFF_SAME_OUT" 2>/dev/null || echo 1)
 if [[ "$SAME_CHANGES" -eq 0 ]]; then echo "OK"; else echo "FAIL (expected 0 changes, got $SAME_CHANGES)"; FAIL=$((FAIL+1)); fi
 rm -f "$DIFF_SAME_OUT"
 
@@ -509,16 +511,20 @@ DIFF_ITER_OUT="$(mktemp)"
 # Count iterations robustly: handles error dicts, empty lists, and pipefail.
 _count_iters() {
   local prof="$1"
-  local raw
-  raw=$(nsys-ai skill run iteration_timing "$prof" --format json 2>/dev/null) || true
-  python3 - "$raw" <<'PY' 2>/dev/null || echo 0
+  local tmp
+  tmp=$(mktemp)
+  # Route JSON through a tempfile instead of argv — argv has an OS-imposed
+  # ARG_MAX (~2 MB on Linux) and large profiles can produce bigger payloads.
+  nsys-ai skill run iteration_timing "$prof" --format json >"$tmp" 2>/dev/null || true
+  python3 -c '
 import json, sys
 try:
-    d = json.loads(sys.argv[1])
+    d = json.load(open(sys.argv[1]))
 except Exception:
     print(0); sys.exit(0)
 print(len(d) if isinstance(d, list) else 0)
-PY
+' "$tmp" 2>/dev/null || echo 0
+  rm -f "$tmp"
 }
 BEFORE_ITERS=$(_count_iters "$DIFF_BEFORE")
 AFTER_ITERS=$(_count_iters "$DIFF_AFTER")
@@ -562,16 +568,21 @@ ITER_TIMING_OUT="$(mktemp)"
 # parser (they are printed to stderr but a merged `2>&1` would break json.load).
 nsys-ai skill run iteration_timing "$NVTX_PROFILE" --format json >"$ITER_TIMING_OUT" 2>/dev/null || true
 printf "  %-55s " "skill iteration_timing --format json"
-ITER_SHAPE=$(python3 -c "
-import json
+ITER_SHAPE=$(python3 -c '
+import json, sys
 try:
-    d = json.load(open('$ITER_TIMING_OUT'))
+    d = json.load(open(sys.argv[1]))
 except Exception:
-    print('invalid'); exit()
-if isinstance(d, list): print('list')
-elif isinstance(d, dict) and d.get('error', {}).get('message', '').find('NVTX') >= 0: print('nvtx_missing')
-else: print('other')
-" 2>/dev/null || echo invalid)
+    print("invalid"); sys.exit(0)
+if isinstance(d, list):
+    print("list")
+elif isinstance(d, dict) and "NVTX" in d.get("error", {}).get("message", ""):
+    # Only SKIP on the specific "no NVTX events" error — any other error
+    # (SQL/schema/etc.) falls through to `other` and FAILs.
+    print("nvtx_missing")
+else:
+    print("other")
+' "$ITER_TIMING_OUT" 2>/dev/null || echo invalid)
 case "$ITER_SHAPE" in
   list) echo "OK" ;;
   nvtx_missing) echo "SKIP (no NVTX events — precondition blocks per M9_VARIANCE.md §1)" ;;
@@ -614,32 +625,32 @@ rm -f "$ITER_DETAIL_OUT"
 # 9c. nccl_anomaly (Mode 9 NCCL straggler check — M9_VARIANCE.md §3 command 6).
 #     Accepts empty list (no NCCL) as correct behavior on minimal profiles.
 NCCL_ANOM_OUT="$(mktemp)"
-# Same rationale as Mode 9a: discard stderr so cache-build banners don't
-# corrupt the JSON parser.
+# Discard stderr so cache-build banners don't corrupt the JSON parser.
+# `nccl_anomaly` returns `[]` on profiles with no NCCL (no error dict needed),
+# so any error-shaped payload here indicates a real bug (SQL/schema/skill) and
+# must FAIL — we deliberately do NOT treat `{"error": ...}` as a soft SKIP.
 nsys-ai skill run nccl_anomaly "$NVTX_PROFILE" --format json >"$NCCL_ANOM_OUT" 2>/dev/null || true
 printf "  %-55s " "skill nccl_anomaly --format json"
-NCCL_SHAPE=$(python3 -c "
-import json
+NCCL_SHAPE=$(python3 -c '
+import json, sys
 try:
-    d = json.load(open('$NCCL_ANOM_OUT'))
+    d = json.load(open(sys.argv[1]))
 except Exception:
-    print('invalid'); exit()
-if isinstance(d, list): print('list')
-elif isinstance(d, dict) and 'error' in d: print('error')
-else: print('other')
-" 2>/dev/null || echo invalid)
+    print("invalid"); sys.exit(0)
+if isinstance(d, list):
+    print("list")
+else:
+    print("unexpected")
+' "$NCCL_ANOM_OUT" 2>/dev/null || echo invalid)
 case "$NCCL_SHAPE" in
   list) echo "OK" ;;
-  error) echo "SKIP (no NCCL collectives)" ;;
   *) echo "FAIL (unexpected shape: $NCCL_SHAPE)"; FAIL=$((FAIL+1)) ;;
 esac
 printf "  %-55s " "nccl_anomaly: returns list"
 if [[ "$NCCL_SHAPE" == "list" ]]; then
   echo "OK"
-elif [[ "$NCCL_SHAPE" == "error" ]]; then
-  echo "SKIP (no NCCL)"
 else
-  echo "FAIL"; FAIL=$((FAIL+1))
+  echo "FAIL (expected list; got $NCCL_SHAPE)"; FAIL=$((FAIL+1))
 fi
 rm -f "$NCCL_ANOM_OUT" "$ITER_TIMING_OUT"
 
