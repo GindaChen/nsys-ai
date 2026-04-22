@@ -12,8 +12,8 @@
       "description": "GPU profile analysis for NVIDIA Nsight Systems. Triage bottlenecks, diagnose NCCL, compute MFU, compare regressions, and drill into SASS instructions. Requires the nsys-ai CLI (>= 0.2.1): pip install nsys-ai.",
       "category": "development",
       "source": {
-        "source": "github",
-        "repo": "GindaChen/nsys-ai"
+        "source": "url",
+        "url": "https://github.com/GindaChen/nsys-ai.git"
       },
       "homepage": "https://github.com/GindaChen/nsys-ai"
     }

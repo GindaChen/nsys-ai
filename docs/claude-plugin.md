@@ -6,15 +6,28 @@ a specific code fix, and a quantified expected gain — in 3 turns or fewer.
 
 ## Install
 
+**Step 1 — install the `nsys-ai` CLI** (required, used by the plugin):
+
 ```bash
-# 1. Install the nsys-ai CLI (required)
 pip install "nsys-ai[agent]"
+```
 
-# 2. Add the plugin to Claude Code
-#    Option A — marketplace (once published)
-claude plugin install GindaChen/nsys-ai
+**Step 2 — add the plugin to Claude Code.**
 
-#    Option B — local dev (session-scoped)
+Option A — marketplace (recommended). In the Claude Code prompt:
+
+```
+/plugin marketplace add GindaChen/nsys-ai
+/plugin install nsys-ai@GindaChen
+```
+
+`/plugin marketplace add` reads `.claude-plugin/marketplace.json` from this
+repo; `/plugin install` fetches the plugin over HTTPS. To refresh later:
+`/plugin marketplace update GindaChen`.
+
+Option B — local dev (session-scoped):
+
+```bash
 git clone https://github.com/GindaChen/nsys-ai
 claude --plugin-dir ./nsys-ai
 ```

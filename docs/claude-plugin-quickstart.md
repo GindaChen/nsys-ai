@@ -8,11 +8,22 @@ pip install "nsys-ai[agent]"
 
 ## 2. Add the plugin to Claude Code
 
-```bash
-# Option A — marketplace (once published)
-claude plugin install GindaChen/nsys-ai
+**Option A — marketplace (recommended).** In Claude Code, run:
 
-# Option B — local dev (session-scoped, run from cloned repo)
+```
+/plugin marketplace add GindaChen/nsys-ai
+/plugin install nsys-ai@GindaChen
+```
+
+The first command registers this repo as a marketplace (reads
+`.claude-plugin/marketplace.json`). The second installs the `nsys-ai` plugin
+from it. Both commands are typed into the Claude Code prompt, not a shell.
+
+To pick up marketplace changes later: `/plugin marketplace update GindaChen`.
+
+**Option B — local dev (session-scoped).**
+
+```bash
 git clone https://github.com/GindaChen/nsys-ai
 claude --plugin-dir ./nsys-ai
 ```
