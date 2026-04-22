@@ -423,6 +423,13 @@ run_capture "sync_cost_analysis" "$SYNC_OUT" \
   nsys-ai skill run sync_cost_analysis "$PROFILE" --format json
 check_regex "  sync_cost_analysis: sync_density_pct" "$SYNC_OUT" '"sync_density_pct"'
 
+HOST_SYNC_OUT="$(mktemp)"
+run_capture_json "host_sync_parent_ranges" "$HOST_SYNC_OUT" \
+  nsys-ai skill run host_sync_parent_ranges "$NVTX_PROFILE" --format json
+check_field_conditional \
+  "  host_sync_parent_ranges: parent_range" "$HOST_SYNC_OUT" '"parent_range"' \
+  "no NVTX or no matching sync events"
+
 run "kernel_launch_overhead" nsys-ai skill run kernel_launch_overhead "$PROFILE" --format json
 
 run_capture "cpu_gpu_pipeline" "$CPU_GPU_OUT" \

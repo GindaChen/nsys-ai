@@ -32,10 +32,10 @@ Skip Stage 2 if keyword already implies sub-focus (e.g. "dataloader" → `cpu-pi
 | Sub-focus | Skills (in order) |
 |-----------|-------------------|
 | `gaps` | `gpu_idle_gaps -p min_gap_ns=1000000` → `stream_concurrency` |
-| `sync` | `sync_cost_analysis` |
+| `sync` | `sync_cost_analysis` → `host_sync_parent_ranges` (if `manifest.nvtx.has_nvtx`) |
 | `launch` | `kernel_launch_overhead` |
 | `cpu-pipeline` | `cpu_gpu_pipeline` → `thread_utilization` |
-| `all` (default) | `gpu_idle_gaps` → `stream_concurrency` → `sync_cost_analysis` → `kernel_launch_overhead` → `cpu_gpu_pipeline` → `thread_utilization` → `module_loading` → `gc_impact` (if `starvation_events > 0`) → `pipeline_bubble_metrics` (if `nccl.collectives > 0`) |
+| `all` (default) | `gpu_idle_gaps` → `stream_concurrency` → `sync_cost_analysis` → `host_sync_parent_ranges` (if `manifest.nvtx.has_nvtx` and `sync_cost_analysis.sync_density_pct > 20`) → `kernel_launch_overhead` → `cpu_gpu_pipeline` → `thread_utilization` → `module_loading` → `gc_impact` (if `starvation_events > 0`) → `pipeline_bubble_metrics` (if `nccl.collectives > 0`) |
 
 Device propagation: `gpu_idle_gaps` accepts `-p device=N`. `stream_concurrency`,
 `sync_cost_analysis`, `kernel_launch_overhead`, `cpu_gpu_pipeline` do not accept device.
@@ -61,6 +61,12 @@ See PRINCIPLES.md §6.
 and `attribution.top_apis[].name`. Look for `DataLoader` / `cudaMemcpyAsync` /
 `cudaStreamSynchronize` in those fields.
 
+**Host-sync workflow** (when `sync_cost_analysis` or NVTX top regions surface `.item()` /
+`_local_scalar_dense` / `cudaStreamSynchronize`): follow PRINCIPLES.md §5.7 (NVTX ancestor
+SQL + repo grep → `path/file.py:line` in Fix); divide the event count by
+`iteration_timing.iterations` before quantifying gain (§3 rule 9 — `count < iterations`
+is one-time overhead, not per-step).
+
 ---
 
 ## 5. Cross-mode exits
@@ -81,11 +87,23 @@ Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summar
    > "GPU is idle 23% of profile time. `gpu_idle_gaps` attributes 78% of gaps to
    > DataLoader workers — the CPU cannot prefetch fast enough to keep the GPU busy."
 
-2. **Specific fix** — matching the stall class:
-   - DataLoader starvation: `DataLoader(..., num_workers=8, pin_memory=True, prefetch_factor=4, persistent_workers=True)`
-   - `.item()` sync loop: remove from inner loop; accumulate as tensor, call once outside
-   - Launch overhead: batch small kernel launches; use CUDA graphs for repeated patterns
-   - GC stall: reduce allocation churn; reuse tensors/buffers; avoid frequent allocate/free cycles; `gc.disable()` only with explicit memory-safety caveat
-   - PP bubble: `num_micro_batches = pipeline_stages * 2` (1F1B schedule)
+2. **Specific fix** — must include a before/after code block per PRINCIPLES.md §3 rule 10.
+   Host-sync fixes additionally cite `path/file.py:line` from §5.7. Example:
 
-3. **Expected gain** — from `speedup_estimator` if NVTX present; omit otherwise.
+   ```python
+   # training_pipeline.py:342 — before (per-step GPU sync)
+   wandb.log({"loss": loss.item()})
+   # after (accumulate on-device, flush every N steps)
+   self._loss_buf.append(loss.detach())
+   if step % self.log_interval == 0:
+       wandb.log({"loss": torch.stack(self._loss_buf).mean().item()})
+       self._loss_buf.clear()
+   ```
+
+   Other stall classes: DataLoader → `num_workers`/`pin_memory`/`prefetch_factor`/`persistent_workers`;
+   launch overhead → CUDA graphs / batched launches; GC stall → reuse tensors;
+   PP bubble → `num_micro_batches = pipeline_stages * 2` (1F1B).
+
+3. **Expected gain** — `speedup_estimator` if NVTX present; for host-sync fixes, scale by
+   the §4 frequency check and bound by `sync_cost_analysis.sync_density_pct` drop (not
+   total step-time drop — other sync sources may remain).

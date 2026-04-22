@@ -1,0 +1,149 @@
+"""Host-sync parent-range attribution.
+
+For each NVTX range that contains host-GPU sync events
+(`aten::item`, `aten::_local_scalar_dense`, `cudaStreamSynchronize`, ...),
+report the total sync time and event count. Used by Mode 6 to localize
+*which* training phase owns the sync cost before correlating with source
+code via `grep` (PRINCIPLES.md §5.7 Step 1).
+"""
+
+from ...connection import DB_ERRORS, wrap_connection
+from ..base import Skill, SkillParam
+
+# Substring patterns matched via SQL `LIKE '%<pattern>%'`. Intentionally narrow:
+# host-GPU sync signatures only — not every NVTX event. Additions should be
+# justified by an observed bottleneck class, not speculative.
+DEFAULT_PATTERNS = "item,_local_scalar_dense,cudaStreamSynchronize"
+
+
+def _execute(conn, **kwargs):
+    limit = int(kwargs.get("limit", 5))
+    raw_patterns = str(kwargs.get("patterns") or DEFAULT_PATTERNS)
+    patterns = [p.strip() for p in raw_patterns.split(",") if p.strip()]
+    if not patterns:
+        patterns = [p.strip() for p in DEFAULT_PATTERNS.split(",")]
+
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+
+    adapter = wrap_connection(conn)
+    tables = adapter.resolve_activity_tables()
+    nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+
+    has_textid = adapter.detect_nvtx_text_id()
+    if has_textid:
+        label_expr = "COALESCE(n.text, s.value)"
+        label_join = "LEFT JOIN StringIds s ON n.textId = s.id"
+    else:
+        label_expr = "n.text"
+        label_join = ""
+
+    trim_where = ""
+    trim_params: list[int] = []
+    if trim_start is not None and trim_end is not None:
+        trim_where = "AND n.start >= ? AND n.[end] <= ?"
+        trim_params = [int(trim_start), int(trim_end)]
+
+    # Bound the LIKE patterns — user-supplied input flows through `patterns` param.
+    like_parts = []
+    like_params: list[str] = []
+    for p in patterns:
+        like_parts.append("child.label LIKE ?")
+        like_params.append(f"%{p}%")
+    like_clause = " OR ".join(like_parts)
+
+    sql = f"""
+        WITH resolved AS (
+            SELECT {label_expr} AS label,
+                   n.globalTid   AS tid,
+                   n.start       AS start,
+                   n.[end]       AS end_ns
+            FROM {nvtx_table} n
+            {label_join}
+            WHERE n.[end] > n.start {trim_where}
+        )
+        SELECT parent.label                  AS parent_range,
+               COUNT(*)                      AS n_syncs,
+               SUM(child.end_ns - child.start) AS sync_ns,
+               MIN(child.label)              AS top_child_label
+        FROM resolved child
+        JOIN resolved parent
+          ON parent.tid = child.tid
+         AND parent.start <= child.start
+         AND parent.end_ns >= child.end_ns
+         AND parent.label != child.label
+        WHERE ({like_clause}) AND parent.label IS NOT NULL
+        GROUP BY parent.label
+        ORDER BY sync_ns DESC
+        LIMIT {int(limit)}
+    """
+
+    try:
+        cur = adapter.execute(sql, trim_params + like_params)
+        rows = cur.fetchall()
+    except DB_ERRORS as exc:
+        return [
+            {
+                "error": (
+                    f"host_sync_parent_ranges query failed: {exc}. "
+                    "NVTX_EVENTS may be absent, or the profile schema is unexpected."
+                ),
+            }
+        ]
+
+    cols = ["parent_range", "n_syncs", "sync_ns", "top_child_label"]
+    out = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        d["sync_ns"] = int(d["sync_ns"] or 0)
+        d["sync_ms"] = round(d["sync_ns"] / 1e6, 3)
+        out.append(d)
+    return out
+
+
+def _format(rows):
+    if not rows:
+        return "(No host-sync events found under any NVTX range)"
+    if "error" in rows[0]:
+        return f"Error: {rows[0]['error']}"
+
+    lines = [
+        "── Host-Sync Parent NVTX Ranges ──",
+        f"{'Parent Range':<50s}  {'n':>6s}  {'Sync (ms)':>10s}  {'Top Child':<28s}",
+        "─" * 102,
+    ]
+    for r in rows:
+        parent = (r.get("parent_range") or "(unnamed)")[:48]
+        child = (r.get("top_child_label") or "(unknown)")[:28]
+        lines.append(
+            f"{parent:<50s}  {r['n_syncs']:>6d}  {r['sync_ms']:>10.3f}  {child:<28s}"
+        )
+    return "\n".join(lines)
+
+
+SKILL = Skill(
+    name="host_sync_parent_ranges",
+    title="Host-Sync Parent NVTX Ranges",
+    description=(
+        "For each NVTX range that contains host-GPU sync events "
+        "(`aten::item`, `_local_scalar_dense`, `cudaStreamSynchronize`, …), "
+        "report total sync time and count. Localizes which training phase owns "
+        "the sync cost so the plugin can grep the user's repo for the exact "
+        "call site (PRINCIPLES.md §5.7 Step 1)."
+    ),
+    category="nvtx",
+    execute_fn=_execute,
+    format_fn=_format,
+    params=[
+        SkillParam("limit", "Max parent ranges to return", "int", False, 5),
+        SkillParam(
+            "patterns",
+            "Comma-separated substrings matched via LIKE "
+            "(default: 'item,_local_scalar_dense,cudaStreamSynchronize')",
+            "str",
+            False,
+            DEFAULT_PATTERNS,
+        ),
+    ],
+    tags=["nvtx", "sync", "host-sync", "attribution", "mode-6"],
+)

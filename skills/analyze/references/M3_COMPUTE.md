@@ -63,6 +63,7 @@ and model architecture table.
 | `arithmetic_intensity.classification` starts with `"Compute-bound"` with low MFU | Above ridge but inefficient | occupancy issue; check register pressure / block size |
 | `kernel_launch_pattern.sync_stalls` > 0 on a stream | CPU dispatch bottleneck | use CUDA graphs; batch launches |
 | `top_kernels[0]` is custom / Triton AND > 60% | SASS-level investigation warranted | suggest Mode 7 |
+| manifest `sync.sync_density_pct > 40` OR `nvtx.top_regions[0].name` contains `item` / `_local_scalar_dense` / `cudaStreamSynchronize` | Workload is sync-bound, not compute-bound | **exit to Mode 6** before finishing Mode 3 — compute tuning won't recover sync stalls. Render `Cross-mode exit: sync-bound, hand off to Mode 6` and follow PRINCIPLES.md §5.7 for code correlation |
 
 ---
 
@@ -87,12 +88,19 @@ Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summar
    > accounts for 68% of GPU time. Tensor core utilization is 91% — compute is the bottleneck,
    > not memory."
 
-2. **Specific fix** — matching the finding:
-   - FP32 fallback: `model = model.to(torch.bfloat16)` or `torch.set_float32_matmul_precision('high')`
-   - Low MFU, memory-bound: increase batch size; fuse attention via `scaled_dot_product_attention`
+2. **Specific fix** — matching the finding. When the fix is a code change (dtype cast,
+   `sdpa` swap, shape padding, etc.), `grep` the user's repo for the relevant call and
+   cite at least one `path/file.py:line` candidate — or state "repo not accessible" if
+   the plugin cannot read the CWD. Do not emit a fix that names only a function class
+   ("your matmul call"): name the file.
+   - FP32 fallback: `model = model.to(torch.bfloat16)` or `torch.set_float32_matmul_precision('high')` — grep `torch.set_default_dtype|\.to\(torch\.float32\)`
+   - Low MFU, memory-bound: increase batch size; fuse attention via `scaled_dot_product_attention` — grep `F\.scaled_dot_product_attention|nn\.MultiheadAttention|custom attention impl`
    - Custom kernel: profiling alone can't fix — suggest Mode 7 for SASS-level diagnosis
    - Small matmul shapes: pad sequence length / batch to GEMM-friendly multiples (128, 256)
 
 3. **Expected gain** — MFU % if computed; `speedup_estimator` if NVTX present; omit otherwise.
+   If the hotspot is a host-sync (e.g. `aten::item` appears in `nvtx.top_regions` with
+   a large share), exit to Mode 6 rather than quantifying compute gain — Mode 3 cannot
+   fix a sync-bound workload. See PRINCIPLES.md §3 rule 9 on frequency verification.
 
 See `ROOT_CAUSE.md §1` for the cross-mode cause→fix matrix.

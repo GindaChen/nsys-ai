@@ -203,8 +203,10 @@ _TABLE_PROJECTIONS: dict[str, str] = {
     "ENUM_CUPTI_SYNC_TYPE": "id, name",
 }
 
-_TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul)'"
-_TC_ACTIVE_PATTERN = "'(xmma|mma_sync|16816|1688|884|ampere_bf16|sm80_tensor_op)'"
+_TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul|flash)'"
+_TC_ACTIVE_PATTERN = (
+    "'(xmma|mma_sync|16816|1688|884|ampere_bf16|sm80_tensor_op|tensorop|flash)'"
+)
 
 
 # Mapping from cache view name (e.g. "kernels") to the actual SQLite table names that

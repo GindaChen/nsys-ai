@@ -134,6 +134,11 @@ first `iteration_timing` call — use the manifest values directly and jump to S
 5. No `SELECT *` — always name specific columns.
 6. Skip iteration 0 in Mode 3 MFU and Mode 8 diff — JIT warmup inflates it.
 7. Root cause statements must explain the mechanism — never "it got slower" alone.
+8. Host-sync diagnoses (`.item()`, `_local_scalar_dense`, `cudaStreamSynchronize`) require
+   PRINCIPLES.md §5.7 — NVTX parent range + repo grep → concrete `path/file.py:line` in Fix.
+9. "Per-step" cost claims require frequency verification (event count ≥ `iteration_count`);
+   one-shot events must be reframed as one-time overhead, not extrapolated.
+10. Code fixes must render as a before/after code block — no pure-prose "convert to …".
 
 **Universal evidence step** (PRINCIPLES.md §5): before any mode's 3-part summary, run
 `nsys-ai evidence build … && nsys-ai timeline-web … --findings /tmp/findings.json`, then

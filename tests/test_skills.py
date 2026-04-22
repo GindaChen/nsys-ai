@@ -18,6 +18,7 @@ def test_list_skills():
         "gc_impact",
         "gpu_idle_gaps",
         "h2d_distribution",
+        "host_sync_parent_ranges",
         "iteration_detail",
         "iteration_timing",
         "kernel_instances",

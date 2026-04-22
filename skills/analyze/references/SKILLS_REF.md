@@ -91,6 +91,7 @@ nsys-ai skill run <skill_name> <profile> --format json [-p key=value ...]
 | `module_loading` | JIT compilation + cuModuleLoad stalls |
 | `gc_impact` | cudaMalloc/cudaFree stalls + Python GC events |
 | `sync_cost_analysis` | CPU-side sync density + blocking cost (cudaStreamSynchronize, etc.) |
+| `host_sync_parent_ranges` | NVTX ancestor attribution for `aten::item` / `_local_scalar_dense` / `cudaStreamSynchronize` — which training phase owns the sync |
 | `pipeline_bubble_metrics` | True GPU idle % (interval merge, O(n log n)) |
 
 ---

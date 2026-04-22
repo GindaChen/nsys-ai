@@ -129,3 +129,67 @@ class TestBuildAndOpen:
         assert db is not None
         db.close()
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
+
+
+class TestTensorCorePatterns:
+    """Regression coverage for the TC eligibility / active regex patterns.
+
+    The patterns are interpolated into DuckDB `regexp_matches()`; these cases
+    guard against drift that would cause Flash Attention / CUTLASS tensor-op
+    kernels to be silently mis-classified as FP32 fallback.
+    """
+
+    @staticmethod
+    def _strip(pattern: str) -> str:
+        # Stored as SQL-quoted literal, e.g. "'(gemm|...)'" — strip the outer quotes
+        # so Python's re module sees a plain pattern.
+        return pattern.strip("'")
+
+    def test_eligible_pattern_covers_flash_attention(self):
+        import re
+
+        elig = self._strip(parquet_cache._TC_ELIGIBLE_PATTERN)
+        for name in [
+            "flash_fwd_splitkv_kernel",
+            "flash_bwd_dq_dk_dv_loop_seqk_parallel",
+            "ampere_bf16_s1688gemm_bf16_128x128x32",
+            "cutlass_80_tensorop_bf16_s16816gemm_something",
+            "sm80_xmma_gemm_bf16",
+        ]:
+            assert re.search(elig, name.lower()), f"{name!r} should be TC-eligible"
+
+    def test_active_pattern_covers_cutlass_and_flash(self):
+        import re
+
+        active = self._strip(parquet_cache._TC_ACTIVE_PATTERN)
+        for name in [
+            "flash_fwd_splitkv_kernel",
+            "flash_bwd_dq_dk_dv_loop_seqk_parallel",
+            "cutlass_80_tensorop_bf16_s16816gemm_something",
+            "ampere_bf16_s1688gemm_bf16_128x128x32",
+            "some_kernel_with_16816_in_name",
+        ]:
+            assert re.search(active, name.lower()), f"{name!r} should be TC-active"
+
+    def test_non_tc_kernels_not_matched(self):
+        import re
+
+        elig = self._strip(parquet_cache._TC_ELIGIBLE_PATTERN)
+        active = self._strip(parquet_cache._TC_ACTIVE_PATTERN)
+        for name in [
+            "vectorized_elementwise_kernel",
+            "reduce_kernel",
+            "memset_kernel",
+        ]:
+            assert not re.search(elig, name.lower()), f"{name!r} should NOT be eligible"
+            assert not re.search(active, name.lower()), f"{name!r} should NOT be active"
+
+    def test_fp32_sgemm_is_eligible_but_not_tc_active(self):
+        """Classic FP32 sgemm: TC-eligible (it's a gemm) but not TC-active."""
+        import re
+
+        elig = self._strip(parquet_cache._TC_ELIGIBLE_PATTERN)
+        active = self._strip(parquet_cache._TC_ACTIVE_PATTERN)
+        name = "ampere_sgemm_128x128_nn"
+        assert re.search(elig, name.lower())
+        assert not re.search(active, name.lower())
