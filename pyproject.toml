@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nsys-ai"
-version = "0.2.1"
+version = "0.2.2"
 description = "AI-powered analysis for NVIDIA Nsight Systems profiles — web viewer, timeline, kernel navigator, NVTX hierarchy"
 readme = "README.md"
 license = {text = "MIT"}
