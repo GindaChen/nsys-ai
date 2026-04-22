@@ -15,9 +15,20 @@ from ..base import Skill, SkillParam
 # justified by an observed bottleneck class, not speculative.
 DEFAULT_PATTERNS = "item,_local_scalar_dense,cudaStreamSynchronize"
 
+# Cap on `limit` — guards the O(n²) ancestry self-join on pathological input.
+_MAX_LIMIT = 1000
+
 
 def _execute(conn, **kwargs):
-    limit = int(kwargs.get("limit", 5))
+    try:
+        limit = int(kwargs.get("limit", 5))
+    except (TypeError, ValueError):
+        return [{"error": "`limit` must be a positive integer"}]
+    if limit < 1:
+        return [{"error": f"`limit` must be >= 1 (got {limit})"}]
+    if limit > _MAX_LIMIT:
+        limit = _MAX_LIMIT
+
     raw_patterns = str(kwargs.get("patterns") or DEFAULT_PATTERNS)
     patterns = [p.strip() for p in raw_patterns.split(",") if p.strip()]
     if not patterns:
@@ -52,6 +63,10 @@ def _execute(conn, **kwargs):
         like_params.append(f"%{p}%")
     like_clause = " OR ".join(like_parts)
 
+    # Self-exclusion predicate: parent must cover child strictly (either a
+    # different start or a different end). This keeps same-labeled but
+    # distinct ancestors — e.g. nested `train_step` scopes — while still
+    # preventing a range from matching itself.
     sql = f"""
         WITH resolved AS (
             SELECT {label_expr} AS label,
@@ -61,20 +76,52 @@ def _execute(conn, **kwargs):
             FROM {nvtx_table} n
             {label_join}
             WHERE n.[end] > n.start {trim_where}
+        ),
+        matched AS (
+            SELECT parent.label                 AS parent_range,
+                   child.label                  AS child_label,
+                   child.end_ns - child.start   AS sync_ns
+            FROM resolved child
+            JOIN resolved parent
+              ON parent.tid = child.tid
+             AND parent.start <= child.start
+             AND parent.end_ns >= child.end_ns
+             AND (parent.start != child.start OR parent.end_ns != child.end_ns)
+            WHERE ({like_clause}) AND parent.label IS NOT NULL
+        ),
+        parent_totals AS (
+            SELECT parent_range,
+                   COUNT(*)     AS n_syncs,
+                   SUM(sync_ns) AS sync_ns
+            FROM matched
+            GROUP BY parent_range
+        ),
+        child_totals AS (
+            SELECT parent_range,
+                   child_label,
+                   COUNT(*)     AS child_n_syncs,
+                   SUM(sync_ns) AS child_sync_ns
+            FROM matched
+            GROUP BY parent_range, child_label
+        ),
+        ranked_children AS (
+            SELECT parent_range,
+                   child_label,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY parent_range
+                       ORDER BY child_sync_ns DESC, child_n_syncs DESC, child_label ASC
+                   ) AS rn
+            FROM child_totals
         )
-        SELECT parent.label                  AS parent_range,
-               COUNT(*)                      AS n_syncs,
-               SUM(child.end_ns - child.start) AS sync_ns,
-               MIN(child.label)              AS top_child_label
-        FROM resolved child
-        JOIN resolved parent
-          ON parent.tid = child.tid
-         AND parent.start <= child.start
-         AND parent.end_ns >= child.end_ns
-         AND parent.label != child.label
-        WHERE ({like_clause}) AND parent.label IS NOT NULL
-        GROUP BY parent.label
-        ORDER BY sync_ns DESC
+        SELECT pt.parent_range,
+               pt.n_syncs,
+               pt.sync_ns,
+               rc.child_label AS top_child_label
+        FROM parent_totals pt
+        LEFT JOIN ranked_children rc
+          ON rc.parent_range = pt.parent_range
+         AND rc.rn = 1
+        ORDER BY pt.sync_ns DESC
         LIMIT {int(limit)}
     """
 

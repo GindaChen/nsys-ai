@@ -205,6 +205,66 @@ class TestHostSyncParentRanges:
     def test_format_error(self):
         assert skill_mod._format([{"error": "boom"}]) == "Error: boom"
 
+    def test_top_child_label_picks_max_sync_time_not_alphabetic(self):
+        # Parent contains two sync children:
+        #   aten::item                 — 100 µs single call
+        #   cudaStreamSynchronize_foo  — 1 ms single call (10x larger)
+        # Alphabetic MIN would pick `aten::item` (wrong); correct answer is
+        # `cudaStreamSynchronize_foo` (larger aggregated sync_ns).
+        conn = _build_conn(
+            [
+                ("train_step",               0,  10_000_000),
+                ("aten::item",       1_000_000,   1_100_000),
+                ("cudaStreamSynchronize_foo", 2_000_000, 3_000_000),
+            ]
+        )
+        out = skill_mod._execute(conn)
+        assert len(out) == 1
+        assert out[0]["parent_range"] == "train_step"
+        assert out[0]["top_child_label"] == "cudaStreamSynchronize_foo"
+
+    def test_same_labeled_nested_ranges_still_attributed(self):
+        # Nested same-label ranges — outer `train_step` contains inner
+        # `train_step` (iteration inside iteration), and the inner range
+        # contains the real sync. Outer should get credit; the previous
+        # `parent.label != child.label` filter would have dropped this.
+        conn = _build_conn(
+            [
+                ("train_step",     0,  10_000_000),  # outer
+                ("train_step", 2_000_000,   8_000_000),  # inner — same label
+                ("aten::item", 4_000_000,   4_500_000),
+            ]
+        )
+        out = skill_mod._execute(conn)
+        # Inner `train_step` and outer `train_step` share a parent_range in
+        # the GROUP BY, so we get ONE row labeled `train_step` with 2 syncs
+        # (outer contains aten::item AND outer contains inner train_step…
+        # but inner train_step doesn't match the sync pattern, so it isn't
+        # counted as a child — still 1 sync attributed but the outer range
+        # is no longer filtered out).
+        assert len(out) == 1
+        assert out[0]["parent_range"] == "train_step"
+        assert out[0]["top_child_label"] == "aten::item"
+
+    def test_invalid_limit_returns_error(self):
+        conn = _build_conn([("train_step", 0, 10_000_000)])
+        # Zero
+        out = skill_mod._execute(conn, limit=0)
+        assert len(out) == 1 and "error" in out[0]
+        # Negative
+        out = skill_mod._execute(conn, limit=-5)
+        assert len(out) == 1 and "error" in out[0]
+        # Non-numeric
+        out = skill_mod._execute(conn, limit="abc")
+        assert len(out) == 1 and "error" in out[0]
+
+    def test_limit_capped_at_max(self):
+        # Above _MAX_LIMIT should silently clamp, not error.
+        conn = _build_conn([("train_step", 0, 10_000_000)])
+        out = skill_mod._execute(conn, limit=10_000)
+        # No error row; just runs normally (empty since no syncs).
+        assert out == []
+
     def test_registered_in_builtin_registry(self):
         from nsys_ai.skills import registry
 
