@@ -189,3 +189,14 @@ def test_sync_analysis_invalid_device_param(sync_skill):
     rows = sync_skill.execute(conn, device="not-a-number")
     assert "error" in rows[0]
     assert "device" in rows[0]["error"].lower()
+
+
+def test_sync_analysis_device_filter_on_missing_tables_reports_not_found(sync_skill):
+    """Regression: if sync tables are absent entirely, supplying `device=N`
+    must still report 'Synchronization tables not found', not 'no deviceId column'.
+    The latter message is misleading when the table itself is missing."""
+    conn = sqlite3.connect(":memory:")
+    rows = sync_skill.execute(conn, device=0)
+    assert "error" in rows[0]
+    assert "not found" in rows[0]["error"].lower()
+    assert "deviceid" not in rows[0]["error"].lower()

@@ -111,6 +111,27 @@ def _execute_sync_analysis_impl(conn, **kwargs) -> list[dict]:
         except Exception:
             pass
 
+    # Probe table existence before column existence so a missing sync table
+    # reports the right error (rather than "no deviceId column") when the user
+    # supplied `-p device=N`.
+    try:
+        adapter.execute(f"SELECT 1 FROM {sync_table} LIMIT 0")
+        sync_table_exists = True
+    except DB_ERRORS:
+        sync_table_exists = False
+
+    if not sync_table_exists:
+        return [
+            {
+                "total_sync_wall_ms": 0.0,
+                "sync_by_type_ms": {},
+                "sync_by_device": None,
+                "profile_span_ms": 0.0,
+                "sync_density_pct": 0.0,
+                "error": "Synchronization tables not found in profile",
+            }
+        ]
+
     has_device = _has_device_id(adapter, sync_table)
     if device_filter is not None and not has_device:
         return [

@@ -420,6 +420,15 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             if actual:
                 _progress(f"{view_name}.parquet")
                 projection = _TABLE_PROJECTIONS.get(actual, "*")
+                # Legacy Nsight exports may lack `deviceId` on synchronization
+                # tables. Drop it from the projection rather than failing the
+                # cache build — sync_cost_analysis degrades to single-device mode.
+                if (
+                    projection != "*"
+                    and actual.startswith("CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+                    and not _table_has_column(db, f"src.{actual}", "deviceId")
+                ):
+                    projection = projection.replace("deviceId, ", "")
                 if projection == "*":
                     db.execute(f"""
                         COPY src.{actual}

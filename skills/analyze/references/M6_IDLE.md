@@ -50,7 +50,7 @@ single call answers both "total sync" and "which rank owns it". See PRINCIPLES.m
 |-------------------|-----------|--------|
 | manifest `idle.idle_pct > 15` OR `pipeline_bubble_metrics.bubble_pct > 15` | GPU starved | check DataLoader / CPU dispatch |
 | `sync_cost_analysis.sync_density_pct > 20` | Excessive CPU→GPU syncs | remove `.item()` / `.cpu()` in loop |
-| `sync_cost_analysis.sync_by_device` shows one device >> others (ratio > 2× OR another device has 0 sync) | Multi-rank asymmetry: one rank stragglers the collective; other ranks just wait on it | fix sync on the stragglering device first. Do NOT cross-exit to Mode 2 (Comms) — the NCCL idle is a symptom of host-blocking, not real comm imbalance |
+| `sync_cost_analysis.sync_by_device` shows one device >> others (ratio > 2× OR another device has 0 sync) | Multi-rank asymmetry: one rank is the straggler in the collective; other ranks just wait on it | fix sync on the straggling device first. Do NOT cross-exit to Mode 2 (Comms) — the NCCL idle is a symptom of host-blocking, not real comm imbalance |
 | `kernel_launch_overhead.overhead_us` concentrated in the top `kernel_name` | High CPU dispatch latency | async launch; reduce Python overhead |
 | any `cpu_gpu_pipeline` row has `starvation_events > 0` | CPU can't feed GPU fast enough | `num_workers`, `pin_memory`, `prefetch_factor` |
 | `thread_utilization` non-empty: one Python/DataLoader thread dominating CPU utilization | CPU thread saturation / imbalance | `persistent_workers=True`, tune/reduce workers |

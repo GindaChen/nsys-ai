@@ -43,11 +43,12 @@ keyword routing is the fast path for power users.
 ### Step 0 — scan CWD (always)
 
 ```bash
-(ls -lt *.sqlite *.nsys-rep 2>/dev/null || true) | head -10
+(ls -1t *.sqlite *.nsys-rep 2>/dev/null || true) | head -10
 ```
-(The `|| true` keeps exit code 0 when no files match, so every branch below is
-reachable — without it, `ls` exits non-zero on no matches and may be treated as
-a tool failure.) Classify:
+(`-1t` = one filename per line, sorted by mtime newest-first — avoids the
+`total N` header `ls -lt` emits. The `|| true` keeps exit code 0 when no files
+match so every branch below is reachable — without it, `ls` exits non-zero on
+no matches and may be treated as a tool failure.) Classify:
 
 - `0 files` AND no path in message → reply `"No profile found in CWD; give me a
   path to a .sqlite or .nsys-rep file."` Do NOT call `AskUserQuestion`.
@@ -60,7 +61,9 @@ a tool failure.) Classify:
 - `header`: `"Profile"`
 - `question`: `"Which profile should I analyze?"`
 - `options` (2–4, newest by mtime first): `label` = filename basename;
-  `description` = relative mtime (`"2h ago"`, `"yesterday"`, etc. — derive from `ls -lt`).
+  `description` = relative mtime (`"2h ago"`, `"yesterday"`, etc. — compute via
+  `stat -c '%Y %n' *.sqlite *.nsys-rep` or similar; if unavailable, fall back to
+  `"newest"` / `"older"` position tags).
 - Auto `Other` lets the user type a path (do NOT add `Other` manually).
 
 **Q2 — Focus** (always)
