@@ -1,48 +1,27 @@
 """Classify NCCL kernels by their leaf NVTX label (call mode).
 
-Answers a single question: of the NCCL kernels in this profile, what
-fraction were called eagerly (user code reaching c10d / NCCL directly),
-captured inside an inductor-compiled graph, or running under some
-unrelated NVTX scope?
+Buckets each NCCL kernel into one of three call modes based on the
+leaf NVTX scope open at launch time. The dominant bucket selects the
+fix path:
 
-The fix recommendation depends on the dominant bucket:
+  - eager             → caller-side: ``async_op=True`` / dedicated stream
+  - inductor_captured → ``torch._inductor.config`` (functional
+                        collectives, ``reorder_for_compute_comm_overlap``)
+  - temporal_only     → leaf NVTX uninformative; reach for
+                        ``nccl_payload_breakdown`` / ``overlap_breakdown``
 
-  - eager-dominant         → caller-side fix: wrap collectives with
-                              ``async_op=True`` or move them to a
-                              dedicated stream
-  - inductor-dominant      → ``torch._inductor.config`` knobs:
-                              functional collectives,
-                              ``reorder_for_compute_comm_overlap``
-  - temporal_only-dominant → reach for ``nccl_payload_breakdown`` and
-                              ``overlap_breakdown`` to find the real
-                              driver; the leaf NVTX is uninformative
-
-IMPORTANT (the lesson from §4 B audit gap #14): classification is by
-**leaf NVTX label**, not ancestor-path match. NVTX path containment
-is *temporal* — any scope that happened to still be open when the
-kernel launched. A filter like ``nvtx_path LIKE '%Torch-Compiled%'``
-would falsely tag eager calls whose enclosing compile-region NVTX
-hadn't closed yet at launch time. A real fastvideo audit shipped the
-wrong fix recommendation on exactly that mistake (96% of NCCL kernels
-matched the path filter, but only 5.4% were actually inductor-captured
-by their leaf label).
+Classifies by **leaf** label, not ancestor-path containment. See
+``nvtx_kernel_map``'s module docstring for why (temporal vs lexical
+containment).
 """
 
 from ..base import Skill
 
-# Inductor-captured leaf marker — observed in PyTorch ≥ 2.1 compiled graphs.
-# When PyTorch lowers a collective through Dynamo + Inductor, the launching
-# NVTX scope at kernel time is the compiled fx-graph call frame.
 _INDUCTOR_LEAF_MARKERS = ("## Call CompiledFxGraph",)
-
-# Eager-call leaf prefixes. ``c10d::`` is the public C++ binding namespace
-# (e.g. ``c10d::all_reduce_``), ``nccl`` covers raw NCCL wrappers and the
-# functional collectives runtime calls (e.g. ``nccl:all_reduce``).
 _EAGER_LEAF_PREFIXES = ("c10d::", "nccl")
 
 
 def _classify_leaf(leaf: str) -> str:
-    """Map a leaf NVTX label to one of the three call-mode buckets."""
     if not leaf:
         return "temporal_only"
     if any(leaf.startswith(p) for p in _EAGER_LEAF_PREFIXES):
@@ -53,8 +32,6 @@ def _classify_leaf(leaf: str) -> str:
 
 
 def _is_nccl_kernel(name: str) -> bool:
-    """Match NCCL kernels by lowercase substring — covers `ncclKernel_*`,
-    `ncclDevKernel_*`, and `nccl_AllReduce_*` variants across NCCL versions."""
     return bool(name) and "nccl" in name.lower()
 
 
@@ -88,13 +65,7 @@ def _execute(conn, **kwargs):
     total_ns = sum(b["ns"] for b in buckets.values())
 
     if total_count == 0:
-        return [{
-            "error": (
-                "No NCCL kernels found in this profile (filter: kernel name "
-                "contains 'nccl'). Single-GPU profiles or captures without "
-                "NCCL tracing will land here."
-            ),
-        }]
+        return [{"error": "No NCCL kernels found (single-GPU or no NCCL tracing)."}]
 
     return [
         {
@@ -138,19 +109,12 @@ SKILL = Skill(
     name="nccl_compile_context_breakdown",
     title="NCCL Call-Mode Breakdown (eager vs inductor-captured vs temporal-only)",
     description=(
-        "Classifies NCCL kernels by the leaf NVTX label open at launch time: "
-        "eager (c10d::* / nccl* leaf), inductor_captured (## Call CompiledFxGraph "
-        "leaf), or temporal_only (anything else). Decides whether a collective "
-        "perf fix lives in user code (stream wrap, async_op) or in inductor "
-        "config (functional collectives, reorder_for_compute_comm_overlap). "
-        "Classifies by LEAF label, not ancestor-path containment — see module "
-        "docstring for why."
+        "Classifies NCCL kernels by leaf NVTX label into eager / "
+        "inductor_captured / temporal_only buckets. Decides whether a "
+        "collective perf fix lives in user code or in torch._inductor.config."
     ),
     category="communication",
     execute_fn=_execute,
     format_fn=_format,
-    tags=[
-        "nccl", "communication", "distributed", "torch-compile", "inductor",
-        "call-mode", "eager", "nvtx",
-    ],
+    tags=["nccl", "communication", "distributed", "torch-compile", "nvtx"],
 )
