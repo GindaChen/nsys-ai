@@ -203,6 +203,7 @@ def attribute_kernels_to_nvtx(
     sqlite_path: str | None = None,
     trim: tuple[int, int] | None = None,
     limit: int | None = None,
+    kernel_name_substring: str | None = None,
 ) -> list[dict]:
     """Attribute GPU kernels to their enclosing NVTX ranges.
 
@@ -212,6 +213,12 @@ def attribute_kernels_to_nvtx(
     Returns list of dicts with keys:
       nvtx_text, nvtx_depth, nvtx_path,
       kernel_name, k_start, k_end, k_dur_ns
+
+    ``kernel_name_substring`` (advisory): when set, the DuckDB-cache fast
+    path pushes ``kernel_name ILIKE '%<substring>%'`` into the SQL so
+    unrelated kernels are never materialized into Python. Other backends
+    ignore this parameter — callers asking for filtered output must still
+    filter the returned list themselves as defense-in-depth.
     """
 
     # DuckDB: try reading from precomputed nvtx_kernel_map first.
@@ -237,19 +244,22 @@ def attribute_kernels_to_nvtx(
                 uses_path_id = cached_nvtx_map_uses_path_id(adapter.raw_conn)
 
                 if uses_path_id:
-                    trim_sql_m = ""
-                    if trim:
-                        trim_sql_m = "WHERE m.k_start >= ? AND m.k_end <= ?"
+                    where_m = "WHERE m.k_start >= ? AND m.k_end <= ?" if trim else ""
+                    extra_params: list = []
+                    if kernel_name_substring:
+                        connector = " AND" if where_m else "WHERE"
+                        where_m = f"{where_m}{connector} m.kernel_name ILIKE ?"
+                        extra_params.append(f"%{kernel_name_substring}%")
                     cur = adapter.execute(
                         f"""
                         SELECT m.nvtx_text, m.nvtx_depth, d.nvtx_path, m.kernel_name,
                                m.k_start, m.k_end, m.k_dur_ns
                         FROM nvtx_kernel_map m
                         JOIN nvtx_path_dict d ON m.path_id = d.path_id
-                        {trim_sql_m}
+                        {where_m}
                         ORDER BY m.k_start{limit_sql}
                         """,
-                        params,
+                        params + extra_params,
                     )
                 else:
                     cur = adapter.execute(

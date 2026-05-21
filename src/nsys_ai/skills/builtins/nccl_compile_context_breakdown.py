@@ -47,7 +47,12 @@ def _execute(conn, **kwargs):
     )
     sqlite_path = kwargs.get("_sqlite_path")
 
-    rows = attribute_kernels_to_nvtx(conn, sqlite_path=sqlite_path, trim=trim, limit=None)
+    # kernel_name_substring is the SQL-pushdown hint (advisory); the
+    # _is_nccl_kernel loop below covers backends that ignore it.
+    rows = attribute_kernels_to_nvtx(
+        conn, sqlite_path=sqlite_path, trim=trim, limit=None,
+        kernel_name_substring="nccl",
+    )
 
     buckets: dict[str, dict[str, int]] = {
         "eager": {"count": 0, "ns": 0},

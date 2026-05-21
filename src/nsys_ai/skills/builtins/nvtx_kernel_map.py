@@ -51,6 +51,7 @@ def _execute(conn, **kwargs):
     return [
         {
             "nvtx_text": r["nvtx_text"],
+            "nvtx_path": r.get("nvtx_path", ""),
             "kernel_name": r["kernel_name"],
             "start_ms": round(r["k_start"] / 1e6, 3),
             "end_ms": round(r["k_end"] / 1e6, 3),
