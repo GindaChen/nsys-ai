@@ -232,6 +232,7 @@ def collect_sanity_warnings(
     """Return (warnings, comparability_confidence in [0,1])."""
     warnings: list[str] = []
     c_schema = 1.0
+    c_gpu = 1.0
     c_workload = 1.0
     c_kernel_overlap = 1.0
 
@@ -246,7 +247,7 @@ def collect_sanity_warnings(
         c_schema = 0.0
     if before.gpu is not None and after.gpu is not None and before.gpu != after.gpu:
         warnings.append("Different GPU IDs selected between before/after (unexpected).")
-        c_schema = 0.0
+        c_gpu = 0.0
 
     if before.kernel_rows and after.kernel_rows:
         lo = min(before.kernel_rows, after.kernel_rows)
@@ -271,7 +272,7 @@ def collect_sanity_warnings(
     if before.overlap.get("error") or after.overlap.get("error"):
         warnings.append("Overlap analysis unavailable (missing kernels or schema).")
 
-    confidence = max(0.0, min(1.0, c_schema * c_workload * c_kernel_overlap))
+    confidence = max(0.0, min(1.0, c_schema * c_gpu * c_workload * c_kernel_overlap))
     return warnings, round(confidence, 3)
 
 
@@ -283,6 +284,11 @@ def compute_category_attribution(
     before: ProfileSummary, after: ProfileSummary
 ) -> list[CategoryDelta]:
     # HTA convention: overlap_ms counts as compute; nccl_only_ms is exposed_comm.
+    # If either side's overlap analysis failed, attribution is unavailable —
+    # returning [] is honest "no signal", while all-zero buckets would look
+    # like a real "compute=0, comm=0, idle=0" measurement.
+    if before.overlap.get("error") or after.overlap.get("error"):
+        return []
     buckets: list[tuple[str, float, float]] = [
         (
             "compute",

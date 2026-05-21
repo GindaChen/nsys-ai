@@ -814,6 +814,67 @@ def test_v01_diff_json_envelope_and_verdict(tmp_path):
     assert seen == {"compute", "communication", "idle"}
 
 
+def test_v01_confidence_separates_schema_and_gpu_mismatch():
+    """c_schema and c_gpu are independent factors; mismatching gpu alone zeros confidence."""
+    from nsys_ai.diff import ProfileSummary, collect_sanity_warnings
+
+    # Same schema, different gpu id → c_gpu = 0 → confidence = 0,
+    # but the warning text mentions GPU (not schema).
+    a = ProfileSummary(
+        path="a",
+        gpu=0,
+        schema_version="2024.1.1",
+        total_gpu_ns=100,
+        kernel_rows=100,
+        kernels=[],
+        nvtx=[],
+        overlap={},
+    )
+    b = ProfileSummary(
+        path="b",
+        gpu=1,  # different GPU id, same schema
+        schema_version="2024.1.1",
+        total_gpu_ns=100,
+        kernel_rows=100,
+        kernels=[],
+        nvtx=[],
+        overlap={},
+    )
+    warnings, conf = collect_sanity_warnings(a, b)
+    assert conf == 0.0
+    assert any("GPU" in w for w in warnings)
+    assert not any("schema" in w.lower() for w in warnings)
+
+
+def test_v01_category_attribution_empty_on_overlap_error():
+    """When either side has overlap error, attribution is [] (no fake zeros)."""
+    from nsys_ai.diff import ProfileSummary, compute_category_attribution
+
+    good = ProfileSummary(
+        path="b",
+        gpu=0,
+        schema_version=None,
+        total_gpu_ns=0,
+        kernel_rows=0,
+        kernels=[],
+        nvtx=[],
+        overlap=_make_overlap_dict(100, 20, 10, 5),
+    )
+    bad = ProfileSummary(
+        path="a",
+        gpu=0,
+        schema_version=None,
+        total_gpu_ns=0,
+        kernel_rows=0,
+        kernels=[],
+        nvtx=[],
+        overlap={"error": "no kernels found"},
+    )
+    assert compute_category_attribution(good, bad) == []
+    assert compute_category_attribution(bad, good) == []
+    assert compute_category_attribution(bad, bad) == []
+
+
 def test_v01_diff_id_is_stable_across_runs(tmp_path):
     """Same inputs → same diff_id (content-derived; not random)."""
     from nsys_ai import profile as profile_mod
