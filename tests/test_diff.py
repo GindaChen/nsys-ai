@@ -846,6 +846,62 @@ def test_v01_confidence_separates_schema_and_gpu_mismatch():
     assert not any("schema" in w.lower() for w in warnings)
 
 
+def test_v01_no_signal_propagates_through_pipeline():
+    """Overlap error → confidence drops, attribution empty, step_time fields None,
+    JSON omits step_time block. No fake-zero leakage."""
+    from nsys_ai.diff import ProfileDiffSummary, ProfileSummary, collect_sanity_warnings
+    from nsys_ai.diff_render import to_diff_json
+
+    good = ProfileSummary(
+        path="b",
+        gpu=0,
+        schema_version="2024.1.1",
+        total_gpu_ns=100,
+        kernel_rows=100,
+        kernels=[],
+        nvtx=[],
+        overlap=_make_overlap_dict(100, 20, 10, 5),
+    )
+    bad = ProfileSummary(
+        path="a",
+        gpu=0,
+        schema_version="2024.1.1",
+        total_gpu_ns=0,
+        kernel_rows=0,
+        kernels=[],
+        nvtx=[],
+        overlap={"error": "no kernels found"},
+    )
+
+    # confidence must reflect the unavailability (c_overlap = 0 -> product 0)
+    warnings, conf = collect_sanity_warnings(good, bad)
+    assert conf == 0.0
+    assert any("Overlap analysis unavailable" in w for w in warnings)
+
+    # Build a summary that mirrors what diff_profiles would emit on this path
+    # (empty attribution, both step_time fields None) and verify the JSON
+    # never leaks fake zeros.
+    summary = ProfileDiffSummary(
+        before=good,
+        after=bad,
+        warnings=warnings,
+        kernel_diffs=[],
+        nvtx_diffs=[],
+        overlap_before=good.overlap,
+        overlap_after=bad.overlap,
+        overlap_delta={},
+        top_regressions=[],
+        top_improvements=[],
+        verdict="inconclusive",
+        comparability_confidence=conf,
+    )
+    payload = json.loads(to_diff_json(summary))
+    assert payload["step_time"] is None
+    assert payload["category_attribution"] == []
+    assert payload["verdict"] == "inconclusive"
+    assert payload["comparability_confidence"] == 0.0
+
+
 def test_v01_category_attribution_empty_on_overlap_error():
     """When either side has overlap error, attribution is [] (no fake zeros)."""
     from nsys_ai.diff import ProfileSummary, compute_category_attribution

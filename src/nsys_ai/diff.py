@@ -112,7 +112,7 @@ class ProfileDiffSummary:
     verdict: str = "neutral"
     comparability_confidence: float = 1.0
     category_attribution: list[CategoryDelta] = field(default_factory=list)
-    step_time_delta_ms: float = 0.0
+    step_time_delta_ms: float | None = None
     step_time_delta_pct: float | None = None
     diff_id: str = ""
 
@@ -235,6 +235,7 @@ def collect_sanity_warnings(
     c_gpu = 1.0
     c_workload = 1.0
     c_kernel_overlap = 1.0
+    c_overlap = 1.0
 
     if (
         before.schema_version
@@ -271,8 +272,9 @@ def collect_sanity_warnings(
 
     if before.overlap.get("error") or after.overlap.get("error"):
         warnings.append("Overlap analysis unavailable (missing kernels or schema).")
+        c_overlap = 0.0
 
-    confidence = max(0.0, min(1.0, c_schema * c_gpu * c_workload * c_kernel_overlap))
+    confidence = max(0.0, min(1.0, c_schema * c_gpu * c_workload * c_kernel_overlap * c_overlap))
     return warnings, round(confidence, 3)
 
 
@@ -471,12 +473,14 @@ def diff_profiles(
                 pass
 
     category_attribution = compute_category_attribution(before, after)
-    step_time_before_ms = sum(c.before_ms for c in category_attribution)
-    delta = sum(c.after_ms for c in category_attribution) - step_time_before_ms
-    step_time_delta_ms = round(delta, 3)
-    step_time_delta_pct = (
-        round(delta / step_time_before_ms * 100.0, 2) if step_time_before_ms > 0 else None
-    )
+    step_time_delta_ms: float | None = None
+    step_time_delta_pct: float | None = None
+    if category_attribution:
+        step_time_before_ms = sum(c.before_ms for c in category_attribution)
+        delta = sum(c.after_ms for c in category_attribution) - step_time_before_ms
+        step_time_delta_ms = round(delta, 3)
+        if step_time_before_ms > 0:
+            step_time_delta_pct = round(delta / step_time_before_ms * 100.0, 2)
     verdict = compute_verdict(step_time_delta_pct, comparability_confidence)
     diff_id = _make_diff_id(
         before.profile_id,

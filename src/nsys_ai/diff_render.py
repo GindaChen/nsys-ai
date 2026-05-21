@@ -442,12 +442,16 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
         "diff_id": data.diff_id,
         "verdict": data.verdict,
         "comparability_confidence": data.comparability_confidence,
-        "step_time": {
-            "before_ms": round(sum(c.before_ms for c in data.category_attribution), 3),
-            "after_ms": round(sum(c.after_ms for c in data.category_attribution), 3),
-            "delta_ms": data.step_time_delta_ms,
-            "delta_pct": data.step_time_delta_pct,
-        },
+        "step_time": (
+            {
+                "before_ms": round(sum(c.before_ms for c in data.category_attribution), 3),
+                "after_ms": round(sum(c.after_ms for c in data.category_attribution), 3),
+                "delta_ms": data.step_time_delta_ms,
+                "delta_pct": data.step_time_delta_pct,
+            }
+            if data.category_attribution
+            else None
+        ),
         "category_attribution": [
             {
                 "category": c.category,
