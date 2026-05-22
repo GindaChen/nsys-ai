@@ -1,0 +1,4 @@
+l40s-perf_compile/json/
+l40s-perf_compile/logs/
+l40s-perf_compile/text/
+*.sqlite
