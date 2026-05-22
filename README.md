@@ -316,6 +316,9 @@ nsys-ai diff before.sqlite after.sqlite --format markdown -o diff.md
 
 # JSON output for scripting
 nsys-ai diff before.sqlite after.sqlite --format json --no-ai
+
+# Fail CI when the diff verdict reports a likely regression
+nsys-ai diff before.sqlite after.sqlite --format json --exit-on-regression
 ```
 
 The report shows:
@@ -338,6 +341,7 @@ Options:
 | `--limit N` | 15 | Top regressions/improvements to show |
 | `--sort` | `delta` | `delta` \| `percent` \| `total` |
 | `--no-ai` | — | Skip AI narration (numeric diff only) |
+| `--exit-on-regression` | — | Exit with status 1 when verdict is `regression_likely` |
 
 ---
 

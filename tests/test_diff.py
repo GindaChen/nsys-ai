@@ -322,6 +322,112 @@ def test_diff_cli_chat_help():
     assert "chat" in result.stdout.lower()
 
 
+def test_diff_cli_exit_on_regression_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--exit-on-regression" in result.stdout
+    assert "ci gate" in result.stdout.lower()
+
+
+def test_diff_cli_exit_on_regression_fails_gate(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 12_000_000, 0, 7, 1, 1, 2)])
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--gpu",
+            "0",
+            "--format",
+            "json",
+            "--exit-on-regression",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["verdict"] == "regression_likely"
+    assert "Diff gate failed" in result.stderr
+    assert "step_time_delta_ms=+2.000" in result.stderr
+    assert "step_time_delta_pct=+20.00%" in result.stderr
+    assert "comparability_confidence=1.000" in result.stderr
+
+
+def test_diff_cli_exit_on_regression_allows_improvement(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 12_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--gpu",
+            "0",
+            "--format",
+            "json",
+            "--exit-on-regression",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["verdict"] == "improvement_likely"
+
+
+def test_diff_cli_exit_on_regression_allows_inconclusive(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 12_000_000, 0, 7, 1, 1, 2),
+            (12_000_000, 24_000_000, 0, 7, 2, 1, 2),
+            (24_000_000, 36_000_000, 0, 7, 3, 1, 2),
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--gpu",
+            "0",
+            "--format",
+            "json",
+            "--exit-on-regression",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "inconclusive"
+    assert payload["comparability_confidence"] < 0.5
+    assert "Diff gate failed" not in result.stderr
+
+
 def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
     """Stage 6: run_diff_tool dispatches; TOOLS_DIFF_OPENAI and build_diff_system_prompt exist."""
     from nsys_ai import profile as profile_mod

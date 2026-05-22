@@ -491,6 +491,7 @@ def _cmd_diff(args, _profile):
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
 
     no_ai = getattr(args, "no_ai", False)
+    gate_summary = None
 
     def _narrative_for(summary):
         if args.format not in ("terminal", "markdown"):
@@ -553,6 +554,7 @@ def _cmd_diff(args, _profile):
                 limit=args.limit,
                 sort=args.sort,
             )
+            gate_summary = summary
             narrative = _narrative_for(summary)
             if args.format == "terminal":
                 out = format_diff_terminal(summary, narrative=narrative)
@@ -571,6 +573,7 @@ def _cmd_diff(args, _profile):
                 limit=args.limit,
                 sort=args.sort,
             )
+            gate_summary = summary
             narrative = _narrative_for(summary)
             if args.format == "terminal":
                 out = format_diff_terminal(summary, narrative=narrative)
@@ -590,6 +593,7 @@ def _cmd_diff(args, _profile):
                 limit=args.limit,
                 sort=args.sort,
             )
+            gate_summary = global_summary
             # For per-GPU we keep top-k small to avoid overwhelming output.
             per_gpu_limit = min(args.limit, 3)
             devices = sorted(set(before.meta.devices) | set(after.meta.devices))
@@ -624,6 +628,18 @@ def _cmd_diff(args, _profile):
         print(f"Diff written to {args.output}")
     else:
         print(out, end="")
+
+    if getattr(args, "exit_on_regression", False) and gate_summary is not None:
+        if gate_summary.verdict == "regression_likely":
+            print(
+                "Diff gate failed: "
+                f"verdict={gate_summary.verdict} "
+                f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
+                f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
+                f"comparability_confidence={gate_summary.comparability_confidence:.3f}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 def _run_diff_chat(args, _profile):

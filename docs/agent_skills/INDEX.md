@@ -37,6 +37,9 @@ nsys-ai diff before.sqlite after.sqlite
 # Machine-readable JSON
 nsys-ai diff before.sqlite after.sqlite --format json
 
+# Fail a CI job on a likely regression verdict
+nsys-ai diff before.sqlite after.sqlite --format json --exit-on-regression
+
 # Specific iteration (skip warmup iteration 0)
 nsys-ai diff before.sqlite after.sqlite --iteration 1 --format json
 
@@ -48,7 +51,7 @@ nsys-ai diff before.sqlite after.sqlite --chat
 ```
 
 **Output formats**: `terminal` (default), `markdown`, `json`
-**Key flags**: `--gpu N`, `--trim START END` (seconds), `--iteration N`, `--marker NAME`
+**Key flags**: `--gpu N`, `--trim START END` (seconds), `--iteration N`, `--marker NAME`, `--exit-on-regression`
 
 ### Report — Full analysis report
 

@@ -338,6 +338,11 @@ def _build_parser():
         action="store_true",
         help="Start interactive AI chat for diff analysis (Phase C tools)",
     )
+    p.add_argument(
+        "--exit-on-regression",
+        action="store_true",
+        help="Exit with status 1 when the diff verdict is regression_likely (CI gate)",
+    )
     p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("diff-web", help="Serve web diff viewer for two profiles")
