@@ -171,13 +171,87 @@ def _format(rows):
     return "\n".join(lines)
 
 
-def _to_findings(rows: list[dict]) -> list:
-    from nsys_ai.annotation import Finding
+_LOW_OVERLAP_EXPLANATION = (
+    "NCCL communication is exposed on the timeline instead of being hidden "
+    "under compute. Low overlap usually means communication is on the critical "
+    "path for step time."
+)
+_COMM_DOMINATED_EXPLANATION = (
+    "Communication time is larger than useful compute time in this window. "
+    "This often points to exposed collectives, poor overlap, or an imbalanced "
+    "parallelism strategy."
+)
+_SUGGESTED_ACTIONS = [
+    "Check whether NCCL and compute run on separate streams with compatible dependencies",
+    "Inspect whether collectives are launched early enough to overlap with backward compute",
+    "Compare per-rank overlap to identify stragglers or imbalance",
+    "Try narrowing to one iteration or NVTX phase to confirm where communication is exposed",
+]
+_FALSE_POSITIVE_NOTES = [
+    "Short windows can understate overlap if they clip compute or communication intervals",
+    "Profiles with very little NCCL time may not need optimization even when overlap is low",
+]
+
+
+def _overlap_confidence(overlap_pct: float, nccl_ms: float, total_ms: float) -> float:
+    """Heuristic confidence for low communication-overlap findings."""
+    if nccl_ms <= 0 or total_ms <= 0:
+        return 0.4
+    nccl_share = min(nccl_ms / total_ms, 1.0)
+    overlap_signal = max(0.0, min((30.0 - overlap_pct) / 30.0, 1.0))
+    return round(min(0.95, 0.55 + 0.25 * overlap_signal + 0.15 * nccl_share), 3)
+
+
+def _ratio_confidence(ratio: float) -> float:
+    """Heuristic confidence for communication-dominated findings."""
+    if ratio < 0.25:
+        return 0.95
+    if ratio < 0.5:
+        return 0.85
+    return 0.7
+
+
+def _common_evidence_values(r: dict, *, nccl_ms: float) -> tuple[dict, dict]:
+    values = {
+        "compute_only_ms": round(float(r.get("compute_only_ms", 0) or 0), 3),
+        "nccl_only_ms": round(float(r.get("nccl_only_ms", 0) or 0), 3),
+        "overlap_ms": round(float(r.get("overlap_ms", 0) or 0), 3),
+        "nccl_total_ms": round(float(nccl_ms), 3),
+        "idle_ms": round(float(r.get("idle_ms", 0) or 0), 3),
+        "total_ms": round(float(r.get("total_ms", 0) or 0), 3),
+        "overlap_pct": round(float(r.get("overlap_pct", 0) or 0), 3),
+    }
+    units = {
+        "compute_only_ms": "ms",
+        "nccl_only_ms": "ms",
+        "overlap_ms": "ms",
+        "nccl_total_ms": "ms",
+        "idle_ms": "ms",
+        "total_ms": "ms",
+        "overlap_pct": "percent",
+    }
+    if r.get("sync_ms") is not None:
+        values["sync_ms"] = round(float(r.get("sync_ms", 0) or 0), 3)
+        units["sync_ms"] = "ms"
+    if r.get("same_stream_diagnosis"):
+        values["same_streams"] = list(r.get("same_stream_diagnosis") or [])
+        if r.get("same_stream_compute_pct") is not None:
+            values["same_stream_compute_pct"] = round(float(r["same_stream_compute_pct"]), 3)
+            units["same_stream_compute_pct"] = "percent"
+        if r.get("same_stream_nccl_pct") is not None:
+            values["same_stream_nccl_pct"] = round(float(r["same_stream_nccl_pct"]), 3)
+            units["same_stream_nccl_pct"] = "percent"
+    return values, units
+
+
+def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
+    from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
 
     findings = []
     if not rows or "error" in rows[0]:
         return findings
 
+    profile_id = (context or {}).get("profile_id", "unknown")
     r = rows[0]
     nccl_ms = r.get("nccl_only_ms", 0) + r.get("overlap_ms", 0)
     compute_ms = r.get("compute_only_ms", 0)
@@ -208,6 +282,26 @@ def _to_findings(rows: list[dict]) -> list:
                     f"share these streams.)"
                 )
 
+        finding_id = f"overlap_low_gpu{device}_{start_ns}"
+        selection = TraceSelection(
+            id=f"sel_{finding_id}",
+            profile_id=profile_id,
+            source="skill:overlap_breakdown",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            gpu_ids=[device],
+            label=f"Low Compute/NCCL Overlap ({overlap_pct}%)",
+        )
+        ev_values, ev_units = _common_evidence_values(r, nccl_ms=nccl_ms)
+        evidence_row = EvidenceRow(
+            id=f"ev_{finding_id}",
+            source_skill="overlap_breakdown",
+            values=ev_values,
+            units=ev_units,
+            selection_id=selection.id,
+            provenance={"row_kind": "low_overlap", "device": device},
+        )
+
         findings.append(
             Finding(
                 type="region",
@@ -217,6 +311,15 @@ def _to_findings(rows: list[dict]) -> list:
                 gpu_id=device,
                 severity="warning",
                 note=note,
+                id=finding_id,
+                category="communication",
+                confidence=_overlap_confidence(float(overlap_pct), float(nccl_ms), float(total_ms)),
+                evidence=[evidence_row],
+                selection=selection,
+                explanation=_LOW_OVERLAP_EXPLANATION,
+                suggested_actions=list(_SUGGESTED_ACTIONS),
+                false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                provenance={"skill": "overlap_breakdown", "row_kind": "low_overlap"},
             )
         )
 
@@ -224,6 +327,28 @@ def _to_findings(rows: list[dict]) -> list:
     if nccl_ms > 0 and compute_ms > 0:
         ratio = compute_ms / nccl_ms
         if ratio < 0.5:
+            finding_id = f"overlap_comm_dominated_gpu{device}_{start_ns}"
+            selection = TraceSelection(
+                id=f"sel_{finding_id}",
+                profile_id=profile_id,
+                source="skill:overlap_breakdown",
+                start_ns=start_ns,
+                end_ns=end_ns,
+                gpu_ids=[device],
+                label=f"Communication Dominated (ratio={ratio:.2f})",
+            )
+            ev_values, ev_units = _common_evidence_values(r, nccl_ms=nccl_ms)
+            ev_values["compute_nccl_ratio"] = round(float(ratio), 3)
+            ev_units["compute_nccl_ratio"] = "ratio"
+            evidence_row = EvidenceRow(
+                id=f"ev_{finding_id}",
+                source_skill="overlap_breakdown",
+                values=ev_values,
+                units=ev_units,
+                selection_id=selection.id,
+                provenance={"row_kind": "communication_dominated", "device": device},
+            )
+
             findings.append(
                 Finding(
                     type="region",
@@ -237,6 +362,18 @@ def _to_findings(rows: list[dict]) -> list:
                         f"(healthy > 2.0). Compute: {compute_ms:.1f}ms, "
                         f"NCCL: {nccl_ms:.1f}ms."
                     ),
+                    id=finding_id,
+                    category="communication",
+                    confidence=_ratio_confidence(float(ratio)),
+                    evidence=[evidence_row],
+                    selection=selection,
+                    explanation=_COMM_DOMINATED_EXPLANATION,
+                    suggested_actions=list(_SUGGESTED_ACTIONS),
+                    false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                    provenance={
+                        "skill": "overlap_breakdown",
+                        "row_kind": "communication_dominated",
+                    },
                 )
             )
 
