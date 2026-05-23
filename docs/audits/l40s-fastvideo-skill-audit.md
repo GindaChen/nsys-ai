@@ -46,7 +46,7 @@ Compute and NCCL run on **CUDA stream 7** with **~0% overlap** (~311k ms compute
 | `kernel_launch_overhead` | OK | rows | PASS | — |
 | `kernel_launch_pattern` | OK | rows | PARTIAL | Does not link streams to overlap story |
 | `kernel_instances` | OK | rows | PASS | — |
-| `thread_utilization` | EMPTY | EMPTY | PARTIAL | No rows returned |
+| `thread_utilization` | EMPTY | EMPTY | PARTIAL | `COMPOSITE_EVENTS` missing or empty on this export — no CPU thread utilization rows |
 | `cpu_gpu_pipeline` | OK | rows | PASS | — |
 | `host_sync_parent_ranges` | OK | rows | PARTIAL | ~34 s on full profile |
 | `gc_impact` | OK | rows | PASS | — |

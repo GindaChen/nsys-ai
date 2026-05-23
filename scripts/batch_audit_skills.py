@@ -49,10 +49,12 @@ PRIORITY_FIRST = [
 
 def _open_skill_connection(profile_path: str):
     """Match ``nsys-ai skill run`` connection setup (cached DuckDB, else SQLite)."""
-    import duckdb
+    try:
+        import duckdb
 
-    from nsys_ai.parquet_cache import open_cached_db
-
+        from nsys_ai.parquet_cache import open_cached_db
+    except ImportError:
+        return sqlite3.connect(profile_path)
     try:
         return open_cached_db(profile_path)
     except (duckdb.Error, RuntimeError, OSError):
