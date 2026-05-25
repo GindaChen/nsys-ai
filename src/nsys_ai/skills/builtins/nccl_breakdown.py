@@ -20,7 +20,10 @@ def _execute(conn, **kwargs):
     if trim_start is not None and trim_end is not None:
         trim = (int(trim_start), int(trim_end))
 
-    return nccl_breakdown(prof, device, trim)
+    rows = nccl_breakdown(prof, device, trim)
+    for r in rows:
+        r["device_id"] = device
+    return rows
 
 
 def _format(rows):
@@ -104,8 +107,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
         return findings
 
     profile_id = (context or {}).get("profile_id", "unknown")
-    # TODO: thread device from context once supported by evidence_builder
-    device = (context or {}).get("device", 0)
+    device = rows[0].get("device_id", (context or {}).get("device", 0))
 
     pct_by_type: dict[str, float] = {}
     total_nccl_ms = sum(r.get("total_ms", 0.0) for r in rows)
@@ -237,7 +239,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
     for r in rows:
         if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > 2.0:
             ratio = round(r["max_ms"] / r["avg_ms"], 1)
-            finding_id = f"nccl_high_variability_{r['type']}"
+            finding_id = f"nccl_high_variability_{r['type']}_stream{r['stream_id']}"
             selection = TraceSelection(
                 id=f"sel_{finding_id}",
                 profile_id=profile_id,
