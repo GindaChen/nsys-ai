@@ -218,6 +218,9 @@ def format_modal_app(
     if modal_cfg is None:
         modal_cfg = ModalConfig()
 
+    # Single source of truth for the upstream repo URL + pinned release tag.
+    from nsys_ai.cutracer.installer import CUTRACER_GITHUB, CUTRACER_TAG
+
     filter_csv = ",".join(config.kernel_filter) if config.kernel_filter else ""
     output_dir_str = str(config.output_dir)
     # Use repr() for Python string literals inside the generated script;
@@ -282,7 +285,7 @@ image = (
     ){extra_pip_lines}
     .run_commands(
         # Clone and build CUTracer NVBit .so (cached layer after first image build)
-        "git clone --depth=1 https://github.com/facebookresearch/CUTracer /opt/CUTracer",
+        "git clone --depth=1 --branch {CUTRACER_TAG} {CUTRACER_GITHUB} /opt/CUTracer",
         "cd /opt/CUTracer && ./install_third_party.sh",
         "cd /opt/CUTracer && make",
         "mkdir -p /root/.nsys-ai/cutracer/lib && cp /opt/CUTracer/lib/cutracer.so /root/.nsys-ai/cutracer/lib/",
