@@ -357,13 +357,20 @@ def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -
     if progress:
         print(f"  Existing clone is not at {CUTRACER_TAG} — fetching + checking out …")
     # Org migration: make sure origin points at the current repo before fetch
-    # (an old clone may still reference facebookresearch).
-    subprocess.run(  # nosec B603 B607
+    # (an old clone may still reference facebookresearch). Checking the return
+    # code matters: a silent failure here would leave origin on the old URL and
+    # still "succeed" via GitHub's redirect, defeating the migration fix.
+    set_url = subprocess.run(  # nosec B603 B607
         ["git", "remote", "set-url", "origin", CUTRACER_GITHUB],
         cwd=clone_dir,
         capture_output=not progress,
         text=True,
     )
+    if set_url.returncode != 0:
+        raise RuntimeError(
+            f"git remote set-url origin failed (exit {set_url.returncode}):\n"
+            f"{getattr(set_url, 'stderr', '')}"
+        )
     fetch = subprocess.run(  # nosec B603 B607
         ["git", "fetch", "--depth=1", "origin", "tag", CUTRACER_TAG],
         cwd=clone_dir,

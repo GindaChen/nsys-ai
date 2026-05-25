@@ -281,13 +281,15 @@ class TestFormatModalApp:
 
     def test_contains_github_clone(self, tmp_path):
         """Generated Modal script should clone from GitHub, not use nsys-ai cutracer install."""
+        from nsys_ai.cutracer.installer import CUTRACER_TAG
         from nsys_ai.cutracer.runner import format_modal_app
 
         plan, config = _make_plan_and_config(tmp_path)
         script = format_modal_app(plan, config)
         assert "git clone" in script
         assert "facebookexperimental/CUTracer" in script
-        assert "--branch v0.2.1" in script
+        # Track the pinned-tag constant so this stays in sync when it bumps.
+        assert f"--branch {CUTRACER_TAG}" in script
         assert "install_third_party.sh" in script
         assert "nsys-ai cutracer install" not in script
 

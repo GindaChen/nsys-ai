@@ -280,6 +280,24 @@ class TestEnsurePinnedCheckout:
         # Stale .so removed so the build step recompiles from the new ref.
         assert not so_dest.exists()
 
+    def test_raises_on_set_url_failure(self, tmp_path):
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:3] == ["git", "remote", "set-url"]:
+                return MagicMock(returncode=1, stdout="", stderr="no origin")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="set-url"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
     def test_raises_on_fetch_failure(self, tmp_path):
         from nsys_ai.cutracer.installer import _ensure_pinned_checkout
 
