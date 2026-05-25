@@ -21,8 +21,11 @@ def _execute(conn, **kwargs):
         trim = (int(trim_start), int(trim_end))
 
     rows = nccl_breakdown(prof, device, trim)
+    span_start, span_end = prof.meta.time_range
     for r in rows:
         r["device_id"] = device
+        r["span_start_ns"] = span_start
+        r["span_end_ns"] = span_end
     return rows
 
 
@@ -108,6 +111,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
 
     profile_id = (context or {}).get("profile_id", "unknown")
     device = rows[0].get("device_id", (context or {}).get("device", 0))
+    start_ns = rows[0].get("span_start_ns", 0)
+    end_ns = rows[0].get("span_end_ns", 0)
 
     pct_by_type: dict[str, float] = {}
     total_nccl_ms = sum(r.get("total_ms", 0.0) for r in rows)
@@ -123,8 +128,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:nccl_breakdown",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_ids=[device],
             label=f"SendRecv Dominated ({sendrecv_pct:.1f}%)",
         )
@@ -139,8 +144,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
         findings.append(Finding(
             type="region",
             label=f"SendRecv Dominated ({sendrecv_pct:.1f}% of NCCL)",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_id=device,
             severity="info",
             note=f"SendRecv accounts for {sendrecv_pct:.1f}% of NCCL time — pipeline parallelism is the dominant communication pattern.",
@@ -163,8 +168,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:nccl_breakdown",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_ids=[device],
             label=f"AllGather Dominated ({allgather_pct:.1f}%)",
         )
@@ -179,8 +184,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
         findings.append(Finding(
             type="region",
             label=f"AllGather Dominated ({allgather_pct:.1f}% of NCCL)",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_id=device,
             severity="info",
             note=f"AllGather accounts for {allgather_pct:.1f}% of NCCL time — TP/sequence parallelism gather dominates.",
@@ -203,8 +208,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:nccl_breakdown",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_ids=[device],
             label=f"AllReduce Dominated ({allreduce_pct:.1f}%)",
         )
@@ -219,8 +224,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
         findings.append(Finding(
             type="region",
             label=f"AllReduce Dominated ({allreduce_pct:.1f}% of NCCL)",
-            start_ns=0,
-            end_ns=0,
+            start_ns=start_ns,
+            end_ns=end_ns,
             gpu_id=device,
             severity="info",
             note=f"AllReduce accounts for {allreduce_pct:.1f}% of NCCL time — data parallelism gradient sync dominates.",
@@ -237,15 +242,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
 
     # Finding 4: high variability
     for r in rows:
-        if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > 2.0:
+        if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > 2.0 and r["pct"] >= 1.0:
             ratio = round(r["max_ms"] / r["avg_ms"], 1)
             finding_id = f"nccl_high_variability_{r['type']}_stream{r['stream_id']}"
             selection = TraceSelection(
                 id=f"sel_{finding_id}",
                 profile_id=profile_id,
                 source="skill:nccl_breakdown",
-                start_ns=0,
-                end_ns=0,
+                start_ns=start_ns,
+                end_ns=end_ns,
                 gpu_ids=[device],
                 label=f"High NCCL Variability ({r['type']}, {ratio}×)",
             )
@@ -265,8 +270,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
             findings.append(Finding(
                 type="region",
                 label=f"High NCCL Variability ({r['type']}, max/avg={ratio}×)",
-                start_ns=0,
-                end_ns=0,
+                start_ns=start_ns,
+                end_ns=end_ns,
                 gpu_id=device,
                 severity="warning",
                 note=f"{r['type']} max={r['max_ms']:.1f}ms vs avg={r['avg_ms']:.1f}ms ({ratio}× ratio) — possible message-size bimodality or stragglers.",
