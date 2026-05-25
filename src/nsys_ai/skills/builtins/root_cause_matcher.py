@@ -332,11 +332,11 @@ def _execute(conn: sqlite3.Connection, **kwargs):
 
     # --- Small Kernel Overhead ---
     if launch_data:
-        # overhead_us > kernel_ms*1000 means overhead > kernel duration
+        # overhead_pct > 50 means overhead > kernel duration (per-kernel aggregated schema)
         high_overhead = [
             e
             for e in launch_data
-            if e.get("kernel_ms", 0) > 0 and e.get("overhead_us", 0) > e["kernel_ms"] * 1000
+            if e.get("overhead_pct", 0) > 50 and e.get("launch_count", 0) >= 100
         ]
         if len(high_overhead) >= 5:
             findings.append(

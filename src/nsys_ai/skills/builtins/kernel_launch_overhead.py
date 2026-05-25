@@ -87,24 +87,34 @@ def _execute(conn, **kwargs):
         denom = r["total_overhead_ms"] + r["total_kernel_ms"]
         r["overhead_pct"] = round(100 * r["total_overhead_ms"] / denom, 1) if denom > 0 else 0.0
 
-    # Inject metadata for findings
+    # Inject metadata for findings — prefer trim window when provided so the
+    # finding span matches the actually-analyzed range, not the whole profile.
     from ...profile import Profile
     prof = Profile._from_conn(conn)
     device = int(kwargs.get("device", 0))
-    span_start, span_end = prof.meta.time_range
+    if trim_start is not None and trim_end is not None:
+        span_start, span_end = int(trim_start), int(trim_end)
+    else:
+        span_start, span_end = prof.meta.time_range
     for r in rows:
         r["device_id"] = device
         r["span_start_ns"] = span_start
         r["span_end_ns"] = span_end
 
-    # Root Cause #12: count cudaDeviceSynchronize calls
+    # Root Cause #12: count cudaDeviceSynchronize calls (within trim window if set,
+    # so sync_count is consistent with the kernel/launch rows above).
+    sync_trim = ""
+    sync_params: list = []
+    if trim_start is not None and trim_end is not None:
+        sync_trim = ' AND r.start >= ? AND r."end" <= ?'
+        sync_params = [trim_start, trim_end]
     sync_sql = f"""
         SELECT COUNT(*) AS cnt
         FROM {runtime_tbl} r
         JOIN {string_tbl} s ON r.nameId = s.id
-        WHERE s.value LIKE 'cudaDeviceSynchronize%'
+        WHERE s.value LIKE 'cudaDeviceSynchronize%'{sync_trim}
     """
-    sync_count = conn.execute(sync_sql).fetchone()
+    sync_count = conn.execute(sync_sql, sync_params).fetchone()
     sync_count = sync_count[0] if sync_count else 0
     for r in rows:
         r["_global_sync_count"] = int(sync_count or 0)
