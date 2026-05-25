@@ -341,7 +341,8 @@ def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -
     the new ref instead of short-circuiting on a binary from the old checkout.
 
     No-op (beyond a probe) when the clone is already at ``CUTRACER_TAG``.
-    Raises ``RuntimeError`` if the fetch or checkout fails.
+    Raises ``RuntimeError`` if the ``git remote set-url``, fetch, or checkout
+    step fails.
     """
     current = subprocess.run(  # nosec B603 B607
         ["git", "describe", "--tags", "--exact-match"],
