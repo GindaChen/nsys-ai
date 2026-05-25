@@ -72,6 +72,7 @@ class EvidenceBuilder:
         "overlap_ratio": ("overlap_breakdown", {}),
         "memory_anomalies": ("memory_bandwidth", {"limit": 5}),
         "h2d_spikes": ("h2d_distribution", {}),
+        "kernel_launch_overhead": ("kernel_launch_overhead", {}),
     }
 
     def build(self, only: list[str] | None = None) -> EvidenceReport:
