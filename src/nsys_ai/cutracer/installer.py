@@ -417,11 +417,17 @@ def _clone_and_build(
 
     # ── Clone ────────────────────────────────────────────────────────────────
     if clone_dir.exists() and (clone_dir / "Makefile").exists():
-        # A pre-existing clone may sit at any ref — an old HEAD from before
-        # tag pinning, or the previous facebookresearch org. Reusing it as-is
-        # would silently build whatever is checked out and defeat the pin, so
-        # reconcile it to CUTRACER_TAG before building.
-        _ensure_pinned_checkout(clone_dir, so_dest, progress=progress)
+        if (clone_dir / ".git").exists():
+            # A pre-existing git clone may sit at any ref — an old HEAD from
+            # before tag pinning, or the previous facebookresearch org. Reusing
+            # it as-is would silently build whatever is checked out and defeat
+            # the pin, so reconcile it to CUTRACER_TAG before building.
+            _ensure_pinned_checkout(clone_dir, so_dest, progress=progress)
+        elif progress:
+            # A non-git source tree (e.g. an extracted tarball) that happens to
+            # have a Makefile — tag pinning does not apply and git ops would
+            # fail here, so build it as-is (the pre-pinning behavior).
+            print(f"  Using existing non-git source tree at: {clone_dir}")
     else:
         if progress:
             print("  Cloning CUTracer from GitHub …")

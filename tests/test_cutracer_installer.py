@@ -335,6 +335,49 @@ class TestEnsurePinnedCheckout:
                 _ensure_pinned_checkout(clone, so_dest, progress=False)
 
 
+class TestCloneAndBuildExistingTree:
+    def test_non_git_makefile_tree_skips_reconciliation(self, tmp_path):
+        """A non-git source tree (e.g. extracted tarball) with a Makefile must
+        build as-is, not attempt git reconciliation (which would error)."""
+        from nsys_ai.cutracer import installer
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        (clone / "Makefile").write_text("all:\n")
+        # Pre-stage so the build short-circuits: nvbit present, .so already built.
+        (clone / "third_party" / "nvbit").mkdir(parents=True)
+        (clone / "lib").mkdir()
+        (clone / "lib" / "cutracer.so").write_bytes(b"\x7fELF")
+        # No .git → must be treated as a non-git tree.
+
+        with patch.object(installer, "_ensure_pinned_checkout") as mock_reconcile:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                result = installer._clone_and_build(clone, progress=False)
+
+        mock_reconcile.assert_not_called()
+        assert result == clone / "lib" / "cutracer.so"
+
+    def test_git_makefile_tree_triggers_reconciliation(self, tmp_path):
+        """A git clone with a Makefile must be reconciled to the pinned tag."""
+        from nsys_ai.cutracer import installer
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        (clone / "Makefile").write_text("all:\n")
+        (clone / ".git").mkdir()
+        (clone / "third_party" / "nvbit").mkdir(parents=True)
+        (clone / "lib").mkdir()
+        (clone / "lib" / "cutracer.so").write_bytes(b"\x7fELF")
+
+        with patch.object(installer, "_ensure_pinned_checkout") as mock_reconcile:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                installer._clone_and_build(clone, progress=False)
+
+        mock_reconcile.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # install (high-level, dry-run)
 # ---------------------------------------------------------------------------
