@@ -64,8 +64,23 @@ _ALLREDUCE_DOMINATED_EXPLANATION = (
 )
 _HIGH_VARIABILITY_EXPLANATION = (
     "NCCL kernel durations vary widely (max >> avg), suggesting message-size "
-    "bimodality or occasional stragglers causing inconsistent communication latency."
+    "bimodality or occasional stragglers. Single-rank proxy for Root Cause #8 "
+    "(Compute-Communication Imbalance) — strict detection requires multi-rank "
+    "comparison, but high variance on one rank often indicates this rank is "
+    "intermittently waiting for other ranks at NCCL barriers."
 )
+_NCCL_SERIALIZATION_EXPLANATION = (
+    "Per Root Cause #3 (NCCL Serialization): when total NCCL time exceeds 20% of "
+    "iteration time, collective operations are not effectively overlapping with "
+    "compute. Common causes: gradient bucketing misconfiguration, NCCL streams "
+    "blocked by compute on same stream, or suboptimal network topology."
+)
+_NCCL_SERIALIZATION_ACTIONS = [
+    "Tune DDP bucket sizes (e.g., bucket_cap_mb=25)",
+    "Ensure NCCL runs on a separate stream from compute",
+    "Use gradient compression or FSDP for large models",
+    "Check NVLink/InfiniBand topology matches the collective algorithm",
+]
 _SUGGESTED_ACTIONS = [
     "Check whether NCCL streams are separate from compute streams to enable overlap",
     "Profile per-rank to identify stragglers causing variability",
@@ -80,6 +95,12 @@ _FALSE_POSITIVE_NOTES = [
     "Short profiles may not capture the steady-state collective distribution",
     "Single-host inference will have no NCCL — empty result is a valid finding",
 ]
+
+# Thresholds (calibrated to common workloads; some sourced from book.md root causes)
+_DOMINATED_THRESHOLD_PCT = 70.0          # collective dominates NCCL when its pct > this
+_VARIABILITY_RATIO_THRESHOLD = 2.0       # max/avg > this → high variability
+_VARIABILITY_MIN_PCT = 1.0               # gate to suppress noise from negligible collectives
+_NCCL_SERIALIZATION_THRESHOLD_PCT = 20.0  # per book.md Root Cause #3
 
 def _nccl_confidence(pct: float, total_nccl_ms: float = 0.0) -> float:
     if total_nccl_ms > 0 and total_nccl_ms < 10.0:
@@ -102,6 +123,16 @@ def _variability_confidence(ratio: float, n_kernels: int = 0) -> float:
         return 0.70
     return 0.60
 
+
+def _serialization_confidence(nccl_iteration_pct: float, iteration_ms: float = 0.0) -> float:
+    if iteration_ms > 0 and iteration_ms < 100.0:
+        return 0.5
+    if nccl_iteration_pct >= 40:
+        return 0.95
+    if nccl_iteration_pct >= 30:
+        return 0.85
+    return 0.70
+
 def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
     from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
 
@@ -122,7 +153,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
 
     # Finding 1: sendrecv dominated
     sendrecv_pct = pct_by_type.get("sendrecv", 0.0)
-    if sendrecv_pct > 70:
+    if sendrecv_pct > _DOMINATED_THRESHOLD_PCT:
         finding_id = "nccl_sendrecv_dominated"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -162,7 +193,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
 
     # Finding 2: allgather dominated
     allgather_pct = pct_by_type.get("allgather", 0.0)
-    if allgather_pct > 70:
+    if allgather_pct > _DOMINATED_THRESHOLD_PCT:
         finding_id = "nccl_allgather_dominated"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -202,7 +233,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
 
     # Finding 3: allreduce dominated
     allreduce_pct = pct_by_type.get("allreduce", 0.0)
-    if allreduce_pct > 70:
+    if allreduce_pct > _DOMINATED_THRESHOLD_PCT:
         finding_id = "nccl_allreduce_dominated"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -240,9 +271,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
             provenance={"skill": "nccl_breakdown", "row_kind": "allreduce_dominated"},
         ))
 
-    # Finding 4: high variability
+    # Finding 4: high variability — single-rank proxy for book.md Root Cause #8 (Compute-Communication Imbalance)
     for r in rows:
-        if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > 2.0 and r["pct"] >= 1.0:
+        if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > _VARIABILITY_RATIO_THRESHOLD and r["pct"] >= _VARIABILITY_MIN_PCT:
             ratio = round(r["max_ms"] / r["avg_ms"], 1)
             finding_id = f"nccl_high_variability_{r['type']}_stream{r['stream_id']}"
             selection = TraceSelection(
@@ -265,7 +296,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 },
                 units={"avg_ms": "ms", "max_ms": "ms", "max_avg_ratio": "ratio"},
                 selection_id=selection.id,
-                provenance={"row_kind": "high_variability", "collective_type": r["type"]},
+                provenance={"row_kind": "high_variability", "collective_type": r["type"], "root_cause": "#8_proxy"},
             )
             findings.append(Finding(
                 type="region",
@@ -283,8 +314,54 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 explanation=_HIGH_VARIABILITY_EXPLANATION,
                 suggested_actions=list(_SUGGESTED_ACTIONS),
                 false_positive_notes=list(_FALSE_POSITIVE_NOTES),
-                provenance={"skill": "nccl_breakdown", "row_kind": "high_variability"},
+                provenance={"skill": "nccl_breakdown", "row_kind": "high_variability", "root_cause": "#8_proxy"},
             ))
+
+    # Finding 5: NCCL Serialization — book.md Root Cause #3
+    # Signal: Total NCCL time > 20% of iteration time
+    total_nccl_ms = sum(r.get("total_ms", 0.0) for r in rows)
+    iteration_ms = (end_ns - start_ns) / 1e6 if end_ns > start_ns else 0
+    nccl_iteration_pct = (total_nccl_ms / iteration_ms * 100) if iteration_ms > 0 else 0
+
+    if nccl_iteration_pct > _NCCL_SERIALIZATION_THRESHOLD_PCT:
+        finding_id = "nccl_serialization"
+        selection = TraceSelection(
+            id=f"sel_{finding_id}",
+            profile_id=profile_id,
+            source="skill:nccl_breakdown",
+            start_ns=start_ns, end_ns=end_ns,
+            gpu_ids=[device],
+            label=f"NCCL Serialization ({nccl_iteration_pct:.1f}% of iteration)",
+        )
+        evidence_row = EvidenceRow(
+            id=f"ev_{finding_id}",
+            source_skill="nccl_breakdown",
+            values={
+                "total_nccl_ms": round(total_nccl_ms, 2),
+                "iteration_ms": round(iteration_ms, 2),
+                "nccl_iteration_pct": round(nccl_iteration_pct, 1),
+            },
+            units={"total_nccl_ms": "ms", "iteration_ms": "ms", "nccl_iteration_pct": "percent"},
+            selection_id=selection.id,
+            provenance={"row_kind": "nccl_serialization", "root_cause": "#3"},
+        )
+        findings.append(Finding(
+            type="region",
+            label=f"NCCL Serialization ({nccl_iteration_pct:.1f}% of iteration time)",
+            start_ns=start_ns, end_ns=end_ns,
+            gpu_id=device,
+            severity="warning",
+            note=f"NCCL accounts for {nccl_iteration_pct:.1f}% of iteration time ({total_nccl_ms:.0f}ms / {iteration_ms:.0f}ms) — may indicate poor compute/comm overlap.",
+            id=finding_id,
+            category="communication",
+            confidence=_serialization_confidence(nccl_iteration_pct, iteration_ms),
+            evidence=[evidence_row],
+            selection=selection,
+            explanation=_NCCL_SERIALIZATION_EXPLANATION,
+            suggested_actions=list(_NCCL_SERIALIZATION_ACTIONS),
+            false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+            provenance={"skill": "nccl_breakdown", "row_kind": "nccl_serialization", "root_cause": "#3"},
+        ))
 
     return findings
 

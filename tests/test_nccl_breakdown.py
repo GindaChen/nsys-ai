@@ -233,12 +233,45 @@ def test_findings_without_context_use_unknown_profile_id():
 def test_l40s_realistic_input():
     """Mirror the real L40S profile distribution from rich7421/fastvideo-wan-l40s-nsys."""
     rows = [
-        _nccl_row(type="sendrecv",  count=10802, pct=97.7, avg_ms=24.551, max_ms=235.945),
-        _nccl_row(type="allgather", count=181,   pct=2.3,  avg_ms=35.169, max_ms=39.593),
-        _nccl_row(type="allreduce", count=2,     pct=0.0,  avg_ms=0.699,  max_ms=1.010),
+        _nccl_row(type="sendrecv",  count=10802, pct=97.7, avg_ms=24.551, max_ms=235.945,
+                  total_ms=265196.86, span_start_ns=0, span_end_ns=700_000_000_000),
+        _nccl_row(type="allgather", count=181,   pct=2.3,  avg_ms=35.169, max_ms=39.593,
+                  total_ms=6365.54,  span_start_ns=0, span_end_ns=700_000_000_000),
+        _nccl_row(type="allreduce", count=2,     pct=0.0,  avg_ms=0.699,  max_ms=1.010,
+                  total_ms=1.4,      span_start_ns=0, span_end_ns=700_000_000_000),
     ]
     findings = SKILL.to_findings_fn(rows, context={"profile_id": "l40s_test"})
     assert any(f.id == "nccl_sendrecv_dominated" for f in findings)
     assert any("high_variability_sendrecv" in (f.id or "") for f in findings)
+    assert any(f.id == "nccl_serialization" for f in findings)
     assert not any(f.id == "nccl_allgather_dominated" for f in findings)
     assert not any(f.id == "nccl_allreduce_dominated" for f in findings)
+
+
+def test_nccl_serialization_finding():
+    """NCCL > 20% of iteration time triggers Root Cause #3 finding."""
+    # iteration = 1000ms, total NCCL = 300ms (30%) → should trigger
+    rows = [
+        _nccl_row(type="allreduce", total_ms=300.0, pct=100.0,
+                  span_start_ns=0, span_end_ns=1_000_000_000),
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
+    assert any(f.id == "nccl_serialization" for f in findings)
+    f = next(f for f in findings if f.id == "nccl_serialization")
+    assert f.severity == "warning"
+    assert f.category == "communication"
+    assert f.evidence[0].values["nccl_iteration_pct"] == pytest.approx(30.0, abs=0.5)
+    assert f.evidence[0].units["nccl_iteration_pct"] == "percent"
+    assert f.evidence[0].provenance["root_cause"] == "#3"
+    assert "Root Cause #3" in f.explanation
+
+
+def test_nccl_serialization_does_not_trigger_below_threshold():
+    """NCCL < 20% of iteration time should NOT trigger #3 finding."""
+    # iteration = 1000ms, total NCCL = 100ms (10%) → should NOT trigger
+    rows = [
+        _nccl_row(type="allreduce", total_ms=100.0, pct=100.0,
+                  span_start_ns=0, span_end_ns=1_000_000_000),
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
+    assert not any(f.id == "nccl_serialization" for f in findings)
