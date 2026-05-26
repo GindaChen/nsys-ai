@@ -249,8 +249,8 @@ def test_l40s_realistic_input():
 
 
 def test_nccl_serialization_finding():
-    """NCCL > 20% of iteration time triggers Root Cause #3 finding."""
-    # iteration = 1000ms, total NCCL = 300ms (30%) → should trigger
+    """NCCL > 20% of captured time triggers Root Cause #3 finding."""
+    # captured = 1000ms, total NCCL = 300ms (30%) → should trigger
     rows = [
         _nccl_row(type="allreduce", total_ms=300.0, pct=100.0,
                   span_start_ns=0, span_end_ns=1_000_000_000),
@@ -260,18 +260,36 @@ def test_nccl_serialization_finding():
     f = next(f for f in findings if f.id == "nccl_serialization")
     assert f.severity == "warning"
     assert f.category == "communication"
-    assert f.evidence[0].values["nccl_iteration_pct"] == pytest.approx(30.0, abs=0.5)
-    assert f.evidence[0].units["nccl_iteration_pct"] == "percent"
+    assert f.evidence[0].values["nccl_capture_pct"] == pytest.approx(30.0, abs=0.5)
+    assert f.evidence[0].units["nccl_capture_pct"] == "percent"
     assert f.evidence[0].provenance["root_cause"] == "#3"
     assert "Root Cause #3" in f.explanation
 
 
 def test_nccl_serialization_does_not_trigger_below_threshold():
-    """NCCL < 20% of iteration time should NOT trigger #3 finding."""
-    # iteration = 1000ms, total NCCL = 100ms (10%) → should NOT trigger
+    """NCCL < 20% of captured time should NOT trigger #3 finding."""
+    # captured = 1000ms, total NCCL = 100ms (10%) → should NOT trigger
     rows = [
         _nccl_row(type="allreduce", total_ms=100.0, pct=100.0,
                   span_start_ns=0, span_end_ns=1_000_000_000),
     ]
     findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
     assert not any(f.id == "nccl_serialization" for f in findings)
+
+
+def test_nccl_serialization_pct_clipped_at_100():
+    """Per-stream sum can exceed captured time when NCCL overlaps across streams;
+    pct must be clipped to 100% so the displayed value stays sane."""
+    # captured = 100ms, 3 streams each running 100ms of NCCL → sum = 300ms (300%)
+    # After clip, pct should be 100% (not 300%).
+    rows = [
+        _nccl_row(stream_id=7, type="sendrecv",  total_ms=100.0, pct=33.3,
+                  span_start_ns=0, span_end_ns=100_000_000),
+        _nccl_row(stream_id=8, type="allreduce", total_ms=100.0, pct=33.3,
+                  span_start_ns=0, span_end_ns=100_000_000),
+        _nccl_row(stream_id=9, type="allgather", total_ms=100.0, pct=33.4,
+                  span_start_ns=0, span_end_ns=100_000_000),
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
+    f = next(f for f in findings if f.id == "nccl_serialization")
+    assert f.evidence[0].values["nccl_capture_pct"] == 100.0
