@@ -69,6 +69,7 @@ class EvidenceBuilder:
         "idle_gaps": ("gpu_idle_gaps", {"limit": 5, "min_gap_ns": 1000000}),
         "nccl_stalls": ("kernel_instances", {"name": "nccl", "limit": 3}),
         "kernel_hotspots": ("kernel_instances", {"limit": 3}),
+        "top_kernel_aggregates": ("top_kernels", {"limit": 15}),
         "overlap_ratio": ("overlap_breakdown", {}),
         "memory_anomalies": ("memory_bandwidth", {"limit": 5}),
         "h2d_spikes": ("h2d_distribution", {}),
