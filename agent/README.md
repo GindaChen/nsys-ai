@@ -8,6 +8,7 @@
 |------|-------------|
 | [agent-design.md](./agent-design.md) | Agent identity, mission, knowledge hierarchy, task taxonomy |
 | [problem-taxonomy.md](./problem-taxonomy.md) | 5 categories of GPU profiling problems the tool addresses |
+| [../docs/guided-loop-setup.md](../docs/guided-loop-setup.md) | **Guided loop (Direction 2)** — install, H100 dataset, `nsys-ai loop` from scratch |
 
 ## Quick Context
 

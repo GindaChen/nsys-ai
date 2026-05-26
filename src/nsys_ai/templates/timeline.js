@@ -405,12 +405,13 @@ function rebuildDataFromCache() {
     const totalNVTX = nvtxSpans.length;
     const totalMs = kernels.reduce((a, k) => a + k.duration_ms, 0);
     const gpuCountLabel = gpuIds.length > 1 ? `GPUs: <strong>${gpuIds.length}</strong> &nbsp; ` : '';
-    document.getElementById('stats').innerHTML =
-        gpuCountLabel +
-        (PROGRESSIVE ? `<span style="color:#238636">● Progressive</span> &nbsp; ` : '') +
-        `<span>Kernels: <strong>${totalKernels}</strong></span> &nbsp; ` +
-        `<span>NVTX: <strong>${totalNVTX}</strong></span> &nbsp; ` +
-        `<span>GPU time: <strong>${totalMs.toFixed(1)}ms</strong></span>`;
+    const chips = [];
+    if (PROGRESSIVE) chips.push('<span class="stat-chip stat-chip--live">Progressive</span>');
+    if (gpuIds.length > 1) chips.push(`<span class="stat-chip">GPUs <strong>${gpuIds.length}</strong></span>`);
+    chips.push(`<span class="stat-chip">Kernels <strong>${totalKernels}</strong></span>`);
+    chips.push(`<span class="stat-chip">NVTX <strong>${totalNVTX}</strong></span>`);
+    chips.push(`<span class="stat-chip">GPU <strong>${totalMs.toFixed(1)}</strong><span class="stat-unit">ms</span></span>`);
+    document.getElementById('stats').innerHTML = chips.join('');
     ensureRenderLockDefaults();
     updateNvtxThreadOptions();
 }
@@ -891,7 +892,7 @@ function updateNvtxThreadOptions() {
     sel.innerHTML = '';
     const autoOpt = document.createElement('option');
     autoOpt.value = 'auto';
-    autoOpt.textContent = 'NVTX: Auto thread';
+    autoOpt.textContent = 'Auto thread';
     sel.appendChild(autoOpt);
     for (const [t, c] of options) {
         const opt = document.createElement('option');
@@ -2373,6 +2374,7 @@ document.addEventListener('keydown', e => {
         case 'n': case 'N': toggleNVTX(); break;
         case 'a': case 'A': toggleChat(); break;
         case 'e': case 'E': if (FINDINGS.length) toggleFindings(); break;
+        case 'w': case 'W': toggleLoop(); break;
         case 'f': case 'F': fitAll(); break;
         case 'b': saveBookmark(); break;
         case 'B': toggleBookmarkList(); break;
@@ -3215,6 +3217,521 @@ async function runAnalyze() {
     }, 3000);
 }
 
+// ── Guided loop sidebar + API ──
+let LOOP_STATE = null;
+let LOOP_BUSY = false;
+
+const LOOP_PHASE_ORDER = ['diagnose', 'propose', 'reprofile', 'diff', 'accept'];
+const LOOP_DEFAULT_PROPOSAL =
+    'Switch attention backend from FlashAttention-2 to FlashAttention-3 on H100.';
+const LOOP_DEFAULT_EXPECTED_IMPACT =
+    'Lower end-to-end step time by ~30–40%, mainly from faster attention kernels.';
+
+function _loopApi(path) {
+    const pfx = BOOT.API_PREFIX || '';
+    return `${pfx}${path}`;
+}
+
+function loopBasename(path) {
+    const p = String(path || '').trim();
+    if (!p) return '—';
+    const profilesMatch = p.match(/[/\\]profiles[/\\]([^/\\]+\.sqlite)/i);
+    if (profilesMatch) return profilesMatch[1];
+    const parts = p.split(/[/\\]/);
+    const base = parts[parts.length - 1] || p;
+    if (/^[a-f0-9]{32,64}$/i.test(base)) {
+        const profIdx = parts.lastIndexOf('profiles');
+        if (profIdx >= 0 && parts[profIdx + 1]) return parts[profIdx + 1];
+    }
+    return base;
+}
+
+function loopShortPath(path) {
+    const p = String(path || '').trim();
+    if (!p) return '';
+    const home = (typeof BOOT.HOME_DIR === 'string' && BOOT.HOME_DIR) ? BOOT.HOME_DIR : '';
+    if (home && p.startsWith(home)) {
+        return '~' + p.slice(home.length);
+    }
+    const snap = p.match(/datasets--[^/\\]+[/\\]snapshots[/\\][^/\\]+[/\\](.+)$/);
+    if (snap) return snap[1];
+    if (p.length <= 56) return p;
+    return '…' + p.slice(-52);
+}
+
+function loopFormatVerdict(v) {
+    const raw = String(v || 'neutral');
+    const map = {
+        improvement_likely: 'Likely faster',
+        regression_likely: 'Likely slower',
+        neutral: 'No clear change',
+        inconclusive: 'Inconclusive',
+    };
+    return map[raw] || raw.replace(/_/g, ' ');
+}
+
+function loopFormatDelta(ms, pct) {
+    if (ms == null || Number.isNaN(ms)) return '—';
+    const abs = Math.abs(ms);
+    let label;
+    if (abs >= 60000) label = `${(abs / 60000).toFixed(1)} min`;
+    else if (abs >= 1000) label = `${(abs / 1000).toFixed(1)} s`;
+    else label = `${abs.toFixed(0)} ms`;
+    const sign = ms < 0 ? '−' : '+';
+    const pctPart = pct == null ? '' : ` (${ms < 0 ? '' : '+'}${pct.toFixed(1)}%)`;
+    return `${sign}${label}${pctPart}`;
+}
+
+function loopTone(value) {
+    const v = String(value || '').toLowerCase();
+    if (v.includes('improvement') || v === 'accept' || v === 'likely faster') return 'improved';
+    if (v.includes('regression') || v === 'reject' || v === 'likely slower') return 'regression';
+    return '';
+}
+
+function loopSetError(message) {
+    const el = document.getElementById('loopError');
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('visible', Boolean(message));
+}
+
+function loopErrorMessage(prefix, err) {
+    const msg = err && err.message ? err.message : String(err || 'unknown error');
+    loopSetError(`${prefix}: ${msg}`);
+    return `${prefix}: ${msg}`;
+}
+
+function loopSetBusy(busy) {
+    LOOP_BUSY = busy;
+    const primary = document.getElementById('loopPrimaryBtn');
+    if (primary) {
+        primary.disabled = busy;
+        primary.classList.toggle('loading', busy);
+    }
+    if (busy) {
+        document.querySelectorAll('#loopActionList .laction, #loopBtnAccept, #loopBtnReject').forEach(btn => {
+            btn.disabled = true;
+        });
+    } else {
+        loopSetStepUi(loopSuggestedPhase(LOOP_STATE));
+    }
+}
+
+function loopSuggestedPhase(state) {
+    const s = state || LOOP_STATE || {};
+    if (s.decision) return 'accept';
+    if (s.diff_summary) return 'accept';
+    if (!s.after_path) return s.proposal ? 'reprofile' : (s.diagnose_findings_count > 0 ? 'propose' : 'diagnose');
+    if (!s.proposal) return 'propose';
+    return 'diff';
+}
+
+function loopPrimaryLabel(state) {
+    const next = loopSuggestedPhase(state);
+    const labels = {
+        diagnose: '1. Run diagnose on baseline',
+        propose: '2. Save proposal',
+        reprofile: '3. Register candidate profile',
+        diff: '4. Run diff (compare B vs A)',
+        accept: '5. Decide: accept or reject',
+    };
+    return labels[next] || labels.diagnose;
+}
+
+function loopFlowHint(next) {
+    const hints = {
+        diagnose: 'Step 1 of 5: Run diagnose on baseline.',
+        propose: 'Step 2 of 5: Save what change you are testing.',
+        reprofile: 'Step 3 of 5: Register candidate profile path.',
+        diff: 'Step 4 of 5: Run diff to verify impact.',
+        accept: 'Step 5 of 5: Accept or reject and finish.',
+    };
+    return hints[next] || hints.diagnose;
+}
+
+/** Absolute duration (no sign) — for before/after step times. */
+function fmtDurationMs(ms) {
+    if (ms == null || Number.isNaN(ms)) return '—';
+    const abs = Math.abs(ms);
+    if (abs >= 60000) return `${(abs / 60000).toFixed(1)} min`;
+    if (abs >= 1000) return `${(abs / 1000).toFixed(1)} s`;
+    return `${abs.toFixed(0)} ms`;
+}
+
+function loopTrimPayload() {
+    const raw = (typeof BOOT !== 'undefined' && BOOT) ? BOOT.LOOP_TRIM_NS : null;
+    if (!Array.isArray(raw) || raw.length !== 2) return {};
+    const start = Number(raw[0]);
+    const end = Number(raw[1]);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return {};
+    return { trim: [Math.trunc(start), Math.trunc(end)] };
+}
+
+/** Diff compares full profiles; timeline --trim only scopes diagnose + the viewer. */
+function loopDiffPayload() {
+    return {};
+}
+
+function loopRevealDiffStats(scrollIntoView) {
+    const panel = document.getElementById('loopStatusPanel');
+    if (!panel || !LOOP_STATE?.diff_summary) return;
+    panel.classList.remove('hidden');
+    if (scrollIntoView) {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+function loopFormatComparability(confidence, stepTimeAvailable) {
+    if (confidence == null || Number.isNaN(confidence)) return '—';
+    const pct = Math.round(confidence * 100);
+    let level = 'Low';
+    if (confidence >= 0.8) level = 'High';
+    else if (confidence >= 0.5) level = 'Medium';
+    let label = `${pct}% (${level})`;
+    if (!stepTimeAvailable && confidence < 0.5) {
+        label += ' · overlap unavailable';
+    }
+    return label;
+}
+
+function loopSetStepUi(next) {
+    const proposalEl = document.getElementById('loopProposalText');
+    const expectedEl = document.getElementById('loopExpectedImpact');
+    const afterEl = document.getElementById('loopAfterPath');
+    const btnAccept = document.getElementById('loopBtnAccept');
+    const btnReject = document.getElementById('loopBtnReject');
+    const sectionProfiles = document.getElementById('loopSectionProfiles');
+    const sectionProposal = document.getElementById('loopSectionProposal');
+    const sectionDecide = document.getElementById('loopDecideSection');
+
+    if (proposalEl) proposalEl.disabled = LOOP_BUSY || next !== 'propose';
+    if (expectedEl) expectedEl.disabled = LOOP_BUSY || next !== 'propose';
+    if (afterEl) afterEl.disabled = LOOP_BUSY || next !== 'reprofile';
+    if (btnAccept) btnAccept.disabled = LOOP_BUSY || next !== 'accept';
+    if (btnReject) btnReject.disabled = LOOP_BUSY || next !== 'accept';
+
+    if (sectionProfiles) {
+        const active = next === 'reprofile';
+        sectionProfiles.classList.toggle('step-current', active);
+        sectionProfiles.classList.toggle('step-locked', !active);
+    }
+    if (sectionProposal) {
+        const active = next === 'propose';
+        sectionProposal.classList.toggle('step-current', active);
+        sectionProposal.classList.toggle('step-locked', !active);
+    }
+    if (sectionDecide) {
+        const active = next === 'accept';
+        sectionDecide.classList.toggle('step-current', active);
+        sectionDecide.classList.toggle('step-locked', !active);
+    }
+}
+
+async function loopFetchState() {
+    const resp = await fetch(_loopApi('/api/loop/state'));
+    const text = await resp.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if (!resp.ok) throw new Error(data.error || text || resp.statusText);
+    LOOP_STATE = data;
+    loopRenderState();
+    return LOOP_STATE;
+}
+
+async function loopPost(path, payload) {
+    const resp = await fetch(_loopApi(path), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    });
+    const text = await resp.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if (!resp.ok) {
+        if (data.state) {
+            LOOP_STATE = data.state;
+            loopRenderState();
+        }
+        throw new Error(data.error || text || resp.statusText);
+    }
+    LOOP_STATE = data.state || data;
+    loopRenderState();
+    return data;
+}
+
+function loopRenderState() {
+    if (!LOOP_STATE) return;
+    const phase = LOOP_STATE.phase || 'diagnose';
+    const phaseIdx = LOOP_PHASE_ORDER.indexOf(phase);
+    const suggested = loopSuggestedPhase(LOOP_STATE);
+
+    const badge = document.getElementById('loopPhaseBadge');
+    if (badge) badge.textContent = phase.charAt(0).toUpperCase() + phase.slice(1);
+    loopSetError(LOOP_STATE.last_error || '');
+
+    const primaryLabel = document.getElementById('loopPrimaryLabel');
+    if (primaryLabel) primaryLabel.textContent = loopPrimaryLabel(LOOP_STATE);
+    const flowHint = document.getElementById('loopFlowHint');
+    if (flowHint) flowHint.textContent = loopFlowHint(suggested);
+
+    const primaryBtn = document.getElementById('loopPrimaryBtn');
+    if (primaryBtn) primaryBtn.disabled = LOOP_BUSY || suggested === 'accept';
+
+    document.querySelectorAll('#loopStepper .lstep').forEach(el => {
+        const ep = el.dataset.phase;
+        const ei = LOOP_PHASE_ORDER.indexOf(ep);
+        el.classList.toggle('active', ep === phase);
+        el.classList.toggle('done', ei < phaseIdx);
+    });
+
+    const beforePath = LOOP_STATE.before_path || '';
+    const afterPath = LOOP_STATE.after_path || '';
+    const beforeHidden = document.getElementById('loopBeforePath');
+    const afterEl = document.getElementById('loopAfterPath');
+    const beforeName = document.getElementById('loopBeforeName');
+    const afterName = document.getElementById('loopAfterName');
+    if (beforeHidden) beforeHidden.value = beforePath;
+    if (beforeName) {
+        beforeName.textContent = LOOP_STATE.before_label || loopBasename(beforePath);
+        beforeName.title = beforePath || 'Baseline profile';
+    }
+    if (afterEl && document.activeElement !== afterEl) {
+        if (!afterEl.value || afterEl.value === afterPath) afterEl.value = afterPath;
+        afterEl.title = afterPath ? loopShortPath(afterPath) : 'Full path to candidate .sqlite';
+    }
+    if (afterName) {
+        const displayAfter = (afterEl && afterEl.value.trim()) || afterPath;
+        afterName.textContent = LOOP_STATE.after_label || loopBasename(displayAfter);
+        afterName.title = displayAfter || 'Set candidate path after re-profile';
+    }
+
+    const proposalEl = document.getElementById('loopProposalText');
+    const expectedEl = document.getElementById('loopExpectedImpact');
+    if (proposalEl && !proposalEl.value) {
+        proposalEl.value = LOOP_STATE.proposal || LOOP_DEFAULT_PROPOSAL;
+    }
+    if (expectedEl && !expectedEl.value) {
+        expectedEl.value = LOOP_STATE.expected_impact || LOOP_DEFAULT_EXPECTED_IMPACT;
+    }
+
+    const diff = LOOP_STATE.diff_summary || {};
+    const step = diff.step_time || {};
+    const verdictRaw = LOOP_STATE.verdict || diff.verdict || 'neutral';
+    const verdictLabel = loopFormatVerdict(verdictRaw);
+    const deltaMs = step.delta_ms != null ? step.delta_ms : null;
+    const deltaPct = step.delta_pct;
+    const deltaLabel = loopFormatDelta(deltaMs, deltaPct);
+    const tone = loopTone(verdictRaw);
+    const deltaTone = deltaMs != null ? (deltaMs < 0 ? 'improved' : deltaMs > 0 ? 'regression' : '') : '';
+
+    const heroMetrics = document.getElementById('loopHeroMetrics');
+    if (heroMetrics) heroMetrics.classList.toggle('hidden', deltaMs == null && !LOOP_STATE.diff_summary);
+
+    const heroDelta = document.getElementById('loopHeroDelta');
+    if (heroDelta) {
+        heroDelta.textContent = deltaMs != null ? deltaLabel : 'Run diff to compare';
+        heroDelta.className = `loop-hero-v ${deltaTone}`;
+    }
+    const heroVerdict = document.getElementById('loopHeroVerdict');
+    if (heroVerdict) {
+        heroVerdict.textContent = LOOP_STATE.diff_summary ? verdictLabel : '—';
+        heroVerdict.className = `loop-hero-v ${tone}`;
+    }
+
+    const vEl = document.getElementById('lstVerdict');
+    if (vEl) {
+        vEl.textContent = LOOP_STATE.diff_summary ? verdictLabel : '—';
+        vEl.className = `lstat-v ${tone}`;
+    }
+    const dEl = document.getElementById('lstDelta');
+    if (dEl) {
+        dEl.textContent = deltaMs != null ? deltaLabel : '—';
+        dEl.className = `lstat-v ${deltaTone}`;
+    }
+    const fEl = document.getElementById('lstFindings');
+    if (fEl) fEl.textContent = LOOP_STATE.diagnose_findings_count ? String(LOOP_STATE.diagnose_findings_count) : '—';
+    const decEl = document.getElementById('lstDecision');
+    if (decEl) {
+        decEl.textContent = LOOP_STATE.decision || 'pending';
+        decEl.className = `lstat-v ${loopTone(LOOP_STATE.decision)}`;
+    }
+    const hasDiff = Boolean(LOOP_STATE.diff_summary);
+    const stepTimeAvailable = hasDiff && step.before_ms != null && step.after_ms != null;
+    const confidenceEl = document.getElementById('lstConfidence');
+    if (confidenceEl) {
+        const c = hasDiff ? LOOP_STATE.comparability_confidence : null;
+        confidenceEl.textContent = loopFormatComparability(c, stepTimeAvailable);
+        confidenceEl.className = `lstat-v ${(typeof c === 'number' && c < 0.5) ? 'regression' : ''}`;
+        confidenceEl.title = hasDiff
+            ? 'How comparable the two profiles are (overlap + sanity checks). Below 50% the verdict stays inconclusive.'
+            : '';
+    }
+    const beforeStepEl = document.getElementById('lstBeforeStep');
+    if (beforeStepEl) {
+        beforeStepEl.textContent = stepTimeAvailable ? fmtDurationMs(step.before_ms) : '—';
+        beforeStepEl.title = stepTimeAvailable
+            ? 'Sum of compute + communication + idle on the full profile (before).'
+            : '';
+    }
+    const afterStepEl = document.getElementById('lstAfterStep');
+    if (afterStepEl) {
+        afterStepEl.textContent = stepTimeAvailable ? fmtDurationMs(step.after_ms) : '—';
+        afterStepEl.title = stepTimeAvailable
+            ? 'Sum of compute + communication + idle on the full profile (after).'
+            : '';
+    }
+    const cat = hasDiff && Array.isArray(diff.category_attribution) ? diff.category_attribution : [];
+    const catMap = new Map(cat.map((row) => [row.category, row]));
+    const computeEl = document.getElementById('lstComputeDelta');
+    if (computeEl) {
+        const row = catMap.get('compute');
+        const delta = row?.delta_ms;
+        computeEl.textContent = row ? loopFormatDelta(delta, row.delta_pct) : '—';
+        computeEl.className = `lstat-v ${delta == null ? '' : (delta < 0 ? 'improved' : delta > 0 ? 'regression' : '')}`;
+        computeEl.title = row ? 'Compute-only + compute∥comm overlap (HTA convention).' : '';
+    }
+    const commEl = document.getElementById('lstCommDelta');
+    if (commEl) {
+        const row = catMap.get('communication');
+        const delta = row?.delta_ms;
+        commEl.textContent = row ? loopFormatDelta(delta, row.delta_pct) : '—';
+        commEl.className = `lstat-v ${delta == null ? '' : (delta < 0 ? 'improved' : delta > 0 ? 'regression' : '')}`;
+        commEl.title = row ? 'Exposed NCCL time (not hidden under compute overlap).' : '';
+    }
+    const idleEl = document.getElementById('lstIdleDelta');
+    if (idleEl) {
+        const row = catMap.get('idle');
+        const delta = row?.delta_ms;
+        idleEl.textContent = row ? loopFormatDelta(delta, row.delta_pct) : '—';
+        idleEl.className = `lstat-v ${delta == null ? '' : (delta < 0 ? 'improved' : delta > 0 ? 'regression' : '')}`;
+        idleEl.title = row ? 'GPU idle gaps between kernels.' : '';
+    }
+
+    const decideSection = document.getElementById('loopDecideSection');
+    if (decideSection) decideSection.classList.toggle('locked', !LOOP_STATE.diff_summary);
+
+    const statusPanel = document.getElementById('loopStatusPanel');
+    if (statusPanel) {
+        statusPanel.classList.toggle('hidden', !LOOP_STATE.diff_summary);
+    }
+
+    loopSetStepUi(suggested);
+}
+
+function toggleLoop() {
+    const sidebar = document.getElementById('loopSidebar');
+    const btn = document.getElementById('loopBtn');
+    if (!sidebar) return;
+    sidebar.classList.toggle('open');
+    if (btn) btn.classList.toggle('active', sidebar.classList.contains('open'));
+    setTimeout(resize, 0);
+    if (sidebar.classList.contains('open')) {
+        loopFetchState().catch(err => console.error('loop state fetch failed', err));
+    }
+}
+
+async function loopRunPrimary() {
+    const next = loopSuggestedPhase(LOOP_STATE);
+    if (next === 'diagnose') return loopRunDiagnose();
+    if (next === 'propose') return loopSaveProposal();
+    if (next === 'reprofile') return loopSetReprofile();
+    if (next === 'diff') return loopRunDiff();
+}
+
+async function loopRunDiagnose() {
+    try {
+        loopSetError('');
+        loopSetBusy(true);
+        const data = await loopPost('/api/loop/diagnose', loopTrimPayload());
+        if (Array.isArray(data.findings)) {
+            FINDINGS.length = 0;
+            FINDINGS.push(...data.findings);
+            selectedFindingIdx = -1;
+            _initFindingsSidebar();
+            const fs = document.getElementById('findingsSidebar');
+            const fbtn = document.getElementById('findingsBtn');
+            if (FINDINGS.length > 0) {
+                if (fs && !fs.classList.contains('open')) fs.classList.add('open');
+                if (fbtn) { fbtn.style.display = ''; fbtn.classList.add('active'); }
+                selectFinding(0);
+                setTimeout(resize, 0);
+            }
+            showToast(`Diagnose: ${FINDINGS.length} finding(s)`);
+        }
+    } catch (err) { showToast(loopErrorMessage('Diagnose failed', err)); }
+    finally { loopSetBusy(false); }
+}
+
+async function loopSaveProposal() {
+    const proposal = (document.getElementById('loopProposalText')?.value || '').trim();
+    const expected_impact = (document.getElementById('loopExpectedImpact')?.value || '').trim();
+    if (!proposal) {
+        loopSetError('Enter what you plan to change before saving the proposal.');
+        return;
+    }
+    try {
+        loopSetError('');
+        loopSetBusy(true);
+        await loopPost('/api/loop/proposal', { proposal, expected_impact });
+        showToast('Proposal saved');
+    } catch (err) { showToast(loopErrorMessage('Proposal failed', err)); }
+    finally { loopSetBusy(false); }
+}
+
+async function loopSetReprofile() {
+    const after_path = (document.getElementById('loopAfterPath')?.value || '').trim();
+    if (!after_path) {
+        loopSetError('Enter the path to the candidate profile (.sqlite) after your change.');
+        return;
+    }
+    try {
+        loopSetError('');
+        loopSetBusy(true);
+        await loopPost('/api/loop/reprofile', { after_path });
+        showToast('Candidate profile registered');
+    } catch (err) { showToast(loopErrorMessage('Candidate profile failed', err)); }
+    finally { loopSetBusy(false); }
+}
+
+async function loopRunDiff() {
+    const after_path = (document.getElementById('loopAfterPath')?.value || LOOP_STATE?.after_path || '').trim();
+    if (!after_path) {
+        loopSetError('Register a candidate profile path before running diff.');
+        return;
+    }
+    try {
+        loopSetError('');
+        loopSetBusy(true);
+        if (after_path !== (LOOP_STATE?.after_path || '').trim()) {
+            await loopPost('/api/loop/reprofile', { after_path });
+        }
+        const data = await loopPost('/api/loop/diff', loopDiffPayload());
+        loopRevealDiffStats(true);
+        if (data.diff && data.diff.verdict) {
+            showToast(`${loopFormatVerdict(data.diff.verdict)} — ${loopFormatDelta(
+                data.diff.step_time?.delta_ms,
+                data.diff.step_time?.delta_pct
+            )}`);
+        }
+    } catch (err) { showToast(loopErrorMessage('Diff failed', err)); }
+    finally { loopSetBusy(false); }
+}
+
+async function loopSetDecision(decision) {
+    if (!LOOP_STATE?.diff_summary) {
+        loopSetError('Run diff before accepting or rejecting.');
+        return;
+    }
+    try {
+        loopSetError('');
+        loopSetBusy(true);
+        await loopPost('/api/loop/decision', { decision, reason: '' });
+        showToast(decision === 'accept' ? 'Change accepted' : 'Change rejected');
+    } catch (err) { showToast(loopErrorMessage('Decision failed', err)); }
+    finally { loopSetBusy(false); }
+}
+
 function addFinding(findingDict) {
     FINDINGS.push(findingDict);
     selectedFindingIdx = -1;
@@ -3237,4 +3754,13 @@ _initFindingsSidebar();
 // Auto-open findings sidebar if findings exist
 if (FINDINGS.length > 0) {
     setTimeout(() => toggleFindings(), 300);
+}
+
+// Initialize loop state; auto-open panel when launched via `nsys-ai loop`.
+loopFetchState().catch(() => {});
+if (BOOT.LOOP_MODE) {
+    setTimeout(() => {
+        const sidebar = document.getElementById('loopSidebar');
+        if (sidebar && !sidebar.classList.contains('open')) toggleLoop();
+    }, 450);
 }

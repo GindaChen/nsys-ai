@@ -31,6 +31,7 @@ from .handlers import (
     _cmd_open,
     _cmd_overlap,
     _cmd_perfetto,
+    _cmd_loop,
     _cmd_report,
     _cmd_root_cause,
     _cmd_search,
@@ -225,8 +226,8 @@ def _build_parser():
     sub = parser.add_subparsers(
         dest="command",
         metavar=(
-            "{open,web,timeline-web,chat,ask,agent-guide,"
-            "info,skill,evidence,report,diff,diff-web,export,help}"
+            "{open,web,timeline-web,loop,chat,ask,agent-guide,"
+            "report,diff,diff-web,export,cutracer,info,skill,evidence,root-cause,help}"
         ),
     )
 
@@ -272,7 +273,45 @@ def _build_parser():
     p.add_argument(
         "--auto-analyze", action="store_true", help="Run AI analysis on startup and show findings"
     )
+    p.add_argument("--loop-before", default=None, help="Loop mode before profile path")
+    p.add_argument("--loop-after", default=None, help="Loop mode after profile path")
+    p.add_argument(
+        "--h100-preset",
+        action="store_true",
+        help="Auto-fill H100 replay before/after paths when available",
+    )
     p.set_defaults(handler=_cmd_timeline_web)
+
+    p = sub.add_parser("loop", help="Guided diagnose->propose->reprofile->diff->accept workflow")
+    p.add_argument(
+        "before",
+        nargs="?",
+        help="Path to baseline profile (.sqlite or .nsys-rep); optional with --h100-preset",
+    )
+    p.add_argument("--after", default=None, help="Path to candidate profile (.sqlite or .nsys-rep)")
+    p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: first GPU)")
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        required=False,
+        metavar=("START_S", "END_S"),
+        help="Time window in seconds",
+    )
+    p.add_argument(
+        "--surface",
+        choices=["timeline-web", "timeline", "tree"],
+        default="timeline-web",
+        help="Workflow surface (default: timeline-web)",
+    )
+    p.add_argument("--port", type=int, default=8144, help="HTTP port for timeline-web")
+    p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser (timeline-web)")
+    p.add_argument(
+        "--h100-preset",
+        action="store_true",
+        help="Auto-fill H100 replay before/after paths when available",
+    )
+    p.set_defaults(handler=_cmd_loop)
 
     p = sub.add_parser("chat", help="AI chat TUI")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")

@@ -29,6 +29,7 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input
 
 from .. import tui_actions
+from ..loop_state import DiffLoopState
 from ..tui_models import TreeNode
 from .chat import ChatPanel
 from .logic import (
@@ -83,6 +84,11 @@ class NsysTreeApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("A", "toggle_chat", "AI Chat", priority=True),
+        Binding("f5", "loop_diagnose", "Loop diagnose", show=False),
+        Binding("f6", "loop_propose", "Loop propose", show=False),
+        Binding("f7", "loop_reprofile", "Loop reprofile", show=False),
+        Binding("f8", "loop_diff", "Loop diff", show=False),
+        Binding("f9", "loop_accept", "Loop accept", show=False),
         Binding("v", "toggle_view", "View mode"),
         Binding("e", "expand_node", "Expand"),
         Binding("c", "collapse_node", "Collapse"),
@@ -122,6 +128,7 @@ class NsysTreeApp(App):
     show_bubbles: reactive[bool] = reactive(False, layout=False)
     bubble_threshold_us: reactive[float] = reactive(10, layout=False)
     live_filter: reactive[bool] = reactive(False, layout=False)
+    analysis_phase: reactive[str] = reactive("diagnose", layout=False)
 
     # -------------------------------------------------------------------------
     # Constructor
@@ -134,11 +141,14 @@ class NsysTreeApp(App):
         max_depth: int = -1,
         min_ms: float = 0,
         json_roots: list[dict] | None = None,
+        loop_after: str | None = None,
     ) -> None:
         super().__init__()
         self._db_path = db_path
         self._device = device
         self._trim = trim or (0, 0)
+        self._loop_state = DiffLoopState(before_path=db_path, after_path=loop_after or "")
+        self.analysis_phase = self._loop_state.phase
         self.max_depth = max_depth
         self.min_dur_us = min_ms * 1000  # convert ms → µs
 
@@ -309,7 +319,7 @@ class NsysTreeApp(App):
         self.title = (
             f"nsys-ai  GPU {self._device}  {trim_s}  |  "
             f"{self._total_nvtx} NVTX  {self._total_kernels} kernels  "
-            f"[{self.view_mode.upper()}]"
+            f"[{self.view_mode.upper()}]  [LOOP:{self.analysis_phase.upper()}]"
         )
 
     def _update_detail_bar(self) -> None:
@@ -664,6 +674,44 @@ class NsysTreeApp(App):
         self._update_title()
         self.notify(f"AI zoom → {start_s:.2f}s–{end_s:.2f}s", timeout=3)
 
+    def set_analysis_phase(self, phase: str) -> None:
+        self._loop_state.set_phase(phase)
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+
+    def action_loop_diagnose(self) -> None:
+        self.set_analysis_phase("diagnose")
+        self.notify("Loop: diagnose", timeout=2)
+
+    def action_loop_propose(self) -> None:
+        self.set_analysis_phase("propose")
+        self.notify("Loop: propose", timeout=2)
+
+    def action_loop_reprofile(self) -> None:
+        self.set_analysis_phase("reprofile")
+        self.notify("Loop: re-profile", timeout=2)
+
+    def action_loop_diff(self) -> None:
+        try:
+            trim = None if self._trim == (0, 0) else self._trim
+            self._loop_state.run_diff(gpu=self._device, trim=trim)
+            self.analysis_phase = self._loop_state.phase
+            self._update_title()
+            self.notify(f"Loop diff verdict: {self._loop_state.verdict}", timeout=3)
+        except Exception as e:
+            self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
+
+    def action_loop_accept(self) -> None:
+        self._loop_state.set_decision("accept", reason="accepted in tree TUI")
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+        self.notify("Loop decision: accept", timeout=2)
+
+    def set_loop_decision(self, decision: str, reason: str = "") -> None:
+        self._loop_state.set_decision(decision, reason=reason)
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+
 
 # ---------------------------------------------------------------------------
 # Entry point (replaces tui.run_tui)
@@ -676,7 +724,10 @@ def run_tui(
     trim: tuple[int, int] | None,
     max_depth: int = -1,
     min_ms: float = 0,
+    loop_after: str | None = None,
 ) -> None:
     """Launch the Textual NVTX tree browser."""
-    app = NsysTreeApp(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
+    app = NsysTreeApp(
+        db_path, device, trim, max_depth=max_depth, min_ms=min_ms, loop_after=loop_after
+    )
     app.run()

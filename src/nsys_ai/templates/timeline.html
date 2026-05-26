@@ -9,39 +9,61 @@
 </head>
 
 <body>
-    <header>
-        <h1>⏱ Timeline</h1>
-        <span class="sub">$GPU_LABEL &nbsp;|&nbsp; $TRIM_LABEL</span>
-        <span class="stats" id="stats"></span>
-        <button onclick="toggleGpuInfo()"
-            style="background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:8px"
-            id="gpuInfoBtn">🖥 GPU Info</button>
-    </header>
-    <div id="gpuInfoPanel"
-        style="display:none;position:absolute;top:36px;right:10px;z-index:100;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;max-width:400px;font-size:11px;color:#8b949e;font-family:monospace">
-        <div id="gpuInfoContent"></div>
-    </div>
-    <div class="toolbar" id="toolbar">
-        <button onclick="zoomIn()" title="+">＋ Zoom</button>
-        <button onclick="zoomOut()" title="-">－ Zoom</button>
-        <button onclick="fitAll()" title="Home">⌂ Fit</button>
-        <div class="sep"></div>
-        <button onclick="toggleNVTX()" id="nvtxBtn" class="active">NVTX</button>
-        <select id="nvtxThreadSel" onchange="onNvtxThreadChange()" style="width:180px" title="NVTX thread filter">
-            <option value="auto">NVTX: Auto thread</option>
-        </select>
-        <span class="nvtx-loading" id="nvtxLoading"><span class="dot"></span><span id="nvtxLoadingText">NVTX loading…</span></span>
-        <button onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
-        <button onclick="toggleSettingsMenu()" id="settingsBtn">⚙ Settings</button>
-        <div class="sep"></div>
-        <input type="text" id="searchInput" placeholder="/ to search kernels + NVTX (/regex/flags)..." oninput="onSearch()">
-        <span class="hint" id="searchHint"></span>
-        <div class="sep"></div>
-        <button onclick="runAnalyze()" id="analyzeBtn" title="Run AI analysis on this profile">🔍 Analyze</button>
-        <button onclick="toggleChat()" id="chatBtn">💬 AI Chat</button>
-        <button onclick="toggleFindings()" id="findingsBtn" style="display:none">📋 Evidence</button>
-        <div class="sep"></div>
-        <button onclick="toggleHelp()">? Help</button>
+    <div class="app-chrome">
+        <div class="chrome-bar">
+            <div class="chrome-brand">
+                <span class="chrome-title">Timeline</span>
+                <span class="chrome-meta">$GPU_LABEL$TRIM_META</span>
+            </div>
+            <div class="chrome-stats" id="stats"></div>
+        </div>
+        <div id="gpuInfoPanel" class="gpu-info-panel">
+            <div id="gpuInfoContent"></div>
+        </div>
+        <nav class="toolbar" id="toolbar" aria-label="Timeline controls">
+            <div class="tool-group">
+                <span class="tool-group-label">View</span>
+                <div class="tool-group-body">
+                    <button type="button" class="tool-btn" onclick="zoomIn()" title="Zoom in (+)">Zoom in</button>
+                    <button type="button" class="tool-btn" onclick="zoomOut()" title="Zoom out (−)">Zoom out</button>
+                    <button type="button" class="tool-btn" onclick="fitAll()" title="Fit full range">Fit</button>
+                </div>
+            </div>
+            <div class="tool-group tool-group-nvtx">
+                <span class="tool-group-label">NVTX</span>
+                <div class="tool-group-body">
+                    <button type="button" class="tool-btn tool-btn-toggle active" onclick="toggleNVTX()" id="nvtxBtn" title="Show NVTX lanes (N)">Lanes</button>
+                    <select id="nvtxThreadSel" class="tool-select" onchange="onNvtxThreadChange()" title="NVTX thread">
+                        <option value="auto">Auto thread</option>
+                    </select>
+                    <span class="nvtx-loading" id="nvtxLoading" aria-live="polite"><span class="dot"></span><span id="nvtxLoadingText">Loading</span></span>
+                </div>
+            </div>
+            <div class="tool-group">
+                <span class="tool-group-label">Filters</span>
+                <div class="tool-group-body">
+                    <button type="button" class="tool-btn" onclick="toggleStreamFilter()" id="streamFilterBtn">Streams</button>
+                    <button type="button" class="tool-btn" onclick="toggleSettingsMenu()" id="settingsBtn">Render</button>
+                </div>
+            </div>
+            <div class="tool-group tool-group-search">
+                <span class="tool-group-label">Search</span>
+                <div class="tool-group-body tool-search-wrap">
+                    <input type="text" id="searchInput" class="tool-search" placeholder="Kernels & NVTX — prefix / for regex" oninput="onSearch()" autocomplete="off" spellcheck="false">
+                    <span class="hint" id="searchHint"></span>
+                </div>
+            </div>
+            <div class="tool-group tool-group-actions">
+                <span class="tool-group-label">Actions</span>
+                <div class="tool-group-body">
+                    <button type="button" class="tool-btn" onclick="runAnalyze()" id="analyzeBtn">Analyze</button>
+                    <button type="button" class="tool-btn tool-btn-accent" onclick="toggleLoop()" id="loopBtn" title="Guided workflow (W)">Loop</button>
+                    <button type="button" class="tool-btn" onclick="toggleChat()" id="chatBtn">Chat</button>
+                    <button type="button" class="tool-btn" onclick="toggleFindings()" id="findingsBtn" style="display:none">Evidence</button>
+                    <button type="button" class="tool-btn tool-btn-ghost" onclick="toggleHelp()" title="Keyboard shortcuts">?</button>
+                </div>
+            </div>
+        </nav>
     </div>
     <div id="appLayout">
         <div id="mainCol">
@@ -85,6 +107,83 @@
                 <button onclick="toggleFindings()" title="Close">✕</button>
             </div>
             <div id="findingsList"></div>
+        </div>
+        <div id="loopSidebar" data-loop-ui="2">
+            <div id="loopHeader">
+                <span id="loopPhaseBadge">Diagnose</span>
+                <button type="button" class="loop-close" onclick="toggleLoop()" title="Close (W)">✕</button>
+            </div>
+            <div id="loopStepper" aria-label="Workflow progress">
+                <div class="lstep" data-phase="diagnose" title="Find issues in the baseline profile">
+                    <div class="lstep-dot">1</div><div class="lstep-label">Diagnose</div>
+                </div>
+                <div class="lstep-line"></div>
+                <div class="lstep" data-phase="propose" title="Describe the optimization you will try">
+                    <div class="lstep-dot">2</div><div class="lstep-label">Propose</div>
+                </div>
+                <div class="lstep-line"></div>
+                <div class="lstep" data-phase="reprofile" title="Point at the new capture after the change">
+                    <div class="lstep-dot">3</div><div class="lstep-label">Candidate</div>
+                </div>
+                <div class="lstep-line"></div>
+                <div class="lstep" data-phase="diff" title="Compare baseline vs candidate">
+                    <div class="lstep-dot">4</div><div class="lstep-label">Diff</div>
+                </div>
+                <div class="lstep-line"></div>
+                <div class="lstep" data-phase="accept" title="Accept or reject the change">
+                    <div class="lstep-dot">5</div><div class="lstep-label">Decide</div>
+                </div>
+            </div>
+            <div id="loopFlowHint" class="loop-flow-hint">Step 1 of 5: Run diagnose on baseline.</div>
+            <div id="loopBody">
+                <div id="loopError" role="alert"></div>
+                <section class="loop-section loop-card" id="loopSectionProfiles">
+                    <div class="loop-section-title">Profiles</div>
+                    <div class="lprofile-card">
+                        <div class="lprofile-head"><span>Baseline</span></div>
+                        <div class="lprofile-name" id="loopBeforeName">—</div>
+                        <input id="loopBeforePath" type="hidden" />
+                    </div>
+                    <div class="lprofile-card">
+                        <div class="lprofile-head"><span>Candidate</span></div>
+                        <div class="lprofile-name" id="loopAfterName">—</div>
+                        <input id="loopAfterPath" type="text" class="lprofile-path" placeholder="Path to .sqlite after re-profile" title="Full path to candidate profile" />
+                    </div>
+                </section>
+                <section class="loop-section loop-card" id="loopSectionProposal">
+                    <div class="loop-section-title">Change under test</div>
+                    <textarea id="loopProposalText" rows="2" placeholder="e.g. Switch Flash Attention 2 → FA3 on H100"></textarea>
+                    <input id="loopExpectedImpact" type="text" placeholder="Expected impact (e.g. lower step time)" />
+                </section>
+                <button type="button" id="loopPrimaryBtn" class="loop-primary" onclick="loopRunPrimary()">
+                    <span id="loopPrimaryLabel">1. Run diagnose on baseline</span>
+                </button>
+                <section class="loop-status-panel hidden" id="loopStatusPanel" aria-live="polite">
+                    <div class="loop-section-title">All steps &amp; status</div>
+                    <div id="loopStatusGrid">
+                        <div class="lstat"><span class="lstat-k">Findings</span><span class="lstat-v" id="lstFindings">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Decision</span><span class="lstat-v" id="lstDecision">pending</span></div>
+                        <div class="lstat"><span class="lstat-k">Verdict</span><span class="lstat-v" id="lstVerdict">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Step Δ</span><span class="lstat-v" id="lstDelta">—</span></div>
+                    </div>
+                    <div class="loop-section-title">Diff statistics</div>
+                    <div id="loopDiffStats">
+                        <div class="lstat"><span class="lstat-k">Comparability</span><span class="lstat-v" id="lstConfidence">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Before step</span><span class="lstat-v" id="lstBeforeStep">—</span></div>
+                        <div class="lstat"><span class="lstat-k">After step</span><span class="lstat-v" id="lstAfterStep">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Compute Δ</span><span class="lstat-v" id="lstComputeDelta">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Comm Δ</span><span class="lstat-v" id="lstCommDelta">—</span></div>
+                        <div class="lstat"><span class="lstat-k">Idle Δ</span><span class="lstat-v" id="lstIdleDelta">—</span></div>
+                    </div>
+                </section>
+                <section class="loop-section loop-card loop-decide" id="loopDecideSection">
+                    <div class="loop-section-title">Final decision</div>
+                    <div class="ldecide-row">
+                        <button type="button" class="laction laccept" id="loopBtnAccept" onclick="loopSetDecision('accept')">Accept change</button>
+                        <button type="button" class="laction lreject" id="loopBtnReject" onclick="loopSetDecision('reject')">Reject</button>
+                    </div>
+                </section>
+            </div>
         </div>
     </div>
     <div class="tooltip" id="tooltip" style="display:none"></div>
@@ -208,6 +307,10 @@
                 <td>Toggle AI chat sidebar</td>
             </tr>
             <tr>
+                <td><span class="key">W</span></td>
+                <td>Toggle guided loop sidebar</td>
+            </tr>
+            <tr>
                 <td><span class="key">E</span></td>
                 <td>Toggle evidence sidebar</td>
             </tr>
@@ -246,6 +349,8 @@
             TILE_WINDOW_S: 5,
             FINDINGS: $FINDINGS_JSON,
             PROFILE_PATH: $PROFILE_PATH,
+            LOOP_TRIM_NS: $LOOP_TRIM_NS,
+            LOOP_MODE: '$LOOP_MODE' === '1',
         };
     </script>
     <script src="$TIMELINE_JS_SRC"></script>

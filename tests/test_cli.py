@@ -36,6 +36,7 @@ def test_subcommands():
         "report",
         "diff",
         "diff-web",
+        "loop",
         "export",
         "agent-guide",
         "info",
@@ -46,13 +47,14 @@ def test_subcommands():
         assert cmd in result.stdout, f"Missing subcommand: {cmd}"
 
     # Legacy command names should be hidden from top-level help.
-    usage_line = result.stdout.splitlines()[0]
+    usage_text = result.stdout.split("positional arguments:", 1)[0]
+    assert "loop" in usage_text
     for hidden in ["summary", "overlap", "analyze"]:
-        assert hidden not in usage_line
+        assert hidden not in usage_text
 
     # 'agent-guide' is public, but 'agent' should be hidden
-    assert ",agent," not in usage_line
-    assert ",agent}" not in usage_line
+    assert ",agent," not in usage_text
+    assert ",agent}" not in usage_text
 
 
 def test_chat_subcommand_help():
@@ -82,6 +84,31 @@ def test_diff_subcommand_help():
     assert result.returncode == 0
     assert "before" in result.stdout
     assert "after" in result.stdout
+
+
+def test_loop_subcommand_help():
+    """loop subcommand should expose before/after workflow inputs."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "loop", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "before" in result.stdout
+    assert "--after" in result.stdout
+    assert "--surface" in result.stdout
+    assert "--h100-preset" in result.stdout
+
+
+def test_loop_missing_profile_has_friendly_error(tmp_path):
+    """loop should not dump a sqlite traceback for placeholder/missing paths."""
+    missing = tmp_path / "missing.sqlite"
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "loop", str(missing), "--no-browser"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "before profile not found" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_cutracer_subcommand_help():

@@ -921,7 +921,90 @@ def _cmd_timeline_web(args, _profile):
             open_browser=not args.no_browser,
             findings_path=getattr(args, "findings", None),
             auto_findings=auto_findings,
+            loop_before=getattr(args, "loop_before", None),
+            loop_after=getattr(args, "loop_after", None),
+            loop_h100_preset=getattr(args, "h100_preset", False),
         )
+
+
+def _cmd_loop(args, _profile):
+    """Run guided loop mode on web or TUI surfaces."""
+    from pathlib import Path
+
+    trim = _parse_trim(args)
+    before_path = getattr(args, "before", None)
+    after_path = getattr(args, "after", None)
+    if getattr(args, "h100_preset", False):
+        from nsys_ai.loop_state import detect_h100_replay_preset
+
+        preset = detect_h100_replay_preset()
+        if preset:
+            before_path = before_path or preset.get("before_path")
+            after_path = after_path or preset.get("after_path")
+        elif not before_path:
+            from nsys_ai.loop_state import h100_preset_download_hint
+
+            print(
+                "Error: --h100-preset was requested, but the H100 replay profiles were not found locally.",
+                file=sys.stderr,
+            )
+            print(h100_preset_download_hint(), file=sys.stderr)
+            sys.exit(1)
+    if not before_path:
+        print("Error: loop requires a before profile, or use --h100-preset.", file=sys.stderr)
+        sys.exit(1)
+    before_path = str(Path(before_path).expanduser())
+    if not Path(before_path).exists():
+        print(f"Error: before profile not found: {before_path}", file=sys.stderr)
+        print(
+            "Pass a real .sqlite/.nsys-rep path. Example: nsys-ai loop data/before.sqlite --after data/after.sqlite",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if after_path:
+        after_path = str(Path(after_path).expanduser())
+        if not Path(after_path).exists():
+            print(f"Error: after profile not found: {after_path}", file=sys.stderr)
+            print("Omit --after to enter the candidate path later in the web UI.", file=sys.stderr)
+            sys.exit(1)
+
+    if args.surface == "timeline-web":
+        from nsys_ai.web import serve_timeline
+
+        try:
+            prof_ctx = _profile.open(before_path)
+        except Exception as exc:
+            print(f"Error: could not open before profile: {before_path}", file=sys.stderr)
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        with prof_ctx as prof:
+            if args.gpu is not None:
+                devices = args.gpu
+            else:
+                devices = prof.meta.devices if prof.meta.devices else [0]
+            serve_timeline(
+                prof,
+                devices,
+                trim,
+                port=args.port,
+                open_browser=not args.no_browser,
+                loop_before=before_path,
+                loop_after=after_path,
+                loop_h100_preset=bool(getattr(args, "h100_preset", False)),
+            )
+        return
+
+    if args.surface == "timeline":
+        from nsys_ai.timeline import run_timeline
+
+        gpu = args.gpu if args.gpu is not None else 0
+        run_timeline(before_path, gpu, trim, min_ms=0, loop_after=after_path)
+        return
+
+    from nsys_ai.tree import run_tui
+
+    gpu = args.gpu if args.gpu is not None else 0
+    run_tui(before_path, gpu, trim, max_depth=-1, min_ms=0, loop_after=after_path)
 
 
 def _cmd_tui(args, _profile):

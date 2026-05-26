@@ -57,6 +57,7 @@ from textual.widgets import Footer, Header, Input
 from .. import tui_actions
 from ..formatting import fmt_dur as _fmt_dur
 from ..formatting import fmt_ns as _fmt_ns
+from ..loop_state import DiffLoopState
 from ..tree.chat import ChatPanel
 from ..tui_models import KernelEvent
 from .canvas import TimelineCanvas
@@ -94,6 +95,11 @@ class NsysTimelineApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("A", "toggle_chat", "AI Chat", priority=True),
+        Binding("f5", "loop_diagnose", "Loop diagnose", show=False),
+        Binding("f6", "loop_propose", "Loop propose", show=False),
+        Binding("f7", "loop_reprofile", "Loop reprofile", show=False),
+        Binding("f8", "loop_diff", "Loop diff", show=False),
+        Binding("f9", "loop_accept", "Loop accept", show=False),
         Binding("left", "pan_left", "←", show=False),
         Binding("right", "pan_right", "→", show=False),
         Binding("shift+left", "page_left", "⇐", show=False),
@@ -144,6 +150,7 @@ class NsysTimelineApp(App):
     ns_per_col: reactive[int] = reactive(1_000_000)
     filter_text: reactive[str] = reactive("")
     min_dur_us: reactive[float] = reactive(0)
+    analysis_phase: reactive[str] = reactive("diagnose")
 
     # -------------------------------------------------------------------------
     # Constructor
@@ -155,6 +162,7 @@ class NsysTimelineApp(App):
         trim: tuple[int, int] | None = None,
         min_ms: float = 0,
         json_roots: list[dict] | None = None,
+        loop_after: str | None = None,
     ) -> None:
         super().__init__()
         self._db_path = db_path
@@ -165,6 +173,8 @@ class NsysTimelineApp(App):
             self._devices = list(device)
         self._device = self._devices[0]  # backward compat for ChatPanel etc.
         self._trim = trim or (0, 0)
+        self._loop_state = DiffLoopState(before_path=db_path, after_path=loop_after or "")
+        self.analysis_phase = self._loop_state.phase
 
         # ALL plain attributes MUST be initialized before any reactive is set.
 
@@ -411,6 +421,7 @@ class NsysTimelineApp(App):
             f"nsys-ai Timeline  GPU {gpu_str}  {trim_s}  "
             f"{kernel_count} kernels  @ {_fmt_ns(self.cursor_ns)}{k_info}  "
             f"[{mode}]{bm_indicator}{filter_indicator}{min_dur_indicator}"
+            f"  [LOOP:{self.analysis_phase.upper()}]"
         )
 
     def _update_bottom_panel(self) -> None:
@@ -797,6 +808,44 @@ class NsysTimelineApp(App):
         self.cursor_ns = start_ns
         self.notify(f"AI zoom → {start_s:.2f}s–{end_s:.2f}s", timeout=3)
 
+    def set_analysis_phase(self, phase: str) -> None:
+        self._loop_state.set_phase(phase)
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+
+    def action_loop_diagnose(self) -> None:
+        self.set_analysis_phase("diagnose")
+        self.notify("Loop: diagnose", timeout=2)
+
+    def action_loop_propose(self) -> None:
+        self.set_analysis_phase("propose")
+        self.notify("Loop: propose", timeout=2)
+
+    def action_loop_reprofile(self) -> None:
+        self.set_analysis_phase("reprofile")
+        self.notify("Loop: re-profile", timeout=2)
+
+    def action_loop_diff(self) -> None:
+        try:
+            trim = None if self._trim == (0, 0) else self._trim
+            self._loop_state.run_diff(gpu=self._device, trim=trim)
+            self.analysis_phase = self._loop_state.phase
+            self._update_title()
+            self.notify(f"Loop diff verdict: {self._loop_state.verdict}", timeout=3)
+        except Exception as e:
+            self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
+
+    def action_loop_accept(self) -> None:
+        self._loop_state.set_decision("accept", reason="accepted in timeline TUI")
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+        self.notify("Loop decision: accept", timeout=2)
+
+    def set_loop_decision(self, decision: str, reason: str = "") -> None:
+        self._loop_state.set_decision(decision, reason=reason)
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+
 
 # ---------------------------------------------------------------------------
 # Entry point (replaces tui_timeline.run_timeline)
@@ -808,7 +857,8 @@ def run_timeline(
     device: int,
     trim: tuple[int, int] | None,
     min_ms: float = 0,
+    loop_after: str | None = None,
 ) -> None:
     """Launch the Textual horizontal timeline browser."""
-    app = NsysTimelineApp(db_path, device, trim, min_ms=min_ms)
+    app = NsysTimelineApp(db_path, device, trim, min_ms=min_ms, loop_after=loop_after)
     app.run()

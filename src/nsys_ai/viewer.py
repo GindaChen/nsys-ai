@@ -289,6 +289,7 @@ def generate_timeline_html(
     timeline_js_src: str = "/assets/timeline.js",
     api_prefix: str = "",
     profile_path: str = "",
+    loop_mode: bool = False,
 ) -> str:
     """Generate a standalone HTML page with the horizontal timeline viewer.
 
@@ -317,20 +318,23 @@ def generate_timeline_html(
     gpu_label = f"{len(devices)}× {gpu_type}" if len(devices) > 1 else gpu_type
     gpu_label_json = json.dumps(gpu_label)
 
+    loop_trim_ns_json = "null"
+    trim_meta = ""
     if trim is not None:
         # Full data baked into HTML (kernel-first payload).
         gpu_entries = build_timeline_gpu_data(prof, devices, trim)
         data_json = json.dumps({"gpus": gpu_entries})
-        trim_label = f"{trim[0] / 1e9:.1f}s - {trim[1] / 1e9:.1f}s"
+        trim_window = f"{trim[0] / 1e9:.1f}s – {trim[1] / 1e9:.1f}s"
+        trim_meta = f" · {html.escape(trim_window)}"
+        loop_trim_ns_json = json.dumps([int(trim[0]), int(trim[1])])
         progressive = ""
     else:
         # Progressive mode: no data baked in
         data_json = "null"
-        trim_label = "Progressive"
         progressive = "1"
 
     safe_gpu_label = html.escape(gpu_label)
-    safe_trim_label = html.escape(trim_label)
+    safe_trim_meta = trim_meta  # already escaped when built
 
     safe_data_json = _escape_json_for_html_script(data_json)
     safe_gpu_info_json = _escape_json_for_html_script(gpu_info_json)
@@ -339,6 +343,7 @@ def generate_timeline_html(
     safe_profile_path_json = _escape_json_for_html_script(
         json.dumps(profile_path) if profile_path is not None else "null"
     )
+    safe_loop_trim_ns_json = _escape_json_for_html_script(loop_trim_ns_json)
 
     tmpl = _load_template("timeline.html")
     return tmpl.safe_substitute(
@@ -346,13 +351,15 @@ def generate_timeline_html(
         GPU_LABEL=safe_gpu_label,
         GPU_LABEL_JSON=safe_gpu_label_json,
         GPU_INFO_JSON=safe_gpu_info_json,
-        TRIM_LABEL=safe_trim_label,
+        TRIM_META=safe_trim_meta,
         PROGRESSIVE=progressive,
         TIMELINE_CSS_HREF=timeline_css_href,
         TIMELINE_JS_SRC=timeline_js_src,
         API_PREFIX=api_prefix,
         FINDINGS_JSON=safe_findings_json,
         PROFILE_PATH=safe_profile_path_json,
+        LOOP_TRIM_NS=safe_loop_trim_ns_json,
+        LOOP_MODE="1" if loop_mode else "0",
     )
 
 

@@ -120,13 +120,17 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert 'href="/assets/timeline.css"' in html
     assert 'src="/assets/timeline.js"' in html
     assert "window.__TIMELINE_BOOTSTRAP__" in html
+    assert 'id="loopBtn"' in html
+    assert 'id="loopSidebar"' in html
+    assert "LOOP_TRIM_NS" in html
 
 
 def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     with Profile(minimal_nsys_db_path) as prof:
         html = generate_timeline_html(prof, [0], None)
     assert 'id="searchInput"' in html
-    assert "search kernels + NVTX" in html
+    assert "searchInput" in html
+    assert "Kernels" in html and "NVTX" in html
     assert 'id="commandPalette"' in html
     assert 'id="commandInput"' in html
     assert 'id="settingsBtn"' in html

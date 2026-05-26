@@ -43,4 +43,21 @@ def execute_tui_action(action_dict: dict, app: Any) -> bool:
             handler(float(start_s), float(end_s))
             return True
         return False
+    if action_type == "set_phase":
+        phase = action_dict.get("phase")
+        if not phase:
+            return False
+        handler = getattr(app, "set_analysis_phase", None)
+        if callable(handler):
+            handler(str(phase))
+            return True
+        return False
+    if action_type == "set_decision":
+        decision = action_dict.get("decision")
+        reason = action_dict.get("reason", "")
+        handler = getattr(app, "set_loop_decision", None)
+        if callable(handler):
+            handler(str(decision), str(reason))
+            return True
+        return False
     return False
