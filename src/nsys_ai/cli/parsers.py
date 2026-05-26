@@ -538,7 +538,8 @@ def _build_parser():
         default=None,
         metavar="MB",
         help="Stop tracing once the on-disk trace reaches MB megabytes "
-        "(sets CUTRACER_TRACE_SIZE_LIMIT_MB; the running kernel is unaffected)",
+        "(passed as the `cutracer trace --trace-size-limit-mb` flag; the running "
+        "kernel is unaffected)",
     )
     sp_run.add_argument(
         "--dry-run",
