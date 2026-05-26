@@ -1,4 +1,4 @@
-"""Tests for kernel_launch_overhead structured findings (book.md Root Causes #5 and #12).
+"""Tests for kernel_launch_overhead structured findings (src/nsys_ai/data/book.md Root Causes #5 and #10).
 
 Uses the minimal_nsys_conn and duckdb_conn fixtures from conftest.py.
 """
@@ -112,9 +112,9 @@ def test_small_kernel_overhead_triggers():
     f = next(f for f in findings if "small_kernel_overhead" in (f.id or ""))
     assert f.severity == "warning"
     assert f.category == "kernels"
-    assert f.evidence[0].provenance["root_cause"] == "#5"
+    assert f.evidence[0].provenance["root_cause"] == "src/nsys_ai/data/book.md#5"
     assert f.evidence[0].units["avg_kernel_us"] == "microseconds"
-    assert "Root Cause #5" in f.explanation
+    assert "src/nsys_ai/data/book.md Root Cause #5" in f.explanation
 
 
 def test_small_kernel_does_not_trigger_when_kernel_large():
@@ -168,8 +168,8 @@ def test_excessive_sync_triggers():
     assert f.category == "kernels"
     assert f.evidence[0].values["sync_count"] == 500
     assert f.evidence[0].units["sync_count"] == "count"
-    assert f.evidence[0].provenance["root_cause"] == "#12"
-    assert "Root Cause #12" in f.explanation
+    assert f.evidence[0].provenance["root_cause"] == "src/nsys_ai/data/book.md#10"
+    assert "src/nsys_ai/data/book.md Root Cause #10" in f.explanation
 
 
 def test_excessive_sync_does_not_trigger_below_threshold():
@@ -177,6 +177,30 @@ def test_excessive_sync_does_not_trigger_below_threshold():
     rows = [_klo_row(_global_sync_count=50)]
     findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
     assert not any(f.id == "klo_excessive_sync" for f in findings)
+
+
+def test_excessive_sync_fires_when_no_kernel_data():
+    """Per reviewer feedback: sync finding must fire even when no kernels
+    meet min_launches (sync_count is independent of kernel data).
+    Simulates _execute output with a metadata-only synthetic row."""
+    rows = [{
+        "kernel_name": None,
+        "launch_count": 0,
+        "total_overhead_ms": 0.0,
+        "avg_overhead_us": 0.0,
+        "max_overhead_us": 0.0,
+        "min_overhead_us": 0.0,
+        "total_kernel_ms": 0.0,
+        "overhead_pct": 0.0,
+        "device_id": 0,
+        "span_start_ns": 0,
+        "span_end_ns": 1_000_000_000,
+        "_global_sync_count": 500,
+    }]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
+    assert any(f.id == "klo_excessive_sync" for f in findings)
+    # Small kernel finding must NOT fire (no real kernel data)
+    assert not any("small_kernel_overhead" in (f.id or "") for f in findings)
 
 
 # ── Edge cases ─────────────────────────────────────────────────────

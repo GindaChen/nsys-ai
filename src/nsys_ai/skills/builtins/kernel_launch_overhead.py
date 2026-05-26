@@ -32,6 +32,10 @@ def _execute(conn, **kwargs):
         trim_runtime = ' AND r.start >= ? AND r."end" <= ?'
         params = [trim_start, trim_end, trim_start, trim_end]
 
+    # Best-match join via MAX greatest-per-group (instead of ROW_NUMBER window
+    # function, which crashes DuckDB 1.5.0 with a BIGINT/INTEGER type mismatch).
+    # For each kernel row, pick the most recent runtime event (with the same
+    # correlationId) that started at or before the kernel.
     sql = f"""
         WITH launch_runtime AS (
             SELECT r.correlationId, r.start, r."end"
@@ -41,26 +45,18 @@ def _execute(conn, **kwargs):
                 OR s_api.value LIKE 'cuLaunchKernel%')
                 {trim_runtime}
         ),
-        matched AS (
+        best_match AS (
             SELECT
                 k.shortName,
                 k.start AS k_start,
                 k."end" AS k_end,
-                r.start AS r_start,
-                ROW_NUMBER() OVER (
-                    PARTITION BY k.correlationId, k.start
-                    ORDER BY r.start DESC
-                ) AS rn
+                MAX(r.start) AS r_start
             FROM {kernel_tbl} k
             JOIN launch_runtime r
               ON r.correlationId = k.correlationId
              AND r.start <= k.start
             WHERE 1=1 {trim_kernel}
-        ),
-        best_match AS (
-            SELECT shortName, k_start, k_end, r_start
-            FROM matched
-            WHERE rn = 1
+            GROUP BY k.shortName, k.start, k."end"
         )
         SELECT s_k.value AS kernel_name,
                COUNT(*) AS launch_count,
@@ -96,12 +92,28 @@ def _execute(conn, **kwargs):
         span_start, span_end = int(trim_start), int(trim_end)
     else:
         span_start, span_end = prof.meta.time_range
+
+    # If no kernel rows survived the min_launches filter, still emit a
+    # metadata-only synthetic row so the independent Excessive Sync finding
+    # (decoupled from kernel data) can still fire.
+    if not rows:
+        rows = [{
+            "kernel_name": None,
+            "launch_count": 0,
+            "total_overhead_ms": 0.0,
+            "avg_overhead_us": 0.0,
+            "max_overhead_us": 0.0,
+            "min_overhead_us": 0.0,
+            "total_kernel_ms": 0.0,
+            "overhead_pct": 0.0,
+        }]
+
     for r in rows:
         r["device_id"] = device
         r["span_start_ns"] = span_start
         r["span_end_ns"] = span_end
 
-    # Root Cause #12: count cudaDeviceSynchronize calls (within trim window if set,
+    # src/nsys_ai/data/book.md Root Cause #10: count cudaDeviceSynchronize calls (within trim window if set,
     # so sync_count is consistent with the kernel/launch rows above).
     sync_trim = ""
     sync_params: list = []
@@ -122,14 +134,16 @@ def _execute(conn, **kwargs):
     return rows
 
 def _format(rows):
-    if not rows:
+    # Filter out metadata-only synthetic rows (launch_count == 0).
+    real_rows = [r for r in rows if r.get("launch_count", 0) > 0]
+    if not real_rows:
         return "(No kernel launch overhead data found)"
     lines = [
         "── Kernel Launch Overhead (per-kernel aggregated) ──",
         f"{'Kernel':<50s}  {'Launches':>9s}  {'Avg(μs)':>9s}  {'Max(μs)':>10s}  {'Total(ms)':>10s}  {'Oh%':>5s}",
         "─" * 100,
     ]
-    for r in rows:
+    for r in real_rows:
         name = r["kernel_name"]
         if len(name) > 48:
             name = name[:45] + "..."
@@ -141,11 +155,11 @@ def _format(rows):
 
 _SMALL_KERNEL_EXPLANATION = (
     "Many short kernels (<10μs avg) where launch overhead exceeds execution time. "
-    "Per Root Cause #5 (Small Kernel Overhead): each launch wastes more time on "
+    "Per src/nsys_ai/data/book.md Root Cause #5 (Small Kernel Overhead): each launch wastes more time on "
     "dispatch/queue than the kernel actually runs."
 )
 _EXCESSIVE_SYNC_EXPLANATION = (
-    "Profile contains many cudaDeviceSynchronize calls. Per Root Cause #12 "
+    "Profile contains many cudaDeviceSynchronize calls. Per src/nsys_ai/data/book.md Root Cause #10 "
     "(Excessive Synchronization): explicit syncs force the GPU pipeline to drain, "
     "preventing overlap and adding latency."
 )
@@ -164,10 +178,10 @@ _FALSE_POSITIVE_NOTES = [
 ]
 
 # Thresholds (sourced from book.md root causes where noted)
-_SMALL_KERNEL_AVG_US_THRESHOLD = 10.0     # book.md Root Cause #5: "tiny kernels < 10μs"
-_SMALL_KERNEL_OVERHEAD_PCT_THRESHOLD = 50.0  # book.md Root Cause #5: "overhead > kernel duration"
+_SMALL_KERNEL_AVG_US_THRESHOLD = 10.0     # src/nsys_ai/data/book.md Root Cause #5: "tiny kernels < 10μs"
+_SMALL_KERNEL_OVERHEAD_PCT_THRESHOLD = 50.0  # src/nsys_ai/data/book.md Root Cause #5: "overhead > kernel duration"
 _MIN_LAUNCH_COUNT = 100                    # statistical confidence floor
-_EXCESSIVE_SYNC_COUNT_THRESHOLD = 100      # book.md Root Cause #12 calibration
+_EXCESSIVE_SYNC_COUNT_THRESHOLD = 100      # book.md src/nsys_ai/data/book.md Root Cause #10 calibration
 
 
 def _small_kernel_confidence(avg_kernel_us: float, overhead_pct: float, launch_count: int) -> float:
@@ -201,9 +215,11 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     end_ns = rows[0].get("span_end_ns", 0)
     sync_count = rows[0].get("_global_sync_count", 0)
 
-    # Finding 1: Small Kernel Overhead — per Root Cause #5
+    # Finding 1: Small Kernel Overhead — per src/nsys_ai/data/book.md Root Cause #5
     # Signal: tiny kernel (< 10μs avg) where overhead > kernel duration (overhead_pct > 50)
     for r in rows:
+        if r.get("launch_count", 0) == 0:
+            continue  # skip metadata-only synthetic row
         avg_kernel_us = r["total_kernel_ms"] * 1000.0 / r["launch_count"] if r["launch_count"] else 0
         if (avg_kernel_us < _SMALL_KERNEL_AVG_US_THRESHOLD
                 and r["overhead_pct"] > _SMALL_KERNEL_OVERHEAD_PCT_THRESHOLD
@@ -228,7 +244,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 },
                 units={"avg_kernel_us": "microseconds", "overhead_pct": "percent", "launch_count": "count"},
                 selection_id=selection.id,
-                provenance={"row_kind": "small_kernel_overhead", "kernel_name": r["kernel_name"], "root_cause": "#5"},
+                provenance={"row_kind": "small_kernel_overhead", "kernel_name": r["kernel_name"], "root_cause": "src/nsys_ai/data/book.md#5"},
             )
             findings.append(Finding(
                 type="region",
@@ -245,10 +261,10 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 explanation=_SMALL_KERNEL_EXPLANATION,
                 suggested_actions=list(_SUGGESTED_ACTIONS),
                 false_positive_notes=list(_FALSE_POSITIVE_NOTES),
-                provenance={"skill": "kernel_launch_overhead", "row_kind": "small_kernel_overhead", "root_cause": "#5"},
+                provenance={"skill": "kernel_launch_overhead", "row_kind": "small_kernel_overhead", "root_cause": "src/nsys_ai/data/book.md#5"},
             ))
 
-    # Finding 2: Excessive Synchronization — per Root Cause #12
+    # Finding 2: Excessive Synchronization — per src/nsys_ai/data/book.md Root Cause #10
     if sync_count > _EXCESSIVE_SYNC_COUNT_THRESHOLD:
         finding_id = "klo_excessive_sync"
         selection = TraceSelection(
@@ -265,7 +281,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             values={"sync_count": sync_count},
             units={"sync_count": "count"},
             selection_id=selection.id,
-            provenance={"row_kind": "excessive_sync", "root_cause": "#12"},
+            provenance={"row_kind": "excessive_sync", "root_cause": "src/nsys_ai/data/book.md#10"},
         )
         findings.append(Finding(
             type="region",
@@ -282,7 +298,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             explanation=_EXCESSIVE_SYNC_EXPLANATION,
             suggested_actions=list(_SUGGESTED_ACTIONS),
             false_positive_notes=list(_FALSE_POSITIVE_NOTES),
-            provenance={"skill": "kernel_launch_overhead", "row_kind": "excessive_sync", "root_cause": "#12"},
+            provenance={"skill": "kernel_launch_overhead", "row_kind": "excessive_sync", "root_cause": "src/nsys_ai/data/book.md#10"},
         ))
 
     return findings
