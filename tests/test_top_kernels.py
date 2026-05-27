@@ -67,7 +67,13 @@ def test_dominates_fires_on_single_heavy_kernel():
     assert f.explanation and "leverage" in f.explanation
     assert f.suggested_actions and f.false_positive_notes
     assert f.provenance == {"skill": "top_kernels", "row_kind": "top_kernel_dominates"}
+    # Per-kernel findings are highlights, not regions — span covers the
+    # full invocation envelope so claiming a tight region would mislead.
+    assert f.type == "highlight"
+    assert f.start_ns == 0
+    assert f.end_ns is None
 
+    # Selection still carries the invocation envelope as metadata.
     assert isinstance(f.selection, TraceSelection)
     assert f.selection.profile_id == "p"
     assert f.selection.source == "skill:top_kernels"
@@ -251,3 +257,90 @@ def test_findings_without_context_use_unknown_profile_id():
 
 def test_skill_registers_to_findings_fn():
     assert SKILL.to_findings_fn is not None
+
+
+# ── NCCL kernels are skipped in per-kernel findings ─────────────────
+
+
+def test_nccl_kernels_are_skipped_in_per_kernel_findings():
+    # SendRecv as the top kernel at 60% — would normally fire dominates,
+    # variability (bimodal max/avg), AND show up as TC-inactive — except
+    # NCCL kernels are owned by nccl_breakdown, not top_kernels.
+    nccl_name = "ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+    rows = [
+        _row(kernel_name=nccl_name, total_ms=600.0, invocations=200,
+             avg_ms=3.0, max_ms=30.0,  # max/avg=10x — would fire variability
+             tc_eligible=False, tc_active=False),
+        _row(kernel_name="small_a", total_ms=200.0, invocations=200),
+        _row(kernel_name="small_b", total_ms=200.0, invocations=200),
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "p"})
+
+    # None of the per-kernel finding types fire on the NCCL row.
+    assert not _find(findings, "top_kernel_dominates_"), (
+        f"top_kernel_dominates fired on an NCCL kernel: {[f.label for f in findings]}"
+    )
+    assert not _find(findings, "top_kernel_high_variability_"), (
+        f"top_kernel_high_variability fired on an NCCL kernel: {[f.label for f in findings]}"
+    )
+    assert not _find(findings, "tc_eligible_inactive_"), (
+        f"tc_eligible_inactive fired on an NCCL kernel: {[f.label for f in findings]}"
+    )
+
+
+def test_nccl_kernel_still_contributes_to_concentrated_finding():
+    # Concentrated is a global aggregate property of the top-K, not a
+    # per-kernel finding — NCCL kernels in the top-3 still count toward
+    # concentration. Excluding them would understate the head's weight.
+    nccl_name = "ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+    rows = [
+        _row(kernel_name=nccl_name, total_ms=400.0),
+        _row(kernel_name="big_gemm", total_ms=300.0),
+        _row(kernel_name="flash_fwd", total_ms=100.0),
+        *[_row(kernel_name=f"tail_{i}", total_ms=10.0) for i in range(20)],
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "p"})
+
+    conc = _find(findings, "top_kernels_concentrated")
+    assert conc, "concentrated finding should still fire when NCCL is in top-3"
+    f = conc[0]
+    ev = f.evidence[0]
+    assert nccl_name in ev.values["top3_kernels"], (
+        "NCCL kernel should still appear in top3_kernels for concentration"
+    )
+
+
+def test_per_kernel_findings_use_highlight_type_with_envelope_in_selection():
+    # All three per-kernel findings (dominates, tc_inactive, variability)
+    # should emit type="highlight" with Finding.start_ns=0 / end_ns=None,
+    # but carry the full invocation envelope on the TraceSelection as
+    # informational metadata.
+    rows = [
+        # dominates fires: 60% of top-K
+        _row(kernel_name="big_gemm", total_ms=600.0, invocations=200,
+             avg_ms=3.0, max_ms=30.0,  # max/avg=10x — also fires variability
+             tc_eligible=True, tc_active=False,  # also fires tc_inactive
+             span_start_ns=1_000, span_end_ns=9_000),
+        _row(kernel_name="medium", total_ms=200.0,
+             span_start_ns=2_000, span_end_ns=8_000),
+        _row(kernel_name="small", total_ms=200.0,
+             span_start_ns=2_000, span_end_ns=8_000),
+    ]
+    findings = SKILL.to_findings_fn(rows, context={"profile_id": "p"})
+
+    per_kernel_prefixes = ("top_kernel_dominates_", "tc_eligible_inactive_",
+                          "top_kernel_high_variability_")
+    per_kernel = [f for f in findings
+                  if any((f.id or "").startswith(p) for p in per_kernel_prefixes)]
+    assert per_kernel, "expected at least one per-kernel finding"
+    for f in per_kernel:
+        assert f.type == "highlight", (
+            f"{f.id} should be 'highlight' not '{f.type}' "
+            f"(span = full invocation envelope, not a tight region)"
+        )
+        assert f.start_ns == 0, f"{f.id} Finding.start_ns should be 0 sentinel"
+        assert f.end_ns is None, f"{f.id} Finding.end_ns should be None"
+        # Selection still carries the envelope for downstream UI navigation.
+        assert f.selection is not None
+        assert f.selection.start_ns == 1_000
+        assert f.selection.end_ns == 9_000

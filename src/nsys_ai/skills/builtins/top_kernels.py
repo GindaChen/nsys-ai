@@ -254,20 +254,39 @@ def _variability_confidence(ratio: float, invocations: int) -> float:
 def _span_from_row(r: dict) -> tuple[bool, int | None, int | None]:
     """Read ``span_start_ns`` / ``span_end_ns`` off a top_kernels row.
 
-    Returns ``(has_span, start_ns_or_None, end_ns_or_None)``. The boolean
-    is the authoritative source for whether to emit ``Finding.type="region"``
-    or ``"highlight"`` and is reused by both the ``Finding`` and the
-    ``TraceSelection`` constructors so the time-anchor decision is taken
-    in one place. ``Finding.start_ns`` is typed ``int`` (required), so
-    callers fall back to ``0`` on the no-span branch and rely on
-    ``type="highlight"`` to signal "not time-anchored" downstream;
-    ``TraceSelection`` accepts ``None`` directly.
+    Returns ``(has_span, start_ns_or_None, end_ns_or_None)``. Used to
+    populate the ``TraceSelection`` metadata on per-kernel findings; the
+    selection's start/end mark the kernel's full invocation envelope in
+    the trace, which is informational rather than a tight localization.
+    ``Finding.start_ns`` is typed ``int`` (required), so per-kernel
+    findings always emit ``0`` with ``type="highlight"`` to signal
+    "not a tight region" downstream — the span often covers most of
+    the profile for recurring kernels, so claiming ``"region"`` would
+    over-state the localization.
     """
     s = r.get("span_start_ns")
     e = r.get("span_end_ns")
     if s is None or e is None:
         return False, None, None
     return True, int(s), int(e)
+
+
+def _is_nccl_kernel(name: str) -> bool:
+    """True for NCCL communication kernels (SendRecv, AllReduce, …).
+
+    Delegates to ``overlap.classify_kernel`` so we share NCCL detection
+    with ``nccl_breakdown`` / ``overlap_breakdown``. NCCL kernels are
+    skipped in the per-kernel ``top_kernels`` findings because (a) their
+    natural category is ``communication`` not ``compute``, (b) the
+    compute-side suggested actions (FlashAttention / cuBLASLt / Tensor
+    Cores) don't apply to comm kernels, and (c) ``nccl_breakdown``
+    already owns NCCL signal (per-collective dominance and variability
+    findings). The ``top_kernels_concentrated`` finding intentionally
+    still considers NCCL kernels — it's a distributional property of
+    the top-K, and excluding NCCL would understate the head's weight.
+    """
+    from nsys_ai.overlap import classify_kernel
+    return classify_kernel(name).startswith("nccl_")
 
 
 def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
@@ -296,13 +315,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     n_kernels = len(rows)
     top = rows[0]
 
-    # Finding 1: single kernel dominates.
+    # Finding 1: single kernel dominates. NCCL kernels are skipped here
+    # (see ``_is_nccl_kernel``); ``nccl_breakdown`` owns comm-side findings.
     top_total_ms = float(top.get("total_ms", 0) or 0)
     top_pct = 100.0 * top_total_ms / total_top_ms
-    if top_pct >= _DOMINATES_PCT_THRESHOLD:
-        kname = top.get("kernel_name", "<unknown>")
+    top_kname = top.get("kernel_name", "<unknown>")
+    if top_pct >= _DOMINATES_PCT_THRESHOLD and not _is_nccl_kernel(top_kname):
+        kname = top_kname
         invocations = int(top.get("invocations", 0) or 0)
-        has_span, span_start_ns, span_end_ns = _span_from_row(top)
+        _, span_start_ns, span_end_ns = _span_from_row(top)
         finding_id = f"top_kernel_dominates_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -328,10 +349,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if has_span else "highlight",
+                # type="highlight" (not "region") because span covers the
+                # kernel's full invocation envelope — for steady-state
+                # kernels this is most of the profile, so "region" would
+                # over-state the localization. Selection still carries
+                # the envelope as informational metadata.
+                type="highlight",
                 label=f"Top kernel dominates ({top_pct:.1f}%): {kname[:48]}",
-                start_ns=span_start_ns if has_span else 0,
-                end_ns=span_end_ns,
+                start_ns=0,
+                end_ns=None,
                 severity="warning",
                 note=(
                     f"Kernel '{kname}' accounts for {top_pct:.1f}% of total "
@@ -404,8 +430,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 )
             )
 
-    # Finding 3: Tensor Core eligible but inactive.
+    # Finding 3: Tensor Core eligible but inactive. NCCL kernels are
+    # never TC-eligible by definition, but skip them explicitly for
+    # consistency with the other per-kernel finding loops.
     for r in rows:
+        kname = r.get("kernel_name", "<unknown>")
+        if _is_nccl_kernel(kname):
+            continue
         tc_eligible = r.get("tc_eligible")
         tc_active = r.get("tc_active")
         # tc_eligible is None on the SQLite-fallback path — silence over false claim.
@@ -417,8 +448,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         invocations = int(r.get("invocations", 0) or 0)
         if total_ms < _TC_INACTIVE_MIN_TOTAL_MS:
             continue
-        kname = r.get("kernel_name", "<unknown>")
-        has_span, span_start_ns, span_end_ns = _span_from_row(r)
+        _, span_start_ns, span_end_ns = _span_from_row(r)
         finding_id = f"tc_eligible_inactive_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -444,10 +474,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if has_span else "highlight",
+                # See note in top_kernel_dominates emit — span = full
+                # invocation envelope, so use ``highlight`` to avoid
+                # over-stating localization.
+                type="highlight",
                 label=f"TC eligible, inactive: {kname[:48]} ({total_ms:.0f}ms)",
-                start_ns=span_start_ns if has_span else 0,
-                end_ns=span_end_ns,
+                start_ns=0,
+                end_ns=None,
                 severity="warning",
                 note=(
                     f"Kernel '{kname}' is Tensor-Core eligible but ran in a "
@@ -466,8 +499,14 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             )
         )
 
-    # Finding 4: high variability on a top kernel.
+    # Finding 4: high variability on a top kernel. NCCL kernels are
+    # skipped here too — ``nccl_breakdown`` has
+    # ``nccl_high_variability_<collective>`` which surfaces the same
+    # signal in the right category.
     for r in rows:
+        kname = r.get("kernel_name", "<unknown>")
+        if _is_nccl_kernel(kname):
+            continue
         invocations = int(r.get("invocations", 0) or 0)
         if invocations < _VARIABILITY_MIN_INVOCATIONS:
             continue
@@ -478,8 +517,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         ratio = max_ms / avg_ms
         if ratio < _VARIABILITY_MIN_RATIO:
             continue
-        kname = r.get("kernel_name", "<unknown>")
-        has_span, span_start_ns, span_end_ns = _span_from_row(r)
+        _, span_start_ns, span_end_ns = _span_from_row(r)
         finding_id = f"top_kernel_high_variability_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
@@ -505,10 +543,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if has_span else "highlight",
+                # See note in top_kernel_dominates emit — span = full
+                # invocation envelope, so use ``highlight`` to avoid
+                # over-stating localization.
+                type="highlight",
                 label=f"High variability ({ratio:.1f}x): {kname[:48]}",
-                start_ns=span_start_ns if has_span else 0,
-                end_ns=span_end_ns,
+                start_ns=0,
+                end_ns=None,
                 severity="info",
                 note=(
                     f"Kernel '{kname}' max={max_ms:.1f}ms vs avg={avg_ms:.1f}ms "
