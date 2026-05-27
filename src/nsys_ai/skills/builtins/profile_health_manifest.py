@@ -785,7 +785,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # ── 3. Communication-bound ──────────────────────────────────────
     overlap = m.get("overlap", {}) or {}
     nccl = m.get("nccl", {}) or {}
-    overlap_pct = float(overlap.get("overlap_pct", 100) or 100)
+    # `overlap_pct` of exactly 0.0 is a legitimate (and important) signal
+    # — full serialization of compute and NCCL on one stream. The naive
+    # ``x or 100`` idiom would mistake 0.0 for "missing" and silence the
+    # comm_bound finding precisely when it should fire hardest. Caught
+    # during L40S validation on the uncompiled perf.sqlite profile, where
+    # overlap_pct=0.0 and nccl_only_ms=8654ms should have tripped the
+    # low-overlap trigger but didn't.
+    raw_overlap_pct = overlap.get("overlap_pct")
+    overlap_pct = 100.0 if raw_overlap_pct is None else float(raw_overlap_pct)
     nccl_only_ms = float(overlap.get("nccl_only_ms", 0) or 0)
     total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
     compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)

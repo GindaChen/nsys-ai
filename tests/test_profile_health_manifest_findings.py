@@ -142,6 +142,32 @@ class TestCommBound:
         m["overlap"]["compute_only_ms"] = 500.0
         assert all(f.id != "profile_comm_bound" for f in _to_findings([m]))
 
+    def test_zero_overlap_with_nccl_fires(self):
+        # Regression: a Python ``x or 100`` default would mistake 0.0 for
+        # "missing" and silence comm_bound on full-serialization profiles.
+        # Caught during L40S validation on the uncompiled perf.sqlite,
+        # where overlap_pct=0.0 with nccl_only_ms=8654ms must trigger
+        # low_overlap.
+        m = _healthy_manifest()
+        m["overlap"]["overlap_pct"] = 0.0
+        m["overlap"]["nccl_only_ms"] = 500.0
+        findings = _to_findings([m])
+        f = next((f for f in findings if f.id == "profile_comm_bound"), None)
+        assert f is not None, "comm_bound must fire when overlap_pct is exactly 0.0"
+        assert "low_overlap" in f.provenance["triggers"]
+
+    def test_missing_overlap_pct_defaults_healthy(self):
+        # Defensive: if overlap_breakdown errored out and overlap dict has
+        # no overlap_pct key at all, default to 100 (healthy) so a missing
+        # measurement doesn't produce a false-positive low-overlap finding.
+        m = _healthy_manifest()
+        del m["overlap"]["overlap_pct"]
+        m["overlap"]["nccl_only_ms"] = 500.0
+        # nccl < compute so the dominance trigger also stays silent
+        m["overlap"]["compute_only_ms"] = 1000.0
+        m["nccl"]["total_nccl_ms"] = 500.0
+        assert all(f.id != "profile_comm_bound" for f in _to_findings([m]))
+
 
 class TestIdleDominant:
     def test_fires_above_threshold(self):
