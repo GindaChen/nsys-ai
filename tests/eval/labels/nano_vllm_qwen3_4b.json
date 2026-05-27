@@ -1,0 +1,26 @@
+{
+  "id": "eval-nano-vllm-001",
+  "profile": "nano_vllm_qwen3_4b.sqlite",
+  "device": 0,
+  "description": "Qwen3-4B nano-vllm inference profile. Local-only (the .sqlite is not committed), so this label is skipped in CI and runs only when the profile is present at the repo root.",
+  "source": "Grounded in a real EvidenceBuilder.build() run (65 findings): communication and idle signal classes are present; the run is dominated by uncategorized 'Slow Iteration' findings — the same noise pattern documented in docs/audits/l40s-fastvideo-gaps.md.",
+  "expect": [
+    {
+      "category": "communication",
+      "min_severity": "warning",
+      "note": "NCCL/comm findings are present and are real signal"
+    },
+    {
+      "category": "idle",
+      "min_severity": "warning",
+      "note": "GPU idle gaps are present"
+    }
+  ],
+  "must_not": [],
+  "known_gaps": [
+    {
+      "observation": "~55 of ~65 findings have category=null (almost all are 'Slow Iteration N' from iteration_timing). Real signal (communication, idle) is a small minority, mirroring the audit's 'real finding buried at 390/401' problem.",
+      "ref": "roadmap §4 B gaps #6/#7; docs/audits/l40s-fastvideo-gaps.md item #3"
+    }
+  ]
+}
