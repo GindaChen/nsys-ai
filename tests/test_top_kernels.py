@@ -5,7 +5,6 @@ synthetic row dicts; it has no DB dependency and matches the shape the
 ``_execute`` SQL emits (after the v0.1 column upgrade that added
 ``span_start_ns`` / ``span_end_ns``).
 """
-from __future__ import annotations
 
 import json
 
