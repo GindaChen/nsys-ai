@@ -129,6 +129,34 @@ def _execute(conn, **kwargs):
 
 # ── Structured findings (v0.1) ──────────────────────────────────────
 
+# ── Thresholds ──────────────────────────────────────────────────────
+# Centralized so the firing policy is in one place. Confidence helpers
+# below reuse these where the cutoff and the trigger are the same value.
+
+# Top kernel must account for ≥ this fraction of top-K kernel time to
+# fire ``top_kernel_dominates``.
+_DOMINATES_PCT_THRESHOLD = 30.0
+
+# Top-3 kernels must account for ≥ this fraction of top-K kernel time
+# to fire ``top_kernels_concentrated``.
+_CONCENTRATED_TOP3_PCT_THRESHOLD = 60.0
+
+# Below this total per-kernel time, the cost of fixing TC routing is
+# unlikely to be worth the optimization; suppress ``tc_eligible_inactive``
+# to keep the noise floor low.
+_TC_INACTIVE_MIN_TOTAL_MS = 10.0
+
+# Variability findings require at least this many invocations to keep
+# the max/avg ratio from being dominated by noise (first-call warmup,
+# straggler tails, etc.).
+_VARIABILITY_MIN_INVOCATIONS = 20
+
+# Minimum max/avg duration ratio for ``top_kernel_high_variability`` to
+# fire (5× ≈ heavy tail / bimodal distribution; below this, normal
+# scheduling jitter accounts for the variance).
+_VARIABILITY_MIN_RATIO = 5.0
+
+
 _DOMINATES_EXPLANATION = (
     "One kernel accounts for a disproportionate fraction of total kernel "
     "time. Optimization leverage here is high — improving this kernel "
@@ -218,9 +246,28 @@ def _tc_inactive_confidence(total_ms: float, invocations: int) -> float:
 
 
 def _variability_confidence(ratio: float, invocations: int) -> float:
-    if invocations < 20:
+    if invocations < _VARIABILITY_MIN_INVOCATIONS:
         return 0.4  # below the guard — should not fire
-    return round(min(0.9, 0.55 + 0.05 * max(ratio - 5.0, 0.0)), 3)
+    return round(min(0.9, 0.55 + 0.05 * max(ratio - _VARIABILITY_MIN_RATIO, 0.0)), 3)
+
+
+def _span_from_row(r: dict) -> tuple[bool, int | None, int | None]:
+    """Read ``span_start_ns`` / ``span_end_ns`` off a top_kernels row.
+
+    Returns ``(has_span, start_ns_or_None, end_ns_or_None)``. The boolean
+    is the authoritative source for whether to emit ``Finding.type="region"``
+    or ``"highlight"`` and is reused by both the ``Finding`` and the
+    ``TraceSelection`` constructors so the time-anchor decision is taken
+    in one place. ``Finding.start_ns`` is typed ``int`` (required), so
+    callers fall back to ``0`` on the no-span branch and rely on
+    ``type="highlight"`` to signal "not time-anchored" downstream;
+    ``TraceSelection`` accepts ``None`` directly.
+    """
+    s = r.get("span_start_ns")
+    e = r.get("span_end_ns")
+    if s is None or e is None:
+        return False, None, None
+    return True, int(s), int(e)
 
 
 def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
@@ -252,18 +299,17 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # Finding 1: single kernel dominates.
     top_total_ms = float(top.get("total_ms", 0) or 0)
     top_pct = 100.0 * top_total_ms / total_top_ms
-    if top_pct >= 30.0:
+    if top_pct >= _DOMINATES_PCT_THRESHOLD:
         kname = top.get("kernel_name", "<unknown>")
         invocations = int(top.get("invocations", 0) or 0)
-        start_ns = int(top.get("span_start_ns") or 0)
-        end_ns = int(top.get("span_end_ns") or 0)
+        has_span, span_start_ns, span_end_ns = _span_from_row(top)
         finding_id = f"top_kernel_dominates_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:top_kernels",
-            start_ns=start_ns or None,
-            end_ns=end_ns or None,
+            start_ns=span_start_ns,
+            end_ns=span_end_ns,
             label=f"Top kernel: {kname} ({top_pct:.1f}%)",
         )
         ev = EvidenceRow(
@@ -282,10 +328,10 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if start_ns and end_ns else "highlight",
+                type="region" if has_span else "highlight",
                 label=f"Top kernel dominates ({top_pct:.1f}%): {kname[:48]}",
-                start_ns=start_ns,
-                end_ns=end_ns or None,
+                start_ns=span_start_ns if has_span else 0,
+                end_ns=span_end_ns,
                 severity="warning",
                 note=(
                     f"Kernel '{kname}' accounts for {top_pct:.1f}% of total "
@@ -305,10 +351,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
 
     # Finding 2: top-3 concentration.
+    # Genuinely global — top-3 is an aggregate property of the top-K
+    # distribution, not anchored to a time window. ``Finding.start_ns``
+    # is required-int, so we use ``0`` as the "no time anchor" sentinel;
+    # ``type="highlight"`` (vs ``"region"``) is the semantic signal to
+    # downstream consumers that this is not a trace location.
     if n_kernels >= 3:
         top3_ms = sum(float(r.get("total_ms", 0) or 0) for r in rows[:3])
         top3_pct = 100.0 * top3_ms / total_top_ms
-        if top3_pct >= 60.0:
+        if top3_pct >= _CONCENTRATED_TOP3_PCT_THRESHOLD:
             names = [r.get("kernel_name", "<unknown>") for r in rows[:3]]
             finding_id = "top_kernels_concentrated"
             selection = TraceSelection(
@@ -364,18 +415,17 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             continue
         total_ms = float(r.get("total_ms", 0) or 0)
         invocations = int(r.get("invocations", 0) or 0)
-        if total_ms < 10.0:
+        if total_ms < _TC_INACTIVE_MIN_TOTAL_MS:
             continue
         kname = r.get("kernel_name", "<unknown>")
-        start_ns = int(r.get("span_start_ns") or 0)
-        end_ns = int(r.get("span_end_ns") or 0)
+        has_span, span_start_ns, span_end_ns = _span_from_row(r)
         finding_id = f"tc_eligible_inactive_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:top_kernels",
-            start_ns=start_ns or None,
-            end_ns=end_ns or None,
+            start_ns=span_start_ns,
+            end_ns=span_end_ns,
             label=f"TC eligible, inactive: {kname}",
         )
         ev = EvidenceRow(
@@ -394,10 +444,10 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if start_ns and end_ns else "highlight",
+                type="region" if has_span else "highlight",
                 label=f"TC eligible, inactive: {kname[:48]} ({total_ms:.0f}ms)",
-                start_ns=start_ns,
-                end_ns=end_ns or None,
+                start_ns=span_start_ns if has_span else 0,
+                end_ns=span_end_ns,
                 severity="warning",
                 note=(
                     f"Kernel '{kname}' is Tensor-Core eligible but ran in a "
@@ -419,25 +469,24 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # Finding 4: high variability on a top kernel.
     for r in rows:
         invocations = int(r.get("invocations", 0) or 0)
-        if invocations < 20:
+        if invocations < _VARIABILITY_MIN_INVOCATIONS:
             continue
         avg_ms = float(r.get("avg_ms", 0) or 0)
         max_ms = float(r.get("max_ms", 0) or 0)
         if avg_ms <= 0:
             continue
         ratio = max_ms / avg_ms
-        if ratio < 5.0:
+        if ratio < _VARIABILITY_MIN_RATIO:
             continue
         kname = r.get("kernel_name", "<unknown>")
-        start_ns = int(r.get("span_start_ns") or 0)
-        end_ns = int(r.get("span_end_ns") or 0)
+        has_span, span_start_ns, span_end_ns = _span_from_row(r)
         finding_id = f"top_kernel_high_variability_{_safe_id(kname)}"
         selection = TraceSelection(
             id=f"sel_{finding_id}",
             profile_id=profile_id,
             source="skill:top_kernels",
-            start_ns=start_ns or None,
-            end_ns=end_ns or None,
+            start_ns=span_start_ns,
+            end_ns=span_end_ns,
             label=f"Variability ({ratio:.1f}x): {kname}",
         )
         ev = EvidenceRow(
@@ -456,10 +505,10 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         )
         findings.append(
             Finding(
-                type="region" if start_ns and end_ns else "highlight",
+                type="region" if has_span else "highlight",
                 label=f"High variability ({ratio:.1f}x): {kname[:48]}",
-                start_ns=start_ns,
-                end_ns=end_ns or None,
+                start_ns=span_start_ns if has_span else 0,
+                end_ns=span_end_ns,
                 severity="info",
                 note=(
                     f"Kernel '{kname}' max={max_ms:.1f}ms vs avg={avg_ms:.1f}ms "
