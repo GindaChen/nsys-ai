@@ -11,7 +11,6 @@ import json
 from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
 from nsys_ai.skills.builtins.top_kernels import SKILL
 
-
 # ── Row factory ─────────────────────────────────────────────────────
 
 
