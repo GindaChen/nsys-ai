@@ -528,7 +528,18 @@ def _build_parser():
         type=int,
         default=None,
         metavar="N",
-        help="Limit CUTracer to N training iterations (sets CUTRACER_MAX_ITERS)",
+        help="(deprecated, no-op) upstream CUTracer has no CUTRACER_MAX_ITERS; "
+        "use --trace-size-limit-mb or a shorter --launch-cmd instead",
+    )
+    sp_run.add_argument(
+        "--trace-size-limit-mb",
+        dest="trace_size_limit_mb",
+        type=int,
+        default=None,
+        metavar="MB",
+        help="Stop tracing once the on-disk trace reaches MB megabytes "
+        "(passed as the `cutracer trace --trace-size-limit-mb` flag; the running "
+        "kernel is unaffected)",
     )
     sp_run.add_argument(
         "--dry-run",

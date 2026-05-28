@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 INSTALL_DIR = Path.home() / ".nsys-ai" / "cutracer"
 NVBIT_REPO = "https://github.com/NVlabs/NVBit/releases/download"
 NVBIT_VERSION = "1.7.1"
-CUTRACER_GITHUB = "https://github.com/facebookresearch/CUTracer"
+# The CUTracer repo migrated from the facebookresearch org to facebookexperimental.
+CUTRACER_GITHUB = "https://github.com/facebookexperimental/CUTracer"
+# Pinned release tag for reproducible builds (clone --branch). Bump on upstream releases.
+CUTRACER_TAG = "v0.2.1"
 
 # CUDA major.minor → NVBit release asset name pattern
 # NVBit ships separate builds for each CUDA toolkit version.
@@ -328,12 +331,112 @@ def find_cutracer_source() -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -> None:
+    """Reconcile an existing CUTracer clone to ``CUTRACER_TAG``.
+
+    A clone left over from a prior install may be at an arbitrary ref (an old
+    HEAD, or the former ``facebookresearch`` org). If it is not already at the
+    pinned tag, repoint ``origin`` at the current URL, fetch the tag, and check
+    it out — then drop any stale ``cutracer.so`` so the caller recompiles from
+    the new ref instead of short-circuiting on a binary from the old checkout.
+
+    No-op (beyond a probe) when the clone is already at ``CUTRACER_TAG``.
+    Raises ``RuntimeError`` if the worktree has uncommitted local changes
+    (rather than discarding them), if cleanliness cannot be verified (``git
+    status`` itself fails), or if the ``git remote set-url``, fetch, or checkout
+    step fails.
+    """
+    current = subprocess.run(  # nosec B603 B607
+        ["git", "describe", "--tags", "--exact-match"],
+        cwd=clone_dir,
+        capture_output=True,
+        text=True,
+    )
+    # A non-zero `git describe` here is the normal "HEAD is not exactly at a
+    # tag" case (an old clone) and is the trigger for reconciliation — not an
+    # error. A genuinely broken repo is caught by the `git status` check below.
+    if current.returncode == 0 and current.stdout.strip() == CUTRACER_TAG:
+        if progress:
+            print(f"  Using existing clone at: {clone_dir} (@ {CUTRACER_TAG})")
+        return
+
+    # Refuse to clobber a dirty worktree — a user may have patched the clone
+    # for debugging. Surface it and let them decide, rather than silently
+    # discarding their work in the checkout below. A failed `git status` means
+    # we cannot verify cleanliness (corrupt repo, permissions), so bail clearly
+    # rather than proceed to a checkout that might destroy data.
+    status = subprocess.run(  # nosec B603 B607
+        ["git", "status", "--porcelain"],
+        cwd=clone_dir,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        raise RuntimeError(
+            f"git status in {clone_dir} failed (exit {status.returncode}); "
+            f"cannot verify a clean worktree before checkout:\n"
+            f"{status.stderr or ''}"
+        )
+    if status.stdout.strip():
+        raise RuntimeError(
+            f"CUTracer clone at {clone_dir} has uncommitted local changes; "
+            f"refusing to check out {CUTRACER_TAG} over them. Commit or stash "
+            f"the changes, or delete the directory for a clean pinned build."
+        )
+
+    if progress:
+        print(f"  Existing clone is not at {CUTRACER_TAG} — fetching + checking out …")
+    # Org migration: make sure origin points at the current repo before fetch
+    # (an old clone may still reference facebookresearch). Checking the return
+    # code matters: a silent failure here would leave origin on the old URL and
+    # still "succeed" via GitHub's redirect, defeating the migration fix.
+    set_url = subprocess.run(  # nosec B603 B607
+        ["git", "remote", "set-url", "origin", CUTRACER_GITHUB],
+        cwd=clone_dir,
+        capture_output=not progress,
+        text=True,
+    )
+    if set_url.returncode != 0:
+        raise RuntimeError(
+            f"git remote set-url origin failed (exit {set_url.returncode}):\n"
+            f"{set_url.stderr or ''}"
+        )
+    fetch = subprocess.run(  # nosec B603 B607
+        ["git", "fetch", "--depth=1", "origin", "tag", CUTRACER_TAG],
+        cwd=clone_dir,
+        capture_output=not progress,
+        text=True,
+    )
+    if fetch.returncode != 0:
+        raise RuntimeError(
+            f"git fetch of {CUTRACER_TAG} failed (exit {fetch.returncode}):\n"
+            f"{fetch.stderr or ''}"
+        )
+    # Worktree is verified clean above, so a plain checkout suffices — no need
+    # for a destructive `-f` that would discard tracked edits.
+    checkout = subprocess.run(  # nosec B603 B607
+        ["git", "checkout", CUTRACER_TAG],
+        cwd=clone_dir,
+        capture_output=not progress,
+        text=True,
+    )
+    if checkout.returncode != 0:
+        raise RuntimeError(
+            f"git checkout of {CUTRACER_TAG} failed (exit {checkout.returncode}):\n"
+            f"{checkout.stderr or ''}"
+        )
+    # Stale artifact from the previous ref would otherwise be reused by the
+    # `so_dest.exists()` short-circuit below.
+    if so_dest.exists():
+        so_dest.unlink()
+
+
 def _clone_and_build(
     clone_dir: Path,
     *,
     progress: bool = True,
 ) -> Path:
-    """Clone facebookresearch/CUTracer from GitHub and build cutracer.so.
+    """Clone facebookexperimental/CUTracer from GitHub and build cutracer.so.
 
     This is the primary install path — the repo's own ``install_third_party.sh``
     handles NVBit and nlohmann/json download, so no separate NVBit step needed.
@@ -345,15 +448,24 @@ def _clone_and_build(
 
     # ── Clone ────────────────────────────────────────────────────────────────
     if clone_dir.exists() and (clone_dir / "Makefile").exists():
-        if progress:
-            print(f"  Using existing clone at: {clone_dir}")
+        if (clone_dir / ".git").exists():
+            # A pre-existing git clone may sit at any ref — an old HEAD from
+            # before tag pinning, or the previous facebookresearch org. Reusing
+            # it as-is would silently build whatever is checked out and defeat
+            # the pin, so reconcile it to CUTRACER_TAG before building.
+            _ensure_pinned_checkout(clone_dir, so_dest, progress=progress)
+        elif progress:
+            # A non-git source tree (e.g. an extracted tarball) that happens to
+            # have a Makefile — tag pinning does not apply and git ops would
+            # fail here, so build it as-is (the pre-pinning behavior).
+            print(f"  Using existing non-git source tree at: {clone_dir}")
     else:
         if progress:
             print("  Cloning CUTracer from GitHub …")
-            print(f"    {CUTRACER_GITHUB}")
+            print(f"    {CUTRACER_GITHUB} @ {CUTRACER_TAG}")
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(  # nosec B603 B607
-            ["git", "clone", "--depth=1", CUTRACER_GITHUB, str(clone_dir)],
+            ["git", "clone", "--depth=1", "--branch", CUTRACER_TAG, CUTRACER_GITHUB, str(clone_dir)],
             capture_output=not progress,
             text=True,
         )
@@ -514,7 +626,7 @@ def install(
 
     # 3. Find or clone CUTracer source and build
     #
-    # Primary path:   GitHub clone (facebookresearch/CUTracer) — handles its
+    # Primary path:   GitHub clone (facebookexperimental/CUTracer) — handles its
     #                 own NVBit download via install_third_party.sh.
     # Fallback path:  pre-existing local source + separate NVBit download.
     cutracer_src = find_cutracer_source()

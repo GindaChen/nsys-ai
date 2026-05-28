@@ -131,6 +131,13 @@ def _cutracer_run(args, _profile):
     modal_volume = getattr(args, "modal_volume", "cutracer-histograms") or "cutracer-histograms"
     so_path_str = getattr(args, "so_path", None)
     max_iters = getattr(args, "max_iters", None)
+    trace_size_limit_mb = getattr(args, "trace_size_limit_mb", None)
+    if max_iters is not None:
+        print(
+            "warning: --max-iters is not honored by CUTracer (no CUTRACER_MAX_ITERS "
+            "variable); use --trace-size-limit-mb or a shorter --launch-cmd",
+            file=sys.stderr,
+        )
 
     with _profile.open(profile_path) as prof:
         plan = build_plan(
@@ -151,6 +158,7 @@ def _cutracer_run(args, _profile):
         kernel_filter=kernel_filter,
         so_path=_Path(so_path_str) if so_path_str else None,
         max_iters=max_iters,
+        trace_size_limit_mb=trace_size_limit_mb,
     )
 
     if backend in {"modal", "modal-run"} or modal_save:

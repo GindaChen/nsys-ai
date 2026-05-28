@@ -53,6 +53,19 @@ _AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
 # the same on/off semantics across env vars in this repo.
 _AUTO_TRIM_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 
+# ── Roll-up finding thresholds ──────────────────────────────────────
+# Shared between _infer_bottleneck (the human-readable string) and
+# _to_findings (the structured roll-up emitter) so a tweak in one place
+# can't drift from the other. Same constants-at-module-top convention as
+# PR #149 (kernel_launch_overhead) and PR #153 (top_kernels).
+_OVERHEAD_CONTAMINATED_PCT = 1.0
+_SYNC_BOUND_DENSITY_PCT = 20.0
+_COMM_BOUND_OVERLAP_PCT = 30.0
+_IDLE_DOMINANT_PCT = 15.0
+_KERNEL_HOTSPOT_PCT = 60.0
+_ITER_VARIANCE_SPIKE_RATIO = 1.5
+_MIN_ITERATIONS_FOR_NVTX_COVERAGE = 3
+
 
 def _auto_trim_enabled() -> bool:
     """Read NSYS_AI_MANIFEST_AUTO_TRIM with 0/false/no/off → disabled."""
@@ -519,13 +532,12 @@ def _infer_bottleneck(m: dict) -> str:
     """Heuristic bottleneck inference from manifest data."""
     sync = m.get("sync", {})
     sync_density = sync.get("sync_density_pct", 0)
-    # The new threshold
-    if sync_density > 20.0:
+    if sync_density > _SYNC_BOUND_DENSITY_PCT:
         return f"High CPU Synchronization Blocking ({sync_density:.1f}% of span)"
 
     dq = m.get("data_quality", {})
     overhead_pct_val = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
-    if overhead_pct_val > 1.0:
+    if overhead_pct_val > _OVERHEAD_CONTAMINATED_PCT:
         return f"Profiler Overhead ({dq.get('overhead_pct', overhead_pct_val)}%) contaminated the profile"
 
     overlap = m.get("overlap", {})
@@ -533,11 +545,11 @@ def _infer_bottleneck(m: dict) -> str:
     nccl = m.get("nccl", {})
 
     # Check NCCL serialization first (most impactful)
-    if overlap.get("overlap_pct", 100) < 30 and overlap.get("nccl_only_ms", 0) > 0:
-        return "NCCL serialization (overlap < 30%)"
+    if overlap.get("overlap_pct", 100) < _COMM_BOUND_OVERLAP_PCT and overlap.get("nccl_only_ms", 0) > 0:
+        return f"NCCL serialization (overlap < {int(_COMM_BOUND_OVERLAP_PCT)}%)"
 
     # Check idle gaps
-    if idle.get("idle_pct", 0) > 15:
+    if idle.get("idle_pct", 0) > _IDLE_DOMINANT_PCT:
         return f"GPU idle bubbles ({idle['idle_pct']}% of profile)"
 
     # Check if one kernel dominates
@@ -545,7 +557,7 @@ def _infer_bottleneck(m: dict) -> str:
     total = m.get("total_kernel_ms", 0)
     if top_k and total > 0:
         top_pct = top_k[0]["total_ms"] / total * 100
-        if top_pct > 60:
+        if top_pct > _KERNEL_HOTSPOT_PCT:
             return f"Kernel hotspot: {top_k[0]['name']} ({top_pct:.0f}%)"
 
     # Check NCCL dominance
@@ -556,11 +568,429 @@ def _infer_bottleneck(m: dict) -> str:
     nvtx = m.get("nvtx", {})
     median_ms = nvtx.get("median_iter_ms", 0)
     slowest_ms = nvtx.get("slowest_iter_ms", 0)
-    if median_ms > 0 and slowest_ms > median_ms * 1.5:
+    if median_ms > 0 and slowest_ms > median_ms * _ITER_VARIANCE_SPIKE_RATIO:
         ratio = slowest_ms / median_ms
         return f"Iteration variance spike (slowest {slowest_ms:.0f}ms = {ratio:.1f}× median)"
 
     return ""
+
+
+# Explanation strings interpolate the threshold constants at module load
+# so the prose stays in sync with the thresholds it cites. Hardcoded
+# values would silently drift if a threshold were ever tuned.
+_OVERHEAD_EXPLANATION = (
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
+    "profile span, which perturbs kernel durations and launch timings enough to "
+    "mask real regressions. Re-capture with torch.cuda.profiler.start/stop() + "
+    "--capture-range=cudaProfilerApi to scope nsys to the region of interest."
+)
+_SYNC_EXPLANATION = (
+    "Synchronous CPU→GPU waits (cudaStreamSynchronize, cudaMemcpy, .item(), "
+    f".cpu()) consumed >{_SYNC_BOUND_DENSITY_PCT}% of wall time. Look for "
+    "unnecessary host-side tensor reads, non-pinned host memory in the "
+    "dataloader, or eager evaluation inside the hot loop."
+)
+_COMM_EXPLANATION = (
+    f"Compute/NCCL overlap fell below {int(_COMM_BOUND_OVERLAP_PCT)}% with "
+    "non-trivial NCCL traffic on a separate stream — the rank is serializing "
+    "communication after compute instead of hiding it. Candidate levers: "
+    "dedicated NCCL stream + wait_stream ordering, Ulysses-Ring hybrid SP "
+    "partitioning, larger fused all-reduces."
+)
+_IDLE_EXPLANATION = (
+    f"GPU was idle for >{int(_IDLE_DOMINANT_PCT)}% of the profile, indicating "
+    "launch-bound segments or host-side blocking gaps between kernels. Inspect "
+    "gpu_idle_gaps findings for the specific stalls; consider CUDA Graphs / "
+    "torch.compile for launch overhead, dataloader workers / pinned memory "
+    "for host stalls."
+)
+_HOTSPOT_EXPLANATION = (
+    f"A single kernel accounts for >{int(_KERNEL_HOTSPOT_PCT)}% of total kernel "
+    "time — optimization effort spent anywhere else is Amdahl-limited. Triage "
+    "this kernel first: check TC eligibility, fusion opportunities, dtype, "
+    "occupancy."
+)
+_ITER_SPIKE_EXPLANATION = (
+    f"At least one steady-state iteration ran ≥{_ITER_VARIANCE_SPIKE_RATIO}× the "
+    "median, indicating non-uniform per-step cost (CFG batching, conditional "
+    "branches, sync outliers, or the first NCCL collective of a new "
+    "communicator). The median is what matters for throughput; the spike often "
+    "signals a specific anti-pattern."
+)
+_NVTX_COVERAGE_EXPLANATION = (
+    f"The profile has no NVTX annotations or fewer than {_MIN_ITERATIONS_FOR_NVTX_COVERAGE} "
+    "detected iterations, which means iteration_timing / nvtx_kernel_map / "
+    "overlap-by-region skills cannot anchor their analysis. Wrap the training "
+    "loop in torch.cuda.nvtx.range_push/pop or use the existing FastVideo "
+    "annotate_profile_regions context manager before re-capturing."
+)
+
+_OVERHEAD_ACTIONS = (
+    "Use torch.cuda.profiler.start/stop() around the region of interest.",
+    "Pass --capture-range=cudaProfilerApi to nsys profile.",
+    "Disable per-event CUPTI features (--cuda-trace=runtime,driver only).",
+)
+_SYNC_ACTIONS = (
+    "Audit .item() / .cpu() / .tolist() calls inside the hot loop.",
+    "Switch host-side buffers to pinned memory with non_blocking=True copies.",
+    "Move loss / metric reductions out of the inner loop.",
+)
+_COMM_ACTIONS = (
+    "Route NCCL collectives onto a dedicated stream with wait_stream ordering.",
+    "Evaluate Hybrid Ulysses-Ring SP partitioning for the dominant dimension.",
+    "Profile per-stream NCCL breakdown to identify the serialized collective.",
+)
+_IDLE_ACTIONS = (
+    "Inspect gpu_idle_gaps findings for the specific stall location.",
+    "Enable torch.compile (or CUDA Graphs) on the launch-bound segment.",
+    "Verify dataloader is non-blocking and uses pinned memory.",
+)
+_HOTSPOT_ACTIONS = (
+    "Confirm Tensor-Core eligibility (dtype, dims, layout) for this kernel.",
+    "Check for fusion opportunities with adjacent ops under torch.compile.",
+    "Profile occupancy and register pressure with Nsight Compute.",
+)
+_ITER_SPIKE_ACTIONS = (
+    "Inspect iteration_timing for the specific slow iteration's stack.",
+    "Check whether the spike aligns with a CFG batch / first-of-kind collective.",
+    "Compare median vs slowest with NVTX annotations to localize the divergence.",
+)
+_NVTX_COVERAGE_ACTIONS = (
+    "Wrap the training loop in torch.cuda.nvtx.range_push/range_pop.",
+    "Use the framework's existing region-annotation context manager.",
+    "Re-capture with at least 5 steady-state iterations after warmup.",
+)
+
+
+def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
+    """Emit roll-up findings characterizing the profile as a whole.
+
+    Reads only the already-assembled manifest dict — never reaches into
+    sub-skill findings — so this skill's findings are independent of any
+    sub-skill's _to_findings status. Seven roll-up types map to the
+    step-time decomposition (compute/communication/idle/sync) plus
+    profile_quality coverage. ``_infer_bottleneck`` still produces the
+    single human-readable string for ``_format``; this emits the full
+    structured set.
+    """
+    from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
+
+    findings: list = []
+    if not rows:
+        return findings
+    m = rows[0]
+    profile_id = (context or {}).get("profile_id", "unknown")
+
+    def _emit(
+        *,
+        finding_id: str,
+        label: str,
+        severity: str,
+        category: str,
+        values: dict,
+        units: dict,
+        note: str,
+        explanation: str,
+        actions: tuple[str, ...],
+        provenance_extra: dict | None = None,
+    ) -> None:
+        # All roll-ups are profile-global characterizations (no time
+        # anchor); ``start_ns=0`` is the established "no anchor" sentinel
+        # — see top_kernels.top_kernels_concentrated for the same
+        # convention — and ``type="highlight"`` signals to consumers that
+        # this is not a trace location.
+        selection = TraceSelection(
+            id=f"sel_{finding_id}",
+            profile_id=profile_id,
+            source="skill:profile_health_manifest",
+            label=label,
+        )
+        provenance = {"skill": "profile_health_manifest", "row_kind": finding_id}
+        if provenance_extra:
+            provenance.update(provenance_extra)
+        ev = EvidenceRow(
+            id=f"ev_{finding_id}",
+            source_skill="profile_health_manifest",
+            values=values,
+            units=units,
+            selection_id=selection.id,
+            provenance={"row_kind": finding_id},
+        )
+        findings.append(
+            Finding(
+                type="highlight",
+                label=label,
+                start_ns=0,
+                end_ns=None,
+                severity=severity,
+                note=note,
+                id=finding_id,
+                category=category,
+                evidence=[ev],
+                selection=selection,
+                explanation=explanation,
+                suggested_actions=list(actions),
+                provenance=provenance,
+            )
+        )
+
+    # ── 1. Profiler overhead contamination ─────────────────────────
+    dq = m.get("data_quality", {}) or {}
+    overhead_pct = float(dq.get("overhead_pct_raw", dq.get("overhead_pct", 0)) or 0)
+    if overhead_pct > _OVERHEAD_CONTAMINATED_PCT:
+        overhead_ms = float(dq.get("profiler_overhead_ms", 0) or 0)
+        _emit(
+            finding_id="profile_overhead_contaminated",
+            label=f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)",
+            severity="critical",
+            category="profile_quality",
+            values={
+                "overhead_pct": round(overhead_pct, 2),
+                "overhead_ms": round(overhead_ms, 2),
+                "threshold_pct": _OVERHEAD_CONTAMINATED_PCT,
+            },
+            units={"overhead_pct": "percent", "overhead_ms": "ms", "threshold_pct": "percent"},
+            note=(
+                f"Per-event profiler overhead is {overhead_pct:.1f}% of profile span "
+                f"({overhead_ms:.1f}ms). Above {_OVERHEAD_CONTAMINATED_PCT}% the captured "
+                "kernel durations are no longer trustworthy."
+            ),
+            explanation=_OVERHEAD_EXPLANATION,
+            actions=_OVERHEAD_ACTIONS,
+        )
+
+    # ── 2. CPU sync blocking ────────────────────────────────────────
+    sync = m.get("sync", {}) or {}
+    sync_density = float(sync.get("sync_density_pct", 0) or 0)
+    if sync_density > _SYNC_BOUND_DENSITY_PCT:
+        sync_wall_ms = float(sync.get("total_sync_wall_ms", 0) or 0)
+        _emit(
+            finding_id="profile_sync_bound",
+            label=f"CPU sync blocks {sync_density:.1f}% of wall time",
+            severity="warning",
+            category="sync",
+            values={
+                "sync_density_pct": round(sync_density, 2),
+                "sync_wall_ms": round(sync_wall_ms, 2),
+                "threshold_pct": _SYNC_BOUND_DENSITY_PCT,
+            },
+            units={
+                "sync_density_pct": "percent",
+                "sync_wall_ms": "ms",
+                "threshold_pct": "percent",
+            },
+            note=(
+                f"Synchronous CPU→GPU waits consume {sync_density:.1f}% of wall time "
+                f"({sync_wall_ms:.1f}ms). Threshold {_SYNC_BOUND_DENSITY_PCT}%."
+            ),
+            explanation=_SYNC_EXPLANATION,
+            actions=_SYNC_ACTIONS,
+        )
+
+    # ── 3. Communication-bound ──────────────────────────────────────
+    overlap = m.get("overlap", {}) or {}
+    nccl = m.get("nccl", {}) or {}
+    # `overlap_pct` of exactly 0.0 is a legitimate (and important) signal
+    # — full serialization of compute and NCCL on one stream. The naive
+    # ``x or 100`` idiom would mistake 0.0 for "missing" and silence the
+    # comm_bound finding precisely when it should fire hardest. Caught
+    # during L40S validation on the uncompiled perf.sqlite profile, where
+    # overlap_pct=0.0 and nccl_only_ms=8654ms should have tripped the
+    # low-overlap trigger but didn't.
+    raw_overlap_pct = overlap.get("overlap_pct")
+    overlap_pct = 100.0 if raw_overlap_pct is None else float(raw_overlap_pct)
+    nccl_only_ms = float(overlap.get("nccl_only_ms", 0) or 0)
+    total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
+    compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
+    low_overlap = overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
+    nccl_dominates_compute = total_nccl_ms > 0 and total_nccl_ms > compute_only_ms
+    if low_overlap or nccl_dominates_compute:
+        # Two distinct triggers can fire this; capture which in provenance
+        # so downstream consumers (and Copilot-style reviewers) can tell
+        # the low-overlap signal from the NCCL-dominance signal.
+        triggers = []
+        if low_overlap:
+            triggers.append("low_overlap")
+        if nccl_dominates_compute:
+            triggers.append("nccl_exceeds_compute")
+        # Build the label from whichever trigger(s) fired so the
+        # human-readable summary reflects the actual signal — citing
+        # "overlap 100%" when only nccl_exceeds_compute triggered would
+        # be misleading.
+        if low_overlap and nccl_dominates_compute:
+            label_text = (
+                f"Communication-bound (overlap {overlap_pct:.0f}%, "
+                f"NCCL {total_nccl_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
+            )
+        elif low_overlap:
+            label_text = (
+                f"Communication-bound: low overlap {overlap_pct:.0f}% "
+                f"(NCCL {nccl_only_ms:.0f}ms unhidden)"
+            )
+        else:
+            label_text = (
+                f"Communication-bound: NCCL dominates "
+                f"({total_nccl_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
+            )
+        _emit(
+            finding_id="profile_comm_bound",
+            label=label_text,
+            severity="warning",
+            category="communication",
+            values={
+                "overlap_pct": round(overlap_pct, 2),
+                "nccl_only_ms": round(nccl_only_ms, 2),
+                "total_nccl_ms": round(total_nccl_ms, 2),
+                "compute_only_ms": round(compute_only_ms, 2),
+                "dominant_collective": nccl.get("dominant_type", "unknown"),
+                "overlap_threshold_pct": _COMM_BOUND_OVERLAP_PCT,
+            },
+            units={
+                "overlap_pct": "percent",
+                "nccl_only_ms": "ms",
+                "total_nccl_ms": "ms",
+                "compute_only_ms": "ms",
+                "overlap_threshold_pct": "percent",
+            },
+            note=(
+                f"Compute/NCCL overlap is {overlap_pct:.0f}% (threshold "
+                f"{int(_COMM_BOUND_OVERLAP_PCT)}%); NCCL total {total_nccl_ms:.0f}ms "
+                f"vs compute-only {compute_only_ms:.0f}ms. Dominant collective: "
+                f"{nccl.get('dominant_type', 'unknown')}."
+            ),
+            explanation=_COMM_EXPLANATION,
+            actions=_COMM_ACTIONS,
+            provenance_extra={"triggers": triggers},
+        )
+
+    # ── 4. GPU idle dominant ────────────────────────────────────────
+    idle = m.get("idle", {}) or {}
+    idle_pct = float(idle.get("idle_pct", 0) or 0)
+    if idle_pct > _IDLE_DOMINANT_PCT:
+        gap_count = int(idle.get("gap_count", 0) or 0)
+        total_idle_ms = float(idle.get("total_idle_ms", 0) or 0)
+        _emit(
+            finding_id="profile_idle_dominant",
+            label=f"GPU idle {idle_pct:.0f}% of profile ({gap_count} gaps)",
+            severity="warning",
+            category="idle",
+            values={
+                "idle_pct": round(idle_pct, 2),
+                "gap_count": gap_count,
+                "total_idle_ms": round(total_idle_ms, 2),
+                "threshold_pct": _IDLE_DOMINANT_PCT,
+            },
+            units={
+                "idle_pct": "percent",
+                "total_idle_ms": "ms",
+                "threshold_pct": "percent",
+            },
+            note=(
+                f"GPU idle for {idle_pct:.0f}% of profile across {gap_count} gaps "
+                f"({total_idle_ms:.0f}ms total). Threshold {int(_IDLE_DOMINANT_PCT)}%."
+            ),
+            explanation=_IDLE_EXPLANATION,
+            actions=_IDLE_ACTIONS,
+        )
+
+    # ── 5. Kernel hotspot ───────────────────────────────────────────
+    top_k = m.get("top_kernels", []) or []
+    total_kernel_ms = float(m.get("total_kernel_ms", 0) or 0)
+    if top_k and total_kernel_ms > 0:
+        top_ms = float(top_k[0].get("total_ms", 0) or 0)
+        top_pct = 100.0 * top_ms / total_kernel_ms
+        if top_pct > _KERNEL_HOTSPOT_PCT:
+            kname = top_k[0].get("name", "<unknown>")
+            count = int(top_k[0].get("count", 0) or 0)
+            _emit(
+                finding_id="profile_kernel_hotspot",
+                label=f"Kernel hotspot: {kname[:48]} ({top_pct:.0f}%)",
+                severity="warning",
+                category="compute",
+                values={
+                    "kernel_name": kname,
+                    "kernel_total_ms": round(top_ms, 2),
+                    "kernel_invocations": count,
+                    "pct_of_total_kernel_ms": round(top_pct, 2),
+                    "threshold_pct": _KERNEL_HOTSPOT_PCT,
+                },
+                units={
+                    "kernel_total_ms": "ms",
+                    "pct_of_total_kernel_ms": "percent",
+                    "threshold_pct": "percent",
+                },
+                note=(
+                    f"Kernel '{kname}' is {top_pct:.0f}% of total kernel time "
+                    f"({top_ms:.0f}ms over {count} invocations). Threshold "
+                    f"{int(_KERNEL_HOTSPOT_PCT)}%."
+                ),
+                explanation=_HOTSPOT_EXPLANATION,
+                actions=_HOTSPOT_ACTIONS,
+            )
+
+    # ── 6. Iteration variance spike ─────────────────────────────────
+    nvtx = m.get("nvtx", {}) or {}
+    median_ms = float(nvtx.get("median_iter_ms", 0) or 0)
+    slowest_ms = float(nvtx.get("slowest_iter_ms", 0) or 0)
+    if median_ms > 0 and slowest_ms > median_ms * _ITER_VARIANCE_SPIKE_RATIO:
+        ratio = slowest_ms / median_ms
+        iter_count = int(nvtx.get("iteration_count", 0) or 0)
+        _emit(
+            finding_id="profile_iteration_variance_spike",
+            label=f"Iteration variance: slowest {ratio:.1f}× median",
+            severity="warning",
+            category="nvtx",
+            values={
+                "median_iter_ms": round(median_ms, 2),
+                "slowest_iter_ms": round(slowest_ms, 2),
+                "ratio": round(ratio, 2),
+                "iteration_count": iter_count,
+                "threshold_ratio": _ITER_VARIANCE_SPIKE_RATIO,
+            },
+            units={
+                "median_iter_ms": "ms",
+                "slowest_iter_ms": "ms",
+                "ratio": "x",
+                "threshold_ratio": "x",
+            },
+            note=(
+                f"Slowest steady-state iteration ({slowest_ms:.0f}ms) is "
+                f"{ratio:.1f}× the median ({median_ms:.0f}ms) across "
+                f"{iter_count} iterations. Threshold {_ITER_VARIANCE_SPIKE_RATIO}×."
+            ),
+            explanation=_ITER_SPIKE_EXPLANATION,
+            actions=_ITER_SPIKE_ACTIONS,
+        )
+
+    # ── 7. Insufficient NVTX coverage ───────────────────────────────
+    has_nvtx = bool(nvtx.get("has_nvtx", False))
+    iter_count = int(nvtx.get("iteration_count", 0) or 0)
+    if not has_nvtx or iter_count < _MIN_ITERATIONS_FOR_NVTX_COVERAGE:
+        reason = "no NVTX annotations" if not has_nvtx else (
+            f"only {iter_count} iteration(s) detected "
+            f"(<{_MIN_ITERATIONS_FOR_NVTX_COVERAGE} required for steady-state)"
+        )
+        _emit(
+            finding_id="profile_insufficient_nvtx_coverage",
+            label=f"Insufficient NVTX coverage: {reason}",
+            severity="info",
+            category="profile_quality",
+            values={
+                "has_nvtx": has_nvtx,
+                "iteration_count": iter_count,
+                "min_iterations": _MIN_ITERATIONS_FOR_NVTX_COVERAGE,
+            },
+            units={},
+            note=(
+                f"Profile cannot anchor iteration / region analysis: {reason}. "
+                "Downstream skills (iteration_timing, nvtx_kernel_map) will "
+                "have reduced fidelity."
+            ),
+            explanation=_NVTX_COVERAGE_EXPLANATION,
+            actions=_NVTX_COVERAGE_ACTIONS,
+        )
+
+    return findings
 
 
 def _format(rows):
@@ -695,6 +1125,7 @@ SKILL = Skill(
     category="utility",
     execute_fn=_execute,
     format_fn=_format,
+    to_findings_fn=_to_findings,
     params=[
         SkillParam("device", "GPU device ID", "int", False, 0),
     ],

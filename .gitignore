@@ -22,6 +22,7 @@ data/nsys-hero/
 !tests/fixtures/mock.sqlite
 *.nsys-rep
 *.nsys-cache/
+*.nsys-cache.build.lock
 *.sqlite.timeline-cache-*.json
 examples/*/output/
 snapshot_report.html

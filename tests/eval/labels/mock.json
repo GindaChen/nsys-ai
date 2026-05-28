@@ -1,0 +1,27 @@
+{
+  "id": "eval-mock-001",
+  "profile": "tests/fixtures/mock.sqlite",
+  "device": 0,
+  "description": "Minimal committed synthetic profile: a few GPU idle gaps plus one large H2D transfer. The only label that runs in CI (its profile is committed); it exists to exercise the harness deterministically and guard against false-positive findings.",
+  "source": "Grounded in EvidenceBuilder.build() output on the committed tests/fixtures/mock.sqlite. Assertions are intentionally coarse (presence, not counts) so they survive minor finding-count drift.",
+  "expect": [
+    {
+      "category": "idle",
+      "min_severity": "warning",
+      "required": true,
+      "note": "GPU idle gaps / idle summary are the dominant real signal in this fixture; stable enough to gate"
+    }
+  ],
+  "must_not": [
+    {
+      "category": "communication",
+      "note": "mock has no NCCL activity; any communication finding here is a false positive"
+    }
+  ],
+  "known_gaps": [
+    {
+      "observation": "the 'Large H2D Transfer' finding has category=null; it should be 'memory'. Uncategorized findings cannot be filtered or attributed to a step-time bucket.",
+      "ref": "roadmap §4 B (per-skill finding upgrade)"
+    }
+  ]
+}

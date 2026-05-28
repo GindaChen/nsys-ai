@@ -173,8 +173,32 @@ class TestRunLocal:
                 # Logger mode: no --analysis flag
                 assert "--analysis" not in call_argv
 
-    def test_max_iters_sets_cutracer_env(self, tmp_path):
-        """CUTRACER_MAX_ITERS is passed when ``RunConfig.max_iters`` is set."""
+    def test_trace_size_limit_passes_cli_flag(self, tmp_path):
+        """trace_size_limit_mb is passed as a ``cutracer trace`` CLI flag.
+
+        The env var alone does not work: the ``cutracer trace`` wrapper resets
+        CUTRACER_TRACE_SIZE_LIMIT_MB for the child from its own ``--trace-size-limit-mb``
+        flag (default 0), so it must be passed on the command line.
+        """
+        from nsys_ai.cutracer.runner import RunConfig, run_local
+
+        so = tmp_path / "cutracer.so"
+        so.write_bytes(b"\x7fELF")
+        cfg = RunConfig(
+            launch_cmd="true",
+            output_dir=tmp_path / "out",
+            so_path=so,
+            trace_size_limit_mb=500,
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            run_local(cfg, progress=False)
+        call_argv = mock_run.call_args[0][0]
+        assert "--trace-size-limit-mb" in call_argv
+        assert call_argv[call_argv.index("--trace-size-limit-mb") + 1] == "500"
+
+    def test_max_iters_does_not_set_phantom_env(self, tmp_path):
+        """``max_iters`` is a no-op: the phantom CUTRACER_MAX_ITERS is never set."""
         from nsys_ai.cutracer.runner import RunConfig, run_local
 
         so = tmp_path / "cutracer.so"
@@ -189,7 +213,7 @@ class TestRunLocal:
             mock_run.return_value = MagicMock(returncode=0)
             run_local(cfg, progress=False)
         env = mock_run.call_args.kwargs.get("env") or {}
-        assert env.get("CUTRACER_MAX_ITERS") == "42"
+        assert "CUTRACER_MAX_ITERS" not in env
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +236,7 @@ def _make_plan_and_config(tmp_path):
         launch_cmd="python train.py",
         output_dir=tmp_path / "cutracer_out",
         kernel_filter=["flash_bwd_dq_dk_dv_loop", "flash_fwd_kernel"],
-        max_iters=5,
+        trace_size_limit_mb=500,
     )
     return plan, config
 
@@ -281,12 +305,15 @@ class TestFormatModalApp:
 
     def test_contains_github_clone(self, tmp_path):
         """Generated Modal script should clone from GitHub, not use nsys-ai cutracer install."""
+        from nsys_ai.cutracer.installer import CUTRACER_TAG
         from nsys_ai.cutracer.runner import format_modal_app
 
         plan, config = _make_plan_and_config(tmp_path)
         script = format_modal_app(plan, config)
         assert "git clone" in script
-        assert "facebookresearch/CUTracer" in script
+        assert "facebookexperimental/CUTracer" in script
+        # Track the pinned-tag constant so this stays in sync when it bumps.
+        assert f"--branch {CUTRACER_TAG}" in script
         assert "install_third_party.sh" in script
         assert "nsys-ai cutracer install" not in script
 
@@ -298,13 +325,17 @@ class TestFormatModalApp:
         assert "nsys-ai cutracer analyze" in script
         assert "/data/trace.sqlite" in script
 
-    def test_contains_max_iters(self, tmp_path):
+    def test_contains_trace_size_limit(self, tmp_path):
         from nsys_ai.cutracer.runner import format_modal_app
 
         plan, config = _make_plan_and_config(tmp_path)
         script = format_modal_app(plan, config)
-        assert "CUTRACER_MAX_ITERS" in script
-        assert "5" in script  # max_iters=5
+        # Passed as a cutracer trace CLI flag, not via the (overridden) env var.
+        assert "--trace-size-limit-mb" in script
+        assert "500" in script  # trace_size_limit_mb=500
+        assert "CUTRACER_TRACE_SIZE_LIMIT_MB" not in script
+        # the phantom iterations env var must not leak back into the script
+        assert "CUTRACER_MAX_ITERS" not in script
 
     def test_contains_vol_iterdir(self, tmp_path):
         from nsys_ai.cutracer.runner import format_modal_app

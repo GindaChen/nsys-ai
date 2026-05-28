@@ -108,17 +108,19 @@ nsys-ai skill run cutracer_analysis profile.sqlite --format json \
 
 ## Modal workflow (no local GPU execution)
 
-Generate or run a Modal app via:
+If you have no local GPU, run CUTracer on [Modal](https://modal.com) instead.
+Generate an editable Modal app from your profile:
 
 ```bash
-nsys-ai cutracer run profile.sqlite --launch-cmd "python train.py" --backend modal
+nsys-ai cutracer run profile.sqlite --launch-cmd "python train.py" \
+  --modal-save run_cutracer.py
+modal run run_cutracer.py
 ```
 
-Or execute directly:
-
-```bash
-nsys-ai cutracer run profile.sqlite --launch-cmd "python train.py" --backend modal-run
-```
+The generated image builds `cutracer.so` for you but does **not** include your
+training code or dependencies — you must add them to the script before running.
+See **[cutracer-modal.md](./cutracer-modal.md)** for the full end-to-end guide
+(prerequisites, adding your code, GPU/cost selection, volumes, troubleshooting).
 
 ## Agent guide / auto-guide note
 

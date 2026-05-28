@@ -231,6 +231,230 @@ class TestBuildSo:
 
 
 # ---------------------------------------------------------------------------
+# _ensure_pinned_checkout (existing-clone reconciliation)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsurePinnedCheckout:
+    def test_already_at_tag_is_reused_without_fetch(self, tmp_path):
+        from nsys_ai.cutracer.installer import CUTRACER_TAG, _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=f"{CUTRACER_TAG}\n", stderr=""
+            )
+            _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+        # Only the `git describe` probe should run — no fetch/checkout.
+        assert mock_run.call_count == 1
+        assert mock_run.call_args_list[0].args[0][:2] == ["git", "describe"]
+
+    def test_wrong_ref_triggers_fetch_checkout_and_drops_stale_so(self, tmp_path):
+        from nsys_ai.cutracer.installer import (
+            CUTRACER_GITHUB,
+            CUTRACER_TAG,
+            _ensure_pinned_checkout,
+        )
+
+        clone = tmp_path / "CUTracer"
+        (clone / "lib").mkdir(parents=True)
+        so_dest = clone / "lib" / "cutracer.so"
+        so_dest.write_bytes(b"\x7fELF")  # stale artifact from old ref
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run) as mock_run:
+            _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert ["git", "remote", "set-url", "origin", CUTRACER_GITHUB] in cmds
+        assert ["git", "fetch", "--depth=1", "origin", "tag", CUTRACER_TAG] in cmds
+        # Plain checkout (no -f) on a clean worktree.
+        assert ["git", "checkout", CUTRACER_TAG] in cmds
+        # Stale .so removed so the build step recompiles from the new ref.
+        assert not so_dest.exists()
+
+    def test_dirty_worktree_refuses_checkout(self, tmp_path):
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        (clone / "lib").mkdir(parents=True)
+        so_dest = clone / "lib" / "cutracer.so"
+        so_dest.write_bytes(b"\x7fELF")  # must NOT be deleted on refusal
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "status"]:
+                return MagicMock(returncode=0, stdout=" M src/foo.cu\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run) as mock_run:
+            with pytest.raises(RuntimeError, match="uncommitted local changes"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+        # No fetch/checkout attempted, stale .so left intact.
+        cmds = [c.args[0][:2] for c in mock_run.call_args_list]
+        assert ["git", "fetch"] not in cmds
+        assert ["git", "checkout"] not in cmds
+        assert so_dest.exists()
+
+    def test_raises_when_git_status_fails(self, tmp_path):
+        """A failed `git status` means cleanliness is unverifiable — bail
+        clearly rather than proceed to a possibly destructive checkout."""
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        (clone / "lib").mkdir(parents=True)
+        so_dest = clone / "lib" / "cutracer.so"
+        so_dest.write_bytes(b"\x7fELF")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "status"]:
+                return MagicMock(returncode=128, stdout="", stderr="fatal: corrupt")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run) as mock_run:
+            with pytest.raises(RuntimeError, match="git status"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+        # No fetch/checkout attempted, stale .so left intact.
+        cmds = [c.args[0][:2] for c in mock_run.call_args_list]
+        assert ["git", "fetch"] not in cmds
+        assert ["git", "checkout"] not in cmds
+        assert so_dest.exists()
+
+    def test_error_message_normalizes_none_stderr(self, tmp_path):
+        """With progress=True, capture_output is False and .stderr is None —
+        the error message must not leak the literal 'None'."""
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "status"]:
+                return MagicMock(returncode=0, stdout="", stderr=None)
+            if cmd[:2] == ["git", "fetch"]:
+                return MagicMock(returncode=1, stdout=None, stderr=None)
+            return MagicMock(returncode=0, stdout=None, stderr=None)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError) as exc:
+                _ensure_pinned_checkout(clone, so_dest, progress=True)
+        assert "None" not in str(exc.value)
+
+    def test_raises_on_set_url_failure(self, tmp_path):
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:3] == ["git", "remote", "set-url"]:
+                return MagicMock(returncode=1, stdout="", stderr="no origin")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="set-url"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+    def test_raises_on_fetch_failure(self, tmp_path):
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "fetch"]:
+                return MagicMock(returncode=1, stdout="", stderr="network down")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="git fetch"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+    def test_raises_on_checkout_failure(self, tmp_path):
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        so_dest = clone / "lib" / "cutracer.so"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "checkout"]:
+                return MagicMock(returncode=1, stdout="", stderr="conflict")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(RuntimeError, match="git checkout"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+
+class TestCloneAndBuildExistingTree:
+    def test_non_git_makefile_tree_skips_reconciliation(self, tmp_path):
+        """A non-git source tree (e.g. extracted tarball) with a Makefile must
+        build as-is, not attempt git reconciliation (which would error)."""
+        from nsys_ai.cutracer import installer
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        (clone / "Makefile").write_text("all:\n")
+        # Pre-stage so the build short-circuits: nvbit present, .so already built.
+        (clone / "third_party" / "nvbit").mkdir(parents=True)
+        (clone / "lib").mkdir()
+        (clone / "lib" / "cutracer.so").write_bytes(b"\x7fELF")
+        # No .git → must be treated as a non-git tree.
+
+        with patch.object(installer, "_ensure_pinned_checkout") as mock_reconcile:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                result = installer._clone_and_build(clone, progress=False)
+
+        mock_reconcile.assert_not_called()
+        assert result == clone / "lib" / "cutracer.so"
+
+    def test_git_makefile_tree_triggers_reconciliation(self, tmp_path):
+        """A git clone with a Makefile must be reconciled to the pinned tag."""
+        from nsys_ai.cutracer import installer
+
+        clone = tmp_path / "CUTracer"
+        clone.mkdir()
+        (clone / "Makefile").write_text("all:\n")
+        (clone / ".git").mkdir()
+        (clone / "third_party" / "nvbit").mkdir(parents=True)
+        (clone / "lib").mkdir()
+        (clone / "lib" / "cutracer.so").write_bytes(b"\x7fELF")
+
+        with patch.object(installer, "_ensure_pinned_checkout") as mock_reconcile:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                installer._clone_and_build(clone, progress=False)
+
+        mock_reconcile.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # install (high-level, dry-run)
 # ---------------------------------------------------------------------------
 

@@ -23,7 +23,6 @@ Modal
 
 from __future__ import annotations
 
-import os
 import shlex
 
 # subprocess is used for argv-based cutracer invocations.
@@ -58,7 +57,15 @@ class RunConfig:
     """CUTracer instrumentation mode."""
 
     max_iters: int | None = None
-    """If set, sets ``CUTRACER_MAX_ITERS`` to limit profiling to N iterations."""
+    """Deprecated / no-op. Upstream CUTracer (v0.2.1) has no ``CUTRACER_MAX_ITERS``
+    variable, so this does not limit iterations. Use ``trace_size_limit_mb`` or a
+    shorter ``launch_cmd`` instead. Kept only for back-compat."""
+
+    trace_size_limit_mb: int | None = None
+    """If set, passes ``--trace-size-limit-mb`` to ``cutracer trace`` so CUTracer
+    stops writing trace once the on-disk size reaches this many MB (the running
+    kernel is unaffected). Applied as a CLI flag, not an env var: the wrapper
+    overrides ``CUTRACER_TRACE_SIZE_LIMIT_MB`` from this flag."""
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +99,11 @@ def _build_cutracer_cmd(config: RunConfig, so_path: Path | None) -> list[str]:
     if config.kernel_filter:
         cmd += ["--kernel-filters", ",".join(config.kernel_filter)]
     cmd += ["--output-dir", str(config.output_dir.resolve())]
+    # Must be a CLI flag: the ``cutracer trace`` wrapper sets the child's
+    # CUTRACER_TRACE_SIZE_LIMIT_MB from this flag (default 0), clobbering any
+    # value inherited from the parent environment.
+    if config.trace_size_limit_mb is not None:
+        cmd += ["--trace-size-limit-mb", str(config.trace_size_limit_mb)]
     cmd += ["--"] + shlex.split(config.launch_cmd)
     return cmd
 
@@ -141,11 +153,9 @@ def run_local(
         print("  " + " ".join(argv))
         return config.output_dir
 
-    run_env = os.environ.copy()
-    if config.max_iters is not None:
-        run_env["CUTRACER_MAX_ITERS"] = str(config.max_iters)
-
-    result = subprocess.run(argv, shell=False, env=run_env)  # nosec B603 B607
+    # trace_size_limit_mb is applied as a ``cutracer trace`` CLI flag (see
+    # _build_cutracer_cmd), not via the environment, which the wrapper overrides.
+    result = subprocess.run(argv, shell=False)  # nosec B603 B607
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, argv)
 
@@ -218,6 +228,9 @@ def format_modal_app(
     if modal_cfg is None:
         modal_cfg = ModalConfig()
 
+    # Single source of truth for the upstream repo URL + pinned release tag.
+    from nsys_ai.cutracer.installer import CUTRACER_GITHUB, CUTRACER_TAG
+
     filter_csv = ",".join(config.kernel_filter) if config.kernel_filter else ""
     output_dir_str = str(config.output_dir)
     # Use repr() for Python string literals inside the generated script;
@@ -282,7 +295,7 @@ image = (
     ){extra_pip_lines}
     .run_commands(
         # Clone and build CUTracer NVBit .so (cached layer after first image build)
-        "git clone --depth=1 https://github.com/facebookresearch/CUTracer /opt/CUTracer",
+        "git clone --depth=1 --branch {CUTRACER_TAG} {CUTRACER_GITHUB} /opt/CUTracer",
         "cd /opt/CUTracer && ./install_third_party.sh",
         "cd /opt/CUTracer && make",
         "mkdir -p /root/.nsys-ai/cutracer/lib && cp /opt/CUTracer/lib/cutracer.so /root/.nsys-ai/cutracer/lib/",
@@ -307,7 +320,7 @@ def run_with_cutracer(
     launch_cmd: str,
     kernel_filter: str,
     analysis: str = "{config.mode}",
-    max_iters: int | None = None,
+    trace_size_limit_mb: int | None = None,
 ) -> None:
     import csv
     import re
@@ -330,6 +343,9 @@ def run_with_cutracer(
         if kernel_filter:
             argv += ["--kernel-filters", kernel_filter]
         argv += ["--output-dir", "/cutracer_out"]
+        # Pass as a CLI flag — the cutracer trace wrapper overrides the size env var.
+        if trace_size_limit_mb is not None:
+            argv += ["--trace-size-limit-mb", str(trace_size_limit_mb)]
     else:
         print(f"WARNING: cutracer.so not found at {{so_path}} — running in kernel logger mode only")
         if kernel_filter:
@@ -347,11 +363,7 @@ def run_with_cutracer(
         print(f"    filter  : {{kernel_filter or '(all)'}}")
     print(f"    argv    : {{' '.join(argv)}}")
 
-    run_env = os.environ.copy()
-    if max_iters is not None:
-        run_env["CUTRACER_MAX_ITERS"] = str(max_iters)
-
-    result = subprocess.run(argv, shell=False, env=run_env)
+    result = subprocess.run(argv, shell=False)
     if result.returncode != 0:
         vol.commit()
         raise SystemExit(f"Training command exited with code {{result.returncode}}")
@@ -365,33 +377,56 @@ def run_with_cutracer(
     existing_hist = sorted(out_dir.glob("*_hist.csv"))
     if existing_hist:
         print(f"==> Found {{len(existing_hist)}} precomputed *_hist.csv file(s); skipping SASS post-process")
-        vol.commit()
-        return
+    else:
+        # Capture base_name → hash mapping from ndjson filenames before SASS resolution,
+        # so we can reconstruct the kernel_<name>_<hash>_hist.csv naming expected by the parser.
+        hash_map: dict = {{}}
+        for ndf in sorted(out_dir.glob("*.ndjson")):
+            base = re.sub(r"_iter\\d+", "", ndf.stem)
+            parts = base.split("_", 2)
+            if len(parts) >= 3:
+                arch = "_".join(base.split("_")[2:])
+                hash_map[arch] = parts[1]
 
-    # Capture base_name → hash mapping from ndjson filenames before SASS resolution,
-    # so we can reconstruct the kernel_<name>_<hash>_hist.csv naming expected by the parser.
-    hash_map: dict = {{}}
-    for ndf in sorted(out_dir.glob("*.ndjson")):
-        base = re.sub(r"_iter\\d+", "", ndf.stem)
-        parts = base.split("_", 2)
-        if len(parts) >= 3:
-            arch = "_".join(base.split("_")[2:])
-            hash_map[arch] = parts[1]
+        hists = sass_resolve_dir(out_dir)
+        if not hists:
+            print("WARNING: sass_resolve_dir returned no histograms — check cutracer/nvdisasm output")
 
-    hists = sass_resolve_dir(out_dir)
-    if not hists:
-        print("WARNING: sass_resolve_dir returned no histograms — check cutracer/nvdisasm output")
+        for arch_suffix, hist in hists.items():
+            hash_part = hash_map.get(arch_suffix, "0")
+            csv_path = out_dir / f"kernel_{{arch_suffix}}_{{hash_part}}_hist.csv"
+            with open(csv_path, "w", newline="") as cf:
+                writer = csv.writer(cf)
+                writer.writerow(["warp_id", "region_id", "instruction", "count", "cycles"])
+                for mn, cnt in sorted(hist.instruction_counts.items(), key=lambda x: -x[1]):
+                    writer.writerow([0, 0, mn, cnt, hist.instruction_cycles.get(mn, 0)])
+            total = sum(hist.instruction_counts.values())
+            print(f"==> Wrote {{csv_path.name}} ({{total:,}} instructions, {{len(hist.instruction_counts)}} opcodes)")
 
-    for arch_suffix, hist in hists.items():
-        hash_part = hash_map.get(arch_suffix, "0")
-        csv_path = out_dir / f"kernel_{{arch_suffix}}_{{hash_part}}_hist.csv"
-        with open(csv_path, "w", newline="") as cf:
-            writer = csv.writer(cf)
-            writer.writerow(["warp_id", "region_id", "instruction", "count", "cycles"])
-            for mn, cnt in sorted(hist.instruction_counts.items(), key=lambda x: -x[1]):
-                writer.writerow([0, 0, mn, cnt, hist.instruction_cycles.get(mn, 0)])
-        total = sum(hist.instruction_counts.values())
-        print(f"==> Wrote {{csv_path.name}} ({{total:,}} instructions, {{len(hist.instruction_counts)}} opcodes)")
+    # -----------------------------------------------------------------------
+    # SASS resolution coverage (runs for both the precomputed-hist and the
+    # SASS-fallback paths) — a captured cubin with no histogram failed nvdisasm,
+    # commonly a CUDA toolkit mismatch where the image's nvdisasm is older than
+    # the framework's CUDA build. Surface this loudly so a dropped HOT kernel is
+    # not mistaken for a clean run — the trace exits 0 even when resolution fails.
+    # -----------------------------------------------------------------------
+    cubins = sorted(out_dir.glob("*.cubin"))
+    written = {{p.name for p in out_dir.glob("*_hist.csv")}}
+    print(f"==> SASS resolution: {{len(written)}} histogram(s), {{len(cubins)}} cubin(s) captured")
+    if cubins and len(written) < len(cubins):
+        failed = []
+        for cb in cubins:
+            frag = cb.stem.split("_", 2)[-1] if cb.stem.count("_") >= 2 else cb.stem
+            if not any(frag in w for w in written):
+                failed.append(cb.name)
+        if failed:
+            print("WARNING: SASS resolution FAILED for these kernel(s) — NO histogram was written:")
+            for f in failed:
+                print(f"    - {{f}}")
+            print("WARNING: usually a CUDA toolkit mismatch (the image's nvdisasm is older than")
+            print("         the framework's CUDA build). See docs/cutracer-modal.md ->")
+            print("         'Match the CUDA toolkit to your framework'.")
+            print("WARNING: if the kernel you targeted is listed above, its results are MISSING.")
 
     vol.commit()  # flush Volume before container exits
 
@@ -405,13 +440,13 @@ def main() -> None:
     # TODO: Replace with your actual training command (short profiling run, not full training).
     launch_cmd = {repr(config.launch_cmd or "python train.py  # TODO: replace")}
     kernel_filter = {repr(filter_csv)}
-    max_iters = {config.max_iters!r}  # set to e.g. 10 to profile only 10 iterations
+    trace_size_limit_mb = {config.trace_size_limit_mb!r}  # e.g. 1000 caps the raw trace at ~1 GB
 
     print("==> Submitting CUTracer run to Modal ...")
     run_with_cutracer.remote(
         launch_cmd=launch_cmd,
         kernel_filter=kernel_filter,
-        max_iters=max_iters,
+        trace_size_limit_mb=trace_size_limit_mb,
     )
 
     # Download histogram CSVs from Modal Volume to local disk
