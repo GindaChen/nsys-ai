@@ -33,6 +33,59 @@ def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
     return total_ns
 
 
+def compute_profiler_overhead_ns(
+    conn,
+    *,
+    trim_start_ns: int | None = None,
+    trim_end_ns: int | None = None,
+) -> int:
+    """Compute the non-overlapping union of profiler-overhead intervals.
+
+    Probes both ``profiler_overhead`` and ``PROFILER_OVERHEAD`` (the two
+    table names Nsight uses across export versions). When ``trim_start_ns``
+    / ``trim_end_ns`` are supplied, intervals are clipped to that window
+    before the union so the result is bounded by the requested scope.
+    Returns 0 if no overhead table exists or no intervals fall inside
+    the window.
+
+    Called both by :meth:`Skill.execute` (to inject ``overhead_ns`` for
+    sub-skills) and by callers that need to realign the value to a
+    later-determined analysis window.
+    """
+    from ..connection import wrap_connection
+
+    adapter = wrap_connection(conn)
+    for oh_table in ("profiler_overhead", "PROFILER_OVERHEAD"):
+        try:
+            conds = []
+            params: list[object] = []
+            if trim_start_ns is not None:
+                conds.append("[end] >= ?")
+                params.append(int(trim_start_ns))
+            if trim_end_ns is not None:
+                conds.append("start <= ?")
+                params.append(int(trim_end_ns))
+            where_clause = "WHERE " + " AND ".join(conds) if conds else ""
+            cur = adapter.execute(
+                f"SELECT start, [end] FROM {oh_table} {where_clause}",
+                params,
+            )
+            rows = cur.fetchall()
+            intervals = []
+            for row in rows:
+                s, e = int(row[0]), int(row[1])
+                if trim_start_ns is not None:
+                    s = max(s, int(trim_start_ns))
+                if trim_end_ns is not None:
+                    e = min(e, int(trim_end_ns))
+                if s < e:
+                    intervals.append((s, e))
+            return _compute_interval_union(intervals)
+        except DB_ERRORS:
+            continue
+    return 0
+
+
 # Track connections that have already been indexed to avoid repeated work.
 _indexed_connections: set[int] = set()
 
@@ -138,45 +191,17 @@ class Skill:
             # No trim requested — replace with empty string
             resolved["trim_clause"] = ""
 
-        # Compute profiler overhead union duration dynamically.
-        # Probe the known profiler overhead table-name variants directly and
-        # treat DB_ERRORS as "table not present" so we can fall back cleanly.
+        # Compute profiler overhead union duration dynamically. Delegates
+        # to the shared ``compute_profiler_overhead_ns`` helper so callers
+        # that need to realign overhead to a later-determined window
+        # (e.g. ``profile_health_manifest`` after auto-trim) can reuse the
+        # same logic without copy-pasting the table-probe and clipping.
         if "overhead_ns" not in resolved:
-            overhead_ns = 0
-            for oh_table in ("profiler_overhead", "PROFILER_OVERHEAD"):
-                try:
-                    conds = []
-                    params: list[object] = []
-                    if trim_start is not None:
-                        conds.append("[end] >= ?")
-                        params.append(int(trim_start))
-                    if trim_end is not None:
-                        conds.append("start <= ?")
-                        params.append(int(trim_end))
-
-                    where_clause = "WHERE " + " AND ".join(conds) if conds else ""
-                    cur = adapter.execute(
-                        f"SELECT start, [end] FROM {oh_table} {where_clause}",
-                        params,
-                    )
-                    rows = cur.fetchall()
-                    if rows:
-                        intervals = []
-                        for row in rows:
-                            s, e = int(row[0]), int(row[1])
-                            if trim_start is not None:
-                                s = max(s, int(trim_start))
-                            if trim_end is not None:
-                                e = min(e, int(trim_end))
-                            if s < e:
-                                intervals.append((s, e))
-                        overhead_ns = _compute_interval_union(intervals)
-                    break  # Table found and queried successfully
-                except DB_ERRORS:
-                    continue  # Table doesn't exist under this name, try next
+            overhead_ns = compute_profiler_overhead_ns(
+                conn, trim_start_ns=trim_start, trim_end_ns=trim_end
+            )
             if overhead_ns == 0:
                 _log.debug("No profiler overhead data found (table absent or empty)")
-
             resolved["overhead_ns"] = overhead_ns
 
         # Python-level skill: delegate to execute_fn with resolved params.

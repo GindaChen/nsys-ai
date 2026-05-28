@@ -47,6 +47,13 @@ _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS = 120 * 10**9   # 120 s
 # to capture at least a few steady-state iterations of any DiT / transformer
 # block, (b) small enough that a 15 M-row NVTX IEJoin completes in seconds.
 _AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
+# Minimum width for an NVTX-derived window to be accepted. Narrower picks
+# typically come from per-op markers (e.g. a 100-µs ``aten::*`` range that
+# happens to repeat ≥ 3 times) rather than a real iteration boundary, and
+# using such a pick collapses sub-skill ratios — overhead-vs-span, NCCL-
+# vs-compute — to meaningless values. Below this floor we fall through to
+# the middle-of-span fallback instead.
+_AUTO_TRIM_MIN_WINDOW_NS = 100 * 10**6               # 100 ms
 
 # Values that turn NSYS_AI_MANIFEST_AUTO_TRIM off. Matches the parsing
 # of NSYS_AI_DEFER_NVTX_KERNEL_MAP in parquet_cache.py so users get
@@ -224,13 +231,20 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
         chosen = rows[idx]
         c_start = int(chosen["start"])
         c_end = int(chosen["end"])
-        # Trim very wide stage ranges down to a 20 s slice in their middle
-        # so sub-skills still get steady-state behaviour but don't grind.
-        if c_end - c_start > _AUTO_TRIM_TARGET_WINDOW_NS:
-            mid = (c_start + c_end) // 2
-            half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
-            return (mid - half, mid + half)
-        return (c_start, c_end)
+        # Accept the NVTX-derived pick only if it's at least as wide as
+        # ``_AUTO_TRIM_MIN_WINDOW_NS``. A sub-100ms pick is almost always
+        # a per-op marker rather than an iteration boundary, and using
+        # such a window makes downstream ratios (overhead-vs-span,
+        # NCCL-vs-compute) statistically empty.
+        if c_end - c_start >= _AUTO_TRIM_MIN_WINDOW_NS:
+            # Trim very wide stage ranges down to a 20 s slice in their middle
+            # so sub-skills still get steady-state behaviour but don't grind.
+            if c_end - c_start > _AUTO_TRIM_TARGET_WINDOW_NS:
+                mid = (c_start + c_end) // 2
+                half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
+                return (mid - half, mid + half)
+            return (c_start, c_end)
+        # else: fall through to the middle-of-span fallback below.
 
     # No usable NVTX iteration marker — take the middle 20 s of the
     # profile so we at least avoid head-of-trace JIT and tail teardown.
@@ -332,6 +346,21 @@ def _execute(conn, **kwargs):
     )
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
+    # When auto-trim narrows the analysis window, the ``overhead_ns`` value
+    # injected by ``Skill.execute`` was computed against the full profile
+    # range — using it as the numerator over ``profile_span_ns`` (the
+    # narrowed denominator) produces a scope-mismatched ratio (observed
+    # up to 3.5M% on a single-iteration capture). Re-query overhead
+    # clipped to the effective window so numerator and denominator share
+    # the same scope.
+    if auto_trim_meta is not None and profile_span_ns > 0:
+        from ..base import compute_profiler_overhead_ns
+
+        overhead_ns = compute_profiler_overhead_ns(
+            conn,
+            trim_start_ns=effective_start_ns,
+            trim_end_ns=effective_end_ns,
+        )
     overhead_ms = round(overhead_ns / 1e6, 1)
     overhead_pct_raw = (overhead_ns / profile_span_ns * 100) if profile_span_ns > 0 else 0
     overhead_pct = round(overhead_pct_raw, 1)
