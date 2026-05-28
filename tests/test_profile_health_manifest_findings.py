@@ -13,6 +13,7 @@ from nsys_ai.skills.builtins.profile_health_manifest import (
     _KERNEL_HOTSPOT_PCT,
     _MIN_ITERATIONS_FOR_NVTX_COVERAGE,
     _OVERHEAD_CONTAMINATED_PCT,
+    _OVERHEAD_PCT_SANITY_MAX,
     _SYNC_BOUND_DENSITY_PCT,
     _to_findings,
 )
@@ -94,6 +95,31 @@ class TestOverheadContaminated:
         m = _healthy_manifest()
         m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT
         assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_silent_when_pct_exceeds_sanity_max(self):
+        # An overhead_pct above 100% can only come from a scope mismatch
+        # upstream (numerator and denominator computed over different
+        # windows). Observed in the wild as a 3.5M% "critical" claim on a
+        # single-iteration capture — silence over nonsense.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_PCT_SANITY_MAX + 1.0
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_silent_when_pct_extreme(self):
+        # Same guard, but at the actual value observed in the original
+        # report — make sure the absurd-large case never sneaks through.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 3_583_749.4
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_fires_at_sanity_max_upper_bound(self):
+        # The guard uses <= so an overhead_pct of exactly 100% — the
+        # mathematical upper bound — is still allowed through. This pins
+        # the inclusive boundary so a future refactor can't silently
+        # drop it.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_PCT_SANITY_MAX
+        assert any(f.id == "profile_overhead_contaminated" for f in _to_findings([m]))
 
 
 class TestSyncBound:

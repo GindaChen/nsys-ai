@@ -66,6 +66,14 @@ _KERNEL_HOTSPOT_PCT = 60.0
 _ITER_VARIANCE_SPIKE_RATIO = 1.5
 _MIN_ITERATIONS_FOR_NVTX_COVERAGE = 3
 
+# Upper sanity bound for the profile-overhead finding. ``overhead_pct``
+# greater than 100% is mathematically impossible (the numerator cannot
+# exceed the denominator); when it appears, the value is a symptom of
+# an upstream scope mismatch (numerator and denominator computed over
+# different time windows) rather than a real profiler-overhead problem.
+# Silence the finding instead of surfacing the nonsense value.
+_OVERHEAD_PCT_SANITY_MAX = 100.0
+
 
 def _auto_trim_enabled() -> bool:
     """Read NSYS_AI_MANIFEST_AUTO_TRIM with 0/false/no/off → disabled."""
@@ -737,7 +745,11 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # ── 1. Profiler overhead contamination ─────────────────────────
     dq = m.get("data_quality", {}) or {}
     overhead_pct = float(dq.get("overhead_pct_raw", dq.get("overhead_pct", 0)) or 0)
-    if overhead_pct > _OVERHEAD_CONTAMINATED_PCT:
+    # Silence rather than emit a finding when the ratio is impossible
+    # (``overhead_pct > 100``); that value can only come from a scope
+    # mismatch upstream, and surfacing it as a ``critical`` finding does
+    # more harm than good.
+    if _OVERHEAD_CONTAMINATED_PCT < overhead_pct <= _OVERHEAD_PCT_SANITY_MAX:
         overhead_ms = float(dq.get("profiler_overhead_ms", 0) or 0)
         _emit(
             finding_id="profile_overhead_contaminated",
