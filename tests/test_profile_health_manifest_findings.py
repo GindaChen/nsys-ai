@@ -151,13 +151,26 @@ class TestCommBound:
         assert "low_overlap" in f.provenance["triggers"]
 
     def test_fires_on_nccl_exceeds_compute(self):
+        # The dominance trigger compares wall-clock NCCL (``nccl_only_ms``)
+        # against wall-clock compute, both from overlap_breakdown.
         m = _healthy_manifest()
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
+        m["overlap"]["nccl_only_ms"] = 500.0
         findings = _to_findings([m])
         f = next((f for f in findings if f.id == "profile_comm_bound"), None)
         assert f is not None
         assert "nccl_exceeds_compute" in f.provenance["triggers"]
+
+    def test_high_total_nccl_ms_alone_does_not_fire(self):
+        # ``total_nccl_ms`` is a per-stream sum and overcounts when NCCL
+        # runs concurrently on multiple streams. A wall-clock-dominant
+        # comparison (``nccl_only_ms`` vs ``compute_only_ms``) avoids the
+        # false positive that the per-stream sum used to trigger.
+        m = _healthy_manifest()
+        m["overlap"]["nccl_only_ms"] = 50.0          # wall-clock, well under compute
+        m["overlap"]["compute_only_ms"] = 200.0
+        m["nccl"]["total_nccl_ms"] = 5000.0          # huge per-stream sum
+        assert all(f.id != "profile_comm_bound" for f in _to_findings([m]))
 
     def test_low_overlap_with_no_nccl_does_not_fire(self):
         # Single-rank profile: overlap_pct is meaningless when nccl_only_ms=0.
@@ -185,14 +198,12 @@ class TestCommBound:
     def test_label_reflects_only_active_trigger(self):
         # When only nccl_exceeds_compute fires (overlap healthy), the label
         # must not cite "overlap 100%" because that's a non-signal. Same the
-        # other way for low_overlap with compute dominant. Regression for
-        # Copilot review MED #5.
+        # other way for low_overlap with compute dominant.
         m = _healthy_manifest()
-        # Trigger only nccl_dominates: overlap healthy, nccl > compute
+        # Trigger only nccl_dominates: overlap healthy, nccl_only > compute
         m["overlap"]["overlap_pct"] = 80
-        m["overlap"]["nccl_only_ms"] = 0
+        m["overlap"]["nccl_only_ms"] = 500.0
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "NCCL dominates" in f.label
         assert "overlap" not in f.label.lower()
@@ -202,17 +213,15 @@ class TestCommBound:
         m["overlap"]["overlap_pct"] = 10
         m["overlap"]["nccl_only_ms"] = 200.0
         m["overlap"]["compute_only_ms"] = 1000.0
-        m["nccl"]["total_nccl_ms"] = 200.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "low overlap" in f.label
         assert "dominates" not in f.label.lower()
 
-        # Both triggers: combined label
+        # Both triggers: combined label cites wall-clock NCCL vs compute.
         m = _healthy_manifest()
         m["overlap"]["overlap_pct"] = 10
-        m["overlap"]["nccl_only_ms"] = 200.0
+        m["overlap"]["nccl_only_ms"] = 500.0
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "overlap 10%" in f.label
         assert "NCCL 500ms vs compute 100ms" in f.label
