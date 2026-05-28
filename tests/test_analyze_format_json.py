@@ -117,7 +117,14 @@ class TestAnalyzeFormatJson:
         args = _make_args(minimal_nsys_db_path, format="json")
         stdout, _ = _capture(_cmd_analyze, args, profile_module)
         payload = json.loads(stdout)
-        idle = [f for f in payload["findings"] if f.get("category") == "idle"]
+        # Filter by source rather than category: `idle` category is shared
+        # across skills (gpu_idle_gaps and profile_health_manifest's
+        # profile_idle_dominant both legitimately emit it), so category is
+        # not a uniqueness key for "idle-gap findings" specifically.
+        idle = [
+            f for f in payload["findings"]
+            if f.get("selection", {}).get("source") == "skill:gpu_idle_gaps"
+        ]
         envelope_id = payload["profile_id"]
         for f in idle:
             assert f.get("id"), "Finding must have an id when v0.1-aware"
