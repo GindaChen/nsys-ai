@@ -803,7 +803,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
     compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
     low_overlap = overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
-    nccl_dominates_compute = total_nccl_ms > 0 and total_nccl_ms > compute_only_ms
+    # Compare wall-clock NCCL (``nccl_only_ms`` — the unhidden, non-overlapped
+    # interval from overlap_breakdown) against wall-clock compute. The
+    # earlier per-stream sum ``total_nccl_ms`` overcounts when NCCL runs
+    # concurrently on multiple streams, which makes the comparison apples-
+    # to-oranges versus the wall-clock compute denominator and produces
+    # spurious dominance findings on multi-stream NCCL workloads.
+    nccl_dominates_compute = nccl_only_ms > 0 and nccl_only_ms > compute_only_ms
     if low_overlap or nccl_dominates_compute:
         # Two distinct triggers can fire this; capture which in provenance
         # so downstream consumers (and Copilot-style reviewers) can tell
@@ -820,7 +826,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         if low_overlap and nccl_dominates_compute:
             label_text = (
                 f"Communication-bound (overlap {overlap_pct:.0f}%, "
-                f"NCCL {total_nccl_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
+                f"NCCL {nccl_only_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
             )
         elif low_overlap:
             label_text = (
@@ -830,7 +836,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         else:
             label_text = (
                 f"Communication-bound: NCCL dominates "
-                f"({total_nccl_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
+                f"({nccl_only_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
             )
         _emit(
             finding_id="profile_comm_bound",
@@ -854,9 +860,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             },
             note=(
                 f"Compute/NCCL overlap is {overlap_pct:.0f}% (threshold "
-                f"{int(_COMM_BOUND_OVERLAP_PCT)}%); NCCL total {total_nccl_ms:.0f}ms "
-                f"vs compute-only {compute_only_ms:.0f}ms. Dominant collective: "
-                f"{nccl.get('dominant_type', 'unknown')}."
+                f"{int(_COMM_BOUND_OVERLAP_PCT)}%); NCCL unhidden "
+                f"{nccl_only_ms:.0f}ms vs compute-only {compute_only_ms:.0f}ms. "
+                f"Dominant collective: {nccl.get('dominant_type', 'unknown')}."
             ),
             explanation=_COMM_EXPLANATION,
             actions=_COMM_ACTIONS,
