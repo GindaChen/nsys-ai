@@ -803,12 +803,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
     compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
     low_overlap = overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
-    # Compare wall-clock NCCL (``nccl_only_ms`` — the unhidden, non-overlapped
-    # interval from overlap_breakdown) against wall-clock compute. The
-    # earlier per-stream sum ``total_nccl_ms`` overcounts when NCCL runs
-    # concurrently on multiple streams, which makes the comparison apples-
-    # to-oranges versus the wall-clock compute denominator and produces
-    # spurious dominance findings on multi-stream NCCL workloads.
+    # Compare wall-clock NCCL (``nccl_only_ms`` — the unhidden,
+    # non-overlapped interval from overlap_breakdown) against wall-clock
+    # compute. The earlier per-stream sum ``total_nccl_ms`` overcounts
+    # when NCCL runs concurrently on multiple streams, which makes the
+    # comparison apples-to-oranges versus the wall-clock compute
+    # denominator and produces spurious dominance findings on
+    # multi-stream NCCL workloads.
     nccl_dominates_compute = nccl_only_ms > 0 and nccl_only_ms > compute_only_ms
     if low_overlap or nccl_dominates_compute:
         # Two distinct triggers can fire this; capture which in provenance
