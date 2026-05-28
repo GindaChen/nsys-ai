@@ -156,6 +156,41 @@ class TestCommBound:
         assert f is not None, "comm_bound must fire when overlap_pct is exactly 0.0"
         assert "low_overlap" in f.provenance["triggers"]
 
+    def test_label_reflects_only_active_trigger(self):
+        # When only nccl_exceeds_compute fires (overlap healthy), the label
+        # must not cite "overlap 100%" because that's a non-signal. Same the
+        # other way for low_overlap with compute dominant. Regression for
+        # Copilot review MED #5.
+        m = _healthy_manifest()
+        # Trigger only nccl_dominates: overlap healthy, nccl > compute
+        m["overlap"]["overlap_pct"] = 80
+        m["overlap"]["nccl_only_ms"] = 0
+        m["overlap"]["compute_only_ms"] = 100.0
+        m["nccl"]["total_nccl_ms"] = 500.0
+        f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
+        assert "NCCL dominates" in f.label
+        assert "overlap" not in f.label.lower()
+
+        # Trigger only low_overlap: overlap < 30 with nccl traffic, compute big
+        m = _healthy_manifest()
+        m["overlap"]["overlap_pct"] = 10
+        m["overlap"]["nccl_only_ms"] = 200.0
+        m["overlap"]["compute_only_ms"] = 1000.0
+        m["nccl"]["total_nccl_ms"] = 200.0
+        f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
+        assert "low overlap" in f.label
+        assert "dominates" not in f.label.lower()
+
+        # Both triggers: combined label
+        m = _healthy_manifest()
+        m["overlap"]["overlap_pct"] = 10
+        m["overlap"]["nccl_only_ms"] = 200.0
+        m["overlap"]["compute_only_ms"] = 100.0
+        m["nccl"]["total_nccl_ms"] = 500.0
+        f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
+        assert "overlap 10%" in f.label
+        assert "NCCL 500ms vs compute 100ms" in f.label
+
     def test_missing_overlap_pct_defaults_healthy(self):
         # Defensive: if overlap_breakdown errored out and overlap dict has
         # no overlap_pct key at all, default to 100 (healthy) so a missing
@@ -242,7 +277,7 @@ class TestInsufficientNvtxCoverage:
         m["nvtx"]["iteration_count"] = _MIN_ITERATIONS_FOR_NVTX_COVERAGE - 1
         findings = _to_findings([m])
         assert any(
-            f.id == "profile_insufficient_nvtx_coverage" for f in _to_findings([m])
+            f.id == "profile_insufficient_nvtx_coverage" for f in findings
         )
         f = next(f for f in findings if f.id == "profile_insufficient_nvtx_coverage")
         # The reason string should mention the iteration count, not "no NVTX".

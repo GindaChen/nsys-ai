@@ -575,48 +575,53 @@ def _infer_bottleneck(m: dict) -> str:
     return ""
 
 
+# Explanation strings interpolate the threshold constants at module load
+# so the prose stays in sync with the thresholds it cites. Hardcoded
+# values would silently drift if a threshold were ever tuned.
 _OVERHEAD_EXPLANATION = (
-    "Per-event CUPTI instrumentation cost exceeded 1% of profile span, which "
-    "perturbs kernel durations and launch timings enough to mask real "
-    "regressions. Re-capture with torch.cuda.profiler.start/stop() + "
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
+    "profile span, which perturbs kernel durations and launch timings enough to "
+    "mask real regressions. Re-capture with torch.cuda.profiler.start/stop() + "
     "--capture-range=cudaProfilerApi to scope nsys to the region of interest."
 )
 _SYNC_EXPLANATION = (
     "Synchronous CPU→GPU waits (cudaStreamSynchronize, cudaMemcpy, .item(), "
-    ".cpu()) consumed >20% of wall time. Look for unnecessary host-side "
-    "tensor reads, non-pinned host memory in the dataloader, or eager "
-    "evaluation inside the hot loop."
+    f".cpu()) consumed >{_SYNC_BOUND_DENSITY_PCT}% of wall time. Look for "
+    "unnecessary host-side tensor reads, non-pinned host memory in the "
+    "dataloader, or eager evaluation inside the hot loop."
 )
 _COMM_EXPLANATION = (
-    "Compute/NCCL overlap fell below 30% with non-trivial NCCL traffic on a "
-    "separate stream — the rank is serializing communication after compute "
-    "instead of hiding it. Candidate levers: dedicated NCCL stream + "
-    "wait_stream ordering, Ulysses-Ring hybrid SP partitioning, larger "
-    "fused all-reduces."
+    f"Compute/NCCL overlap fell below {int(_COMM_BOUND_OVERLAP_PCT)}% with "
+    "non-trivial NCCL traffic on a separate stream — the rank is serializing "
+    "communication after compute instead of hiding it. Candidate levers: "
+    "dedicated NCCL stream + wait_stream ordering, Ulysses-Ring hybrid SP "
+    "partitioning, larger fused all-reduces."
 )
 _IDLE_EXPLANATION = (
-    "GPU was idle for >15% of the profile, indicating launch-bound segments "
-    "or host-side blocking gaps between kernels. Inspect gpu_idle_gaps "
-    "findings for the specific stalls; consider CUDA Graphs / torch.compile "
-    "for launch overhead, dataloader workers / pinned memory for host stalls."
+    f"GPU was idle for >{int(_IDLE_DOMINANT_PCT)}% of the profile, indicating "
+    "launch-bound segments or host-side blocking gaps between kernels. Inspect "
+    "gpu_idle_gaps findings for the specific stalls; consider CUDA Graphs / "
+    "torch.compile for launch overhead, dataloader workers / pinned memory "
+    "for host stalls."
 )
 _HOTSPOT_EXPLANATION = (
-    "A single kernel accounts for >60% of total kernel time — optimization "
-    "effort spent anywhere else is Amdahl-limited. Triage this kernel first: "
-    "check TC eligibility, fusion opportunities, dtype, occupancy."
+    f"A single kernel accounts for >{int(_KERNEL_HOTSPOT_PCT)}% of total kernel "
+    "time — optimization effort spent anywhere else is Amdahl-limited. Triage "
+    "this kernel first: check TC eligibility, fusion opportunities, dtype, "
+    "occupancy."
 )
 _ITER_SPIKE_EXPLANATION = (
-    "At least one steady-state iteration ran ≥1.5× the median, indicating "
-    "non-uniform per-step cost (CFG batching, conditional branches, sync "
-    "outliers, or the first NCCL collective of a new communicator). The "
-    "median is what matters for throughput; the spike often signals a "
-    "specific anti-pattern."
+    f"At least one steady-state iteration ran ≥{_ITER_VARIANCE_SPIKE_RATIO}× the "
+    "median, indicating non-uniform per-step cost (CFG batching, conditional "
+    "branches, sync outliers, or the first NCCL collective of a new "
+    "communicator). The median is what matters for throughput; the spike often "
+    "signals a specific anti-pattern."
 )
 _NVTX_COVERAGE_EXPLANATION = (
-    "The profile has no NVTX annotations or fewer than 3 detected iterations, "
-    "which means iteration_timing / nvtx_kernel_map / overlap-by-region "
-    "skills cannot anchor their analysis. Wrap the training loop in "
-    "torch.cuda.nvtx.range_push/pop or use the existing FastVideo "
+    f"The profile has no NVTX annotations or fewer than {_MIN_ITERATIONS_FOR_NVTX_COVERAGE} "
+    "detected iterations, which means iteration_timing / nvtx_kernel_map / "
+    "overlap-by-region skills cannot anchor their analysis. Wrap the training "
+    "loop in torch.cuda.nvtx.range_push/pop or use the existing FastVideo "
     "annotate_profile_regions context manager before re-capturing."
 )
 
@@ -797,24 +802,39 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     nccl_only_ms = float(overlap.get("nccl_only_ms", 0) or 0)
     total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
     compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
+    low_overlap = overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
     nccl_dominates_compute = total_nccl_ms > 0 and total_nccl_ms > compute_only_ms
-    if (
-        overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
-    ) or nccl_dominates_compute:
+    if low_overlap or nccl_dominates_compute:
         # Two distinct triggers can fire this; capture which in provenance
         # so downstream consumers (and Copilot-style reviewers) can tell
         # the low-overlap signal from the NCCL-dominance signal.
         triggers = []
-        if overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0:
+        if low_overlap:
             triggers.append("low_overlap")
         if nccl_dominates_compute:
             triggers.append("nccl_exceeds_compute")
-        _emit(
-            finding_id="profile_comm_bound",
-            label=(
+        # Build the label from whichever trigger(s) fired so the
+        # human-readable summary reflects the actual signal — citing
+        # "overlap 100%" when only nccl_exceeds_compute triggered would
+        # be misleading.
+        if low_overlap and nccl_dominates_compute:
+            label_text = (
                 f"Communication-bound (overlap {overlap_pct:.0f}%, "
                 f"NCCL {total_nccl_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
-            ),
+            )
+        elif low_overlap:
+            label_text = (
+                f"Communication-bound: low overlap {overlap_pct:.0f}% "
+                f"(NCCL {nccl_only_ms:.0f}ms unhidden)"
+            )
+        else:
+            label_text = (
+                f"Communication-bound: NCCL dominates "
+                f"({total_nccl_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
+            )
+        _emit(
+            finding_id="profile_comm_bound",
+            label=label_text,
             severity="warning",
             category="communication",
             values={
@@ -878,7 +898,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     total_kernel_ms = float(m.get("total_kernel_ms", 0) or 0)
     if top_k and total_kernel_ms > 0:
         top_ms = float(top_k[0].get("total_ms", 0) or 0)
-        top_pct = 100.0 * top_ms / total_kernel_ms if total_kernel_ms > 0 else 0
+        top_pct = 100.0 * top_ms / total_kernel_ms
         if top_pct > _KERNEL_HOTSPOT_PCT:
             kname = top_k[0].get("name", "<unknown>")
             count = int(top_k[0].get("count", 0) or 0)
