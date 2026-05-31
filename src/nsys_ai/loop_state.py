@@ -139,7 +139,7 @@ def profile_display_name(path: str, preset: dict[str, str] | None = None) -> str
     return name or "—"
 
 
-def reconcile_h100_loop_paths(state: "DiffLoopState") -> None:
+def reconcile_h100_loop_paths(state: DiffLoopState) -> None:
     """Point loop paths at HF snapshot files when they refer to the H100 preset blobs."""
     preset = detect_h100_replay_preset()
     if not preset:
