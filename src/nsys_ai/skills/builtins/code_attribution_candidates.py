@@ -41,7 +41,10 @@ def _confidence(
 
 def _resolve_text_expr(adapter, alias: str = "n") -> tuple[str, str]:
     if adapter.detect_nvtx_text_id():
-        return f"COALESCE({alias}.text, s.value)", "LEFT JOIN StringIds s ON n.textId = s.id"
+        return (
+            f"COALESCE({alias}.text, s.value)",
+            f"LEFT JOIN StringIds s ON {alias}.textId = s.id",
+        )
     return f"{alias}.text", ""
 
 
@@ -118,7 +121,7 @@ def _load_kernels(adapter, start_ns: int, end_ns: int, device: int | None) -> li
                k."end" AS kernel_end_ns,
                k.deviceId AS device_id,
                k.streamId AS stream_id,
-               COALESCE(d.value, s.value, 'kernel_' || k.shortName) AS kernel_name
+               COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name
         FROM {kernel_table} k
         JOIN {runtime_table} r ON r.correlationId = k.correlationId
         LEFT JOIN StringIds s ON k.shortName = s.id
@@ -170,6 +173,8 @@ def _execute(conn, **kwargs):
     device_arg = kwargs.get("device")
     device = None if device_arg in (None, "", "all") else int(device_arg)
     limit = int(kwargs.get("limit", 5))
+    if limit < 1:
+        return [{"error": "limit must be >= 1"}]
     min_overlap_pct = float(kwargs.get("min_overlap_pct", 0.0))
 
     adapter = wrap_connection(conn)
@@ -240,6 +245,7 @@ def _execute(conn, **kwargs):
                 "confidence": confidence,
                 "reason": "; ".join(reasons),
                 "evidence": {
+                    "global_tid": r["global_tid"],
                     "selection_start_ns": start_ns,
                     "selection_end_ns": end_ns,
                     "selection_device_id": device,
@@ -287,12 +293,7 @@ def _execute(conn, **kwargs):
         candidates = sorted(
             candidates,
             key=lambda c: (
-                0
-                if any(
-                    r["nvtx_path"] == c["candidate"] and kernel_tids.get(r["global_tid"], 0)
-                    for r in nvtx_ranges
-                )
-                else 1,
+                0 if kernel_tids.get(c["evidence"]["global_tid"], 0) else 1,
                 -float(c["confidence"]),
                 -float(c["evidence"]["overlap_pct"]),
                 -int(c["evidence"]["kernel_count"]),
