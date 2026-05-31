@@ -154,7 +154,8 @@ class TestKernelInstanceFindings:
         f = findings[0]
         assert f.label == "Long NCCL (12.50ms)"
         assert f.category == "communication"
-        assert f.severity == "critical"
+        assert f.severity == "warning"
+        assert f.confidence == 0.7
         assert f.selection.profile_id == "p"
         assert f.provenance["row_kind"] == "long_nccl"
         ev = f.evidence[0]
@@ -167,8 +168,19 @@ class TestKernelInstanceFindings:
         findings = ki_skill.to_findings_fn(
             [_kernel_row(short_name="ncclTinyKernel", kernel_name="ncclTinyKernel", duration_ms=2.0)]
         )
+        assert findings[0].label == "NCCL kernel (2.00ms)"
         assert findings[0].severity == "warning"
         assert findings[0].category == "communication"
+
+    def test_stream_id_is_normalized_in_structured_fields(self, ki_skill):
+        findings = ki_skill.to_findings_fn([_kernel_row(stream_id="7")])
+
+        f = findings[0]
+        assert f.id == "kernel_instance_gpu2_stream7_1000"
+        assert f.stream == "7"
+        assert f.selection.stream_ids == [7]
+        assert f.evidence[0].values["stream_id"] == 7
+        assert f.evidence[0].provenance["stream"] == 7
 
     def test_error_rows_are_skipped(self, ki_skill):
         findings = ki_skill.to_findings_fn([{"error": "boom"}, _kernel_row()])

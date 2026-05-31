@@ -102,10 +102,8 @@ _FALSE_POSITIVE_NOTES = [
 def _confidence(duration_ms: float, *, is_nccl: bool) -> float:
     """Heuristic confidence for kernel instance findings."""
     if is_nccl:
-        if duration_ms > 50:
-            return 0.95
         if duration_ms > 5:
-            return 0.85
+            return 0.7
         return 0.7
     if duration_ms > 50:
         return 0.9
@@ -132,11 +130,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         end_ns = int(r["end_ns"])
         duration_ns = max(0, end_ns - start_ns)
         device_id = int(r.get("device_id", 0) or 0)
-        stream_id = r.get("stream_id", 0)
+        stream_id = int(r.get("stream_id", 0) or 0)
 
         if is_nccl:
-            label = f"Long NCCL ({dur_ms:.2f}ms)"
-            sev = "critical" if dur_ms > 5.0 else "warning"
+            label = (
+                f"Long NCCL ({dur_ms:.2f}ms)"
+                if dur_ms > 5.0
+                else f"NCCL kernel ({dur_ms:.2f}ms)"
+            )
+            sev = "warning"
             category = "communication"
             explanation = _NCCL_EXPLANATION
             suggested_actions = _NCCL_ACTIONS
