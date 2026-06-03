@@ -264,16 +264,6 @@ def _execute(conn, **kwargs):
             }
         )
 
-    candidates.sort(
-        key=lambda c: (
-            -float(c["confidence"]),
-            -float(c["evidence"]["overlap_pct"]),
-            -int(c["evidence"]["kernel_count"]),
-            -int(c["nvtx_depth"]),
-            c["candidate"],
-        )
-    )
-
     if not candidates:
         return [
             {
@@ -289,18 +279,18 @@ def _execute(conn, **kwargs):
         ]
 
     # Prefer candidates on threads that launched selected kernels when possible.
-    if kernel_tids:
-        candidates = sorted(
-            candidates,
-            key=lambda c: (
-                0 if kernel_tids.get(c["evidence"]["global_tid"], 0) else 1,
-                -float(c["confidence"]),
-                -float(c["evidence"]["overlap_pct"]),
-                -int(c["evidence"]["kernel_count"]),
-                -int(c["nvtx_depth"]),
-                c["candidate"],
-            ),
+    candidates.sort(
+        key=lambda c: (
+            0
+            if not kernel_tids
+            else (0 if kernel_tids.get(c["evidence"]["global_tid"], 0) else 1),
+            -float(c["confidence"]),
+            -float(c["evidence"]["overlap_pct"]),
+            -int(c["evidence"]["kernel_count"]),
+            -int(c["nvtx_depth"]),
+            c["candidate"],
         )
+    )
 
     return candidates[:limit]
 
