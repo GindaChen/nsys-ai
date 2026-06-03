@@ -102,8 +102,6 @@ _FALSE_POSITIVE_NOTES = [
 def _confidence(duration_ms: float, *, is_nccl: bool) -> float:
     """Heuristic confidence for kernel instance findings."""
     if is_nccl:
-        if duration_ms > 5:
-            return 0.7
         return 0.7
     if duration_ms > 50:
         return 0.9
