@@ -1772,7 +1772,7 @@ function ensureVisible(k) {
 // ── GPU Info dropdown ──
 function toggleGpuInfo() {
     const panel = document.getElementById('gpuInfoPanel');
-    if (panel.style.display === 'none') {
+    if (panel.style.display !== 'block') {
         let html = '<table style="border-collapse:collapse;width:100%">';
         html += '<tr style="color:#58a6ff"><th style="text-align:left;padding:2px 6px">GPU</th><th style="text-align:left;padding:2px 6px">Name</th><th style="text-align:right;padding:2px 6px">SMs</th><th style="text-align:right;padding:2px 6px">Mem</th><th style="text-align:left;padding:2px 6px">PCI</th></tr>';
         GPU_INFO.forEach(g => {
@@ -1861,7 +1861,7 @@ function toggleNVTX() {
 
 function isGpuInfoPanelOpen() {
     const panel = document.getElementById('gpuInfoPanel');
-    return !!panel && panel.style.display !== 'none';
+    return !!panel && panel.style.display === 'block';
 }
 
 function streamNumberKey(sid) {
@@ -1911,7 +1911,7 @@ function renderStreamFilterPanel() {
 function toggleStreamFilter() {
     const panel = document.getElementById('gpuInfoPanel');
     renderStreamFilterPanel();
-    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
 }
 
 function toggleStream(sid) {
@@ -3322,7 +3322,8 @@ function loopSuggestedPhase(state) {
     const s = state || LOOP_STATE || {};
     if (s.decision) return 'accept';
     if (s.diff_summary) return 'accept';
-    if (!s.after_path) return s.proposal ? 'reprofile' : (s.diagnose_findings_count > 0 ? 'propose' : 'diagnose');
+    if (!s.diagnose_findings_count) return 'diagnose';
+    if (!s.after_path) return s.proposal ? 'reprofile' : 'propose';
     if (!s.proposal) return 'propose';
     return 'diff';
 }
@@ -3478,11 +3479,12 @@ function loopRenderState() {
     const primaryBtn = document.getElementById('loopPrimaryBtn');
     if (primaryBtn) primaryBtn.disabled = LOOP_BUSY || suggested === 'accept';
 
+    const diagnoseDone = (LOOP_STATE.diagnose_findings_count || 0) > 0;
     document.querySelectorAll('#loopStepper .lstep').forEach(el => {
         const ep = el.dataset.phase;
         const ei = LOOP_PHASE_ORDER.indexOf(ep);
         el.classList.toggle('active', ep === phase);
-        el.classList.toggle('done', ei < phaseIdx);
+        el.classList.toggle('done', ei < phaseIdx && (ep !== 'diagnose' || diagnoseDone));
     });
 
     const beforePath = LOOP_STATE.before_path || '';
@@ -3508,11 +3510,15 @@ function loopRenderState() {
 
     const proposalEl = document.getElementById('loopProposalText');
     const expectedEl = document.getElementById('loopExpectedImpact');
-    if (proposalEl && !proposalEl.value) {
-        proposalEl.value = LOOP_STATE.proposal || LOOP_DEFAULT_PROPOSAL;
+    if (proposalEl) {
+        if (LOOP_STATE.proposal) proposalEl.value = LOOP_STATE.proposal;
+        else if (!proposalEl.value) proposalEl.value = '';
+        if (!proposalEl.placeholder) proposalEl.placeholder = LOOP_DEFAULT_PROPOSAL;
     }
-    if (expectedEl && !expectedEl.value) {
-        expectedEl.value = LOOP_STATE.expected_impact || LOOP_DEFAULT_EXPECTED_IMPACT;
+    if (expectedEl) {
+        if (LOOP_STATE.expected_impact) expectedEl.value = LOOP_STATE.expected_impact;
+        else if (!expectedEl.value) expectedEl.value = '';
+        if (!expectedEl.placeholder) expectedEl.placeholder = LOOP_DEFAULT_EXPECTED_IMPACT;
     }
 
     const diff = LOOP_STATE.diff_summary || {};
@@ -3668,6 +3674,13 @@ async function loopSaveProposal() {
     const expected_impact = (document.getElementById('loopExpectedImpact')?.value || '').trim();
     if (!proposal) {
         loopSetError('Enter what you plan to change before saving the proposal.');
+        return;
+    }
+    if (
+        proposal === LOOP_DEFAULT_PROPOSAL
+        && !(LOOP_STATE && LOOP_STATE.proposal)
+    ) {
+        loopSetError('Edit the proposal before saving (the example text is only a placeholder).');
         return;
     }
     try {

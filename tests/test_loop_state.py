@@ -1,4 +1,6 @@
+import os
 import shutil
+import time
 from pathlib import Path
 
 from nsys_ai import profile as _profile
@@ -27,6 +29,36 @@ def test_loop_state_phase_and_proposal():
     assert state.phase == "accept"
     assert state.decision == "accept"
     assert state.decision_reason == "speedup confirmed"
+
+
+def test_detect_h100_replay_preset_picks_newest_complete_snapshot(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    base = (
+        home
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "datasets--rich7421--fastvideo-wan-h100-sp1-nsys"
+        / "snapshots"
+    )
+    old_snap = base / "old_rev"
+    new_snap = base / "new_rev"
+    for snap in (old_snap, new_snap):
+        (snap / "profiles").mkdir(parents=True)
+    (old_snap / "profiles" / "perf_h100_sp1.sqlite").write_text("")
+    new_before = new_snap / "profiles" / "perf_h100_sp1.sqlite"
+    new_after = new_snap / "profiles" / "perf_h100_sp1_fa3.sqlite"
+    new_before.write_text("")
+    new_after.write_text("")
+
+    os.utime(old_snap, (time.time() - 100, time.time() - 100))
+    os.utime(new_snap, (time.time(), time.time()))
+
+    out = detect_h100_replay_preset()
+    assert out is not None
+    assert "new_rev" in out["before_path"]
+    assert "new_rev" in out["after_path"]
 
 
 def test_detect_h100_replay_preset(monkeypatch, tmp_path):
@@ -143,6 +175,17 @@ def test_normalize_profile_path_keeps_symlink_name(tmp_path):
     out = normalize_profile_path(str(link), label="before")
     assert out.endswith("perf_h100_sp1.sqlite")
     assert "803cf28" not in out
+
+
+def test_record_reprofile_artifact_missing_path(tmp_path):
+    state = DiffLoopState(before_path="/tmp/before.sqlite")
+    missing = tmp_path / "missing.sqlite"
+    try:
+        state.record_reprofile_artifact(str(missing))
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("expected FileNotFoundError")
 
 
 def test_loop_state_run_diagnose(minimal_nsys_db_path):

@@ -111,14 +111,15 @@ def detect_h100_replay_preset() -> dict[str, str] | None:
     snapshots = [p for p in base.iterdir() if p.is_dir()]
     if not snapshots:
         return None
-    snap = snapshots[0]
-    before = snap / "profiles" / "perf_h100_sp1.sqlite"
-    after = snap / "profiles" / "perf_h100_sp1_fa3.sqlite"
-    if before.exists() and after.exists():
-        return {
-            "before_path": normalize_profile_path(str(before), label="before"),
-            "after_path": normalize_profile_path(str(after), label="after"),
-        }
+    snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for snap in snapshots:
+        before = snap / "profiles" / H100_BEFORE_FILE
+        after = snap / "profiles" / H100_AFTER_FILE
+        if before.exists() and after.exists():
+            return {
+                "before_path": normalize_profile_path(str(before), label="before"),
+                "after_path": normalize_profile_path(str(after), label="after"),
+            }
     return None
 
 
@@ -168,7 +169,6 @@ class DiffLoopState:
     last_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        reconcile_h100_loop_paths(self)
         preset = detect_h100_replay_preset()
         return {
             "before_path": self.before_path,

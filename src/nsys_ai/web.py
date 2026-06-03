@@ -25,6 +25,7 @@ from urllib.parse import quote
 _log = logging.getLogger(__name__)
 
 _FINDINGS_LOCK = threading.Lock()
+_LOOP_LOCK = threading.Lock()
 
 # Bounded thread pool: fixed worker count, request queue with max size.
 # Workers are released when each request finishes (finish_request + shutdown_request).
@@ -448,97 +449,105 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         return loop_state
 
     def _handle_loop_state_get(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        self._json_response(loop_state.to_dict())
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            self._json_response(loop_state.to_dict())
 
     def _handle_loop_phase(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        phase = str(payload.get("phase") or "").strip()
-        if not phase:
-            self._json_response({"error": "phase is required"}, 400)
-            return
-        loop_state.set_phase(phase)  # validated by loop_state.py
-        self._json_response(loop_state.to_dict())
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            phase = str(payload.get("phase") or "").strip()
+            if not phase:
+                self._json_response({"error": "phase is required"}, 400)
+                return
+            loop_state.set_phase(phase)  # validated by loop_state.py
+            self._json_response(loop_state.to_dict())
 
     def _handle_loop_proposal(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        proposal = str(payload.get("proposal") or "").strip()
-        expected = str(payload.get("expected_impact") or "").strip()
-        if not proposal:
-            self._json_response({"error": "proposal is required"}, 400)
-            return
-        loop_state.set_proposal(proposal, expected_impact=expected)
-        self._json_response(loop_state.to_dict())
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            proposal = str(payload.get("proposal") or "").strip()
+            expected = str(payload.get("expected_impact") or "").strip()
+            if not proposal:
+                self._json_response({"error": "proposal is required"}, 400)
+                return
+            loop_state.set_proposal(proposal, expected_impact=expected)
+            self._json_response(loop_state.to_dict())
 
     def _handle_loop_reprofile(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        after_path = str(payload.get("after_path") or "").strip()
-        if not after_path:
-            self._json_response({"error": "after_path is required"}, 400)
-            return
-        loop_state.record_reprofile_artifact(after_path)
-        self._json_response(loop_state.to_dict())
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            after_path = str(payload.get("after_path") or "").strip()
+            if not after_path:
+                self._json_response({"error": "after_path is required"}, 400)
+                return
+            loop_state.record_reprofile_artifact(after_path)
+            self._json_response(loop_state.to_dict())
 
     def _handle_loop_diagnose(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        trim = None
-        trim_raw = payload.get("trim")
-        if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
-            trim = (int(trim_raw[0]), int(trim_raw[1]))
-        device = self.devices[0] if self.devices else 0
-        findings = loop_state.run_diagnose(self.prof, device=device, trim=trim)
-        with _FINDINGS_LOCK:
-            self.__class__._findings = findings
-        self._json_response({"state": loop_state.to_dict(), "findings": findings})
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            trim = None
+            trim_raw = payload.get("trim")
+            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
+                trim = (int(trim_raw[0]), int(trim_raw[1]))
+            device = self.devices[0] if self.devices else 0
+            findings = loop_state.run_diagnose(self.prof, device=device, trim=trim)
+            with _FINDINGS_LOCK:
+                self.__class__._findings = findings
+            self._json_response({"state": loop_state.to_dict(), "findings": findings})
 
     def _handle_loop_diff(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        gpu_raw = payload.get("gpu")
-        gpu = int(gpu_raw) if gpu_raw is not None else None
-        trim = None
-        trim_raw = payload.get("trim")
-        if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
-            trim = (int(trim_raw[0]), int(trim_raw[1]))
-        baseline_prof = self.prof if self.prof is not None else None
-        diff_payload = loop_state.run_diff(gpu=gpu, trim=trim, baseline_prof=baseline_prof)
-        self._json_response({"state": loop_state.to_dict(), "diff": diff_payload})
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            gpu_raw = payload.get("gpu")
+            gpu = int(gpu_raw) if gpu_raw is not None else None
+            trim = None
+            trim_raw = payload.get("trim")
+            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
+                trim = (int(trim_raw[0]), int(trim_raw[1]))
+            baseline_prof = self.prof if self.prof is not None else None
+            diff_payload = loop_state.run_diff(gpu=gpu, trim=trim, baseline_prof=baseline_prof)
+            self._json_response({"state": loop_state.to_dict(), "diff": diff_payload})
 
     def _handle_loop_decision(self):
-        loop_state = self._loop_or_error()
-        if loop_state is None:
-            return
-        payload = self._read_json_body()
-        decision = str(payload.get("decision") or "").strip()
-        reason = str(payload.get("reason") or "").strip()
-        loop_state.set_decision(decision, reason=reason)
-        self._json_response(loop_state.to_dict())
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            decision = str(payload.get("decision") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+            loop_state.set_decision(decision, reason=reason)
+            self._json_response(loop_state.to_dict())
 
     def _handle_loop_server_error(self, path: str, exc: Exception):
         _log.exception("Error handling POST %s", path)
-        loop_state = self.__class__._loop_state
-        if loop_state is not None:
-            loop_state.last_error = str(exc)
-            state = loop_state.to_dict()
-        else:
-            state = None
-        self._json_response({"error": str(exc), "state": state}, 500)
+        with _LOOP_LOCK:
+            loop_state = self.__class__._loop_state
+            if loop_state is not None:
+                loop_state.last_error = str(exc)
+                state = loop_state.to_dict()
+            else:
+                state = None
+            self._json_response({"error": str(exc), "state": state}, 500)
 
     def do_POST(self):
         path = self.path.split("?")[0]
@@ -563,7 +572,14 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         if path == "/api/loop/reprofile":
             try:
                 self._handle_loop_reprofile()
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                ValueError,
+                KeyError,
+                TypeError,
+                FileNotFoundError,
+            ) as e:
                 self._json_response({"error": str(e)}, 400)
             return
         if path == "/api/loop/diagnose":
