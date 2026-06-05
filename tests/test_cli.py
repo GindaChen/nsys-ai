@@ -74,15 +74,15 @@ def test_default_profile_command_routes_to_timeline_web():
     ]
 
 
-def test_default_profile_command_accepts_sqlite_and_zst():
-    """The documented shorthand applies to all profile path forms."""
+def test_default_profile_command_accepts_supported_profile_paths_only():
+    """The documented shorthand applies only to profile paths the opener supports."""
     from nsys_ai.cli.app import _normalize_default_profile_command
 
     assert _normalize_default_profile_command(["nsys-ai", "profile.sqlite"])[1] == "timeline-web"
-    assert (
-        _normalize_default_profile_command(["nsys-ai", "profile.nsys-rep.zst"])[1]
-        == "timeline-web"
-    )
+    assert _normalize_default_profile_command(["nsys-ai", "profile.nsys-rep.zst"]) == [
+        "nsys-ai",
+        "profile.nsys-rep.zst",
+    ]
 
 
 def test_default_profile_command_leaves_subcommands_unchanged():

@@ -88,7 +88,6 @@ def _looks_like_profile_path(value: str) -> bool:
         and (
             value.endswith(".sqlite")
             or value.endswith(".nsys-rep")
-            or value.endswith(".nsys-rep.zst")
         )
     )
 
