@@ -73,35 +73,132 @@ def _format(rows):
     return "\n".join(lines)
 
 
-def _to_findings(rows: list[dict]) -> list:
-    from nsys_ai.annotation import Finding
+_NCCL_EXPLANATION = (
+    "This is a long NCCL communication kernel. Long communication kernels "
+    "matter most when they are exposed on the critical path instead of "
+    "overlapping with useful compute."
+)
+_HOTSPOT_EXPLANATION = (
+    "This is one of the longest individual compute kernel instances in the "
+    "selected window. Kernel hotspots are useful anchors for deeper NVTX, "
+    "launch configuration, or instruction-level analysis."
+)
+_NCCL_ACTIONS = [
+    "Check whether this NCCL kernel overlaps with compute in the timeline",
+    "Compare the same collective across ranks to look for stragglers",
+    "Inspect surrounding NVTX ranges to identify the distributed phase",
+]
+_HOTSPOT_ACTIONS = [
+    "Map the kernel back to its enclosing NVTX range or model layer",
+    "Compare repeated instances to see whether this is a persistent hotspot",
+    "Use CUTracer or Nsight Compute for instruction-level analysis if needed",
+]
+_FALSE_POSITIVE_NOTES = [
+    "A long individual kernel is not necessarily a bottleneck if it overlaps well",
+    "Very short capture windows can over-emphasize one kernel instance",
+]
+
+
+def _confidence(duration_ms: float, *, is_nccl: bool) -> float:
+    """Heuristic confidence for kernel instance findings."""
+    if is_nccl:
+        return 0.7
+    if duration_ms > 50:
+        return 0.9
+    if duration_ms > 5:
+        return 0.8
+    return 0.65
+
+
+def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
+    from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
 
     findings = []
+    profile_id = (context or {}).get("profile_id", "unknown")
     for r in rows:
         if "error" in r:
             continue
 
         name = r.get("short_name") or r.get("kernel_name", "?")
         is_nccl = "nccl" in name.lower()
-        dur_ms = r.get("duration_ms", 0.0)
+        kernel_name = r.get("kernel_name", name)
+        short_name = r.get("short_name", name)
+        dur_ms = float(r.get("duration_ms", 0.0) or 0.0)
+        start_ns = int(r["start_ns"])
+        end_ns = int(r["end_ns"])
+        duration_ns = max(0, end_ns - start_ns)
+        device_id = int(r.get("device_id", 0) or 0)
+        stream_id = int(r.get("stream_id", 0) or 0)
 
         if is_nccl:
-            label = f"Long NCCL ({dur_ms:.2f}ms)"
-            sev = "critical" if dur_ms > 5.0 else "warning"
+            label = (
+                f"Long NCCL ({dur_ms:.2f}ms)"
+                if dur_ms > 5.0
+                else f"NCCL kernel ({dur_ms:.2f}ms)"
+            )
+            sev = "warning"
+            category = "communication"
+            explanation = _NCCL_EXPLANATION
+            suggested_actions = _NCCL_ACTIONS
+            row_kind = "long_nccl"
         else:
             label = f"Hotspot: {name[:30]}"
             sev = "info"
+            category = "compute"
+            explanation = _HOTSPOT_EXPLANATION
+            suggested_actions = _HOTSPOT_ACTIONS
+            row_kind = "kernel_hotspot"
+
+        finding_id = f"kernel_instance_gpu{device_id}_stream{stream_id}_{start_ns}"
+        selection = TraceSelection(
+            id=f"sel_{finding_id}",
+            profile_id=profile_id,
+            source="skill:kernel_instances",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            gpu_ids=[device_id],
+            stream_ids=[int(stream_id)] if stream_id is not None else None,
+            label=label,
+        )
+        evidence_row = EvidenceRow(
+            id=f"ev_{finding_id}",
+            source_skill="kernel_instances",
+            values={
+                "kernel_name": kernel_name,
+                "short_name": short_name,
+                "duration_ms": round(dur_ms, 3),
+                "duration_ns": duration_ns,
+                "device_id": device_id,
+                "stream_id": stream_id,
+                "is_nccl": is_nccl,
+            },
+            units={
+                "duration_ms": "ms",
+                "duration_ns": "ns",
+            },
+            selection_id=selection.id,
+            provenance={"row_kind": row_kind, "device": device_id, "stream": stream_id},
+        )
 
         findings.append(
             Finding(
                 type="highlight",
                 label=label,
-                start_ns=r["start_ns"],
-                end_ns=r["end_ns"],
-                gpu_id=r.get("device_id", 0),
-                stream=str(r.get("stream_id", "0")),
+                start_ns=start_ns,
+                end_ns=end_ns,
+                gpu_id=device_id,
+                stream=str(stream_id),
                 severity=sev,
-                note=f"{r.get('kernel_name', name)[:60]}: {dur_ms:.2f}ms",
+                note=f"{kernel_name[:60]}: {dur_ms:.2f}ms",
+                id=finding_id,
+                category=category,
+                confidence=_confidence(dur_ms, is_nccl=is_nccl),
+                evidence=[evidence_row],
+                selection=selection,
+                explanation=explanation,
+                suggested_actions=list(suggested_actions),
+                false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                provenance={"skill": "kernel_instances", "row_kind": row_kind},
             )
         )
     return findings
