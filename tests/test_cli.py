@@ -55,6 +55,47 @@ def test_subcommands():
     assert ",agent}" not in usage_line
 
 
+def test_default_profile_command_routes_to_timeline_web():
+    """Bare profile paths should keep working as the default web timeline command."""
+    from nsys_ai.cli.app import _normalize_default_profile_command
+
+    assert _normalize_default_profile_command(["nsys-ai", "profile.nsys-rep"]) == [
+        "nsys-ai",
+        "timeline-web",
+        "profile.nsys-rep",
+    ]
+    assert _normalize_default_profile_command(
+        ["nsys-ai", "profile.nsys-rep", "--no-browser"]
+    ) == [
+        "nsys-ai",
+        "timeline-web",
+        "profile.nsys-rep",
+        "--no-browser",
+    ]
+
+
+def test_default_profile_command_accepts_sqlite_and_zst():
+    """The documented shorthand applies to all profile path forms."""
+    from nsys_ai.cli.app import _normalize_default_profile_command
+
+    assert _normalize_default_profile_command(["nsys-ai", "profile.sqlite"])[1] == "timeline-web"
+    assert (
+        _normalize_default_profile_command(["nsys-ai", "profile.nsys-rep.zst"])[1]
+        == "timeline-web"
+    )
+
+
+def test_default_profile_command_leaves_subcommands_unchanged():
+    """Named commands still parse through the normal public/legacy command tables."""
+    from nsys_ai.cli.app import _normalize_default_profile_command
+
+    assert _normalize_default_profile_command(["nsys-ai", "open", "profile.nsys-rep"]) == [
+        "nsys-ai",
+        "open",
+        "profile.nsys-rep",
+    ]
+
+
 def test_chat_subcommand_help():
     """chat subcommand should have --help and accept a profile argument."""
     result = subprocess.run(
