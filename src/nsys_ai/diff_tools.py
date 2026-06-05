@@ -692,6 +692,330 @@ def summarize_nvtx_subtree(
     }
 
 
+_LAUNCH_GRID_COLS = ("gridX", "gridY", "gridZ")
+_LAUNCH_BLOCK_COLS = ("blockX", "blockY", "blockZ")
+_LAUNCH_REGISTER_COLS = ("registersPerThread",)
+_LAUNCH_STATIC_SHARED_COLS = ("staticSharedMemory", "staticSharedMemoryBytes")
+_LAUNCH_DYNAMIC_SHARED_COLS = ("dynamicSharedMemory", "dynamicSharedMemoryBytes")
+
+
+def _kernel_table_columns(prof: Profile) -> list[str]:
+    kt = prof.schema.kernel_table
+    if not kt:
+        return []
+    try:
+        return prof.adapter.get_table_columns(kt)
+    except Exception:
+        # Keep the older explicit probe paths as a fallback for any adapter
+        # that does not expose get_table_columns correctly.
+        try:
+            if prof.db is not None:
+                col_rows = prof._duckdb_query(f"DESCRIBE {kt}")
+                return [r.get("column_name") or r.get("name") or "" for r in col_rows]
+            with prof._lock:
+                return [r[1] for r in prof.conn.execute(f"PRAGMA table_info({kt})").fetchall()]
+        except Exception:
+            return []
+
+
+def _first_existing(cols: set[str], candidates: tuple[str, ...]) -> str | None:
+    for col in candidates:
+        if col in cols:
+            return col
+    return None
+
+
+def _launch_config_columns(cols: list[str]) -> dict[str, str]:
+    colset = set(cols)
+    selected: dict[str, str] = {}
+    for col in _LAUNCH_GRID_COLS + _LAUNCH_BLOCK_COLS:
+        if col in colset:
+            selected[col] = col
+    reg_col = _first_existing(colset, _LAUNCH_REGISTER_COLS)
+    if reg_col:
+        selected["registersPerThread"] = reg_col
+    static_col = _first_existing(colset, _LAUNCH_STATIC_SHARED_COLS)
+    if static_col:
+        selected["staticSharedMemory"] = static_col
+    dynamic_col = _first_existing(colset, _LAUNCH_DYNAMIC_SHARED_COLS)
+    if dynamic_col:
+        selected["dynamicSharedMemory"] = dynamic_col
+    return selected
+
+
+def _product(values: list[int | None]) -> int | None:
+    if any(v is None for v in values):
+        return None
+    out = 1
+    for value in values:
+        out *= int(value or 0)
+    return out
+
+
+def _format_dims(values: list[int | None] | None) -> str:
+    if not values:
+        return "?"
+    return "x".join("?" if v is None else str(v) for v in values)
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "?"
+    if value == 0:
+        return "0B"
+    if value % 1024 == 0:
+        kib = value // 1024
+        if kib % 1024 == 0:
+            return f"{kib // 1024}MiB"
+        return f"{kib}KiB"
+    return f"{value}B"
+
+
+def _scalar_delta(before: int | None, after: int | None) -> int | None:
+    if before is None or after is None:
+        return None
+    return after - before
+
+
+def _delta_entry(before, after):
+    if before is None or after is None:
+        delta = None
+    elif isinstance(before, list) and isinstance(after, list):
+        delta = [
+            _scalar_delta(b, a)
+            for b, a in zip(before, after, strict=False)
+        ]
+    else:
+        delta = after - before
+    return {"before": before, "after": after, "delta": delta}
+
+
+def _shared_total(row: dict) -> int | None:
+    static = row.get("staticSharedMemory")
+    dynamic = row.get("dynamicSharedMemory")
+    if static is None and dynamic is None:
+        return None
+    return int(static or 0) + int(dynamic or 0)
+
+
+def _normalize_launch_row(row: dict | None, selected_cols: dict[str, str]) -> dict | None:
+    if row is None:
+        return None
+    config: dict = {
+        "matched_name": row.get("matched_name"),
+        "sample_count": int(row.get("sample_count") or 0),
+        "total_ms": round((int(row.get("total_ns") or 0)) / 1e6, 3),
+        "avg_ms": round((float(row.get("avg_ns") or 0.0)) / 1e6, 6),
+    }
+    distinct_configs = row.get("distinct_configs")
+    if distinct_configs is not None:
+        config["distinct_configs"] = int(distinct_configs)
+    total_invocations = int(row.get("total_invocations") or 0)
+    if total_invocations > 0:
+        config["total_invocations"] = total_invocations
+        config["dominant_share"] = round(config["sample_count"] / total_invocations, 4)
+
+    for col in _LAUNCH_GRID_COLS + _LAUNCH_BLOCK_COLS:
+        if col in selected_cols:
+            value = row.get(col)
+            config[col] = int(value) if value is not None else None
+
+    if any(col in config for col in _LAUNCH_GRID_COLS):
+        config["grid"] = [config.get(col) for col in _LAUNCH_GRID_COLS]
+        config["total_blocks"] = _product(config["grid"])
+    if any(col in config for col in _LAUNCH_BLOCK_COLS):
+        config["block"] = [config.get(col) for col in _LAUNCH_BLOCK_COLS]
+        config["threads_per_block"] = _product(config["block"])
+    if config.get("total_blocks") is not None and config.get("threads_per_block") is not None:
+        config["total_threads"] = int(config["total_blocks"]) * int(config["threads_per_block"])
+
+    for col in ("registersPerThread", "staticSharedMemory", "dynamicSharedMemory"):
+        if col in selected_cols:
+            value = row.get(col)
+            config[col] = int(value) if value is not None else None
+    shared = _shared_total(config)
+    if shared is not None:
+        config["sharedMemoryBytes"] = shared
+    return config
+
+
+def _query_launch_config(
+    prof: Profile,
+    kernel_name: str,
+    selected_cols: dict[str, str],
+    trim: tuple[int, int] | None,
+    target_gpu: int | None,
+) -> dict | None:
+    if not prof.schema.kernel_table or not selected_cols:
+        return None
+
+    select_parts = ["COALESCE(d.value, s.value, ?) AS matched_name"]
+    group_parts = []
+    for output_name, source_col in selected_cols.items():
+        select_parts.append(f"k.{source_col} AS {output_name}")
+        group_parts.append(f"k.{source_col}")
+    select_parts.extend(
+        [
+            "COUNT(*) AS sample_count",
+            "SUM(k.[end] - k.start) AS total_ns",
+            "AVG(k.[end] - k.start) AS avg_ns",
+        ]
+    )
+
+    sql = f"""
+        SELECT {", ".join(select_parts)}
+        FROM {prof.schema.kernel_table} k
+        LEFT JOIN StringIds s ON k.shortName = s.id
+        LEFT JOIN StringIds d ON k.demangledName = d.id
+        WHERE (s.value = ? OR d.value = ?)
+    """
+    params: list = [kernel_name, kernel_name, kernel_name]
+    if target_gpu is not None:
+        sql += " AND k.deviceId = ?"
+        params.append(target_gpu)
+    if trim is not None:
+        sql += " AND k.start >= ? AND k.[end] <= ?"
+        params.extend([int(trim[0]), int(trim[1])])
+    if group_parts:
+        sql += " GROUP BY " + ", ".join(group_parts) + ", matched_name"
+    sql += " ORDER BY total_ns DESC, sample_count DESC"
+
+    rows = prof._duckdb_query(sql, params)
+    if not rows:
+        return None
+    # One row per distinct launch config; the first (by total GPU time) is the
+    # dominant config we report. Carry the distinct-config count + total
+    # invocations so the caller can express how representative the dominant
+    # config is — an honesty signal for kernels launched with several shapes.
+    dominant = dict(rows[0])
+    dominant["distinct_configs"] = len(rows)
+    dominant["total_invocations"] = sum(int(r.get("sample_count") or 0) for r in rows)
+    return dominant
+
+
+def _resolve_launch_config_windows(
+    ctx: DiffContext,
+    iteration_index: int | None,
+    target_gpu: int | None,
+) -> tuple[tuple[int, int] | None, tuple[int, int] | None, dict | None]:
+    if iteration_index is None:
+        return ctx.trim, ctx.trim, None
+    bounds = get_iteration_boundaries(ctx, marker=ctx.marker, target_gpu=target_gpu)
+    # Reject negatives explicitly: Python would otherwise let -1 silently index
+    # the last iteration, contradicting the "out of range" contract.
+    if iteration_index < 0 or iteration_index >= len(bounds["boundaries"]):
+        return (
+            None,
+            None,
+            {
+                "error": f"iteration_index {iteration_index} out of range (max {len(bounds['boundaries']) - 1})",
+                "iteration_index": iteration_index,
+            },
+        )
+    bnd = bounds["boundaries"][iteration_index]
+    trim_before = (
+        (bnd["before"]["start_ns"], bnd["before"]["end_ns"])
+        if bnd["before"]["start_ns"] is not None
+        else None
+    )
+    trim_after = (
+        (bnd["after"]["start_ns"], bnd["after"]["end_ns"])
+        if bnd["after"]["start_ns"] is not None
+        else None
+    )
+    if trim_before is None or trim_after is None:
+        return (
+            trim_before,
+            trim_after,
+            {
+                "error": "Missing before or after window for this iteration",
+                "iteration_index": iteration_index,
+                "has_before": bnd["has_before"],
+                "has_after": bnd["has_after"],
+            },
+        )
+    return trim_before, trim_after, None
+
+
+def _build_launch_delta(before: dict | None, after: dict | None) -> dict:
+    delta: dict = {}
+    for config_field in (
+        "gridX",
+        "gridY",
+        "gridZ",
+        "grid",
+        "blockX",
+        "blockY",
+        "blockZ",
+        "block",
+        "total_blocks",
+        "threads_per_block",
+        "total_threads",
+        "registersPerThread",
+        "staticSharedMemory",
+        "dynamicSharedMemory",
+        "sharedMemoryBytes",
+    ):
+        b = before.get(config_field) if before else None
+        a = after.get(config_field) if after else None
+        if b is not None or a is not None:
+            delta[config_field] = _delta_entry(b, a)
+    return delta
+
+
+def _changed(delta: dict, field: str) -> bool:
+    entry = delta.get(field)
+    if not entry:
+        return False
+    d = entry.get("delta")
+    if isinstance(d, list):
+        return any(x not in (None, 0) for x in d)
+    return d not in (None, 0)
+
+
+def _launch_config_explanation(kernel_name: str, before: dict | None, after: dict | None, delta: dict) -> str:
+    if before is None and after is None:
+        return f"No launch configuration rows found for kernel '{kernel_name}'."
+    if before is None:
+        return f"Kernel '{kernel_name}' only appears after; launch configuration has no before baseline."
+    if after is None:
+        return f"Kernel '{kernel_name}' only appears before; launch configuration has no after comparison."
+
+    parts: list[str] = []
+    if _changed(delta, "grid"):
+        parts.append(f"grid {_format_dims(before.get('grid'))} -> {_format_dims(after.get('grid'))}")
+    if _changed(delta, "block"):
+        parts.append(f"block {_format_dims(before.get('block'))} -> {_format_dims(after.get('block'))}")
+    if _changed(delta, "registersPerThread"):
+        parts.append(
+            f"registers/thread {before.get('registersPerThread')} -> {after.get('registersPerThread')}"
+        )
+    if _changed(delta, "sharedMemoryBytes"):
+        parts.append(
+            f"shared mem {_format_bytes(before.get('sharedMemoryBytes'))} -> {_format_bytes(after.get('sharedMemoryBytes'))}"
+        )
+    if not parts:
+        return "Launch config is unchanged; slowdown is likely from data, scheduling, memory behavior, or lower-level kernel execution."
+
+    occupancy_reasons = []
+    reg_delta = (delta.get("registersPerThread") or {}).get("delta")
+    shared_delta = (delta.get("sharedMemoryBytes") or {}).get("delta")
+    threads_delta = (delta.get("threads_per_block") or {}).get("delta")
+    blocks_delta = (delta.get("total_blocks") or {}).get("delta")
+    if isinstance(reg_delta, int) and reg_delta > 0:
+        occupancy_reasons.append("higher register pressure")
+    if isinstance(shared_delta, int) and shared_delta > 0:
+        occupancy_reasons.append("more shared memory per block")
+    if isinstance(threads_delta, int) and threads_delta > 0:
+        occupancy_reasons.append("larger blocks")
+    if isinstance(blocks_delta, int) and blocks_delta < 0:
+        occupancy_reasons.append("fewer blocks")
+
+    if occupancy_reasons:
+        return "; ".join(parts) + " -> likely lower occupancy/parallelism from " + ", ".join(occupancy_reasons) + "."
+    return "; ".join(parts) + " -> launch geometry changed; inspect occupancy and memory behavior."
+
+
 def get_launch_config_diff(
     ctx: DiffContext,
     kernel_name: str,
@@ -701,38 +1025,60 @@ def get_launch_config_diff(
     """
     Grid/block/registers before vs after; explains 'why'. Returns error when columns missing (BETA).
     """
-    # Launch-config columns are BETA; detect available columns
-    kt = ctx.before.schema.kernel_table
-    try:
-        if ctx.before.db is not None:
-            # DuckDB path: DESCRIBE is valid
-            col_rows = ctx.before._duckdb_query(f"DESCRIBE {kt}")
-            cols = [r.get("column_name") or r.get("name") or "" for r in col_rows]
-        else:
-            # SQLite fallback: DESCRIBE is not valid, use PRAGMA
-            with ctx.before._lock:
-                cols = [
-                    r[1] for r in ctx.before.conn.execute(f"PRAGMA table_info({kt})").fetchall()
-                ]
-    except Exception:
-        cols = []
-    if not ("gridX" in cols or "blockX" in cols):
+    before_cols = _kernel_table_columns(ctx.before)
+    after_cols = _kernel_table_columns(ctx.after)
+    before_selected = _launch_config_columns(before_cols)
+    after_selected = _launch_config_columns(after_cols)
+    common_keys = sorted(set(before_selected).intersection(after_selected))
+    before_common = {key: before_selected[key] for key in common_keys}
+    after_common = {key: after_selected[key] for key in common_keys}
+
+    if not ("gridX" in before_common or "blockX" in before_common):
         return {
             "error": "not available",
             "reason": "Launch-config columns (gridX/blockX, etc.) not in export",
+            "available_columns": {
+                "before": before_cols,
+                "after": after_cols,
+            },
         }
-    # Optional: query one kernel by name in trim window and return before/after config
-    return {
+
+    trim_before, trim_after, window_error = _resolve_launch_config_windows(
+        ctx, iteration_index, target_gpu
+    )
+    if window_error is not None:
+        return window_error
+
+    before_row = _query_launch_config(ctx.before, kernel_name, before_common, trim_before, target_gpu)
+    after_row = _query_launch_config(ctx.after, kernel_name, after_common, trim_after, target_gpu)
+    before_config = _normalize_launch_row(before_row, before_common)
+    after_config = _normalize_launch_row(after_row, after_common)
+    delta = _build_launch_delta(before_config, after_config)
+    explanation = _launch_config_explanation(kernel_name, before_config, after_config, delta)
+
+    base = {
         "kernel_name": kernel_name,
-        "before": {},
-        "after": {},
+        "target_gpu": target_gpu,
+        "iteration_index": iteration_index,
+        "trim_before_ns": list(trim_before) if trim_before else None,
+        "trim_after_ns": list(trim_after) if trim_after else None,
+        "columns_used": {
+            "before": before_common,
+            "after": after_common,
+        },
+        "before": before_config,
+        "after": after_config,
+        "delta": delta,
+        "explanation": explanation,
         "uses_tensor_core_likely": any(
             p in kernel_name
             for p in ("sm80_xmma_", "volta_fp16_s884gemm", "h884gemm", "xmma", "wmma")
         ),
-        "error": "not available",
-        "reason": "Launch-config diff not yet implemented; schema present",
     }
+    if before_config is None or after_config is None:
+        base["error"] = "not comparable"
+        base["reason"] = explanation
+    return base
 
 
 def get_source_code_context(ctx: DiffContext, nvtx_path: str) -> dict:

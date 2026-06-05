@@ -63,6 +63,61 @@ def _make_profile(path: str, *, kernels: list[tuple], nvtx: list[tuple] | None =
     conn.close()
 
 
+def _make_profile_with_launch_config(
+    path: str,
+    *,
+    kernels: list[tuple],
+    shared_cols: tuple[str, str] = ("staticSharedMemory", "dynamicSharedMemory"),
+):
+    """
+    Minimal profile with launch-config columns.
+
+    kernels entries:
+      (start_ns, end_ns, deviceId, streamId, correlationId, shortNameId, demangledId,
+       gridX, gridY, gridZ, blockX, blockY, blockZ,
+       registersPerThread, <static shared>, <dynamic shared>)
+
+    shared_cols overrides the shared-memory column names so tests can exercise
+    the staticSharedMemoryBytes / dynamicSharedMemoryBytes schema variants.
+    """
+    static_col, dynamic_col = shared_cols
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT, "
+        "gridX INT, gridY INT, gridZ INT, "
+        "blockX INT, blockY INT, blockZ INT, "
+        f"registersPerThread INT, {static_col} INT, {dynamic_col} INT)"
+    )
+    conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT, globalTid INT, start INT, [end] INT)")
+    # Empty RUNTIME table so iteration detection can run (and cleanly find no
+    # iterations) instead of raising on a missing table.
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INT, correlationId INT, start INT, [end] INT)"
+    )
+    conn.executemany(
+        "INSERT INTO StringIds(id, value) VALUES(?,?)",
+        [
+            (1, "kA"),
+            (2, "kA_dem"),
+            (3, "kB"),
+            (4, "kB_dem"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL("
+        "start, [end], deviceId, streamId, correlationId, shortName, demangledName, "
+        "gridX, gridY, gridZ, blockX, blockY, blockZ, "
+        f"registersPerThread, {static_col}, {dynamic_col}) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        kernels,
+    )
+    conn.commit()
+    conn.close()
+
+
 def _make_profile_with_runtime(
     path: str,
     *,
@@ -842,6 +897,259 @@ def test_diff_tools_region_diff_and_stubs(tmp_path):
         ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
         mem = get_memory_profile_diff(ctx, target_gpu=0)
     assert "error" in mem
+
+
+def test_get_launch_config_diff_returns_config_delta_and_explanation(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[
+            # In-window representative config.
+            (0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            # Outside ctx.trim and longer; must not win.
+            (200_000_000, 260_000_000, 0, 7, 2, 1, 2, 999, 1, 1, 64, 1, 1, 32, 0, 0),
+        ],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[
+            (0, 20_000_000, 0, 7, 1, 1, 2, 128, 1, 1, 128, 1, 1, 96, 0, 49_152),
+            (200_000_000, 260_000_000, 0, 7, 2, 1, 2, 999, 1, 1, 64, 1, 1, 32, 0, 0),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=(0, 100_000_000), marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["grid"] == [256, 1, 1]
+    assert out["after"]["grid"] == [128, 1, 1]
+    assert out["delta"]["gridX"] == {"before": 256, "after": 128, "delta": -128}
+    assert out["delta"]["grid"]["delta"] == [-128, 0, 0]
+    assert out["delta"]["registersPerThread"] == {"before": 64, "after": 96, "delta": 32}
+    assert out["delta"]["sharedMemoryBytes"]["after"] == 49_152
+    assert out["before"]["sample_count"] == 1
+    assert "999" not in out["explanation"]
+    assert "registers/thread 64 -> 96" in out["explanation"]
+    assert "occupancy" in out["explanation"]
+
+
+def test_get_launch_config_diff_partial_when_kernel_missing_one_side(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10, 0, 7, 1, 1, 2, 1, 1, 1, 128, 1, 1, 32, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10, 0, 7, 1, 3, 4, 1, 1, 1, 128, 1, 1, 32, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not comparable"
+    assert out["before"]["matched_name"] == "kA_dem"
+    assert out["after"] is None
+    assert "only appears before" in out["explanation"]
+
+
+def test_get_launch_config_diff_reports_distinct_configs_and_dominant_share(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # before: kA launched with two distinct configs in-window —
+    #   grid 256 x2 (20ms total) -> dominant by GPU time
+    #   grid 128 x1 (5ms total)
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            (10_000_000, 20_000_000, 0, 7, 2, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            (20_000_000, 25_000_000, 0, 7, 3, 1, 2, 128, 1, 1, 128, 1, 1, 64, 0, 0),
+        ],
+    )
+    # after: kA launched only one way.
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=(0, 100_000_000), marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    # Dominant config is the one with the most GPU time (grid 256), not the
+    # smallest or the most recent.
+    assert out["before"]["grid"] == [256, 1, 1]
+    assert out["before"]["distinct_configs"] == 2
+    assert out["before"]["total_invocations"] == 3
+    assert out["before"]["sample_count"] == 2
+    assert out["before"]["dominant_share"] == round(2 / 3, 4)
+    # after launched only one way -> dominant config is fully representative.
+    assert out["after"]["distinct_configs"] == 1
+    assert out["after"]["dominant_share"] == 1.0
+
+
+def test_get_launch_config_diff_iteration_index_out_of_range(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", iteration_index=99, target_gpu=0)
+
+    assert "out of range" in out["error"]
+    assert out["iteration_index"] == 99
+
+
+def test_get_launch_config_diff_unchanged_config_points_elsewhere(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Identical launch config; only the duration grew. The tool should rule
+    # launch config OUT as the cause and point elsewhere.
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 20_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    assert out["delta"]["gridX"]["delta"] == 0
+    assert out["delta"]["registersPerThread"]["delta"] == 0
+    assert "unchanged" in out["explanation"]
+
+
+def test_get_launch_config_diff_reads_shared_memory_bytes_column_variant(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Newer Nsight exports name the columns staticSharedMemoryBytes /
+    # dynamicSharedMemoryBytes; the tool must detect those variants too.
+    variant = ("staticSharedMemoryBytes", "dynamicSharedMemoryBytes")
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 16_384)],
+        shared_cols=variant,
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 49_152)],
+        shared_cols=variant,
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    # The *Bytes variant is mapped back to the canonical output key.
+    assert out["columns_used"]["before"]["dynamicSharedMemory"] == "dynamicSharedMemoryBytes"
+    assert out["delta"]["sharedMemoryBytes"]["before"] == 16_384
+    assert out["delta"]["sharedMemoryBytes"]["after"] == 49_152
+    assert out["delta"]["sharedMemoryBytes"]["delta"] == 32_768
+
+
+def test_get_launch_config_diff_not_available_when_columns_absent(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Plain profiles: kernel table has no grid/block launch-config columns.
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not available"
+    assert "gridX" not in out["available_columns"]["before"]
+
+
+def test_get_launch_config_diff_not_available_when_columns_asymmetric(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # before HAS launch-config columns, after does NOT -> common set is empty,
+    # so there is nothing comparable and the tool reports "not available".
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not available"
+    # The asymmetry is surfaced for debugging.
+    assert "gridX" in out["available_columns"]["before"]
+    assert "gridX" not in out["available_columns"]["after"]
+
+
+def test_get_launch_config_diff_negative_iteration_index_out_of_range(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", iteration_index=-1, target_gpu=0)
+
+    # -1 must NOT silently select the last iteration via Python indexing.
+    assert "out of range" in out["error"]
+    assert out["iteration_index"] == -1
 
 
 # ---------------------------------------------------------------------------
