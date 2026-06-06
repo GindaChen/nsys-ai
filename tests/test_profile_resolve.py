@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from nsys_ai import profile as profile_mod
-from nsys_ai.exceptions import ExportError, ExportTimeoutError, ExportToolMissingError
+from nsys_ai.exceptions import (
+    ExportError,
+    ExportTimeoutError,
+    ExportToolMissingError,
+    ProfileNotFoundError,
+)
 
 
 def test_resolve_non_nsys_rep_passthrough(tmp_path: Path):
@@ -15,6 +20,50 @@ def test_resolve_non_nsys_rep_passthrough(tmp_path: Path):
     path.write_bytes(b"0")
     result = profile_mod.resolve_profile_path(str(path))
     assert result == str(path)
+
+
+def test_resolve_missing_path_raises_without_side_effects(tmp_path: Path):
+    """Missing path raises ProfileNotFoundError and creates no files."""
+    missing = tmp_path / "does_not_exist.sqlite"
+    with pytest.raises(ProfileNotFoundError) as exc:
+        profile_mod.resolve_profile_path(str(missing))
+    assert "not found" in str(exc.value)
+    assert exc.value.error_code == "PROFILE_NOT_FOUND"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_open_missing_path_raises_without_creating_files(tmp_path: Path):
+    """profile.open() on a missing path raises and leaves no stub/cache behind."""
+    missing = tmp_path / "typo.sqlite"
+    with pytest.raises(ProfileNotFoundError):
+        profile_mod.open(str(missing))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_profile_init_missing_path_raises_without_creating_files(tmp_path: Path):
+    """Direct Profile(...) (e.g. the agent, dispatcher) also guards, not just open()."""
+    missing = tmp_path / "direct.sqlite"
+    with pytest.raises(ProfileNotFoundError):
+        profile_mod.Profile(str(missing))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cache_open_missing_path_raises_without_creating_files(tmp_path: Path):
+    """Cache-open helpers (used by `skill run` and the chat DB tool) also guard."""
+    from nsys_ai import parquet_cache
+
+    missing = tmp_path / "cache.sqlite"
+    with pytest.raises(ProfileNotFoundError):
+        parquet_cache.open_cached_db(str(missing))
+    with pytest.raises(ProfileNotFoundError):
+        parquet_cache.open_direct_sqlite(str(missing))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_resolve_missing_nsys_rep_raises_not_found(tmp_path: Path):
+    """Missing .nsys-rep raises ProfileNotFoundError before the export path runs."""
+    with pytest.raises(ProfileNotFoundError):
+        profile_mod.resolve_profile_path(str(tmp_path / "missing.nsys-rep"))
 
 
 def test_resolve_parquetdir_passthrough_directory(tmp_path: Path):

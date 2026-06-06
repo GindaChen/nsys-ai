@@ -48,6 +48,8 @@ from pathlib import Path
 
 import duckdb
 
+from nsys_ai.exceptions import ProfileNotFoundError
+
 # fcntl is POSIX-only. On Windows we degrade to no-locking — concurrent
 # builders may then race redundantly, but ``build_cache``'s tmp_dir +
 # atomic rename still keeps the cache consistent.
@@ -57,6 +59,12 @@ except ImportError:
     _fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
+
+
+def _require_profile_exists(path: str) -> None:
+    """Raise before opening so a missing path can't create an empty stub/cache."""
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
 
 
 @contextlib.contextmanager
@@ -642,6 +650,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
       ``string_ids``, ``gpu_info``, ``cuda_device``, ``nvtx_kernel_map``,
      ``nvtx_path_dict`` (when map uses ``path_id``).
     """
+    _require_profile_exists(sqlite_path)
     if not is_cache_valid(sqlite_path):
         build_cache(sqlite_path)
 
@@ -1381,6 +1390,7 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
       - One-off queries that only touch 1-2 tables
       - ``--no-cache`` mode for quick diagnostics
     """
+    _require_profile_exists(sqlite_path)
     db = duckdb.connect()
     _configure_duckdb_analytics_session(db)
     safe_path = str(sqlite_path).replace("'", "''")

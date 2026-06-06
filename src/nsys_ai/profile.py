@@ -26,6 +26,7 @@ from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
     ExportToolMissingError,
+    ProfileNotFoundError,
     SchemaError,
 )
 
@@ -191,6 +192,11 @@ class Profile:
             raise ValueError(
                 "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
             )
+        # Guard before sqlite3.connect, which would otherwise create an empty
+        # stub + cache for a missing path. Covers every entry path, including
+        # direct Profile(...) construction that bypasses resolve_profile_path.
+        if not os.path.exists(path):
+            raise ProfileNotFoundError(f"profile not found: {path}")
         self.path = path
         self.backend = backend
         self._lock = threading.Lock()
@@ -719,7 +725,12 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
 
     Exports always pass `--include-blobs=true` so NVTX payload-dependent
     analysis (for example communicator-aware NCCL diagnostics) remains available.
+
+    Raises ProfileNotFoundError when *path* does not exist (e.g. a missing
+    `.nsys-rep`, before any export is attempted).
     """
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
     if backend == "parquetdir":
         return _resolve_parquetdir_path(path)
     if not path.lower().endswith(".nsys-rep"):
