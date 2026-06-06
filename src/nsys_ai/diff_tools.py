@@ -1195,8 +1195,11 @@ _MEMORY_DELTA_FIELDS = (
     "alloc_count",
     "free_count",
     "event_count",
+    "host_event_count",
     "unknown_event_count",
 )
+# memKind 0/1 are Pageable / Pinned host memory and never consume VRAM.
+_HOST_MEM_KINDS = (0, 1)
 
 
 def _memory_table_columns(prof: Profile) -> list[str]:
@@ -1230,6 +1233,9 @@ def _normalize_memory_profile_row(
     *,
     trim: tuple[int, int] | None,
     target_gpu: int | None,
+    mem_kind_available: bool,
+    distinct_contexts: int | None,
+    mem_kind_breakdown: list,
 ) -> dict:
     baseline = int(row.get("baseline_vram_bytes") or 0)
     peak_after_event = row.get("peak_after_event_bytes")
@@ -1242,6 +1248,7 @@ def _normalize_memory_profile_row(
     out = {
         "target_gpu": target_gpu,
         "trim_ns": list(trim) if trim else None,
+        "mem_kind_available": mem_kind_available,
         "peak_vram_bytes": peak,
         "baseline_vram_bytes": baseline,
         "final_vram_bytes": baseline + net_delta,
@@ -1251,8 +1258,13 @@ def _normalize_memory_profile_row(
         "alloc_count": int(row.get("alloc_count") or 0),
         "free_count": int(row.get("free_count") or 0),
         "event_count": int(row.get("event_count") or 0),
+        "host_event_count": int(row.get("host_event_count") or 0),
         "unknown_event_count": int(row.get("unknown_event_count") or 0),
     }
+    if distinct_contexts is not None:
+        out["distinct_contexts"] = distinct_contexts
+    if mem_kind_breakdown:
+        out["mem_kind_breakdown"] = mem_kind_breakdown
     if first_event is not None and last_event is not None:
         out["event_window_ns"] = [int(first_event), int(last_event)]
     return out
@@ -1262,22 +1274,39 @@ def _query_memory_profile(
     prof: Profile,
     trim: tuple[int, int] | None,
     target_gpu: int | None,
+    cols: list[str],
 ) -> dict:
-    where_parts = ["1=1"]
-    event_params: list = []
+    colset = set(cols)
+    has_mem_kind = "memKind" in colset
+    has_context = "contextId" in colset
+
+    scope_where = "1=1"
+    scope_params: list = []
     if target_gpu is not None:
-        where_parts.append("deviceId = ?")
-        event_params.append(int(target_gpu))
+        scope_where = "deviceId = ?"
+        scope_params = [int(target_gpu)]
+
+    # Events CTE pulls everything up to the window end so the running balance and
+    # the pre-window baseline are correct; the window filter is applied afterwards.
+    events_where = scope_where
+    events_params = list(scope_params)
     if trim is not None:
-        where_parts.append("start <= ?")
-        event_params.append(int(trim[1]))
+        events_where += " AND start <= ?"
+        events_params.append(int(trim[1]))
+
+    # In-window raw filter, for the per-kind / per-context breakdown sub-queries.
+    inwin_where = scope_where
+    inwin_params = list(scope_params)
+    if trim is not None:
+        inwin_where += " AND start >= ? AND start <= ?"
+        inwin_params += [int(trim[0]), int(trim[1])]
 
     if trim is not None:
         window_where = "event_start >= ? AND event_start <= ?"
         window_params: list = [int(trim[0]), int(trim[1])]
         baseline_expr = (
-            "(SELECT COALESCE(SUM(delta_bytes), 0) FROM events "
-            "WHERE event_start < ?) AS baseline_vram_bytes"
+            "(SELECT COALESCE(SUM(delta_bytes), 0) FROM events WHERE event_start < ?) "
+            "AS baseline_vram_bytes"
         )
         baseline_params: list = [int(trim[0])]
     else:
@@ -1286,31 +1315,40 @@ def _query_memory_profile(
         baseline_expr = "0 AS baseline_vram_bytes"
         baseline_params = []
 
-    # Nsight Systems records memoryOperationType=0 for allocation and 1 for
-    # deallocation. Build a running balance over all events up to the window
-    # end, then count alloc/free events only inside the selected window.
+    # memKind 0/1 = host (pageable/pinned), never VRAM; 2/3 device, 4/6 managed,
+    # 5 device-static are device-resident (documented Nsight ENUM_CUDA_MEM_KIND).
+    # Without the column we cannot tell, so count every event (best effort).
+    is_device = (
+        "CASE WHEN CAST(memKind AS INTEGER) IN (0, 1) THEN 0 ELSE 1 END" if has_mem_kind else "1"
+    )
+
+    # memoryOperationType: 0 = alloc, 1 = free. Allocs sort before frees at equal
+    # timestamps so a same-ts alloc+free still registers the high-water mark.
     sql = f"""
         WITH events AS (
             SELECT
                 CAST(start AS BIGINT) AS event_start,
                 CAST(memoryOperationType AS INTEGER) AS op,
                 CAST(COALESCE(bytes, 0) AS BIGINT) AS bytes,
+                {is_device} AS is_device,
                 CASE
+                    WHEN {is_device} = 0 THEN 0
                     WHEN memoryOperationType = 0 THEN CAST(COALESCE(bytes, 0) AS BIGINT)
                     WHEN memoryOperationType = 1 THEN -CAST(COALESCE(bytes, 0) AS BIGINT)
                     ELSE 0
                 END AS delta_bytes
             FROM {_MEMORY_USAGE_TABLE}
-            WHERE {" AND ".join(where_parts)}
+            WHERE {events_where}
         ),
         running AS (
             SELECT
                 event_start,
                 op,
                 bytes,
+                is_device,
                 delta_bytes,
                 SUM(delta_bytes) OVER (
-                    ORDER BY event_start, CASE WHEN op = 1 THEN 0 ELSE 1 END
+                    ORDER BY event_start, CASE WHEN op = 0 THEN 0 ELSE 1 END
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS balance_bytes
             FROM events
@@ -1320,12 +1358,15 @@ def _query_memory_profile(
         )
         SELECT
             COUNT(*) AS event_count,
-            COALESCE(SUM(CASE WHEN op = 0 THEN 1 ELSE 0 END), 0) AS alloc_count,
-            COALESCE(SUM(CASE WHEN op = 1 THEN 1 ELSE 0 END), 0) AS free_count,
-            COALESCE(SUM(CASE WHEN op NOT IN (0, 1) THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN is_device = 0 THEN 1 ELSE 0 END), 0) AS host_event_count,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 0 THEN 1 ELSE 0 END), 0) AS alloc_count,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 1 THEN 1 ELSE 0 END), 0) AS free_count,
+            COALESCE(SUM(CASE WHEN op IS NULL OR op NOT IN (0, 1) THEN 1 ELSE 0 END), 0)
                 AS unknown_event_count,
-            COALESCE(SUM(CASE WHEN op = 0 THEN bytes ELSE 0 END), 0) AS allocated_bytes,
-            COALESCE(SUM(CASE WHEN op = 1 THEN bytes ELSE 0 END), 0) AS freed_bytes,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 0 THEN bytes ELSE 0 END), 0)
+                AS allocated_bytes,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 1 THEN bytes ELSE 0 END), 0)
+                AS freed_bytes,
             COALESCE(SUM(delta_bytes), 0) AS net_delta_bytes,
             MIN(event_start) AS first_event_ns,
             MAX(event_start) AS last_event_ns,
@@ -1333,8 +1374,51 @@ def _query_memory_profile(
             {baseline_expr}
         FROM windowed
     """
-    row = prof._duckdb_query(sql, event_params + window_params + baseline_params)[0]
-    return _normalize_memory_profile_row(row, trim=trim, target_gpu=target_gpu)
+    row = prof._duckdb_query(sql, events_params + window_params + baseline_params)[0]
+
+    distinct_contexts = None
+    if has_context:
+        ctx_rows = prof._duckdb_query(
+            f"SELECT COUNT(DISTINCT contextId) AS n FROM {_MEMORY_USAGE_TABLE} WHERE {inwin_where}",
+            list(inwin_params),
+        )
+        distinct_contexts = int(ctx_rows[0].get("n") or 0) if ctx_rows else 0
+
+    mem_kind_breakdown: list = []
+    if has_mem_kind:
+        bk_rows = prof._duckdb_query(
+            f"""
+            SELECT
+                CAST(memKind AS INTEGER) AS mem_kind,
+                COALESCE(SUM(CASE WHEN memoryOperationType = 0 THEN 1 ELSE 0 END), 0) AS alloc_count,
+                COALESCE(SUM(CASE WHEN memoryOperationType = 1 THEN 1 ELSE 0 END), 0) AS free_count
+            FROM {_MEMORY_USAGE_TABLE}
+            WHERE {inwin_where}
+            GROUP BY CAST(memKind AS INTEGER)
+            ORDER BY mem_kind
+            """,
+            list(inwin_params),
+        )
+        for r in bk_rows:
+            mk = r.get("mem_kind")
+            mk_int = int(mk) if mk is not None else None
+            mem_kind_breakdown.append(
+                {
+                    "mem_kind": mk_int,
+                    "is_host": mk_int in _HOST_MEM_KINDS if mk_int is not None else False,
+                    "alloc_count": int(r.get("alloc_count") or 0),
+                    "free_count": int(r.get("free_count") or 0),
+                }
+            )
+
+    return _normalize_memory_profile_row(
+        row,
+        trim=trim,
+        target_gpu=target_gpu,
+        mem_kind_available=has_mem_kind,
+        distinct_contexts=distinct_contexts,
+        mem_kind_breakdown=mem_kind_breakdown,
+    )
 
 
 def _build_memory_delta(before: dict, after: dict) -> dict:
@@ -1346,8 +1430,9 @@ def _build_memory_delta(before: dict, after: dict) -> dict:
 
 def _memory_columns_used(cols: list[str]) -> list[str]:
     used = [col for col in _MEMORY_REQUIRED_COLS if col in cols]
-    if "deviceId" in cols:
-        used.append("deviceId")
+    for opt in ("deviceId", "memKind", "contextId"):
+        if opt in cols:
+            used.append(opt)
     return used
 
 
@@ -1464,9 +1549,15 @@ def get_memory_profile_diff(
     if window_error is not None:
         return window_error
 
-    before_stats = _query_memory_profile(ctx.before, trim_before, target_gpu)
-    after_stats = _query_memory_profile(ctx.after, trim_after, target_gpu)
+    before_stats = _query_memory_profile(ctx.before, trim_before, target_gpu, before_cols)
+    after_stats = _query_memory_profile(ctx.after, trim_after, target_gpu, after_cols)
     delta = _build_memory_delta(before_stats, after_stats)
+    explanation = _memory_profile_explanation(before_stats, after_stats, delta)
+    if not (before_stats["mem_kind_available"] and after_stats["mem_kind_available"]):
+        explanation += (
+            " Note: the memKind column is absent, so host vs device memory could not be "
+            "separated — these figures may include non-VRAM (host) allocations."
+        )
     return {
         "target_gpu": target_gpu,
         "iteration_index": iteration_index,
@@ -1480,7 +1571,7 @@ def get_memory_profile_diff(
         "before": before_stats,
         "after": after_stats,
         "delta": delta,
-        "explanation": _memory_profile_explanation(before_stats, after_stats, delta),
+        "explanation": explanation,
     }
 
 

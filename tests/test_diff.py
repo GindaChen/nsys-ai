@@ -126,14 +126,18 @@ def _make_profile_with_memory_usage(
     nvtx: list[tuple] | None = None,
     runtime: list[tuple] | None = None,
     include_memory_table: bool = True,
+    include_mem_kind: bool = True,
 ):
     """
     Minimal profile with CUDA_GPU_MEMORY_USAGE_EVENTS.
 
-    events entries:
-      (start_ns, deviceId, bytes, memoryOperationType)
+    events entries (4 or 6 elements; memKind/contextId default to device kind 2 /
+    context 1 when omitted):
+      (start_ns, deviceId, bytes, memoryOperationType[, memKind, contextId])
 
-    memoryOperationType follows Nsight Systems: 0 = alloc, 1 = free.
+    memoryOperationType follows Nsight Systems: 0 = alloc, 1 = free (None -> NULL).
+    memKind follows ENUM_CUDA_MEM_KIND: 0/1 host, 2/3 device, 4/6 managed, 5 static.
+    Pass include_mem_kind=False to emit the older schema without memKind/contextId.
     """
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
@@ -179,7 +183,20 @@ def _make_profile_with_memory_usage(
             "INSERT INTO NVTX_EVENTS(text, globalTid, start, [end]) VALUES(?,?,?,?)",
             nvtx,
         )
-    if include_memory_table:
+    if include_memory_table and include_mem_kind:
+        conn.execute(
+            "CREATE TABLE CUDA_GPU_MEMORY_USAGE_EVENTS("
+            "start INT, deviceId INT, bytes INT, memoryOperationType INT, "
+            "memKind INT, contextId INT)"
+        )
+        rows = [e if len(e) >= 6 else (e[0], e[1], e[2], e[3], 2, 1) for e in events]
+        conn.executemany(
+            "INSERT INTO CUDA_GPU_MEMORY_USAGE_EVENTS("
+            "start, deviceId, bytes, memoryOperationType, memKind, contextId) "
+            "VALUES(?,?,?,?,?,?)",
+            rows,
+        )
+    elif include_memory_table:
         conn.execute(
             "CREATE TABLE CUDA_GPU_MEMORY_USAGE_EVENTS("
             "start INT, deviceId INT, bytes INT, memoryOperationType INT)"
@@ -187,7 +204,7 @@ def _make_profile_with_memory_usage(
         conn.executemany(
             "INSERT INTO CUDA_GPU_MEMORY_USAGE_EVENTS(start, deviceId, bytes, memoryOperationType) "
             "VALUES(?,?,?,?)",
-            events,
+            [tuple(e[:4]) for e in events],
         )
     conn.commit()
     conn.close()
@@ -1424,6 +1441,115 @@ def test_get_memory_profile_diff_not_available_when_table_missing(tmp_path):
     assert out["tables_present"] == {"before": True, "after": False}
     assert "bytes" in out["available_columns"]["before"]
     assert out["available_columns"]["after"] == []
+
+
+def test_get_memory_profile_diff_excludes_host_mem_kinds_from_vram(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # (start, deviceId, bytes, op, memKind, contextId): a device alloc (kind 2)
+    # plus a pinned-host alloc (kind 1). Host must NOT count toward VRAM.
+    events = [(10, 0, 1000, 0, 2, 1), (20, 0, 5000, 0, 1, 1)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["mem_kind_available"] is True
+    assert out["before"]["peak_vram_bytes"] == 1000  # host 5000 excluded
+    assert out["before"]["alloc_count"] == 1  # device alloc only
+    assert out["before"]["host_event_count"] == 1
+    breakdown = {bk["mem_kind"]: bk for bk in out["before"]["mem_kind_breakdown"]}
+    assert set(breakdown) == {1, 2}
+    assert breakdown[1]["is_host"] is True
+    assert breakdown[2]["is_host"] is False
+
+
+def test_get_memory_profile_diff_same_timestamp_alloc_free_keeps_peak(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # alloc 1000 and free 1000 at the SAME timestamp: alloc must apply first so the
+    # high-water mark is 1000, not 0.
+    events = [(10, 0, 1000, 0, 2, 1), (10, 0, 1000, 1, 2, 1)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["peak_vram_bytes"] == 1000
+    assert out["before"]["net_delta_bytes"] == 0
+
+
+def test_get_memory_profile_diff_counts_null_op_as_unknown(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # op=None -> NULL memoryOperationType; must be surfaced, not silently dropped.
+    _make_profile_with_memory_usage(
+        str(before), events=[(10, 0, 1000, 0, 2, 1), (20, 0, 500, None, 2, 1)]
+    )
+    _make_profile_with_memory_usage(str(after), events=[(10, 0, 1000, 0, 2, 1)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["unknown_event_count"] == 1
+
+
+def test_get_memory_profile_diff_reports_distinct_contexts(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Two CUDA contexts on the same device; total device VRAM is the sum.
+    events = [(10, 0, 1000, 0, 2, 1), (20, 0, 2000, 0, 2, 2)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["distinct_contexts"] == 2
+    assert out["before"]["peak_vram_bytes"] == 3000
+
+
+def test_get_memory_profile_diff_best_effort_when_mem_kind_absent(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Older schema without memKind/contextId columns.
+    _make_profile_with_memory_usage(
+        str(before), events=[(10, 0, 1000, 0)], include_mem_kind=False
+    )
+    _make_profile_with_memory_usage(
+        str(after), events=[(10, 0, 1000, 0)], include_mem_kind=False
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["mem_kind_available"] is False
+    assert out["before"]["peak_vram_bytes"] == 1000  # best effort: counts everything
+    assert "memKind column is absent" in out["explanation"]
 
 
 # ---------------------------------------------------------------------------
