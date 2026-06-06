@@ -44,6 +44,7 @@ def show_help():
     print("  Commands:")
     print("  ─────────────────────────────────────────────────────────")
     print("    nsys-ai                       Show this help")
+    print("    nsys-ai <profile>             Open web timeline UI (default)")
     print("    nsys-ai help                  This help text")
     print()
     print("  Analysis:")
@@ -83,11 +84,12 @@ def show_help():
 
 
 def _looks_like_profile_path(value: str) -> bool:
+    lower_value = value.lower()
     return (
         not value.startswith("-")
         and (
-            value.endswith(".sqlite")
-            or value.endswith(".nsys-rep")
+            lower_value.endswith(".sqlite")
+            or lower_value.endswith(".nsys-rep")
         )
     )
 
