@@ -1832,7 +1832,7 @@ function toggleBookmarkList() {
     });
     html += '</table>';
     document.getElementById('gpuInfoContent').innerHTML = html;
-    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
 }
 
 function showToast(msg) {
