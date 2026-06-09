@@ -403,6 +403,32 @@ def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = No
 # ── Iteration detection ────────────────────────────────────────────
 
 
+# Rows whose GPU duration is below this fraction of the longest iteration are
+# treated as sub-iteration NVTX noise, not real training iterations. A loose
+# marker substring can match many short op-level ranges; real iterations cluster
+# near a similar, large duration, so the tiny tail drops out.
+_REAL_ITER_MIN_FRACTION = 0.1
+
+
+def _flag_real_iterations(results: list[dict]) -> list[dict]:
+    """Mark each row ``is_real_iteration`` to separate true iterations from noise.
+
+    A real training iteration has a substantial GPU duration; sub-iteration op
+    markers that a loose NVTX marker happens to match are orders of magnitude
+    shorter. Flag any row within ``_REAL_ITER_MIN_FRACTION`` of the longest as
+    real. When durations are uniform (no tiny tail) every row stays real, so a
+    clean profile is unaffected. Consumers compute medians/variance over the
+    real rows only, avoiding a median contaminated by the sub-ms tail.
+    """
+    if not results:
+        return results
+    max_dur = max((r.get("duration_ms") or 0.0) for r in results)
+    floor = max_dur * _REAL_ITER_MIN_FRACTION
+    for r in results:
+        r["is_real_iteration"] = (r.get("duration_ms") or 0.0) >= floor if max_dur > 0 else True
+    return results
+
+
 def detect_iterations(
     prof: Profile, device: int, trim: tuple[int, int] | None = None, marker: str = "sample_0"
 ) -> list[dict]:
@@ -593,7 +619,7 @@ def detect_iterations(
             }
         )
 
-    return results
+    return _flag_real_iterations(results)
 
 
 # ── Interval math helpers ──────────────────────────────────────────

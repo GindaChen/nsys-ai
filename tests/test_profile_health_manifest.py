@@ -55,6 +55,17 @@ class TestManifestExecute:
         m = rows[0]
         assert isinstance(m["top_kernels"], list)
 
+    def test_top_kernels_carry_dominant_convention_aliases(
+        self, minimal_nsys_conn, manifest_skill
+    ):
+        """Manifest top_kernels expose kernel_name/invocations (the convention
+        used by the top_kernels skill / planner / tool_dispatch) in addition to
+        the legacy name/count, additively."""
+        m = manifest_skill.execute(minimal_nsys_conn, device=0)[0]
+        for k in m["top_kernels"]:
+            assert k["kernel_name"] == k["name"]
+            assert k["invocations"] == k["count"]
+
     def test_nccl_summary_has_streams(self, minimal_nsys_conn, manifest_skill):
         """Our test data has NCCL kernels, so streams > 0."""
         rows = manifest_skill.execute(minimal_nsys_conn, device=0)

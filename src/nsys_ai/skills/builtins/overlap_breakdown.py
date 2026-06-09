@@ -20,6 +20,12 @@ _log = logging.getLogger(__name__)
 # if one exists on StringIds.value.
 _NCCL_LIKE = "(s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')"
 
+# A same-stream collision is only worth flagging when a meaningful fraction of
+# BOTH compute and NCCL actually share a stream. A few stray cross-stream kernels
+# (e.g. one eager kernel on the NCCL stream) score ~0% and must not trigger the
+# diagnosis.
+_SAME_STREAM_MIN_PCT = 5.0
+
 
 def _execute(conn, **kwargs):
     from ...overlap import overlap_analysis
@@ -61,11 +67,11 @@ def _execute(conn, **kwargs):
                 params,
             )
             if same_stream:
-                result["same_stream_diagnosis"] = [str(r["streamId"]) for r in same_stream]
-                # Quantify the diagnosis: a near-clean multi-stream layout
-                # with a few stray cross-stream kernels reads identically
-                # to 100 % collision without these percentages. Trigger
-                # above is unchanged; the proportions are purely additive.
+                # Quantify the shared fraction BEFORE flagging. A near-clean
+                # multi-stream layout with a few stray cross-stream kernels
+                # reads identically to a 100% collision by stream id alone, so
+                # gate the diagnosis on a meaningful share of both kinds rather
+                # than firing on a single stray cross-stream kernel.
                 totals = prof._duckdb_query(
                     f"""
                     SELECT
@@ -77,19 +83,25 @@ def _execute(conn, **kwargs):
                     """,
                     params,
                 )
+                compute_pct = nccl_pct = 0.0
                 if totals:
                     nccl_total = totals[0]["nccl_total"] or 0
                     compute_total = totals[0]["compute_total"] or 0
                     nccl_same = sum((r["nccl_count"] or 0) for r in same_stream)
                     compute_same = sum((r["compute_count"] or 0) for r in same_stream)
                     if compute_total > 0:
-                        result["same_stream_compute_pct"] = round(
-                            100 * compute_same / compute_total, 1
-                        )
+                        compute_pct = round(100 * compute_same / compute_total, 1)
                     if nccl_total > 0:
-                        result["same_stream_nccl_pct"] = round(
-                            100 * nccl_same / nccl_total, 1
-                        )
+                        nccl_pct = round(100 * nccl_same / nccl_total, 1)
+                if (
+                    compute_pct >= _SAME_STREAM_MIN_PCT
+                    and nccl_pct >= _SAME_STREAM_MIN_PCT
+                ):
+                    result["same_stream_diagnosis"] = [
+                        str(r["streamId"]) for r in same_stream
+                    ]
+                    result["same_stream_compute_pct"] = compute_pct
+                    result["same_stream_nccl_pct"] = nccl_pct
     except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
 

@@ -403,11 +403,19 @@ def _execute(conn, **kwargs):
         name = r.get("demangled", "?")
         if len(name) > 60:
             name = name[:57] + "..."
+        total_ms = round(r.get("total_ns", 0) / 1e6, 2)
+        count = r.get("count", 0)
         top_kernels.append(
             {
                 "name": name,
-                "total_ms": round(r.get("total_ns", 0) / 1e6, 2),
-                "count": r.get("count", 0),
+                "total_ms": total_ms,
+                "count": count,
+                # Aliases matching the dominant codebase convention used by the
+                # top_kernels skill / planner / tool_dispatch (which read
+                # kernel_name / invocations, not name / count). Additive so
+                # existing manifest consumers of name / count keep working.
+                "kernel_name": name,
+                "invocations": count,
             }
         )
 

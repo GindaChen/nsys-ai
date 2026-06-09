@@ -71,8 +71,11 @@ def _execute(conn, **kwargs):
             }
         )
 
-    # 3. Compute vs_median
-    durs = [it["duration_ms"] for it in iters]
+    # 3. Compute vs_median over real iterations only — a loose NVTX marker can
+    #    match many sub-ms op ranges whose contaminated median otherwise yields
+    #    absurd vs_median figures.
+    real = [it for it in iters if it.get("is_real_iteration", True)]
+    durs = [it["duration_ms"] for it in (real or iters)]
     median = statistics.median(durs)
     vs_median = round((target["duration_ms"] - median) / median * 100, 1) if median > 0 else 0
 

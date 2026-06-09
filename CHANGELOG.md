@@ -67,6 +67,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   reports which devices are present and warns when no device is specified.
 - Parquet cache builds are serialized so concurrent runs against the same cache
   no longer crash.
+- Iteration timing separates real training iterations from sub-iteration NVTX
+  noise: a loose marker that matched hundreds of short op ranges used to
+  contaminate the median so every real iteration looked thousands of percent
+  slow. `iteration_timing` and `iteration_detail` now judge variance against the
+  real iterations only.
+- `overlap_breakdown` only flags a same-stream compute/NCCL collision when a
+  meaningful fraction of both actually share a stream, instead of firing on a
+  single stray kernel.
+- `profile_health_manifest` top kernels now also carry `kernel_name` /
+  `invocations`, matching the field names the rest of the codebase uses.
 
 ### Performance
 
