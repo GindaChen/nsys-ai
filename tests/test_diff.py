@@ -1898,6 +1898,64 @@ def test_launch_overhead_ms_without_runtime_table_is_zero():
     assert launch_overhead_ms(_Prof(), device=0) == 0.0
 
 
+def test_launch_overhead_through_real_profile_stack(tmp_path):
+    """End-to-end: launch overhead flows through Profile (incl. DuckDB cache) and
+    into the carved attribution bucket — guards against the best-effort
+    try/except silently returning 0 on a backend the unit test doesn't exercise.
+    """
+    import sqlite3
+
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import build_profile_summary, compute_category_attribution
+    from nsys_ai.overlap import launch_overhead_ms
+
+    db = tmp_path / "ctrl.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE TARGET_INFO_GPU (id INTEGER PRIMARY KEY, name TEXT,
+          busLocation TEXT DEFAULT '', totalMemory INTEGER DEFAULT 0,
+          smCount INTEGER DEFAULT 0, chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0);
+        CREATE TABLE TARGET_INFO_CUDA_DEVICE (gpuId INTEGER, cudaId INTEGER,
+          pid INTEGER DEFAULT 0, uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+          globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0, streamId INTEGER DEFAULT 0,
+          correlationId INTEGER DEFAULT 0, start INTEGER, end INTEGER, shortName INTEGER,
+          demangledName INTEGER DEFAULT 0, gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1,
+          gridZ INTEGER DEFAULT 1, blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (globalTid INTEGER DEFAULT 0,
+          correlationId INTEGER, start INTEGER, end INTEGER, nameId INTEGER DEFAULT 0);
+        INSERT INTO StringIds VALUES (1, 'kernel_A');
+        INSERT INTO TARGET_INFO_GPU VALUES (0, 'NVIDIA Test GPU', '', 0, 108, 'Chip', 0);
+        INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL
+          (deviceId, streamId, correlationId, start, end, shortName) VALUES
+          (0, 7, 1, 1000000, 2000000, 1),
+          (0, 7, 2, 5000000, 6000000, 1),
+          (0, 7, 3, 10000000, 11000000, 1),
+          (0, 7, 4, 12000000, 13000000, 1);
+        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME (correlationId, start, end) VALUES
+          (1, 900000, 1000000), (2, 4000000, 4500000),
+          (3, 8500000, 10200000), (4, 10500000, 10900000);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    prof = profile_mod.open(str(db))
+    try:
+        # Same scenario as the unit test: 0.5 + 1.5 ms exposed.
+        assert launch_overhead_ms(prof, 0) == 2.0
+        summary = build_profile_summary(prof, 0, trim=None)
+        assert summary.overlap["launch_overhead_ms"] == 2.0
+        # Carved out of idle in attribution, and present as its own bucket.
+        cats = {c.category: c for c in compute_category_attribution(summary, summary)}
+        assert cats["launch_overhead"].before_ms == 2.0
+    finally:
+        prof.close()
+
+
 def test_v01_compute_verdict_thresholds():
     """compute_verdict applies ±5% threshold + confidence ≥ 0.5 gate."""
     from nsys_ai.diff import compute_verdict

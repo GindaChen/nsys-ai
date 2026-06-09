@@ -101,7 +101,11 @@ def launch_overhead_ms(
     if not runtime_table:
         return 0.0
 
-    where = ["k.correlationId IS NOT NULL"]
+    # All kernels define the GPU-busy boundary (so idle gaps are correct); the
+    # LEFT JOIN below — not a WHERE filter — gates which kernels have a launch
+    # window to attribute. Seeding with 1=1 keeps the SQL valid when no device/
+    # trim is given.
+    where = ["1=1"]
     params: list = []
     if device is not None:
         where.append("k.deviceId = ?")
