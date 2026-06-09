@@ -403,36 +403,43 @@ def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = No
 # ── Iteration detection ────────────────────────────────────────────
 
 
-# Rows whose GPU duration is below this fraction of the longest iteration are
-# treated as sub-iteration NVTX noise, not real training iterations. A loose
-# marker substring can match many short op-level ranges; real iterations cluster
-# near a similar, large duration, so the tiny tail drops out.
+# Rows whose GPU compute is below this fraction of the busiest iteration are
+# treated as noise, not real training iterations. A loose marker substring can
+# match many short op-level ranges, and the heuristic fallback can emit a row
+# spanning a long idle gap with almost no work; real iterations all do a similar,
+# substantial amount of GPU compute, so both kinds of artifact drop out.
 _REAL_ITER_MIN_FRACTION = 0.1
 
 
 def _flag_real_iterations(results: list[dict]) -> list[dict]:
     """Mark each row ``is_real_iteration`` to separate true iterations from noise.
 
-    A real training iteration has a substantial GPU duration; sub-iteration op
-    markers that a loose NVTX marker happens to match are orders of magnitude
-    shorter. Flag any row within ``_REAL_ITER_MIN_FRACTION`` of the longest as
-    real. When durations are uniform (no tiny tail) every row stays real, so a
-    clean profile is unaffected. Consumers compute medians/variance over the
-    real rows only, avoiding a median contaminated by the sub-ms tail.
+    Classification is by **GPU compute** (sum of kernel durations), not wall-clock
+    span: a real training iteration does a substantial, similar amount of work,
+    whereas the two artifacts this guards against have little. Op-level ranges a
+    loose NVTX marker matches are orders of magnitude shorter; a heuristic-fallback
+    "ghost" can have a huge span (a long idle gap) but near-zero compute. Flagging
+    by a fraction of the busiest iteration's compute drops both, while a clean
+    profile (uniform compute) keeps every row. Consumers then compute their
+    median/variance over the real rows only — measured on duration (iteration
+    wall-clock time), but selected by compute.
 
-    This is a heuristic, not exact iteration detection: an extreme outlier (e.g.
-    a warmup region many times longer than a normal step) inflates the cutoff
-    and can drop a borderline-short real iteration. That is acceptable here —
-    the goal is a representative median, so losing a data point at the margin is
-    harmless, whereas the contaminated median it replaces produced findings that
-    were off by orders of magnitude.
+    This is a heuristic, not exact iteration detection: if real iterations vary in
+    compute by more than ``1/_REAL_ITER_MIN_FRACTION``×, a borderline-light one can
+    be dropped. That is acceptable — the goal is a representative median, so losing
+    a marginal data point is harmless, whereas the contaminated median it replaces
+    produced findings off by orders of magnitude. Validated to match a
+    duration-based rule on a dozen real profiles while additionally dropping a
+    real ghost iteration the duration rule kept.
     """
     if not results:
         return results
-    max_dur = max((r.get("duration_ms") or 0.0) for r in results)
-    floor = max_dur * _REAL_ITER_MIN_FRACTION
+    max_compute = max((r.get("compute_ms") or 0.0) for r in results)
+    floor = max_compute * _REAL_ITER_MIN_FRACTION
     for r in results:
-        r["is_real_iteration"] = (r.get("duration_ms") or 0.0) >= floor if max_dur > 0 else True
+        r["is_real_iteration"] = (
+            (r.get("compute_ms") or 0.0) >= floor if max_compute > 0 else True
+        )
     return results
 
 

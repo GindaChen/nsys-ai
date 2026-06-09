@@ -36,6 +36,20 @@ def test_flag_real_iterations_splits_bimodal():
     assert all(r["duration_ms"] == 500.0 for r in real)
 
 
+def test_flag_real_iterations_drops_low_compute_ghost():
+    """A heuristic-fallback 'ghost' — a huge wall-clock span with almost no GPU
+    work — must NOT count as a real iteration, even though its duration is large.
+    Classification is by compute, not duration."""
+    rows = [_row(500.0, iteration=i, compute_ms=480.0) for i in range(8)]
+    # Ghost: longest duration of all, but negligible compute (a long idle gap).
+    rows.append(_row(9000.0, iteration=99, compute_ms=0.6, kernel_count=2))
+    _flag_real_iterations(rows)
+
+    ghost = next(r for r in rows if r["iteration"] == 99)
+    assert ghost["is_real_iteration"] is False, "ghost (high span, ~0 compute) must be dropped"
+    assert all(r["is_real_iteration"] for r in rows if r["iteration"] != 99)
+
+
 def test_flag_real_iterations_keeps_uniform_all_real():
     """A clean profile (no tiny tail) must keep every iteration real."""
     rows = [_row(500.0, iteration=i) for i in range(16)]
