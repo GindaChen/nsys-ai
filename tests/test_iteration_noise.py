@@ -8,7 +8,7 @@ skills compute variance over the real rows only.
 """
 
 from nsys_ai.overlap import _flag_real_iterations
-from nsys_ai.skills.builtins.iteration_timing import _to_findings
+from nsys_ai.skills.builtins.iteration_timing import _format, _to_findings
 
 
 def _row(dur_ms, **extra):
@@ -19,6 +19,7 @@ def _row(dur_ms, **extra):
         "gpu_end_ns": extra.get("gpu_end_ns", int(dur_ms * 1e6)),
         "kernel_count": extra.get("kernel_count", 1),
         "nccl_count": 0,
+        "compute_ms": extra.get("compute_ms", dur_ms),
     }
     row.update(extra)
     return row
@@ -69,6 +70,22 @@ def test_findings_ignore_noise_and_use_real_median():
     assert "median 500" in f.note, f"expected real median in note, got: {f.note!r}"
     # And no absurd thousands-of-percent figure from a contaminated median.
     assert "390" not in f.note
+
+
+def test_format_shows_real_iterations_and_filtered_count():
+    """The text view lists real iterations and reports the noise it hid, instead
+    of dumping hundreds of sub-iteration ranges."""
+    rows = [_row(500.0, iteration=i) for i in range(16)]
+    rows += [_row(0.3, iteration=100 + i) for i in range(968)]
+    _flag_real_iterations(rows)
+
+    text = _format(rows)
+    # 16 real iteration lines, not 984.
+    iter_lines = [ln for ln in text.splitlines() if ln.strip().startswith("iter ")]
+    assert len(iter_lines) == 16, f"expected 16 iter lines, got {len(iter_lines)}"
+    assert "968 sub-iteration NVTX range(s) filtered as noise" in text
+    # The average must reflect real iterations (~500ms), not the noise.
+    assert "Average: 500.0ms" in text
 
 
 def test_findings_empty_when_fewer_than_three_real():

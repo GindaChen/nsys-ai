@@ -419,6 +419,13 @@ def _flag_real_iterations(results: list[dict]) -> list[dict]:
     real. When durations are uniform (no tiny tail) every row stays real, so a
     clean profile is unaffected. Consumers compute medians/variance over the
     real rows only, avoiding a median contaminated by the sub-ms tail.
+
+    This is a heuristic, not exact iteration detection: an extreme outlier (e.g.
+    a warmup region many times longer than a normal step) inflates the cutoff
+    and can drop a borderline-short real iteration. That is acceptable here —
+    the goal is a representative median, so losing a data point at the margin is
+    harmless, whereas the contaminated median it replaces produced findings that
+    were off by orders of magnitude.
     """
     if not results:
         return results
