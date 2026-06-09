@@ -2564,6 +2564,9 @@ async function sendChat() {
                         if (payload.content) {
                             fullContent = payload.content;
                             aiDiv.innerHTML = formatChatContent(fullContent);
+                        } else if (payload.error && !fullContent) {
+                            fullContent = 'Error: ' + payload.error;
+                            aiDiv.innerHTML = formatChatContent(fullContent);
                         }
                         streamDone = true;
                     } else if (currentEvent === 'action') {
