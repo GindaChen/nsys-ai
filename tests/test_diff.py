@@ -1699,7 +1699,9 @@ def test_diff_cli_json_structure_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_overlap_dict(compute_only_ms, nccl_only_ms, overlap_ms, idle_ms):
+def _make_overlap_dict(
+    compute_only_ms, nccl_only_ms, overlap_ms, idle_ms, launch_overhead_ms=0.0
+):
     """Helper to build a fake overlap dict matching overlap_analysis output."""
     total = compute_only_ms + nccl_only_ms + overlap_ms + idle_ms
     return {
@@ -1707,6 +1709,7 @@ def _make_overlap_dict(compute_only_ms, nccl_only_ms, overlap_ms, idle_ms):
         "nccl_only_ms": nccl_only_ms,
         "overlap_ms": overlap_ms,
         "idle_ms": idle_ms,
+        "launch_overhead_ms": launch_overhead_ms,
         "total_ms": total,
         "overlap_pct": 0.0,
         "compute_kernels": 1,
@@ -1746,10 +1749,153 @@ def test_v01_category_attribution_hta_convention():
     assert cats["compute"].delta_ms == 25.0
     assert cats["communication"].before_ms == 20.0  # exposed_comm = nccl_only
     assert cats["communication"].after_ms == 25.0
+    # No launch_overhead in these fixtures, so idle is unchanged and the
+    # launch bucket is zero.
     assert cats["idle"].before_ms == 5.0
     assert cats["idle"].after_ms == 10.0
-    # launch_overhead is intentionally absent in v0.1 (PR-B will add it).
-    assert "launch_overhead" not in cats
+    assert cats["launch_overhead"].before_ms == 0.0
+    assert cats["launch_overhead"].after_ms == 0.0
+
+
+def test_v01_launch_overhead_carved_from_idle():
+    """launch_overhead is carved out of idle; the four buckets sum to total."""
+    from nsys_ai.diff import ProfileSummary, compute_category_attribution
+
+    def _summary(co, nccl, ov, idle, launch):
+        return ProfileSummary(
+            path="p",
+            gpu=0,
+            schema_version=None,
+            total_gpu_ns=0,
+            kernel_rows=0,
+            kernels=[],
+            nvtx=[],
+            overlap=_make_overlap_dict(co, nccl, ov, idle, launch_overhead_ms=launch),
+        )
+
+    # before idle=20 of which 8 is launch overhead; after idle=30 of which 5 is.
+    before = _summary(100, 20, 10, 20, 8)
+    after = _summary(120, 25, 15, 30, 5)
+    cats = {c.category: c for c in compute_category_attribution(before, after)}
+
+    assert cats["launch_overhead"].before_ms == 8.0
+    assert cats["launch_overhead"].after_ms == 5.0
+    # idle is reduced by the carved launch overhead (residual idle).
+    assert cats["idle"].before_ms == 12.0  # 20 - 8
+    assert cats["idle"].after_ms == 25.0  # 30 - 5
+
+    # Sum invariant: the four buckets reproduce the original step time, so the
+    # verdict is unaffected by adding the bucket.
+    for side in ("before_ms", "after_ms"):
+        four = sum(getattr(cats[c], side) for c in cats)
+        three = (
+            getattr(cats["compute"], side)
+            + getattr(cats["communication"], side)
+            + getattr(cats["launch_overhead"], side)
+            + getattr(cats["idle"], side)
+        )
+        assert four == three  # tautology guard that all four are present
+    assert sum(getattr(cats[c], "before_ms") for c in cats) == 100 + 20 + 10 + 20
+
+
+def test_v01_launch_overhead_capped_at_idle():
+    """A launch_overhead_ms exceeding idle is capped so residual idle stays >= 0."""
+    from nsys_ai.diff import ProfileSummary, compute_category_attribution
+
+    def _summary(launch):
+        return ProfileSummary(
+            path="p",
+            gpu=0,
+            schema_version=None,
+            total_gpu_ns=0,
+            kernel_rows=0,
+            kernels=[],
+            nvtx=[],
+            overlap=_make_overlap_dict(100, 0, 0, 5, launch_overhead_ms=launch),
+        )
+
+    cats = {
+        c.category: c
+        for c in compute_category_attribution(_summary(9.0), _summary(9.0))
+    }
+    # launch capped at idle (5), residual idle clamped to 0.
+    assert cats["launch_overhead"].before_ms == 5.0
+    assert cats["idle"].before_ms == 0.0
+
+
+def test_launch_overhead_ms_counts_only_exposed_idle():
+    """launch_overhead_ms = GPU-idle time overlapping a kernel-launch API call."""
+    import sqlite3
+
+    from nsys_ai.overlap import launch_overhead_ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            deviceId INTEGER, correlationId INTEGER, start INTEGER, end INTEGER
+        );
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+            correlationId INTEGER, start INTEGER, end INTEGER
+        );
+        """
+    )
+    # All on device 0; timestamps in ns (1e6 ns = 1 ms).
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?)",
+        [
+            (0, 1, 1_000_000, 2_000_000),  # first kernel: no preceding idle -> 0
+            (0, 2, 5_000_000, 6_000_000),  # idle gap (2e6,5e6)
+            (0, 3, 10_000_000, 11_000_000),  # idle gap (6e6,10e6)
+            (0, 4, 12_000_000, 13_000_000),  # idle gap (11e6,12e6)
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?)",
+        [
+            (1, 900_000, 1_000_000),  # before first kernel — not attributed
+            (2, 4_000_000, 4_500_000),  # fully inside gap -> 0.5 ms
+            (3, 8_500_000, 10_200_000),  # (8.5e6,10.2e6) ∩ (6e6,10e6) -> 1.5 ms
+            (4, 10_500_000, 10_900_000),  # ends before gap start (11e6) -> hidden, 0
+        ],
+    )
+    conn.commit()
+
+    class _Schema:
+        kernel_table = "CUPTI_ACTIVITY_KIND_KERNEL"
+        tables = ["CUPTI_ACTIVITY_KIND_KERNEL", "CUPTI_ACTIVITY_KIND_RUNTIME"]
+
+    class _Prof:
+        schema = _Schema()
+        adapter = conn
+
+    assert launch_overhead_ms(_Prof(), device=0) == 2.0  # 0.5 + 1.5
+    assert launch_overhead_ms(_Prof(), device=99) == 0.0  # no kernels on device
+
+
+def test_launch_overhead_ms_without_runtime_table_is_zero():
+    """No runtime table → launch overhead is 0.0 (best-effort enrichment)."""
+    import sqlite3
+
+    from nsys_ai.overlap import launch_overhead_ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(deviceId INTEGER, correlationId INTEGER, start INTEGER, end INTEGER);"
+    )
+    conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 1, 0, 1000)")
+    conn.commit()
+
+    class _Schema:
+        kernel_table = "CUPTI_ACTIVITY_KIND_KERNEL"
+        tables = ["CUPTI_ACTIVITY_KIND_KERNEL"]  # no RUNTIME table
+
+    class _Prof:
+        schema = _Schema()
+        adapter = conn
+
+    assert launch_overhead_ms(_Prof(), device=0) == 0.0
 
 
 def test_v01_compute_verdict_thresholds():
@@ -1853,11 +1999,12 @@ def test_v01_diff_json_envelope_and_verdict(tmp_path):
     assert "step_time" in payload
     assert "delta_ms" in payload["step_time"]
 
-    # category_attribution is a list of category bucket entries
+    # category_attribution is a list of category bucket entries — all four
+    # step-time buckets (launch_overhead carved from idle; see §1.6).
     cats = payload["category_attribution"]
     assert isinstance(cats, list)
     seen = {c["category"] for c in cats}
-    assert seen == {"compute", "communication", "idle"}
+    assert seen == {"compute", "communication", "launch_overhead", "idle"}
 
 
 def test_v01_confidence_separates_schema_and_gpu_mismatch():

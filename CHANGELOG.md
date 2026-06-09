@@ -26,7 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   verdict, so a diff can gate CI.
 - `nsys-ai diff --format json` emits a versioned envelope: a top-level
   `verdict`, a `comparability_confidence` score, step-time `category_attribution`
-  (compute / communication / idle), and a content-derived `profile_id` per side.
+  (compute / communication / launch overhead / idle), and a content-derived
+  `profile_id` per side. Launch overhead is the exposed kernel-dispatch latency
+  — the GPU-idle time spent waiting on a launch call — carved out of idle, so
+  the buckets still sum to step time and the verdict is unchanged.
 - Structured v0.1 findings — category, severity, confidence, and a located time
   window where possible — for `overlap_breakdown`, `nccl_breakdown`,
   `top_kernels`, `profile_health_manifest`, and `kernel_instances`, so the agent

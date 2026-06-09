@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 
 from .annotation import TraceSelection
 from .fingerprint import get_profile_id
-from .overlap import overlap_analysis
+from .overlap import launch_overhead_ms, overlap_analysis
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -179,6 +179,9 @@ def build_profile_summary(
 
     if gpu is not None:
         overlap = overlap_analysis(prof, gpu, trim=trim)
+        # Exposed launch overhead — a subset of idle, carved out in attribution.
+        if "error" not in overlap:
+            overlap["launch_overhead_ms"] = launch_overhead_ms(prof, gpu, trim=trim)
     else:
         # Node-wide aggregation: sum up individual GPU overlap stats.
         overlap = {
@@ -186,6 +189,7 @@ def build_profile_summary(
             "nccl_only_ms": 0.0,
             "overlap_ms": 0.0,
             "idle_ms": 0.0,
+            "launch_overhead_ms": 0.0,
             "total_ms": 0.0,
             "overlap_pct": 0.0,
             "compute_kernels": 0,
@@ -202,6 +206,7 @@ def build_profile_summary(
                 overlap["total_ms"] += dev_stats.get("total_ms", 0.0)
                 overlap["compute_kernels"] += dev_stats.get("compute_kernels", 0)
                 overlap["nccl_kernels"] += dev_stats.get("nccl_kernels", 0)
+                overlap["launch_overhead_ms"] += launch_overhead_ms(prof, dev, trim=trim)
 
         # Round logic to avoid float drift, and set a clean combined overlap pct
         # Node-wide idle logic is tricky because overlap might not overlap across GPUs perfectly,
@@ -210,7 +215,14 @@ def build_profile_summary(
             c_nccl = overlap["nccl_only_ms"] + overlap["overlap_ms"]
             overlap["overlap_pct"] = round(100 * overlap["overlap_ms"] / c_nccl, 1)
 
-        for k in ("compute_only_ms", "nccl_only_ms", "overlap_ms", "idle_ms", "total_ms"):
+        for k in (
+            "compute_only_ms",
+            "nccl_only_ms",
+            "overlap_ms",
+            "idle_ms",
+            "launch_overhead_ms",
+            "total_ms",
+        ):
             overlap[k] = round(overlap[k], 2)
 
     pid = get_profile_id(prof.conn, fallback_path=prof.path)
@@ -296,6 +308,14 @@ def compute_category_attribution(
     # like a real "compute=0, comm=0, idle=0" measurement.
     if before.overlap.get("error") or after.overlap.get("error"):
         return []
+    # launch_overhead is the exposed dispatch latency carved OUT of idle (it is
+    # a strict subset; see overlap.launch_overhead_ms). Cap it at idle so the
+    # residual idle stays >= 0 and the four buckets still sum to total — keeping
+    # step_time (and therefore the verdict) identical to the 3-bucket result.
+    b_idle = _ms(before.overlap, "idle_ms")
+    a_idle = _ms(after.overlap, "idle_ms")
+    b_launch = min(_ms(before.overlap, "launch_overhead_ms"), b_idle)
+    a_launch = min(_ms(after.overlap, "launch_overhead_ms"), a_idle)
     buckets: list[tuple[str, float, float]] = [
         (
             "compute",
@@ -308,9 +328,14 @@ def compute_category_attribution(
             _ms(after.overlap, "nccl_only_ms"),
         ),
         (
+            "launch_overhead",
+            b_launch,
+            a_launch,
+        ),
+        (
             "idle",
-            _ms(before.overlap, "idle_ms"),
-            _ms(after.overlap, "idle_ms"),
+            b_idle - b_launch,
+            a_idle - a_launch,
         ),
     ]
     return [
