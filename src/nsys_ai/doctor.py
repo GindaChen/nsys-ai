@@ -441,9 +441,24 @@ def _nccl_call_modes(prof: Any) -> str | None:
     )
 
 
+def _has_overhead_table(prof: Any) -> bool:
+    """True if the profile carries the table compute_profiler_overhead_ns reads.
+
+    Nsight names it ``PROFILER_OVERHEAD`` in SQLite and ``profiler_overhead`` in
+    the Parquet/DuckDB cache; match either case-insensitively.
+    """
+    tables = getattr(getattr(prof, "schema", None), "tables", None) or []
+    return any(t.lower() == "profiler_overhead" for t in tables)
+
+
 def _profiler_overhead_pct(prof: Any, span_ns: int) -> float | None:
-    """Profiler overhead as a percent of the full profile span, or None."""
-    if span_ns <= 0:
+    """Profiler overhead as a percent of the full profile span.
+
+    Returns None when overhead cannot be measured (degenerate span, no
+    overhead table, or a probe error) — distinct from a measured 0%, so the
+    caller can report "skipped" rather than a falsely reassuring "ok 0.0%".
+    """
+    if span_ns <= 0 or not _has_overhead_table(prof):
         return None
     try:
         from nsys_ai.skills.base import compute_profiler_overhead_ns
@@ -474,7 +489,7 @@ def _gpu_model_check(meta: Any, devices: list[int]) -> CheckResult:
 def _overhead_check(pct: float | None) -> CheckResult:
     if pct is None:
         return CheckResult(
-            "Profiler overhead", "skipped", "no profiler-overhead table in profile"
+            "Profiler overhead", "skipped", "no profiler-overhead data in profile"
         )
     if pct > 100.0:
         # Physically impossible — a degenerate/very short profile, not a real

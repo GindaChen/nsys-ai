@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import sqlite3
+import types
+
 import pytest
 
 from nsys_ai.doctor import (
     DoctorReport,
+    _has_overhead_table,
     _overhead_check,
+    _profiler_overhead_pct,
     format_doctor_text,
     run_doctor,
 )
@@ -127,3 +132,36 @@ def test_health_only_mode_has_no_env(minimal_nsys_db_path):
 )
 def test_overhead_check_thresholds(pct, expected):
     assert _overhead_check(pct).status == expected
+
+
+def test_has_overhead_table_matches_either_case():
+    # SQLite (PROFILER_OVERHEAD) and the DuckDB cache (profiler_overhead) both count.
+    for name in ("PROFILER_OVERHEAD", "profiler_overhead"):
+        prof = types.SimpleNamespace(schema=types.SimpleNamespace(tables=[name]))
+        assert _has_overhead_table(prof) is True
+    prof = types.SimpleNamespace(schema=types.SimpleNamespace(tables=["NVTX_EVENTS"]))
+    assert _has_overhead_table(prof) is False
+
+
+def test_overhead_pct_is_none_without_table():
+    """An absent overhead table is unmeasurable, not a measured 0%."""
+    prof = types.SimpleNamespace(schema=types.SimpleNamespace(tables=["NVTX_EVENTS"]))
+    assert _profiler_overhead_pct(prof, span_ns=1_000_000) is None
+
+
+def test_overhead_skipped_when_profile_has_no_overhead_table(minimal_nsys_db_path):
+    """The minimal profile has no overhead table -> skipped, not a false 'ok 0.0%'."""
+    # Guard the premise: the fixture genuinely lacks the table.
+    with sqlite3.connect(minimal_nsys_db_path) as conn:
+        names = {
+            r[0].lower()
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "profiler_overhead" not in names
+
+    report = run_doctor(minimal_nsys_db_path, include_env=False)
+    overhead = _check(report, "Profiler overhead")
+    assert overhead is not None
+    assert overhead.status == "skipped"
