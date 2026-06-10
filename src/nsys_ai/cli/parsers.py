@@ -51,6 +51,13 @@ from .handlers import (
 # ---------------------------------------------------------------------------
 
 
+def _positive_pct(value: str) -> float:
+    pct = float(value)
+    if pct <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive percentage, got {value}")
+    return pct
+
+
 def _register_info_parser(sub):
     """Register the ``info`` subcommand on *sub*."""
     p = sub.add_parser("info", help="Show profile metadata and GPU info")
@@ -373,6 +380,14 @@ def _build_parser():
         "--exit-on-regression",
         action="store_true",
         help="Exit with status 1 when the diff verdict is regression_likely (CI gate)",
+    )
+    p.add_argument(
+        "--gate",
+        type=_positive_pct,
+        default=None,
+        metavar="PCT",
+        help="Step-time regression threshold in percent for the verdict and CI gate "
+        "(implies --exit-on-regression; default: 5.0)",
     )
     p.set_defaults(handler=_cmd_diff)
 
