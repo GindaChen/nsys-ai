@@ -26,6 +26,7 @@ from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
     ExportToolMissingError,
+    ProfileNotFoundError,
     SchemaError,
 )
 
@@ -191,6 +192,11 @@ class Profile:
             raise ValueError(
                 "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
             )
+        # Guard before sqlite3.connect, which would otherwise create an empty
+        # stub + cache for a missing path. Covers every entry path, including
+        # direct Profile(...) construction that bypasses resolve_profile_path.
+        if not os.path.exists(path):
+            raise ProfileNotFoundError(f"profile not found: {path}")
         self.path = path
         self.backend = backend
         self._lock = threading.Lock()
@@ -278,22 +284,33 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        devices = [
-            r[0]
-            for r in self.adapter.execute(
-                f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
-            ).fetchall()
-        ]
-
+        # Single pass over the kernel table for devices, per-device streams,
+        # time range, total kernel count, and per-device kernel counts. These
+        # were five separate full scans; in direct-SQLite mode (large profiles)
+        # each scan is seconds, so collapsing them noticeably speeds up open.
+        # ORDER BY preserves the previous device/stream ordering exactly.
+        devices: list[int] = []
         streams: dict[int, list[int]] = {}
-        for r in self.adapter.execute(
-            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
+        kcounts: dict[int, int] = {}
+        kernel_count = 0
+        min_start = None
+        max_end = None
+        for dev, stream, mn, mx, cnt in self.adapter.execute(
+            f"SELECT deviceId, streamId, MIN(start), MAX([end]), COUNT(*) "
+            f"FROM {kernel_table} GROUP BY deviceId, streamId ORDER BY deviceId, streamId"
         ).fetchall():
-            streams.setdefault(r[0], []).append(r[1])
+            if dev not in streams:
+                streams[dev] = []
+                kcounts[dev] = 0
+                devices.append(dev)
+            streams[dev].append(stream)
+            kcounts[dev] += cnt
+            kernel_count += cnt
+            if mn is not None:
+                min_start = mn if min_start is None else min(min_start, mn)
+            if mx is not None:
+                max_end = mx if max_end is None else max(max_end, mx)
 
-        tr = self.adapter.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
-
-        kc = self.adapter.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
         nc = (
             self.adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
             if "NVTX_EVENTS" in tables
@@ -303,24 +320,18 @@ class Profile:
         return ProfileMeta(
             devices=devices,
             streams=streams,
-            time_range=(tr[0] or 0, tr[1] or 0),
-            kernel_count=kc,
+            time_range=(min_start or 0, max_end or 0),
+            kernel_count=kernel_count,
             nvtx_count=nc,
             tables=tables,
-            gpu_info=self._gpu_info(devices, streams, tables),
+            gpu_info=self._gpu_info(devices, streams, tables, kcounts),
         )
 
-    def _gpu_info(self, devices, streams, tables) -> dict[int, GpuInfo]:
-        """Query hardware metadata per GPU."""
+    def _gpu_info(self, devices, streams, tables, kcounts) -> dict[int, GpuInfo]:
+        """Build per-GPU metadata. Per-device kernel counts come from the
+        single scan in :meth:`_discover`; only hardware metadata is queried here."""
         info: dict[int, GpuInfo] = {}
-
-        # Kernel counts per device
-        kcounts = {}
         query_conn = self.db if self.db is not None else self.conn
-        for r in query_conn.execute(
-            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
-        ).fetchall():
-            kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
         hw = {}
@@ -362,7 +373,7 @@ class Profile:
     def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device (or all devices if None), optionally trimmed to a time window."""
         sql = """
-            SELECT k.start, k.[end], k.streamId, k.correlationId,
+            SELECT k.start, k.[end], k.deviceId, k.streamId, k.correlationId,
                    s.value as name, d.value as demangled
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
@@ -533,25 +544,28 @@ class Profile:
 
     def memcpy_in_window(
         self,
-        device: int,
+        device: int | None,
         trim: tuple[int, int],
     ) -> dict:
         """
         Sum memcpy time in window by direction (H2D=1, D2H=2, D2D=8).
+        ``device=None`` aggregates across all devices (matches ``kernels``).
         Returns {h2d_ns, d2h_ns, d2d_ns, total_ns}; 0 when table or window empty.
         """
         out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
         if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
             return out
-        rows = self._duckdb_query(
-            """
+        sql = """
             SELECT copyKind, SUM([end] - start) AS total_ns
             FROM CUPTI_ACTIVITY_KIND_MEMCPY
-            WHERE deviceId = ? AND start >= ? AND [end] <= ?
-            GROUP BY copyKind
-            """,
-            [device, trim[0], trim[1]],
-        )
+            WHERE start >= ? AND [end] <= ?
+        """
+        params: list = [trim[0], trim[1]]
+        if device is not None:
+            sql += " AND deviceId = ?"
+            params.append(device)
+        sql += " GROUP BY copyKind"
+        rows = self._duckdb_query(sql, params)
         for r in rows:
             kind = int(r["copyKind"])
             ns = int(r["total_ns"] or 0)
@@ -719,7 +733,12 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
 
     Exports always pass `--include-blobs=true` so NVTX payload-dependent
     analysis (for example communicator-aware NCCL diagnostics) remains available.
+
+    Raises ProfileNotFoundError when *path* does not exist (e.g. a missing
+    `.nsys-rep`, before any export is attempted).
     """
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
     if backend == "parquetdir":
         return _resolve_parquetdir_path(path)
     if not path.lower().endswith(".nsys-rep"):

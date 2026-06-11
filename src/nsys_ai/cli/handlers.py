@@ -131,6 +131,13 @@ def _cutracer_run(args, _profile):
     modal_volume = getattr(args, "modal_volume", "cutracer-histograms") or "cutracer-histograms"
     so_path_str = getattr(args, "so_path", None)
     max_iters = getattr(args, "max_iters", None)
+    trace_size_limit_mb = getattr(args, "trace_size_limit_mb", None)
+    if max_iters is not None:
+        print(
+            "warning: --max-iters is not honored by CUTracer (no CUTRACER_MAX_ITERS "
+            "variable); use --trace-size-limit-mb or a shorter --launch-cmd",
+            file=sys.stderr,
+        )
 
     with _profile.open(profile_path) as prof:
         plan = build_plan(
@@ -151,6 +158,7 @@ def _cutracer_run(args, _profile):
         kernel_filter=kernel_filter,
         so_path=_Path(so_path_str) if so_path_str else None,
         max_iters=max_iters,
+        trace_size_limit_mb=trace_size_limit_mb,
     )
 
     if backend in {"modal", "modal-run"} or modal_save:
@@ -370,6 +378,34 @@ def _cmd_info(args, _profile):
                 f"SMs={info.sm_count} | Mem={info.memory_bytes / 1e9:.0f}GB | "
                 f"Kernels={info.kernel_count} | Streams={info.streams}"
             )
+
+
+def _cmd_doctor(args, _profile):
+    """Diagnose the environment and (optionally) a profile's health.
+
+    Exit code follows the brew/npm consensus: warnings are exit 0, failures
+    are non-zero. ``--strict`` promotes warnings to failures for CI use.
+    """
+    import json as _json
+
+    from nsys_ai.doctor import format_doctor_text, run_doctor
+
+    profile_path = getattr(args, "profile", None)
+    report = run_doctor(
+        profile_path,
+        deep=getattr(args, "deep", False),
+    )
+
+    fmt = getattr(args, "format", "text") or "text"
+    if fmt == "json":
+        print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_doctor_text(report, verbose=getattr(args, "verbose", False)))
+
+    if report.has_failures():
+        sys.exit(1)
+    if getattr(args, "strict", False) and report.has_warnings():
+        sys.exit(1)
 
 
 def _cmd_analyze(args, _profile):

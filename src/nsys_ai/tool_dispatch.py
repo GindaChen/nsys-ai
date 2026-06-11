@@ -435,7 +435,7 @@ class ToolDispatcher:
         res = get_iteration_boundaries(
             self._diff_context,
             args.get("marker"),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
@@ -449,7 +449,7 @@ class ToolDispatcher:
             self._diff_context,
             args.get("parent_path", ""),
             args.get("depth", 1),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
             args.get("profile_side", "after"),
         )
         return ToolResult(content=json.dumps(res), events=events)
@@ -477,7 +477,7 @@ class ToolDispatcher:
             self._diff_context,
             int(args["iteration_index"]),
             args.get("marker"),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
@@ -494,7 +494,7 @@ class ToolDispatcher:
             self._diff_context,
             nvtx,
             args.get("iteration_index"),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
@@ -557,7 +557,7 @@ class ToolDispatcher:
             self._diff_context,
             args.get("parent_path", ""),
             args.get("iteration_index"),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
             args.get("top_n", 3),
         )
         return ToolResult(content=json.dumps(res), events=events)
@@ -572,6 +572,6 @@ class ToolDispatcher:
             self._diff_context,
             args.get("kernel_name", ""),
             args.get("iteration_index"),
-            args.get("target_gpu", 0),
+            args.get("target_gpu"),
         )
         return ToolResult(content=json.dumps(res), events=events)

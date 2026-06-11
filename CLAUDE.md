@@ -4,16 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-nsys-ai is an AI-powered terminal UI for analyzing NVIDIA Nsight Systems GPU profiles (`.sqlite` files). It provides curses-based TUI viewers, HTML export, a skill-based analysis system, and an LLM agent for automated GPU performance diagnosis.
+nsys-ai is an AI-powered terminal UI for analyzing NVIDIA Nsight Systems GPU profiles (`.sqlite` files). It provides Textual-based TUI viewers, a local web timeline, HTML export, a skill-based analysis system, and an LLM agent for automated GPU performance diagnosis.
 
-**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). Both `nsys-ai` and `nsys-ai` CLI commands work.
+**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). Both `nsys-ai` and `nsys-tui` CLI commands work.
 
 ## Build & Development Commands
 
 ```bash
 # Install (pick one tier)
 pip install -e '.[dev]'      # Core + pytest (for development)
-pip install -e '.[agent]'    # Core + anthropic SDK (for agent work)
+pip install -e '.[agent]'    # Core + anthropic + litellm (for agent work)
 pip install -e '.[all]'      # Everything
 
 # Test
@@ -26,7 +26,7 @@ python -m nsys_ai --help
 nsys-ai <command> <profile.sqlite>
 ```
 
-Core has **zero runtime dependencies** — only Python stdlib (sqlite3, curses, json). The `anthropic` package is only needed for `[agent]` extras.
+Core runtime dependencies are `duckdb` + `pyarrow` (Parquet cache acceleration) and `rich` + `textual` (TUI). SQL profile analysis and the web server stay on the stdlib (`sqlite3`, `http.server`), so a profile can still be read and analyzed without the cache. AI features (`ask`/`chat`/`agent`) add `litellm` (and `anthropic`) via the `[agent]` / `[chat]` extras.
 
 ## Testing
 
@@ -39,7 +39,7 @@ Core has **zero runtime dependencies** — only Python stdlib (sqlite3, curses, 
 
 ### Entry Point
 
-`src/nsys_ai/__main__.py` — argparse CLI with ~20 subcommands. Two entry points registered in pyproject.toml: `nsys-ai` and `nsys-ai`, both point to `nsys_ai.__main__:main`.
+`src/nsys_ai/__main__.py` delegates to `nsys_ai.cli.app:main`; the argparse CLI is built in `cli/parsers.py` (~30 subcommands) and dispatched to `cli/handlers.py`. Two entry points registered in pyproject.toml: `nsys-ai` and `nsys-tui`, both point to `nsys_ai.__main__:main`.
 
 ### Core Data Model
 
@@ -48,13 +48,13 @@ Profiles are `.sqlite` files from NVIDIA Nsight Systems. Key tables: `CUPTI_ACTI
 ### Key Modules
 
 - `profile.py` — SQLite profile loader, `Profile`/`ProfileMeta`/`GpuInfo` classes
-- `tui.py` (44KB) — Interactive tree TUI (curses), NVTX hierarchy browser
-- `tui_timeline.py` (43KB) — Perfetto-style horizontal timeline TUI (curses)
-- `tree.py` — NVTX tree data model and formatting
-- `overlap.py` — Compute/NCCL overlap analysis
+- `tree/` — Textual NVTX tree TUI (`run_tui`) plus the NVTX tree data model and formatters (`build_nvtx_tree`, `format_text`/`format_markdown`)
+- `timeline/` — Textual Perfetto-style horizontal timeline TUI (`run_timeline`)
+- `overlap.py` — Compute/NCCL overlap analysis (and `launch_overhead_ms`)
 - `export.py` / `export_flat.py` — HTML viewer and CSV/JSON export
 - `viewer.py` — Perfetto JSON trace export
 - `web.py` — Local HTTP server (stdlib `http.server` + custom `_ThreadPoolMixIn`; no Flask/Jinja2)
+- `diff.py` / `diff_tools.py` / `diff_render.py` / `diff_web.py` — before/after profile comparison + verdict
 
 ### Skill System (`src/nsys_ai/skills/`)
 

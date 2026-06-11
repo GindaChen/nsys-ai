@@ -27,6 +27,7 @@ Always check `nsys --version` on the target system and cross-reference with the 
 | [07-container-profiling.md](./07-container-profiling.md) | Docker/container profiling setup | User Guide |
 | [08-focused-profiling.md](./08-focused-profiling.md) | Limiting profile scope with cudaProfilerApi and NVTX capture ranges | User Guide |
 | [cutracer-instruction-analysis.md](./cutracer-instruction-analysis.md) | Instruction-level drill-down workflow (`cutracer` + `cutracer_analysis`) | Project Guide |
+| [cutracer-modal.md](./cutracer-modal.md) | Running CUTracer on Modal (serverless GPU, no local GPU needed) | Project Guide |
 | [09-performance-questions-mfu.html](./09-performance-questions-mfu.html) | Curated high-impact performance questions and MFU calculation playbook | Project Guide |
 
 ## How This Knowledge Base Is Used

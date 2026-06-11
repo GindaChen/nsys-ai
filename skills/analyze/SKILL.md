@@ -29,6 +29,21 @@ nsys-ai --help   # exit 0 = ready
 
 If not installed: `pip install "nsys-ai[agent]"`.
 
+**Triage with `doctor` when you have a profile path.** Before analyzing, run:
+
+```bash
+nsys-ai doctor <profile> --format json
+```
+
+Parse it to steer the analysis (do NOT surface the raw JSON to the user):
+
+- `profiler overhead` FAIL (> 20%) → caveat every timing claim; the profile is distorted.
+- `NVTX events` WARN (none) → skip layer/region attribution; lean on kernel-level skills.
+- `GPU model` WARN (unknown) → do not attempt MFU.
+- `AI provider` not configured → you are the LLM; proceed, but skill outputs are the evidence.
+- `.nsys-rep conversion` FAIL (no `nsys`) on a `.nsys-rep` input → tell the user to install Nsight Systems.
+- A `FAIL` in `Profile health` (cannot open) → stop and report the path/file problem.
+
 **File format**: `.sqlite` used directly; `.nsys-rep` is auto-converted silently by
 `nsys-ai` (see PRINCIPLES.md §4.2). **Do not ask the user to convert.**
 

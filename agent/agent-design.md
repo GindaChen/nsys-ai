@@ -117,13 +117,13 @@ Per-project context, session history, and active hypotheses — accumulated duri
 
 | Module | Responsibility | Touch carefully? |
 |--------|---------------|-----------------|
-| `__main__.py` | CLI arg parsing, subcommand dispatch | ⚠️ Central — affects all commands |
+| `__main__.py` → `cli/` | CLI arg parsing (`cli/parsers.py`), subcommand dispatch (`cli/handlers.py`) | ⚠️ Central — affects all commands |
 | `profile.py` | SQLite loading, GPU/kernel queries | ⚠️ Core data layer |
-| `tui.py` | Interactive tree TUI (curses) | ⚠️ Complex curses state machine |
-| `tui_timeline.py` | Timeline TUI (curses) | ⚠️ Most complex module (~43K) |
+| `tree/` | Interactive tree TUI (Textual) | ⚠️ Textual app package |
+| `timeline/` | Timeline TUI (Textual) | ⚠️ Most complex TUI |
 | `summary.py` | Kernel statistics | ✅ Self-contained |
 | `overlap.py` | Overlap analysis | ✅ Self-contained |
-| `tree.py` | Text tree rendering | ✅ Self-contained |
+| `tree/` (logic) | Text tree rendering | ✅ Self-contained |
 | `search.py` | Name search | ✅ Self-contained |
 | `export.py` | Perfetto export | ✅ Self-contained |
 | `export_flat.py` | CSV/JSON export | ✅ Self-contained |

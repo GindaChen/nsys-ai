@@ -20,6 +20,7 @@ from .handlers import (
     _cmd_cutracer,
     _cmd_diff,
     _cmd_diff_web,
+    _cmd_doctor,
     _cmd_evidence,
     _cmd_export,
     _cmd_export_csv,
@@ -56,6 +57,36 @@ def _register_info_parser(sub):
     p = sub.add_parser("info", help="Show profile metadata and GPU info")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.set_defaults(handler=_cmd_info)
+    return p
+
+
+def _register_doctor_parser(sub):
+    """Register the ``doctor`` subcommand on *sub*."""
+    p = sub.add_parser(
+        "doctor",
+        help="Diagnose the environment and a profile's health",
+    )
+    p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Optional profile (.sqlite or .nsys-rep) for a health summary",
+    )
+    p.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="Show hints for skipped checks too"
+    )
+    p.add_argument(
+        "--strict", action="store_true", help="Exit non-zero on warnings (for CI)"
+    )
+    p.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run slow checks too (e.g. NCCL eager/inductor split); off by default",
+    )
+    p.set_defaults(handler=_cmd_doctor)
     return p
 
 
@@ -227,7 +258,7 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent-guide,"
-            "report,diff,diff-web,export,cutracer,info,skill,evidence,root-cause,help}"
+            "info,doctor,skill,evidence,report,diff,diff-web,export,cutracer,root-cause,help}"
         ),
     )
 
@@ -567,7 +598,18 @@ def _build_parser():
         type=int,
         default=None,
         metavar="N",
-        help="Limit CUTracer to N training iterations (sets CUTRACER_MAX_ITERS)",
+        help="(deprecated, no-op) upstream CUTracer has no CUTRACER_MAX_ITERS; "
+        "use --trace-size-limit-mb or a shorter --launch-cmd instead",
+    )
+    sp_run.add_argument(
+        "--trace-size-limit-mb",
+        dest="trace_size_limit_mb",
+        type=int,
+        default=None,
+        metavar="MB",
+        help="Stop tracing once the on-disk trace reaches MB megabytes "
+        "(passed as the `cutracer trace --trace-size-limit-mb` flag; the running "
+        "kernel is unaffected)",
     )
     sp_run.add_argument(
         "--dry-run",
@@ -611,6 +653,7 @@ def _build_parser():
 
     # Agent-facing commands (promoted from legacy so --help exposes them)
     _register_info_parser(sub)
+    _register_doctor_parser(sub)
     _register_skill_parser(sub, include_management=False)
     _register_evidence_parser(sub)
     _register_root_cause_parser(sub)
@@ -623,6 +666,7 @@ def _build_parser():
 def _register_legacy_commands(sub):
     """Register legacy commands on the provided subparser collection."""
     _register_info_parser(sub)
+    _register_doctor_parser(sub)
 
     p = sub.add_parser(
         "analyze",

@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from .annotation import TraceSelection
 from .fingerprint import get_profile_id
-from .overlap import overlap_analysis
+from .overlap import launch_overhead_ms, overlap_analysis
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class KernelDiff:
     after_share: float
     delta_share: float
     classification: str  # regression|improvement|new|removed|neutral
+    selection: TraceSelection | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,9 @@ def build_profile_summary(
 
     if gpu is not None:
         overlap = overlap_analysis(prof, gpu, trim=trim)
+        # Exposed launch overhead — a subset of idle, carved out in attribution.
+        if "error" not in overlap:
+            overlap["launch_overhead_ms"] = launch_overhead_ms(prof, gpu, trim=trim)
     else:
         # Node-wide aggregation: sum up individual GPU overlap stats.
         overlap = {
@@ -184,6 +189,7 @@ def build_profile_summary(
             "nccl_only_ms": 0.0,
             "overlap_ms": 0.0,
             "idle_ms": 0.0,
+            "launch_overhead_ms": 0.0,
             "total_ms": 0.0,
             "overlap_pct": 0.0,
             "compute_kernels": 0,
@@ -200,6 +206,7 @@ def build_profile_summary(
                 overlap["total_ms"] += dev_stats.get("total_ms", 0.0)
                 overlap["compute_kernels"] += dev_stats.get("compute_kernels", 0)
                 overlap["nccl_kernels"] += dev_stats.get("nccl_kernels", 0)
+                overlap["launch_overhead_ms"] += launch_overhead_ms(prof, dev, trim=trim)
 
         # Round logic to avoid float drift, and set a clean combined overlap pct
         # Node-wide idle logic is tricky because overlap might not overlap across GPUs perfectly,
@@ -208,7 +215,14 @@ def build_profile_summary(
             c_nccl = overlap["nccl_only_ms"] + overlap["overlap_ms"]
             overlap["overlap_pct"] = round(100 * overlap["overlap_ms"] / c_nccl, 1)
 
-        for k in ("compute_only_ms", "nccl_only_ms", "overlap_ms", "idle_ms", "total_ms"):
+        for k in (
+            "compute_only_ms",
+            "nccl_only_ms",
+            "overlap_ms",
+            "idle_ms",
+            "launch_overhead_ms",
+            "total_ms",
+        ):
             overlap[k] = round(overlap[k], 2)
 
     pid = get_profile_id(prof.conn, fallback_path=prof.path)
@@ -294,6 +308,14 @@ def compute_category_attribution(
     # like a real "compute=0, comm=0, idle=0" measurement.
     if before.overlap.get("error") or after.overlap.get("error"):
         return []
+    # launch_overhead is the exposed dispatch latency carved OUT of idle (it is
+    # a strict subset; see overlap.launch_overhead_ms). Cap it at idle so the
+    # residual idle stays >= 0 and the four buckets still sum to total — keeping
+    # step_time (and therefore the verdict) identical to the 3-bucket result.
+    b_idle = _ms(before.overlap, "idle_ms")
+    a_idle = _ms(after.overlap, "idle_ms")
+    b_launch = min(_ms(before.overlap, "launch_overhead_ms"), b_idle)
+    a_launch = min(_ms(after.overlap, "launch_overhead_ms"), a_idle)
     buckets: list[tuple[str, float, float]] = [
         (
             "compute",
@@ -306,9 +328,14 @@ def compute_category_attribution(
             _ms(after.overlap, "nccl_only_ms"),
         ),
         (
+            "launch_overhead",
+            b_launch,
+            a_launch,
+        ),
+        (
             "idle",
-            _ms(before.overlap, "idle_ms"),
-            _ms(after.overlap, "idle_ms"),
+            b_idle - b_launch,
+            a_idle - a_launch,
         ),
     ]
     return [
@@ -352,6 +379,35 @@ def _classify_delta(delta_ns: int, before_ns: int, after_ns: int) -> str:
     if delta_ns < 0:
         return "improvement"
     return "neutral"
+
+
+def _diff_selection(
+    kd: KernelDiff,
+    profile_id: str,
+    gpu: int | None,
+    diff_id: str,
+) -> TraceSelection:
+    selection_key = json.dumps(
+        {
+            "diff_id": diff_id,
+            "kernel_key": kd.key,
+            "before_total_ns": kd.before_total_ns,
+            "after_total_ns": kd.after_total_ns,
+            "before_count": kd.before_count,
+            "after_count": kd.after_count,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    key_hash = hashlib.sha256(selection_key).hexdigest()[:12]
+    delta_ms = kd.delta_ns / 1e6
+    return TraceSelection(
+        id=f"sel_diff_{key_hash}",
+        profile_id=profile_id,
+        source="diff",
+        gpu_ids=[gpu] if gpu is not None else None,
+        label=f"{kd.name} {delta_ms:+.2f}ms",
+    )
 
 
 def diff_profiles(
@@ -455,6 +511,28 @@ def diff_profiles(
     improvements = [k for k in kernel_diffs if k.delta_ns < 0]
     regressions.sort(key=sort_key, reverse=True)
     improvements.sort(key=sort_key)  # most negative first
+    diff_id = _make_diff_id(
+        before.profile_id,
+        after.profile_id,
+        {
+            "gpu": gpu,
+            "trim_before": trim_before,
+            "trim_after": trim_after,
+            "limit": limit,
+            "sort": sort,
+            "nvtx_limit": nvtx_limit,
+        },
+    )
+    limited_regressions = regressions[: max(0, int(limit))]
+    limited_improvements = improvements[: max(0, int(limit))]
+    limited_regressions = [
+        replace(k, selection=_diff_selection(k, after.profile_id, gpu, diff_id))
+        for k in limited_regressions
+    ]
+    limited_improvements = [
+        replace(k, selection=_diff_selection(k, after.profile_id, gpu, diff_id))
+        for k in limited_improvements
+    ]
 
     overlap_before = before.overlap
     overlap_after = after.overlap
@@ -485,19 +563,6 @@ def diff_profiles(
         if step_time_before_ms > 0:
             step_time_delta_pct = round(delta / step_time_before_ms * 100.0, 2)
     verdict = compute_verdict(step_time_delta_pct, comparability_confidence)
-    diff_id = _make_diff_id(
-        before.profile_id,
-        after.profile_id,
-        {
-            "gpu": gpu,
-            "trim_before": trim_before,
-            "trim_after": trim_after,
-            "limit": limit,
-            "sort": sort,
-            "nvtx_limit": nvtx_limit,
-        },
-    )
-
     return ProfileDiffSummary(
         before=before,
         after=after,
@@ -507,8 +572,8 @@ def diff_profiles(
         overlap_before=overlap_before,
         overlap_after=overlap_after,
         overlap_delta=overlap_delta,
-        top_regressions=regressions[: max(0, int(limit))],
-        top_improvements=improvements[: max(0, int(limit))],
+        top_regressions=limited_regressions,
+        top_improvements=limited_improvements,
         verdict=verdict,
         comparability_confidence=comparability_confidence,
         category_attribution=category_attribution,

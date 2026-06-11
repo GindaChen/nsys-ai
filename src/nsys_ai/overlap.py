@@ -68,6 +68,83 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
     return _overlap_analysis_python(prof, device, trim)
 
 
+def launch_overhead_ms(
+    prof: Profile, device: int | None, trim: tuple[int, int] | None = None
+) -> float:
+    """Exposed CUDA kernel-launch overhead on a device, in milliseconds.
+
+    This is the slice of GPU-idle time during which the CPU was still inside a
+    kernel-launch API call — the dispatch latency the GPU actually *waited on*.
+    It is deliberately not the full ``kernel_start - api_start`` gap, which is
+    mostly hidden by pipelined launches and would double-count compute (the
+    cartesian-overhead trap). Being a strict subset of ``overlap_analysis``'s
+    ``idle_ms``, it is meant to be *carved out* of idle in the step-time
+    attribution so the four buckets still sum to total.
+
+    Definition: walk kernels on the device by start time, tracking
+    ``prev_end`` = the latest end of any earlier kernel (the GPU-busy
+    boundary). The idle gap before kernel K is ``(prev_end, K.start)``; the part
+    of K's launch window ``(api_start, api_end)`` that falls inside that gap is
+    exposed launch overhead. Per-kernel gaps are disjoint, so nothing is counted
+    twice. Returns 0.0 when the kernel or runtime table is unavailable.
+    """
+    kernel_table = prof.schema.kernel_table
+    if not kernel_table:
+        return 0.0
+    tables = prof.schema.tables
+    runtime_table: str | None = "CUPTI_ACTIVITY_KIND_RUNTIME"
+    if runtime_table not in tables:
+        runtime_table = next(
+            (t for t in sorted(tables) if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME")),
+            None,
+        )
+    if not runtime_table:
+        return 0.0
+
+    # All kernels define the GPU-busy boundary (so idle gaps are correct); the
+    # LEFT JOIN below — not a WHERE filter — gates which kernels have a launch
+    # window to attribute. Seeding with 1=1 keeps the SQL valid when no device/
+    # trim is given.
+    where = ["1=1"]
+    params: list = []
+    if device is not None:
+        where.append("k.deviceId = ?")
+        params.append(device)
+    if trim:
+        where.append("k.start >= ? AND k.[end] <= ?")
+        params.extend(trim)
+    where_sql = " AND ".join(where)
+
+    sql = f"""
+        SELECT k.start AS ks, k.[end] AS ke, r.start AS rs, r.[end] AS re
+        FROM {kernel_table} k
+        LEFT JOIN {runtime_table} r ON k.correlationId = r.correlationId
+        WHERE {where_sql}
+        ORDER BY k.start
+    """  # noqa: S608 — table names are validated schema identifiers, values are bound
+    try:
+        rows = prof.adapter.execute(sql, params).fetchall()
+    except Exception:  # noqa: BLE001 — launch overhead is best-effort enrichment
+        log.debug("launch_overhead_ms query failed", exc_info=True)
+        return 0.0
+
+    launch_ns = 0
+    prev_end: int | None = None
+    for row in rows:
+        ks, ke, rs, re = row[0], row[1], row[2], row[3]
+        if ks is None or ke is None:
+            continue
+        if prev_end is not None and rs is not None and re is not None and ks > prev_end:
+            # exposed = | (prev_end, ks) ∩ (rs, re) |
+            lo = prev_end if prev_end > rs else rs
+            hi = ks if ks < re else re
+            if hi > lo:
+                launch_ns += hi - lo
+        if prev_end is None or ke > prev_end:
+            prev_end = ke
+    return round(launch_ns / 1e6, 2)
+
+
 def _has_duckdb(prof: Profile) -> bool:
     from .connection import DuckDBAdapter, wrap_connection
 

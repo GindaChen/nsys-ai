@@ -89,6 +89,7 @@ Parameters marked **required** must be provided via `--param`.
 | `region_mfu` | Region-Level MFU | Computes MFU for an NVTX region or kernel. Requires `name` and `theoretical_flops`. |
 | `theoretical_flops` | Theoretical FLOPs Calculator | Exact FLOPs for transformer operations (attention, mlp, full_model, etc.). LLMs should use this instead of manual multiplication. |
 | `arithmetic_intensity` | Arithmetic Intensity vs. GPU Peak (Roofline) | Aggregate roofline assessment: combines GPU hardware specs (peak TFLOPS, HBM BW) with kernel time and user-provided FLOPs. Reports MFU and classifies workload as compute-bound or memory-bound. |
+| `cutracer_analysis` | CUTracer Instruction-Level Drill-Down | Parses CUTracer instruction-histogram traces and correlates them with NVTX attribution from the nsys profile. Requires a `trace_dir`. |
 
 #### `top_kernels` Parameters
 
@@ -134,8 +135,8 @@ Parameters marked **required** must be provided via `--param`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `name` | str | ✅ | — | NVTX region or kernel name to analyze |
-| `theoretical_flops` | float | ✅ | — | Model FLOPs per step (from user) |
+| `name` | str | Yes | — | NVTX region or kernel name to analyze |
+| `theoretical_flops` | float | Yes | — | Model FLOPs per step (from user) |
 | `source` | str | | `nvtx` | Match source: `nvtx` or `kernel` |
 | `peak_tflops` | float | | auto | GPU peak TFLOPS (auto-detected if omitted) |
 | `num_gpus` | int | | 1 | Number of GPUs (for DP/TP adjustment) |
@@ -147,9 +148,9 @@ Parameters marked **required** must be provided via `--param`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `operation` | str | ✅ | — | `attention` / `qkv_proj` / `output_proj` / `mlp` / `full_layer` / `full_model` / `linear` |
-| `hidden_dim` | int | ✅* | 0 | Model hidden dimension (H) |
-| `seq_len` | int | ✅* | 0 | Sequence length (S) |
+| `operation` | str | Yes | — | `attention` / `qkv_proj` / `output_proj` / `mlp` / `full_layer` / `full_model` / `linear` |
+| `hidden_dim` | int | Yes* | 0 | Model hidden dimension (H) |
+| `seq_len` | int | Yes* | 0 | Sequence length (S) |
 | `num_layers` | int | | 1 | Number of transformer layers |
 | `ffn_dim` | int | | 4×H | FFN intermediate dimension |
 | `batch_size` | int | | 1 | Batch size |
@@ -162,11 +163,17 @@ Parameters marked **required** must be provided via `--param`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `theoretical_flops` | float | ✅ | — | Total FLOPs for the profiled workload (use `theoretical_flops` skill to compute) |
+| `theoretical_flops` | float | Yes | — | Total FLOPs for the profiled workload (use `theoretical_flops` skill to compute) |
 | `bytes_moved` | float | | — | Total bytes moved to/from HBM. If provided, computes true arithmetic intensity. |
 | `device` | int | | 0 | GPU device ID |
 | `peak_tflops` | float | | auto | Override GPU peak FP16 TFLOPS (auto-detected from chipName if omitted) |
 | `hbm_bw_gbps` | float | | auto | Override HBM bandwidth in GB/s (auto-detected if omitted) |
+
+#### `cutracer_analysis` Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|:--------:|---------|-------------|
+| `trace_dir` | str | Yes | — | Path to the CUTracer output directory to correlate with this profile |
 
 ---
 
@@ -194,6 +201,9 @@ No required parameters. Supports `--trim`.
 | `nccl_anomaly` | NCCL Anomaly Detection | Detects outlier NCCL operations exceeding a threshold relative to their op type average. |
 | `overlap_breakdown` | Compute/Communication Overlap | Quantifies compute vs NCCL overlap. `overlap_pct > 60%` = NCCL well-hidden. |
 | `kernel_overlap_matrix` | Kernel Overlap Matrix | Pairwise overlap between kernel categories: comm×comm, comm×compute, compute×compute. |
+| `nccl_communicator_analysis` | NCCL Communicator-Aware Analysis | Groups NCCL communication by communicator ID and collective type, decoding NVTX extended-payload blobs from enriched Nsight exports. |
+| `nccl_compile_context_breakdown` | NCCL Call-Mode Breakdown | Classifies NCCL kernels by leaf NVTX label into eager / inductor-captured / temporal-only buckets — decides whether the fix lives in user code or `torch._inductor.config`. |
+| `nccl_payload_breakdown` | NCCL Payload Breakdown | Decodes typed-payload NVTX events to extract real per-collective message sizes, peer ranks, and communicator IDs from `NVTX_EVENTS.binaryData`. |
 
 #### `nccl_anomaly` Parameters
 
@@ -218,6 +228,8 @@ No required parameters. Supports `--trim`.
 | `nvtx_layer_breakdown` | NVTX Region GPU Time Breakdown | Attributes GPU kernels to NVTX regions, ranked by GPU time. Shows compute/NCCL split, top kernels, outlier detection. Auto-detects layer depth. |
 | `iteration_timing` | Per-Iteration Timing Analysis | Detects repeating training iterations via NVTX markers. Reports per-iteration GPU timing and kernel counts. |
 | `iteration_detail` | Per-Iteration Kernel Breakdown | Drill into a specific iteration: top kernels, NCCL stats, compute time, vs-median comparison. Use after `iteration_timing` identifies a slow iteration. |
+| `code_attribution_candidates` | Code Attribution Candidates | Ranks likely model/training code or config regions for a selected profile window using NVTX timing context and kernel evidence, with confidence and explicit limitations. |
+| `host_sync_parent_ranges` | Host-Sync Parent NVTX Ranges | For each NVTX range containing host-GPU sync events (`aten::item`, `cudaStreamSynchronize`, …), reports the total sync time and count. |
 
 #### `nvtx_kernel_map` Parameters
 
@@ -244,9 +256,19 @@ No required parameters. Supports `--trim`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `iteration` | int | ✅ | | Iteration index (0-based) |
+| `iteration` | int | Yes | | Iteration index (0-based) |
 | `device` | int | | 0 | GPU device ID |
 | `marker` | str | | `sample_0` | NVTX marker for iteration boundary detection |
+
+#### `code_attribution_candidates` Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|:--------:|---------|-------------|
+| `start_ns` | int | Yes | — | Start of the selected window (ns) |
+| `end_ns` | int | Yes | — | End of the selected window (ns) |
+| `device` | int | | (all) | GPU device ID filter |
+| `limit` | int | | 5 | Max candidate regions to return |
+| `min_overlap_pct` | float | | 0.0 | Minimum window-overlap % to include a candidate |
 
 ---
 
@@ -256,6 +278,7 @@ No required parameters. Supports `--trim`.
 |-------|-------|-------------|
 | `cpu_gpu_pipeline` | CPU-GPU Pipeline Analysis | Measures CPU dispatch lead time, GPU starvation events, per-thread launch contribution. |
 | `thread_utilization` | CPU Thread Utilization | CPU % by thread. Identifies CPU-bound threads starving the GPU (DataLoader, GIL). Requires `COMPOSITE_EVENTS` table. |
+| `sync_cost_analysis` | Sync Cost Analysis | Measures the total wall-clock time the host CPU was blocked by CUDA synchronization calls (`cudaDeviceSynchronize`, `cudaStreamSynchronize`, `cudaEventSynchronize`). |
 
 #### `cpu_gpu_pipeline` Parameters
 
@@ -309,7 +332,7 @@ No required parameters. Supports `--trim`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `iteration_ms` | float | ✅ | — | Current iteration time in ms |
+| `iteration_ms` | float | Yes | — | Current iteration time in ms |
 | `compute_ms` | float | | 0 | Total compute time in ms |
 | `nccl_ms` | float | | 0 | Total NCCL time in ms |
 | `idle_ms` | float | | 0 | Total GPU idle time in ms |
@@ -341,19 +364,19 @@ No required parameters. Supports `--trim`.
 
 | Category | Count | What it covers |
 |----------|:-----:|----------------|
-| `kernels` | 10 | GPU kernel timing, instance details, launch overhead, MFU, FLOPs, Tensor Cores, roofline |
+| `kernels` | 11 | GPU kernel timing, instance details, launch overhead, MFU, FLOPs, Tensor Cores, roofline, CUTracer drill-down |
 | `memory` | 3 | H2D/D2H transfers, bandwidth, distribution |
-| `communication` | 4 | NCCL breakdown, anomalies, overlap, overlap matrix |
-| `nvtx` | 4 | NVTX→kernel mapping, layer breakdown, iterations, iteration detail |
-| `system` | 2 | CPU→GPU pipeline, thread utilization |
+| `communication` | 7 | NCCL breakdown, anomalies, overlap, overlap matrix, communicator/call-mode/payload analysis |
+| `nvtx` | 6 | NVTX→kernel mapping, layer breakdown, iterations, code attribution, host-sync ranges |
+| `system` | 3 | CPU→GPU pipeline, thread utilization, sync cost |
 | `bottlenecks` | 2 | JIT/module loading stalls, GC/memory allocation stalls |
 | `utilization` | 1 | Pipeline bubble metrics (true GPU idle %) |
 | `analysis` | 2 | Root cause patterns, speedup estimates |
 | `utility` | 2 | Schema inspection, profile health manifest |
-| **Total** | **30** | |
+| **Total** | **37** | |
 
 > **Note**: `memory_transfers.py` registers 2 skills (`memory_transfers` + `h2d_distribution`).
-> There are exactly 30 unique Python builtin skills.
+> There are 37 registered builtin skills. Run `nsys-ai skill list` for the live catalog.
 
 ---
 

@@ -880,6 +880,15 @@ def chat_completion_stream(body_bytes: bytes):
 
     model, _ = _get_model_and_key(payload.get("model"))
     if not model:
+        yield _sse_event(
+            "text",
+            {
+                "chunk": (
+                    "LLM not configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+                    "or GEMINI_API_KEY before starting nsys-ai."
+                )
+            },
+        )
         yield _sse_event("done", {"error": "LLM not configured"})
         return
 

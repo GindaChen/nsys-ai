@@ -63,6 +63,153 @@ def _make_profile(path: str, *, kernels: list[tuple], nvtx: list[tuple] | None =
     conn.close()
 
 
+def _make_profile_with_launch_config(
+    path: str,
+    *,
+    kernels: list[tuple],
+    shared_cols: tuple[str, str] = ("staticSharedMemory", "dynamicSharedMemory"),
+):
+    """
+    Minimal profile with launch-config columns.
+
+    kernels entries:
+      (start_ns, end_ns, deviceId, streamId, correlationId, shortNameId, demangledId,
+       gridX, gridY, gridZ, blockX, blockY, blockZ,
+       registersPerThread, <static shared>, <dynamic shared>)
+
+    shared_cols overrides the shared-memory column names so tests can exercise
+    the staticSharedMemoryBytes / dynamicSharedMemoryBytes schema variants.
+    """
+    static_col, dynamic_col = shared_cols
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT, "
+        "gridX INT, gridY INT, gridZ INT, "
+        "blockX INT, blockY INT, blockZ INT, "
+        f"registersPerThread INT, {static_col} INT, {dynamic_col} INT)"
+    )
+    conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT, globalTid INT, start INT, [end] INT)")
+    # Empty RUNTIME table so iteration detection can run (and cleanly find no
+    # iterations) instead of raising on a missing table.
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INT, correlationId INT, start INT, [end] INT)"
+    )
+    conn.executemany(
+        "INSERT INTO StringIds(id, value) VALUES(?,?)",
+        [
+            (1, "kA"),
+            (2, "kA_dem"),
+            (3, "kB"),
+            (4, "kB_dem"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL("
+        "start, [end], deviceId, streamId, correlationId, shortName, demangledName, "
+        "gridX, gridY, gridZ, blockX, blockY, blockZ, "
+        f"registersPerThread, {static_col}, {dynamic_col}) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        kernels,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _make_profile_with_memory_usage(
+    path: str,
+    *,
+    events: list[tuple],
+    kernels: list[tuple] | None = None,
+    nvtx: list[tuple] | None = None,
+    runtime: list[tuple] | None = None,
+    include_memory_table: bool = True,
+    include_mem_kind: bool = True,
+):
+    """
+    Minimal profile with CUDA_GPU_MEMORY_USAGE_EVENTS.
+
+    events entries (4 or 6 elements; memKind/contextId default to device kind 2 /
+    context 1 when omitted):
+      (start_ns, deviceId, bytes, memoryOperationType[, memKind, contextId])
+
+    memoryOperationType follows Nsight Systems: 0 = alloc, 1 = free (None -> NULL).
+    memKind follows ENUM_CUDA_MEM_KIND: 0/1 host, 2/3 device, 4/6 managed, 5 static.
+    Pass include_mem_kind=False to emit the older schema without memKind/contextId.
+    """
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT)"
+    )
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INT, correlationId INT, start INT, [end] INT)"
+    )
+    conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT, globalTid INT, start INT, [end] INT)")
+    conn.executemany(
+        "INSERT INTO StringIds(id, value) VALUES(?,?)",
+        [
+            (1, "kA"),
+            (2, "kA_dem"),
+            (3, "kB"),
+            (4, "kB_dem"),
+        ],
+    )
+
+    if kernels is None:
+        devices = sorted({int(e[1]) for e in events}) or [0]
+        kernels = [
+            (0, 100_000_000, dev, 7, idx + 1, 1, 2)
+            for idx, dev in enumerate(devices)
+        ]
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL("
+        "start, [end], deviceId, streamId, correlationId, shortName, demangledName) "
+        "VALUES(?,?,?,?,?,?,?)",
+        kernels,
+    )
+    if runtime:
+        conn.executemany(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME(globalTid, correlationId, start, [end]) "
+            "VALUES(?,?,?,?)",
+            runtime,
+        )
+    if nvtx:
+        conn.executemany(
+            "INSERT INTO NVTX_EVENTS(text, globalTid, start, [end]) VALUES(?,?,?,?)",
+            nvtx,
+        )
+    if include_memory_table and include_mem_kind:
+        conn.execute(
+            "CREATE TABLE CUDA_GPU_MEMORY_USAGE_EVENTS("
+            "start INT, deviceId INT, bytes INT, memoryOperationType INT, "
+            "memKind INT, contextId INT)"
+        )
+        rows = [e if len(e) >= 6 else (e[0], e[1], e[2], e[3], 2, 1) for e in events]
+        conn.executemany(
+            "INSERT INTO CUDA_GPU_MEMORY_USAGE_EVENTS("
+            "start, deviceId, bytes, memoryOperationType, memKind, contextId) "
+            "VALUES(?,?,?,?,?,?)",
+            rows,
+        )
+    elif include_memory_table:
+        conn.execute(
+            "CREATE TABLE CUDA_GPU_MEMORY_USAGE_EVENTS("
+            "start INT, deviceId INT, bytes INT, memoryOperationType INT)"
+        )
+        conn.executemany(
+            "INSERT INTO CUDA_GPU_MEMORY_USAGE_EVENTS(start, deviceId, bytes, memoryOperationType) "
+            "VALUES(?,?,?,?)",
+            [tuple(e[:4]) for e in events],
+        )
+    conn.commit()
+    conn.close()
+
+
 def _make_profile_with_runtime(
     path: str,
     *,
@@ -163,6 +310,139 @@ def test_diff_engine_math(tmp_path):
     assert kC.before_total_ns == 0
     assert kC.after_total_ns == 5
     assert kC.classification == "new"
+
+
+def test_diff_top_regression_has_trace_selection(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    selection = diff.top_regressions[0].selection
+    assert selection is not None
+    assert selection.source == "diff"
+    assert selection.profile_id == diff.after.profile_id
+    assert selection.gpu_ids == [0]
+    assert "kA" in selection.label
+    assert "+20.00ms" in selection.label
+
+
+def test_diff_top_regression_selection_serializes_to_json(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--gpu",
+            "0",
+            "--format",
+            "json",
+            "--no-ai",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    selection = payload["top_regressions"][0]["selection"]
+    assert selection["id"].startswith("sel_diff_")
+    assert selection["source"] == "diff"
+    assert selection["profile_id"] == payload["after"]["profile_id"]
+    assert selection["gpu_ids"] == [0]
+    assert "kA" in selection["label"]
+
+
+def test_diff_selection_round_trips_through_trace_selection_dict(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.annotation import TraceSelection
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    selection = diff.top_regressions[0].selection
+    assert selection is not None
+    assert TraceSelection.from_dict(selection.to_dict()) == selection
+
+
+def test_diff_selection_id_includes_diff_context(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before_a = tmp_path / "before_a.sqlite"
+    before_b = tmp_path / "before_b.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before_a), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(before_b), kernels=[(0, 5_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before_a)) as b1, profile_mod.open(str(after)) as a:
+        first = diff_profiles(b1, a, gpu=0, limit=10)
+    with profile_mod.open(str(before_b)) as b2, profile_mod.open(str(after)) as a:
+        second = diff_profiles(b2, a, gpu=0, limit=10)
+
+    first_selection = first.top_regressions[0].selection
+    second_selection = second.top_regressions[0].selection
+    assert first_selection is not None
+    assert second_selection is not None
+    assert first_selection.id != second_selection.id
+
+
+def test_diff_node_wide_selection_omits_gpu_ids(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=None, limit=10)
+
+    selection = diff.top_regressions[0].selection
+    assert selection is not None
+    assert selection.gpu_ids is None
+    assert "gpu_ids" not in selection.to_dict()
+
+
+def test_diff_without_top_regressions_has_empty_selection_lists(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_render import to_diff_json
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    assert diff.top_regressions == []
+    assert diff.top_improvements == []
+    payload = json.loads(to_diff_json(diff))
+    assert payload["top_regressions"] == []
+    assert payload["top_improvements"] == []
 
 
 def test_diff_cli_json_output(tmp_path):
@@ -530,6 +810,47 @@ def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
     assert "/before.sqlite" in prompt and "/after.sqlite" in prompt
 
 
+def test_diff_tools_global_diff_payload_includes_selection(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_global_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="step")
+        payload = get_global_diff(ctx, target_gpu=0)
+
+    selection = payload["top_regressions"][0]["selection"]
+    assert selection["id"].startswith("sel_diff_")
+    assert selection["source"] == "diff"
+    assert selection["profile_id"].startswith("nsys1:")
+    assert selection["gpu_ids"] == [0]
+    assert "kA" in selection["label"]
+
+
+def test_diff_tools_top_k_payload_includes_selection(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_tools import _top_k_payload
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        summary = diff_profiles(b, a, gpu=0, limit=10)
+
+    regressions, _improvements, _others_ms = _top_k_payload(summary, top_n=5)
+    selection = regressions[0]["selection"]
+    assert selection["source"] == "diff"
+    assert selection["profile_id"] == summary.after.profile_id
+    assert selection["gpu_ids"] == [0]
+
+
 def test_diff_tools_phase_c_prompt_export():
     """Phase C: system prompt and tool descriptions are exported for agent use."""
     from nsys_ai.diff_tools import DIFF_SYSTEM_PROMPT, TOOL_DESCRIPTIONS
@@ -668,6 +989,567 @@ def test_diff_tools_region_diff_and_stubs(tmp_path):
         ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
         mem = get_memory_profile_diff(ctx, target_gpu=0)
     assert "error" in mem
+
+
+def test_diff_tools_default_target_gpu_aggregates_all_gpus(tmp_path):
+    """Omitting target_gpu aggregates every device; an explicit id scopes to one.
+
+    The dispatcher and the diff_tools function signatures default target_gpu
+    to None, which means "all GPUs". A query that does not name a device must
+    therefore report the combined compute time of a multi-GPU profile, not
+    just GPU 0.
+    """
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_region_diff, run_diff_tool
+
+    # GPU 0 runs a 10ms kernel, GPU 1 a 20ms kernel, both inside "step" and both
+    # on stream 7. Reusing the same streamId across devices checks that the
+    # per-GPU detail fields aggregate by (deviceId, streamId), not streamId alone
+    # (streamId is device-scoped, so a naive count would collapse to one).
+    kernels = [
+        (0, 10_000_000, 0, 7, 1, 1, 2),  # deviceId 0, kA, 10ms, stream 7
+        (0, 20_000_000, 1, 7, 2, 3, 4),  # deviceId 1, kB, 20ms, stream 7
+    ]
+    nvtx = [("step", 1, 0, 20_000_000)]
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=kernels, nvtx=nvtx)
+    _make_profile(str(after), kernels=kernels, nvtx=nvtx)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="step")
+
+        # Default (target_gpu omitted): both devices counted → 10 + 20 = 30ms,
+        # and the detail fields count two distinct (deviceId, streamId) pairs
+        # even though both devices reuse streamId 7.
+        all_gpus = get_region_diff(ctx, "step")
+        assert all_gpus["top3_global_categories"]["Compute"]["before"] == 30.0
+        assert all_gpus["unique_streams_count_before"] == 2
+
+        # Explicit device still scopes to that GPU only → 10ms and one stream.
+        gpu0 = get_region_diff(ctx, "step", target_gpu=0)
+        assert gpu0["top3_global_categories"]["Compute"]["before"] == 10.0
+        assert gpu0["unique_streams_count_before"] == 1
+
+        # Dispatching without target_gpu in args matches the all-GPU default.
+        dispatched = run_diff_tool(ctx, "get_region_diff", {"nvtx_exact_match": "step"})
+        assert dispatched["top3_global_categories"]["Compute"]["before"] == 30.0
+        assert dispatched["unique_streams_count_before"] == 2
+
+
+def test_get_launch_config_diff_returns_config_delta_and_explanation(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[
+            # In-window representative config.
+            (0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            # Outside ctx.trim and longer; must not win.
+            (200_000_000, 260_000_000, 0, 7, 2, 1, 2, 999, 1, 1, 64, 1, 1, 32, 0, 0),
+        ],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[
+            (0, 20_000_000, 0, 7, 1, 1, 2, 128, 1, 1, 128, 1, 1, 96, 0, 49_152),
+            (200_000_000, 260_000_000, 0, 7, 2, 1, 2, 999, 1, 1, 64, 1, 1, 32, 0, 0),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=(0, 100_000_000), marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["grid"] == [256, 1, 1]
+    assert out["after"]["grid"] == [128, 1, 1]
+    assert out["delta"]["gridX"] == {"before": 256, "after": 128, "delta": -128}
+    assert out["delta"]["grid"]["delta"] == [-128, 0, 0]
+    assert out["delta"]["registersPerThread"] == {"before": 64, "after": 96, "delta": 32}
+    assert out["delta"]["sharedMemoryBytes"]["after"] == 49_152
+    assert out["before"]["sample_count"] == 1
+    assert "999" not in out["explanation"]
+    assert "registers/thread 64 -> 96" in out["explanation"]
+    assert "occupancy" in out["explanation"]
+
+
+def test_get_launch_config_diff_partial_when_kernel_missing_one_side(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10, 0, 7, 1, 1, 2, 1, 1, 1, 128, 1, 1, 32, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10, 0, 7, 1, 3, 4, 1, 1, 1, 128, 1, 1, 32, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not comparable"
+    assert out["before"]["matched_name"] == "kA_dem"
+    assert out["after"] is None
+    assert "only appears before" in out["explanation"]
+
+
+def test_get_launch_config_diff_reports_distinct_configs_and_dominant_share(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # before: kA launched with two distinct configs in-window —
+    #   grid 256 x2 (20ms total) -> dominant by GPU time
+    #   grid 128 x1 (5ms total)
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            (10_000_000, 20_000_000, 0, 7, 2, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0),
+            (20_000_000, 25_000_000, 0, 7, 3, 1, 2, 128, 1, 1, 128, 1, 1, 64, 0, 0),
+        ],
+    )
+    # after: kA launched only one way.
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=(0, 100_000_000), marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    # Dominant config is the one with the most GPU time (grid 256), not the
+    # smallest or the most recent.
+    assert out["before"]["grid"] == [256, 1, 1]
+    assert out["before"]["distinct_configs"] == 2
+    assert out["before"]["total_invocations"] == 3
+    assert out["before"]["sample_count"] == 2
+    assert out["before"]["dominant_share"] == round(2 / 3, 4)
+    # after launched only one way -> dominant config is fully representative.
+    assert out["after"]["distinct_configs"] == 1
+    assert out["after"]["dominant_share"] == 1.0
+
+
+def test_get_launch_config_diff_iteration_index_out_of_range(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", iteration_index=99, target_gpu=0)
+
+    assert "out of range" in out["error"]
+    assert out["iteration_index"] == 99
+
+
+def test_get_launch_config_diff_unchanged_config_points_elsewhere(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Identical launch config; only the duration grew. The tool should rule
+    # launch config OUT as the cause and point elsewhere.
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 20_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    assert out["delta"]["gridX"]["delta"] == 0
+    assert out["delta"]["registersPerThread"]["delta"] == 0
+    assert "unchanged" in out["explanation"]
+
+
+def test_get_launch_config_diff_reads_shared_memory_bytes_column_variant(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Newer Nsight exports name the columns staticSharedMemoryBytes /
+    # dynamicSharedMemoryBytes; the tool must detect those variants too.
+    variant = ("staticSharedMemoryBytes", "dynamicSharedMemoryBytes")
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 16_384)],
+        shared_cols=variant,
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 49_152)],
+        shared_cols=variant,
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert "error" not in out
+    # The *Bytes variant is mapped back to the canonical output key.
+    assert out["columns_used"]["before"]["dynamicSharedMemory"] == "dynamicSharedMemoryBytes"
+    assert out["delta"]["sharedMemoryBytes"]["before"] == 16_384
+    assert out["delta"]["sharedMemoryBytes"]["after"] == 49_152
+    assert out["delta"]["sharedMemoryBytes"]["delta"] == 32_768
+
+
+def test_get_launch_config_diff_not_available_when_columns_absent(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Plain profiles: kernel table has no grid/block launch-config columns.
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not available"
+    assert "gridX" not in out["available_columns"]["before"]
+
+
+def test_get_launch_config_diff_not_available_when_columns_asymmetric(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # before HAS launch-config columns, after does NOT -> common set is empty,
+    # so there is nothing comparable and the tool reports "not available".
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", target_gpu=0)
+
+    assert out["error"] == "not available"
+    # The asymmetry is surfaced for debugging.
+    assert "gridX" in out["available_columns"]["before"]
+    assert "gridX" not in out["available_columns"]["after"]
+
+
+def test_get_launch_config_diff_negative_iteration_index_out_of_range(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_launch_config(
+        str(before),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+    _make_profile_with_launch_config(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 1, 1, 2, 256, 1, 1, 128, 1, 1, 64, 0, 0)],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_launch_config_diff(ctx, "kA", iteration_index=-1, target_gpu=0)
+
+    # -1 must NOT silently select the last iteration via Python indexing.
+    assert "out of range" in out["error"]
+    assert out["iteration_index"] == -1
+
+
+def test_get_memory_profile_diff_returns_peak_counts_net_delta_and_explanation(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    mib = 1024 * 1024
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_memory_usage(
+        str(before),
+        events=[
+            (0, 0, 1024 * mib, 0),  # pre-window baseline
+            (10, 0, 512 * mib, 0),
+            (20, 0, 128 * mib, 1),
+            (200_000_000, 0, 10_000 * mib, 0),  # outside ctx.trim; must not win peak
+        ],
+    )
+    _make_profile_with_memory_usage(
+        str(after),
+        events=[
+            (0, 0, 1024 * mib, 0),
+            (10, 0, 1024 * mib, 0),
+            (20, 0, 128 * mib, 1),
+            (200_000_000, 0, 10_000 * mib, 0),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=(5, 100), marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["baseline_vram_bytes"] == 1024 * mib
+    assert out["before"]["peak_vram_bytes"] == 1536 * mib
+    assert out["after"]["peak_vram_bytes"] == 2048 * mib
+    assert out["delta"]["peak_vram_bytes"] == {
+        "before": 1536 * mib,
+        "after": 2048 * mib,
+        "delta": 512 * mib,
+    }
+    assert out["before"]["alloc_count"] == 1
+    assert out["before"]["free_count"] == 1
+    assert out["before"]["allocated_bytes"] == 512 * mib
+    assert out["before"]["freed_bytes"] == 128 * mib
+    assert out["before"]["net_delta_bytes"] == 384 * mib
+    assert out["after"]["net_delta_bytes"] == 896 * mib
+    assert out["before"]["event_window_ns"] == [10, 20]
+    assert "10000" not in out["explanation"]
+    assert "peak VRAM" in out["explanation"]
+    assert "higher peak" in out["explanation"]
+
+
+def test_get_memory_profile_diff_default_target_gpu_aggregates_all_gpus(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_memory_usage(
+        str(before),
+        events=[
+            (0, 0, 100, 0),
+            (0, 1, 200, 0),
+        ],
+    )
+    _make_profile_with_memory_usage(
+        str(after),
+        events=[
+            (0, 0, 100, 0),
+            (0, 1, 300, 0),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        all_gpus = get_memory_profile_diff(ctx)
+        gpu1 = get_memory_profile_diff(ctx, target_gpu=1)
+
+    assert all_gpus["before"]["peak_vram_bytes"] == 300
+    assert all_gpus["after"]["peak_vram_bytes"] == 400
+    assert all_gpus["delta"]["peak_vram_bytes"]["delta"] == 100
+    assert gpu1["before"]["peak_vram_bytes"] == 200
+    assert gpu1["after"]["peak_vram_bytes"] == 300
+    assert gpu1["delta"]["peak_vram_bytes"]["delta"] == 100
+
+
+def test_get_memory_profile_diff_uses_iteration_window(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    kernels = [(1_000_000_000, 2_000_000_000, 0, 7, 1, 1, 2)]
+    nvtx = [("step", 1, 500_000_000, 2_500_000_000)]
+    runtime = [(1, 1, 900_000_000, 1_000_000_000)]
+    _make_profile_with_memory_usage(
+        str(before),
+        events=[
+            (100_000_000, 0, 1000, 0),
+            (1_000_000_000, 0, 500, 0),
+            (3_000_000_000, 0, 9999, 0),
+        ],
+        kernels=kernels,
+        nvtx=nvtx,
+        runtime=runtime,
+    )
+    _make_profile_with_memory_usage(
+        str(after),
+        events=[
+            (100_000_000, 0, 1000, 0),
+            (1_000_000_000, 0, 700, 0),
+            (3_000_000_000, 0, 9999, 0),
+        ],
+        kernels=kernels,
+        nvtx=nvtx,
+        runtime=runtime,
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="step")
+        out = get_memory_profile_diff(ctx, iteration_index=0, target_gpu=0)
+
+    assert "error" not in out
+    assert out["trim_before_ns"] == [1_000_000_000, 2_000_000_000]
+    assert out["trim_after_ns"] == [1_000_000_000, 2_000_000_000]
+    assert out["before"]["baseline_vram_bytes"] == 1000
+    assert out["before"]["peak_vram_bytes"] == 1500
+    assert out["after"]["peak_vram_bytes"] == 1700
+    assert out["delta"]["peak_vram_bytes"]["delta"] == 200
+
+
+def test_get_memory_profile_diff_not_available_when_table_missing(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile_with_memory_usage(str(before), events=[(0, 0, 100, 0)])
+    _make_profile_with_memory_usage(
+        str(after),
+        events=[],
+        include_memory_table=False,
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx)
+
+    assert out["error"] == "not available"
+    assert out["tables_present"] == {"before": True, "after": False}
+    assert "bytes" in out["available_columns"]["before"]
+    assert out["available_columns"]["after"] == []
+
+
+def test_get_memory_profile_diff_excludes_host_mem_kinds_from_vram(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # (start, deviceId, bytes, op, memKind, contextId): a device alloc (kind 2)
+    # plus a pinned-host alloc (kind 1). Host must NOT count toward VRAM.
+    events = [(10, 0, 1000, 0, 2, 1), (20, 0, 5000, 0, 1, 1)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["mem_kind_available"] is True
+    assert out["before"]["peak_vram_bytes"] == 1000  # host 5000 excluded
+    assert out["before"]["alloc_count"] == 1  # device alloc only
+    assert out["before"]["host_event_count"] == 1
+    breakdown = {bk["mem_kind"]: bk for bk in out["before"]["mem_kind_breakdown"]}
+    assert set(breakdown) == {1, 2}
+    assert breakdown[1]["is_host"] is True
+    assert breakdown[2]["is_host"] is False
+
+
+def test_get_memory_profile_diff_same_timestamp_alloc_free_keeps_peak(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # alloc 1000 and free 1000 at the SAME timestamp: alloc must apply first so the
+    # high-water mark is 1000, not 0.
+    events = [(10, 0, 1000, 0, 2, 1), (10, 0, 1000, 1, 2, 1)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["peak_vram_bytes"] == 1000
+    assert out["before"]["net_delta_bytes"] == 0
+
+
+def test_get_memory_profile_diff_counts_null_op_as_unknown(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # op=None -> NULL memoryOperationType; must be surfaced, not silently dropped.
+    _make_profile_with_memory_usage(
+        str(before), events=[(10, 0, 1000, 0, 2, 1), (20, 0, 500, None, 2, 1)]
+    )
+    _make_profile_with_memory_usage(str(after), events=[(10, 0, 1000, 0, 2, 1)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["unknown_event_count"] == 1
+
+
+def test_get_memory_profile_diff_reports_distinct_contexts(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Two CUDA contexts on the same device; total device VRAM is the sum.
+    events = [(10, 0, 1000, 0, 2, 1), (20, 0, 2000, 0, 2, 2)]
+    _make_profile_with_memory_usage(str(before), events=events)
+    _make_profile_with_memory_usage(str(after), events=events)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert out["before"]["distinct_contexts"] == 2
+    assert out["before"]["peak_vram_bytes"] == 3000
+
+
+def test_get_memory_profile_diff_best_effort_when_mem_kind_absent(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_memory_profile_diff
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # Older schema without memKind/contextId columns.
+    _make_profile_with_memory_usage(
+        str(before), events=[(10, 0, 1000, 0)], include_mem_kind=False
+    )
+    _make_profile_with_memory_usage(
+        str(after), events=[(10, 0, 1000, 0)], include_mem_kind=False
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="sample_0")
+        out = get_memory_profile_diff(ctx, target_gpu=0)
+
+    assert "error" not in out
+    assert out["before"]["mem_kind_available"] is False
+    assert out["before"]["peak_vram_bytes"] == 1000  # best effort: counts everything
+    assert "memKind column is absent" in out["explanation"]
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +1699,9 @@ def test_diff_cli_json_structure_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _make_overlap_dict(compute_only_ms, nccl_only_ms, overlap_ms, idle_ms):
+def _make_overlap_dict(
+    compute_only_ms, nccl_only_ms, overlap_ms, idle_ms, launch_overhead_ms=0.0
+):
     """Helper to build a fake overlap dict matching overlap_analysis output."""
     total = compute_only_ms + nccl_only_ms + overlap_ms + idle_ms
     return {
@@ -825,6 +1709,7 @@ def _make_overlap_dict(compute_only_ms, nccl_only_ms, overlap_ms, idle_ms):
         "nccl_only_ms": nccl_only_ms,
         "overlap_ms": overlap_ms,
         "idle_ms": idle_ms,
+        "launch_overhead_ms": launch_overhead_ms,
         "total_ms": total,
         "overlap_pct": 0.0,
         "compute_kernels": 1,
@@ -864,10 +1749,211 @@ def test_v01_category_attribution_hta_convention():
     assert cats["compute"].delta_ms == 25.0
     assert cats["communication"].before_ms == 20.0  # exposed_comm = nccl_only
     assert cats["communication"].after_ms == 25.0
+    # No launch_overhead in these fixtures, so idle is unchanged and the
+    # launch bucket is zero.
     assert cats["idle"].before_ms == 5.0
     assert cats["idle"].after_ms == 10.0
-    # launch_overhead is intentionally absent in v0.1 (PR-B will add it).
-    assert "launch_overhead" not in cats
+    assert cats["launch_overhead"].before_ms == 0.0
+    assert cats["launch_overhead"].after_ms == 0.0
+
+
+def test_v01_launch_overhead_carved_from_idle():
+    """launch_overhead is carved out of idle; the four buckets sum to total."""
+    from nsys_ai.diff import ProfileSummary, compute_category_attribution
+
+    def _summary(co, nccl, ov, idle, launch):
+        return ProfileSummary(
+            path="p",
+            gpu=0,
+            schema_version=None,
+            total_gpu_ns=0,
+            kernel_rows=0,
+            kernels=[],
+            nvtx=[],
+            overlap=_make_overlap_dict(co, nccl, ov, idle, launch_overhead_ms=launch),
+        )
+
+    # before idle=20 of which 8 is launch overhead; after idle=30 of which 5 is.
+    before = _summary(100, 20, 10, 20, 8)
+    after = _summary(120, 25, 15, 30, 5)
+    cats = {c.category: c for c in compute_category_attribution(before, after)}
+
+    assert cats["launch_overhead"].before_ms == 8.0
+    assert cats["launch_overhead"].after_ms == 5.0
+    # idle is reduced by the carved launch overhead (residual idle).
+    assert cats["idle"].before_ms == 12.0  # 20 - 8
+    assert cats["idle"].after_ms == 25.0  # 30 - 5
+
+    # Sum invariant: the four buckets reproduce the original step time, so the
+    # verdict is unaffected by adding the bucket.
+    for side in ("before_ms", "after_ms"):
+        four = sum(getattr(cats[c], side) for c in cats)
+        three = (
+            getattr(cats["compute"], side)
+            + getattr(cats["communication"], side)
+            + getattr(cats["launch_overhead"], side)
+            + getattr(cats["idle"], side)
+        )
+        assert four == three  # tautology guard that all four are present
+    assert sum(getattr(cats[c], "before_ms") for c in cats) == 100 + 20 + 10 + 20
+
+
+def test_v01_launch_overhead_capped_at_idle():
+    """A launch_overhead_ms exceeding idle is capped so residual idle stays >= 0."""
+    from nsys_ai.diff import ProfileSummary, compute_category_attribution
+
+    def _summary(launch):
+        return ProfileSummary(
+            path="p",
+            gpu=0,
+            schema_version=None,
+            total_gpu_ns=0,
+            kernel_rows=0,
+            kernels=[],
+            nvtx=[],
+            overlap=_make_overlap_dict(100, 0, 0, 5, launch_overhead_ms=launch),
+        )
+
+    cats = {
+        c.category: c
+        for c in compute_category_attribution(_summary(9.0), _summary(9.0))
+    }
+    # launch capped at idle (5), residual idle clamped to 0.
+    assert cats["launch_overhead"].before_ms == 5.0
+    assert cats["idle"].before_ms == 0.0
+
+
+def test_launch_overhead_ms_counts_only_exposed_idle():
+    """launch_overhead_ms = GPU-idle time overlapping a kernel-launch API call."""
+    import sqlite3
+
+    from nsys_ai.overlap import launch_overhead_ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            deviceId INTEGER, correlationId INTEGER, start INTEGER, end INTEGER
+        );
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+            correlationId INTEGER, start INTEGER, end INTEGER
+        );
+        """
+    )
+    # All on device 0; timestamps in ns (1e6 ns = 1 ms).
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?)",
+        [
+            (0, 1, 1_000_000, 2_000_000),  # first kernel: no preceding idle -> 0
+            (0, 2, 5_000_000, 6_000_000),  # idle gap (2e6,5e6)
+            (0, 3, 10_000_000, 11_000_000),  # idle gap (6e6,10e6)
+            (0, 4, 12_000_000, 13_000_000),  # idle gap (11e6,12e6)
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?)",
+        [
+            (1, 900_000, 1_000_000),  # before first kernel — not attributed
+            (2, 4_000_000, 4_500_000),  # fully inside gap -> 0.5 ms
+            (3, 8_500_000, 10_200_000),  # (8.5e6,10.2e6) ∩ (6e6,10e6) -> 1.5 ms
+            (4, 10_500_000, 10_900_000),  # ends before gap start (11e6) -> hidden, 0
+        ],
+    )
+    conn.commit()
+
+    class _Schema:
+        kernel_table = "CUPTI_ACTIVITY_KIND_KERNEL"
+        tables = ["CUPTI_ACTIVITY_KIND_KERNEL", "CUPTI_ACTIVITY_KIND_RUNTIME"]
+
+    class _Prof:
+        schema = _Schema()
+        adapter = conn
+
+    assert launch_overhead_ms(_Prof(), device=0) == 2.0  # 0.5 + 1.5
+    assert launch_overhead_ms(_Prof(), device=99) == 0.0  # no kernels on device
+
+
+def test_launch_overhead_ms_without_runtime_table_is_zero():
+    """No runtime table → launch overhead is 0.0 (best-effort enrichment)."""
+    import sqlite3
+
+    from nsys_ai.overlap import launch_overhead_ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(deviceId INTEGER, correlationId INTEGER, start INTEGER, end INTEGER);"
+    )
+    conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 1, 0, 1000)")
+    conn.commit()
+
+    class _Schema:
+        kernel_table = "CUPTI_ACTIVITY_KIND_KERNEL"
+        tables = ["CUPTI_ACTIVITY_KIND_KERNEL"]  # no RUNTIME table
+
+    class _Prof:
+        schema = _Schema()
+        adapter = conn
+
+    assert launch_overhead_ms(_Prof(), device=0) == 0.0
+
+
+def test_launch_overhead_through_real_profile_stack(tmp_path):
+    """End-to-end: launch overhead flows through Profile (incl. DuckDB cache) and
+    into the carved attribution bucket — guards against the best-effort
+    try/except silently returning 0 on a backend the unit test doesn't exercise.
+    """
+    import sqlite3
+
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import build_profile_summary, compute_category_attribution
+    from nsys_ai.overlap import launch_overhead_ms
+
+    db = tmp_path / "ctrl.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE TARGET_INFO_GPU (id INTEGER PRIMARY KEY, name TEXT,
+          busLocation TEXT DEFAULT '', totalMemory INTEGER DEFAULT 0,
+          smCount INTEGER DEFAULT 0, chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0);
+        CREATE TABLE TARGET_INFO_CUDA_DEVICE (gpuId INTEGER, cudaId INTEGER,
+          pid INTEGER DEFAULT 0, uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+          globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0, streamId INTEGER DEFAULT 0,
+          correlationId INTEGER DEFAULT 0, start INTEGER, end INTEGER, shortName INTEGER,
+          demangledName INTEGER DEFAULT 0, gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1,
+          gridZ INTEGER DEFAULT 1, blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (globalTid INTEGER DEFAULT 0,
+          correlationId INTEGER, start INTEGER, end INTEGER, nameId INTEGER DEFAULT 0);
+        INSERT INTO StringIds VALUES (1, 'kernel_A');
+        INSERT INTO TARGET_INFO_GPU VALUES (0, 'NVIDIA Test GPU', '', 0, 108, 'Chip', 0);
+        INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL
+          (deviceId, streamId, correlationId, start, end, shortName) VALUES
+          (0, 7, 1, 1000000, 2000000, 1),
+          (0, 7, 2, 5000000, 6000000, 1),
+          (0, 7, 3, 10000000, 11000000, 1),
+          (0, 7, 4, 12000000, 13000000, 1);
+        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME (correlationId, start, end) VALUES
+          (1, 900000, 1000000), (2, 4000000, 4500000),
+          (3, 8500000, 10200000), (4, 10500000, 10900000);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    prof = profile_mod.open(str(db))
+    try:
+        # Same scenario as the unit test: 0.5 + 1.5 ms exposed.
+        assert launch_overhead_ms(prof, 0) == 2.0
+        summary = build_profile_summary(prof, 0, trim=None)
+        assert summary.overlap["launch_overhead_ms"] == 2.0
+        # Carved out of idle in attribution, and present as its own bucket.
+        cats = {c.category: c for c in compute_category_attribution(summary, summary)}
+        assert cats["launch_overhead"].before_ms == 2.0
+    finally:
+        prof.close()
 
 
 def test_v01_compute_verdict_thresholds():
@@ -971,11 +2057,12 @@ def test_v01_diff_json_envelope_and_verdict(tmp_path):
     assert "step_time" in payload
     assert "delta_ms" in payload["step_time"]
 
-    # category_attribution is a list of category bucket entries
+    # category_attribution is a list of category bucket entries — all four
+    # step-time buckets (launch_overhead carved from idle; see §1.6).
     cats = payload["category_attribution"]
     assert isinstance(cats, list)
     seen = {c["category"] for c in cats}
-    assert seen == {"compute", "communication", "idle"}
+    assert seen == {"compute", "communication", "launch_overhead", "idle"}
 
 
 def test_v01_confidence_separates_schema_and_gpu_mismatch():

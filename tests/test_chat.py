@@ -638,6 +638,18 @@ def test_chat_completion_stream_no_db_agent(monkeypatch):
     assert b"event: done" in raw
 
 
+def test_chat_completion_stream_no_model_reports_configuration_error(monkeypatch):
+    """Streaming chat should emit visible text when no model/API key is configured."""
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: (None, None))
+    body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode()
+
+    raw = b"".join(chat_mod.chat_completion_stream(body)).decode("utf-8")
+
+    assert "event: text" in raw
+    assert "LLM not configured" in raw
+    assert "event: done" in raw
+
+
 def test_stream_agent_loop_skill_names_injected(monkeypatch, tmp_path):
     """skill_names causes SESSION SKILL CONTEXT to appear in the system prompt sent to LLM."""
     import nsys_ai.prompt_loader as pl

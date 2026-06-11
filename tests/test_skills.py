@@ -13,6 +13,7 @@ def test_list_skills():
 
     expected = [
         "arithmetic_intensity",
+        "code_attribution_candidates",
         "cpu_gpu_pipeline",
         "cutracer_analysis",
         "gc_impact",

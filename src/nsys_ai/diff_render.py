@@ -495,6 +495,7 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "before_share": k.before_share,
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
+                "selection": k.selection.to_dict() if k.selection else None,
             }
             for k in data.top_regressions
         ],
@@ -512,6 +513,7 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "before_share": k.before_share,
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
+                "selection": k.selection.to_dict() if k.selection else None,
             }
             for k in data.top_improvements
         ],

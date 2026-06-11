@@ -44,6 +44,7 @@ def show_help():
     print("  Commands:")
     print("  ─────────────────────────────────────────────────────────")
     print("    nsys-ai                       Show this help")
+    print("    nsys-ai <profile>             Open web timeline UI (default)")
     print("    nsys-ai help                  This help text")
     print()
     print("  Analysis:")
@@ -82,8 +83,28 @@ def show_help():
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_profile_path(value: str) -> bool:
+    lower_value = value.lower()
+    return (
+        not value.startswith("-")
+        and (
+            lower_value.endswith(".sqlite")
+            or lower_value.endswith(".nsys-rep")
+        )
+    )
+
+
+def _normalize_default_profile_command(argv: list[str]) -> list[str]:
+    """Route ``nsys-ai <profile>`` through the public timeline-web command."""
+    if len(argv) > 1 and _looks_like_profile_path(argv[1]):
+        return [argv[0], "timeline-web", *argv[1:]]
+    return argv
+
+
 def main():
     from .parsers import _build_legacy_parser, _build_parser
+
+    sys.argv = _normalize_default_profile_command(sys.argv)
 
     legacy_commands = {
         "analyze",
@@ -113,24 +134,6 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
-        # Zero-arg / unknown: if first arg looks like a profile path, open timeline-web;
-        # otherwise show help (intentional: no interactive launcher; see PR/docs for rationale).
-        remaining = sys.argv[1:]
-        if remaining and not remaining[0].startswith("-"):
-            candidate = remaining[0]
-            if (
-                candidate.endswith(".sqlite")
-                or candidate.endswith(".nsys-rep")
-                or candidate.endswith(".nsys-rep.zst")
-            ):
-                from nsys_ai import profile as _profile
-                from nsys_ai.web import serve_timeline
-
-                with _profile.open(candidate) as prof:
-                    devices = prof.meta.devices if prof.meta.devices else [0]
-                    serve_timeline(prof, devices, None, port=8144, open_browser=True)
-                return
-
         show_help()
         return
 

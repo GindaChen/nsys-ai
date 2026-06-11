@@ -10,7 +10,7 @@ extra installed, can delegate to an LLM for natural language analysis.
 import logging
 import sqlite3
 
-from ..exceptions import NsysAiError
+from ..exceptions import NsysAiError, ProfileNotFoundError
 from ..profile import Profile
 from ..skills.registry import get_skill, run_skill
 
@@ -118,6 +118,10 @@ class Agent:
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
         try:
             self.profile = Profile(profile_path)
+        except ProfileNotFoundError:
+            # A missing file has nothing to fall back to — fail cleanly rather
+            # than letting sqlite3.connect below create an empty stub.
+            raise
         except (NsysAiError, sqlite3.Error, ValueError) as e:
             import sqlite3 as _sqlite3
 
