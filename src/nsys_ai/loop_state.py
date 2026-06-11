@@ -161,6 +161,7 @@ class DiffLoopState:
     expected_impact: str = ""
     decision: Decision | None = None
     decision_reason: str = ""
+    diagnose_ran: bool = False
     diagnose_findings_count: int = 0
     top_findings: list[dict[str, Any]] = field(default_factory=list)
     diff_summary: dict[str, Any] | None = None
@@ -181,6 +182,7 @@ class DiffLoopState:
             "expected_impact": self.expected_impact,
             "decision": self.decision,
             "decision_reason": self.decision_reason,
+            "diagnose_ran": self.diagnose_ran,
             "diagnose_findings_count": self.diagnose_findings_count,
             "top_findings": self.top_findings,
             "diff_summary": self.diff_summary,
@@ -200,6 +202,7 @@ class DiffLoopState:
             expected_impact=str(payload.get("expected_impact") or ""),
             decision=payload.get("decision"),
             decision_reason=str(payload.get("decision_reason") or ""),
+            diagnose_ran=bool(payload.get("diagnose_ran")),
             diagnose_findings_count=int(payload.get("diagnose_findings_count") or 0),
             top_findings=list(payload.get("top_findings") or []),
             diff_summary=payload.get("diff_summary"),
@@ -254,6 +257,7 @@ class DiffLoopState:
         report = builder.build()
         findings = [f.to_dict() for f in report.findings]
         ranked = _normalize_findings(findings)
+        self.diagnose_ran = True
         self.diagnose_findings_count = len(ranked)
         self.top_findings = ranked[:15]
         self.phase = "diagnose"

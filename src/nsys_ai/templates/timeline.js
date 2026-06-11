@@ -3322,7 +3322,7 @@ function loopSuggestedPhase(state) {
     const s = state || LOOP_STATE || {};
     if (s.decision) return 'accept';
     if (s.diff_summary) return 'accept';
-    if (!s.diagnose_findings_count) return 'diagnose';
+    if (!s.diagnose_ran) return 'diagnose';
     if (!s.after_path) return s.proposal ? 'reprofile' : 'propose';
     if (!s.proposal) return 'propose';
     return 'diff';
@@ -3479,7 +3479,7 @@ function loopRenderState() {
     const primaryBtn = document.getElementById('loopPrimaryBtn');
     if (primaryBtn) primaryBtn.disabled = LOOP_BUSY || suggested === 'accept';
 
-    const diagnoseDone = (LOOP_STATE.diagnose_findings_count || 0) > 0;
+    const diagnoseDone = !!LOOP_STATE.diagnose_ran;
     document.querySelectorAll('#loopStepper .lstep').forEach(el => {
         const ep = el.dataset.phase;
         const ei = LOOP_PHASE_ORDER.indexOf(ep);

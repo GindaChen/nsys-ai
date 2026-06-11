@@ -194,3 +194,14 @@ def test_loop_state_run_diagnose(minimal_nsys_db_path):
         findings = state.run_diagnose(prof, device=0)
     assert isinstance(findings, list)
     assert state.diagnose_findings_count >= 0
+    assert state.diagnose_ran is True
+
+
+def test_diagnose_ran_roundtrip_and_default():
+    state = DiffLoopState(diagnose_ran=True, diagnose_findings_count=0)
+    restored = DiffLoopState.from_dict(state.to_dict())
+    assert restored.diagnose_ran is True
+    assert restored.diagnose_findings_count == 0
+
+    legacy = DiffLoopState.from_dict({"diagnose_findings_count": 3})
+    assert legacy.diagnose_ran is False

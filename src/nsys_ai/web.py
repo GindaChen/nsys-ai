@@ -773,12 +773,15 @@ def serve_timeline(
         reconcile_h100_loop_paths,
     )
 
+    raw_path = prof.path if hasattr(prof, "path") else ""
+    _profile_path = os.fspath(raw_path) if raw_path else ""
+
     preset = detect_h100_replay_preset() if loop_h100_preset else None
     if preset:
         loop_before_path = preset["before_path"]
         loop_after_path = preset["after_path"]
     else:
-        loop_before_path = loop_before or (prof.path if hasattr(prof, "path") else "")
+        loop_before_path = loop_before or _profile_path
         loop_after_path = loop_after or ""
     loop_state = DiffLoopState(phase="diagnose")
     if loop_before_path:
@@ -788,9 +791,6 @@ def serve_timeline(
     reconcile_h100_loop_paths(loop_state)
     _ViewerHandler._loop_state = loop_state
     _in_loop_mode = bool(loop_before or loop_after or loop_h100_preset)
-
-    # Resolve profile path for chat agent DB access
-    _profile_path = prof.path if hasattr(prof, "path") else ""
 
     _asset_v = _template_asset_version()
     _css_href = _versioned_asset_url("/assets/timeline.css")
@@ -828,9 +828,7 @@ def serve_timeline(
 
     # Pre-build full kernel-first timeline payload for all GPUs (progressive mode)
     if trim is None:
-        import os
-
-        db_path = prof.path if hasattr(prof, "path") else ""
+        db_path = _profile_path
         cache_path = db_path + ".timeline-cache-v3-kernels.json" if db_path else ""
         cache_valid = False
 
