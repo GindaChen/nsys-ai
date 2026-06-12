@@ -729,9 +729,13 @@ def test_diff_cli_gate_help_and_validation(tmp_path):
     after = tmp_path / "after.sqlite"
     _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
     _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
-    bad = _run_diff_cli(before, after, "--gate", "-3")
-    assert bad.returncode == 2
-    assert "positive percentage" in bad.stderr
+    # Non-finite values would make the gate silently never fire (fail-open):
+    # NaN compares false against everything, inf exceeds any delta. The =form
+    # keeps argparse from reading "-inf" as an option name.
+    for invalid in ("-3", "0", "nan", "inf", "-inf"):
+        bad = _run_diff_cli(before, after, f"--gate={invalid}")
+        assert bad.returncode == 2, f"--gate {invalid} should be rejected"
+        assert "positive percentage" in bad.stderr
 
 
 def test_diff_cli_gate_tightens_threshold_and_implies_exit(tmp_path):

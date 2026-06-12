@@ -7,6 +7,7 @@ Extracted from app.py to reduce file size and improve maintainability.
 from __future__ import annotations
 
 import argparse
+import math
 
 from nsys_ai.cutracer.installer import NVBIT_VERSION
 
@@ -53,7 +54,9 @@ from .handlers import (
 
 def _positive_pct(value: str) -> float:
     pct = float(value)
-    if pct <= 0:
+    # Reject nan/inf too: NaN compares false against everything and inf exceeds
+    # any delta, so either would make the CI gate silently never fire (fail-open).
+    if not math.isfinite(pct) or pct <= 0:
         raise argparse.ArgumentTypeError(f"must be a positive percentage, got {value}")
     return pct
 
