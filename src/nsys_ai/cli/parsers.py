@@ -7,6 +7,7 @@ Extracted from app.py to reduce file size and improve maintainability.
 from __future__ import annotations
 
 import argparse
+import math
 
 from nsys_ai.cutracer.installer import NVBIT_VERSION
 
@@ -50,6 +51,15 @@ from .handlers import (
 # ---------------------------------------------------------------------------
 # Shared parser registration helpers — used by both main and legacy parsers
 # ---------------------------------------------------------------------------
+
+
+def _positive_pct(value: str) -> float:
+    pct = float(value)
+    # Reject nan/inf too: NaN compares false against everything and inf exceeds
+    # any delta, so either would make the CI gate silently never fire (fail-open).
+    if not math.isfinite(pct) or pct <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive percentage, got {value}")
+    return pct
 
 
 def _register_info_parser(sub):
@@ -412,6 +422,14 @@ def _build_parser():
         "--exit-on-regression",
         action="store_true",
         help="Exit with status 1 when the diff verdict is regression_likely (CI gate)",
+    )
+    p.add_argument(
+        "--gate",
+        type=_positive_pct,
+        default=None,
+        metavar="PCT",
+        help="Step-time regression threshold in percent for the verdict and CI gate "
+        "(implies --exit-on-regression; default: 5.0)",
     )
     p.set_defaults(handler=_cmd_diff)
 

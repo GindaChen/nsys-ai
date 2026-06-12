@@ -350,12 +350,16 @@ def compute_category_attribution(
     ]
 
 
-def compute_verdict(step_time_delta_pct: float | None, confidence: float) -> str:
+def compute_verdict(
+    step_time_delta_pct: float | None,
+    confidence: float,
+    regression_pct: float = STEP_TIME_REGRESSION_PCT,
+) -> str:
     if confidence < MIN_COMPARABILITY_CONFIDENCE or step_time_delta_pct is None:
         return "inconclusive"
-    if step_time_delta_pct >= STEP_TIME_REGRESSION_PCT:
+    if step_time_delta_pct >= regression_pct:
         return "regression_likely"
-    if step_time_delta_pct <= -STEP_TIME_REGRESSION_PCT:
+    if step_time_delta_pct <= -regression_pct:
         return "improvement_likely"
     return "neutral"
 
@@ -486,6 +490,7 @@ def diff_profiles(
     limit: int = 15,
     sort: str = "delta",
     nvtx_limit: int | None = 200,
+    regression_pct: float = STEP_TIME_REGRESSION_PCT,
 ) -> ProfileDiffSummary:
     """Compare two profiles. Use trim for same window, or trim_before/trim_after for iteration diff."""
     t_before = trim_before if trim_before is not None else trim
@@ -576,18 +581,19 @@ def diff_profiles(
     improvements = [k for k in kernel_diffs if k.delta_ns < 0]
     regressions.sort(key=sort_key, reverse=True)
     improvements.sort(key=sort_key)  # most negative first
-    diff_id = _make_diff_id(
-        before.profile_id,
-        after.profile_id,
-        {
-            "gpu": gpu,
-            "trim_before": trim_before,
-            "trim_after": trim_after,
-            "limit": limit,
-            "sort": sort,
-            "nvtx_limit": nvtx_limit,
-        },
-    )
+    diff_id_params = {
+        "gpu": gpu,
+        "trim_before": trim_before,
+        "trim_after": trim_after,
+        "limit": limit,
+        "sort": sort,
+        "nvtx_limit": nvtx_limit,
+    }
+    # Only key the diff_id on the threshold when it deviates from the default,
+    # so ids of existing default-threshold diffs stay stable.
+    if regression_pct != STEP_TIME_REGRESSION_PCT:
+        diff_id_params["regression_pct"] = regression_pct
+    diff_id = _make_diff_id(before.profile_id, after.profile_id, diff_id_params)
     limited_regressions = regressions[: max(0, int(limit))]
     limited_improvements = improvements[: max(0, int(limit))]
     bound_keys = sorted({k.key for k in limited_regressions + limited_improvements})
@@ -639,7 +645,9 @@ def diff_profiles(
         step_time_delta_ms = round(delta, 3)
         if step_time_before_ms > 0:
             step_time_delta_pct = round(delta / step_time_before_ms * 100.0, 2)
-    verdict = compute_verdict(step_time_delta_pct, comparability_confidence)
+    verdict = compute_verdict(
+        step_time_delta_pct, comparability_confidence, regression_pct=regression_pct
+    )
     return ProfileDiffSummary(
         before=before,
         after=after,

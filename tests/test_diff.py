@@ -814,6 +814,81 @@ def test_diff_cli_exit_on_regression_allows_inconclusive(tmp_path):
     assert "Diff gate failed" not in result.stderr
 
 
+def _run_diff_cli(before, after, *extra):
+    return subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", str(before), str(after), "--gpu", "0", *extra],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_diff_cli_gate_help_and_validation(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--gate" in result.stdout
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    # Non-finite values would make the gate silently never fire (fail-open):
+    # NaN compares false against everything, inf exceeds any delta. The =form
+    # keeps argparse from reading "-inf" as an option name.
+    for invalid in ("-3", "0", "nan", "inf", "-inf"):
+        bad = _run_diff_cli(before, after, f"--gate={invalid}")
+        assert bad.returncode == 2, f"--gate {invalid} should be rejected"
+        assert "positive percentage" in bad.stderr
+
+
+def test_diff_cli_gate_tightens_threshold_and_implies_exit(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # +4% step time: passes the default 5% verdict but fails a 3% gate.
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_400_000, 0, 7, 1, 1, 2)])
+
+    default_gate = _run_diff_cli(before, after, "--format", "json", "--exit-on-regression")
+    assert default_gate.returncode == 0, default_gate.stderr
+    assert json.loads(default_gate.stdout)["verdict"] == "neutral"
+
+    # --gate alone implies the CI gate; the verdict reflects the custom threshold.
+    tight = _run_diff_cli(before, after, "--format", "json", "--gate", "3.0")
+    assert tight.returncode == 1
+    payload = json.loads(tight.stdout)
+    assert payload["verdict"] == "regression_likely"
+    assert "Diff gate failed" in tight.stderr
+    assert "step_time_delta_pct=+4.00%" in tight.stderr
+    assert "gate_pct=3.00%" in tight.stderr
+
+
+def test_diff_cli_gate_loosens_threshold(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # +20% fails the default gate but passes a 30% gate, and the verdict agrees.
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 12_000_000, 0, 7, 1, 1, 2)])
+
+    loose = _run_diff_cli(before, after, "--format", "json", "--gate", "30")
+    assert loose.returncode == 0, loose.stderr
+    assert json.loads(loose.stdout)["verdict"] == "neutral"
+    assert "Diff gate failed" not in loose.stderr
+
+
+def test_compute_verdict_custom_regression_pct():
+    from nsys_ai.diff import compute_verdict
+
+    assert compute_verdict(4.0, 1.0) == "neutral"
+    assert compute_verdict(4.0, 1.0, regression_pct=3.0) == "regression_likely"
+    assert compute_verdict(-4.0, 1.0, regression_pct=3.0) == "improvement_likely"
+    assert compute_verdict(20.0, 1.0, regression_pct=30.0) == "neutral"
+    # Confidence gating still wins over any threshold.
+    assert compute_verdict(50.0, 0.4, regression_pct=3.0) == "inconclusive"
+
+
 def test_diff_cli_iteration_out_of_range_exits_nonzero(tmp_path):
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"

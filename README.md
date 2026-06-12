@@ -175,6 +175,9 @@ nsys-ai diff before.sqlite after.sqlite --format json
 
 # Gate CI: exit non-zero when the verdict is a likely regression
 nsys-ai diff before.sqlite after.sqlite --exit-on-regression
+
+# Same gate with a custom regression threshold (default 5%)
+nsys-ai diff before.sqlite after.sqlite --gate 3.0
 ```
 
 The report covers top regressions and improvements, new and removed kernels,
@@ -193,6 +196,7 @@ across every device.
 | `--limit N` | 15 | Top regressions/improvements to show |
 | `--sort` | `delta` | `delta` \| `percent` \| `total` |
 | `--exit-on-regression` | — | Exit 1 when the verdict is `regression_likely` |
+| `--gate PCT` | 5.0 | Regression threshold (%) for the verdict; implies `--exit-on-regression` |
 
 ## Commands
 

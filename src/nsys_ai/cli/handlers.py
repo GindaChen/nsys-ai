@@ -516,7 +516,7 @@ def _cmd_report(args, _profile):
 
 
 def _cmd_diff(args, _profile):
-    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
     from nsys_ai.diff_render import (
         format_diff_markdown,
         format_diff_markdown_multi,
@@ -528,6 +528,8 @@ def _cmd_diff(args, _profile):
 
     no_ai = getattr(args, "no_ai", False)
     gate_summary = None
+    gate_pct = getattr(args, "gate", None)
+    regression_pct = gate_pct if gate_pct is not None else STEP_TIME_REGRESSION_PCT
 
     def _narrative_for(summary):
         if args.format not in ("terminal", "markdown"):
@@ -589,6 +591,7 @@ def _cmd_diff(args, _profile):
                 trim_after=trim_after,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = summary
             narrative = _narrative_for(summary)
@@ -608,6 +611,7 @@ def _cmd_diff(args, _profile):
                 trim=trim,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = summary
             narrative = _narrative_for(summary)
@@ -628,6 +632,7 @@ def _cmd_diff(args, _profile):
                 trim=trim,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = global_summary
             # For per-GPU we keep top-k small to avoid overwhelming output.
@@ -642,6 +647,7 @@ def _cmd_diff(args, _profile):
                     trim=trim,
                     limit=per_gpu_limit,
                     sort=args.sort,
+                    regression_pct=regression_pct,
                 )
 
             narrative = _narrative_for(global_summary)
@@ -665,14 +671,16 @@ def _cmd_diff(args, _profile):
     else:
         print(out, end="")
 
-    if getattr(args, "exit_on_regression", False) and gate_summary is not None:
+    gate_enabled = getattr(args, "exit_on_regression", False) or gate_pct is not None
+    if gate_enabled and gate_summary is not None:
         if gate_summary.verdict == "regression_likely":
             print(
                 "Diff gate failed: "
                 f"verdict={gate_summary.verdict} "
                 f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
                 f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
-                f"comparability_confidence={gate_summary.comparability_confidence:.3f}.",
+                f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+                f"gate_pct={regression_pct:.2f}%.",
                 file=sys.stderr,
             )
             sys.exit(1)
