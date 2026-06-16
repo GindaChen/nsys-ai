@@ -63,6 +63,30 @@ def _make_profile(path: str, *, kernels: list[tuple], nvtx: list[tuple] | None =
     conn.close()
 
 
+def _make_named_profile(path: str, *, kernels: list[tuple], strings: dict[int, str]):
+    """
+    Create a minimal profile with caller-supplied StringIds.
+
+    kernels entries: (start_ns, end_ns, deviceId, streamId, correlationId, shortNameId, demangledId)
+    """
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT)"
+    )
+    conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT, globalTid INT, start INT, [end] INT)")
+    conn.executemany("INSERT INTO StringIds(id, value) VALUES(?,?)", list(strings.items()))
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL(start, [end], deviceId, streamId, correlationId, shortName, demangledName) "
+        "VALUES(?,?,?,?,?,?,?)",
+        kernels,
+    )
+    conn.commit()
+    conn.close()
+
+
 def _make_profile_with_launch_config(
     path: str,
     *,
@@ -2244,6 +2268,95 @@ def test_v01_diff_json_envelope_and_verdict(tmp_path):
     assert isinstance(cats, list)
     seen = {c["category"] for c in cats}
     assert seen == {"compute", "communication", "launch_overhead", "idle"}
+
+
+def test_diff_json_includes_communication_and_idle_summary_axes(tmp_path):
+    """Diff JSON exposes drillable communication and idle summary axes."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    ms = 1_000_000
+    strings = {
+        1: "compute_A",
+        2: "compute_A_dem",
+        3: "compute_B",
+        4: "compute_B_dem",
+        5: "ncclAllReduceKernel",
+        6: "ncclAllReduceKernel_dem",
+        7: "ncclAllGatherKernel",
+        8: "ncclAllGatherKernel_dem",
+    }
+    _make_named_profile(
+        str(before),
+        strings=strings,
+        kernels=[
+            (0, 10 * ms, 0, 7, 1, 1, 2),
+            (12 * ms, 17 * ms, 0, 17, 2, 5, 6),
+            (18 * ms, 20 * ms, 0, 17, 3, 7, 8),
+            (30 * ms, 40 * ms, 0, 7, 4, 3, 4),
+        ],
+    )
+    _make_named_profile(
+        str(after),
+        strings=strings,
+        kernels=[
+            (0, 10 * ms, 0, 7, 1, 1, 2),
+            (12 * ms, 20 * ms, 0, 17, 2, 5, 6),
+            (21 * ms, 22 * ms, 0, 17, 3, 7, 8),
+            (45 * ms, 55 * ms, 0, 7, 4, 3, 4),
+        ],
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--gpu",
+            "0",
+            "--format",
+            "json",
+            "--limit",
+            "5",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+
+    comm = payload["communication_summary"]
+    assert comm["axis"] == "communication"
+    assert comm["before_ms"] == 7.0
+    assert comm["after_ms"] == 9.0
+    assert comm["delta_ms"] == 2.0
+    comm_entries = {entry["key"]: entry for entry in comm["entries"]}
+    assert comm_entries["allreduce"]["delta_ms"] == 3.0
+    assert comm_entries["allreduce"]["classification"] == "regression"
+    assert comm_entries["allreduce"]["selection"]["source"] == "diff:communication_summary"
+    assert comm_entries["allreduce"]["selection"]["profile_id"] == payload["after"]["profile_id"]
+    assert comm_entries["allreduce"]["selection"]["start_ns"] == 12 * ms
+    assert comm_entries["allreduce"]["selection"]["end_ns"] == 20 * ms
+    assert comm_entries["allreduce"]["selection"]["gpu_ids"] == [0]
+    assert comm_entries["allgather"]["delta_ms"] == -1.0
+
+    idle = payload["idle_summary"]
+    assert idle["axis"] == "idle"
+    assert idle["before_ms"] == 13.0
+    assert idle["after_ms"] == 26.0
+    assert idle["delta_ms"] == 13.0
+    assert len(idle["entries"]) == 1
+    gap = idle["entries"][0]
+    assert gap["delta_ms"] == 15.0
+    assert gap["classification"] == "grown"
+    assert gap["metadata"]["device_id"] == 0
+    assert gap["metadata"]["stream_id"] == 7
+    assert gap["selection"]["source"] == "diff:idle_summary"
+    assert gap["selection"]["profile_id"] == payload["after"]["profile_id"]
+    assert gap["selection"]["start_ns"] == 10 * ms
+    assert gap["selection"]["end_ns"] == 45 * ms
+    assert gap["selection"]["gpu_ids"] == [0]
 
 
 def test_v01_confidence_separates_schema_and_gpu_mismatch():

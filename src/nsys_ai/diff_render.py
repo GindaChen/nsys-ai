@@ -36,6 +36,40 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
 
 
+def _axis_summary_to_dict(axis):
+    if axis is None:
+        return None
+    return {
+        "axis": axis.axis,
+        "title": axis.title,
+        "before_ms": axis.before_ms,
+        "after_ms": axis.after_ms,
+        "delta_ms": axis.delta_ms,
+        "delta_pct": axis.delta_pct,
+        "entries": [
+            {
+                "key": e.key,
+                "label": e.label,
+                "before_ms": e.before_ms,
+                "after_ms": e.after_ms,
+                "delta_ms": e.delta_ms,
+                "delta_pct": e.delta_pct,
+                "before_count": e.before_count,
+                "after_count": e.after_count,
+                "classification": e.classification,
+                "selection": e.selection.to_dict() if e.selection else None,
+                "metadata": dict(e.metadata),
+            }
+            for e in axis.entries
+        ],
+    }
+
+
+def _fmt_ms_delta(ms: float) -> str:
+    sign = "+" if ms > 0 else ""
+    return f"{sign}{ms:.3f}ms"
+
+
 def format_diff_terminal(
     data: ProfileDiffSummary,
     narrative: DiffNarrative | None = None,
@@ -81,6 +115,28 @@ def format_diff_terminal(
                 f"- {'overlap_pct':<15} {b['overlap_pct']:>8.1f}% → {a['overlap_pct']:>8.1f}%  (Δ {sign}{d}%)"
             )
     lines.append("")
+
+    def add_axis_section(axis):
+        if axis is None:
+            return
+        lines.append(axis.title)
+        lines.append("─" * 60)
+        lines.append(
+            f"Total: {axis.before_ms:.3f}ms → {axis.after_ms:.3f}ms  (Δ {_fmt_ms_delta(axis.delta_ms)})"
+        )
+        if axis.entries:
+            lines.append(f"{'Δ':>11}  | {'Before':>9} | {'After':>9} | Item")
+            lines.append(f"{'-' * 11}--+-{'-' * 9}-+-{'-' * 9}-+-{'-' * 30}")
+            for e in axis.entries:
+                lines.append(
+                    f"{_fmt_ms_delta(e.delta_ms):>11}  | {e.before_ms:>9.3f} | {e.after_ms:>9.3f} | {e.label}"
+                )
+        else:
+            lines.append("(no changed entries)")
+        lines.append("")
+
+    add_axis_section(data.communication_summary)
+    add_axis_section(data.idle_summary)
 
     def add_kernel_section(title: str, rows):
         lines.append(title)
@@ -254,6 +310,30 @@ def format_diff_markdown(
             )
     md.append("")
 
+    def add_axis_table(axis):
+        if axis is None:
+            return
+        md.append(f"### {axis.title}")
+        md.append("")
+        md.append(
+            f"- **Total**: `{axis.before_ms:.3f}ms` → `{axis.after_ms:.3f}ms` (Δ `{_fmt_ms_delta(axis.delta_ms)}`)"
+        )
+        md.append("")
+        if not axis.entries:
+            md.append("_no changed entries_")
+            md.append("")
+            return
+        md.append("| Δ | item | before | after | class |")
+        md.append("|---:|---|---:|---:|---|")
+        for e in axis.entries:
+            md.append(
+                f"| `{_fmt_ms_delta(e.delta_ms)}` | `{e.label}` | `{e.before_ms:.3f}ms` | `{e.after_ms:.3f}ms` | `{e.classification}` |"
+            )
+        md.append("")
+
+    add_axis_table(data.communication_summary)
+    add_axis_table(data.idle_summary)
+
     def add_table(title: str, rows, is_regression: bool):
         md.append(f"### {title}")
         md.append("")
@@ -346,6 +426,30 @@ def format_diff_markdown_multi(
                 f"  - `overlap_pct`: `{b['overlap_pct']}%` → `{a['overlap_pct']}%` (Δ `{sign}{d}%`)"
             )
     md.append("")
+
+    def add_global_axis(axis):
+        if axis is None:
+            return
+        md.append(f"### {axis.title}")
+        md.append("")
+        md.append(
+            f"- **Total**: `{axis.before_ms:.3f}ms` → `{axis.after_ms:.3f}ms` (Δ `{_fmt_ms_delta(axis.delta_ms)}`)"
+        )
+        md.append("")
+        if not axis.entries:
+            md.append("_no changed entries_")
+            md.append("")
+            return
+        md.append("| Δ | item | before | after | class |")
+        md.append("|---:|---|---:|---:|---|")
+        for e in axis.entries:
+            md.append(
+                f"| `{_fmt_ms_delta(e.delta_ms)}` | `{e.label}` | `{e.before_ms:.3f}ms` | `{e.after_ms:.3f}ms` | `{e.classification}` |"
+            )
+        md.append("")
+
+    add_global_axis(g.communication_summary)
+    add_global_axis(g.idle_summary)
 
     # 2) Per-GPU breakdown table
     if per_gpu:
@@ -466,6 +570,8 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             }
             for c in data.category_attribution
         ],
+        "communication_summary": _axis_summary_to_dict(data.communication_summary),
+        "idle_summary": _axis_summary_to_dict(data.idle_summary),
         "before": {
             "path": data.before.path,
             "profile_id": data.before.profile_id,

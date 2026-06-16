@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 
 from .annotation import TraceSelection
 from .fingerprint import get_profile_id
-from .overlap import launch_overhead_ms, overlap_analysis
+from .overlap import classify_kernel, launch_overhead_ms, overlap_analysis
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -67,6 +67,32 @@ class CategoryDelta:
 
 
 @dataclass(frozen=True)
+class DiffAxisEntry:
+    key: str
+    label: str
+    before_ms: float
+    after_ms: float
+    delta_ms: float
+    delta_pct: float | None
+    before_count: int
+    after_count: int
+    classification: str
+    selection: TraceSelection | None = None
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DiffAxisSummary:
+    axis: str
+    title: str
+    before_ms: float
+    after_ms: float
+    delta_ms: float
+    delta_pct: float | None
+    entries: list[DiffAxisEntry] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class KernelDiff:
     key: str
     name: str
@@ -114,6 +140,8 @@ class ProfileDiffSummary:
     verdict: str = "neutral"
     comparability_confidence: float = 1.0
     category_attribution: list[CategoryDelta] = field(default_factory=list)
+    communication_summary: DiffAxisSummary | None = None
+    idle_summary: DiffAxisSummary | None = None
     step_time_delta_ms: float | None = None
     step_time_delta_pct: float | None = None
     diff_id: str = ""
@@ -479,6 +507,336 @@ def _diff_selection(
     )
 
 
+def _round_ms(ns: int | float) -> float:
+    return round(float(ns) / 1e6, 3)
+
+
+def _delta_pct(before_ms: float, after_ms: float) -> float | None:
+    return round((after_ms - before_ms) / before_ms * 100.0, 2) if before_ms > 0 else None
+
+
+def _category_delta(category_attribution: list[CategoryDelta], category: str) -> CategoryDelta | None:
+    return next((c for c in category_attribution if c.category == category), None)
+
+
+def _axis_selection(
+    *,
+    axis: str,
+    key: str,
+    profile_id: str,
+    diff_id: str,
+    bounds: tuple[int, int] | None,
+    gpu_ids: list[int] | None,
+    label: str,
+    before_ns: int,
+    after_ns: int,
+) -> TraceSelection:
+    selection_key = json.dumps(
+        {
+            "axis": axis,
+            "key": key,
+            "diff_id": diff_id,
+            "before_ns": before_ns,
+            "after_ns": after_ns,
+            "profile_id": profile_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    key_hash = hashlib.sha256(selection_key).hexdigest()[:12]
+    return TraceSelection(
+        id=f"sel_diff_{axis}_{key_hash}",
+        profile_id=profile_id,
+        source=f"diff:{axis}_summary",
+        start_ns=bounds[0] if bounds else None,
+        end_ns=bounds[1] if bounds else None,
+        gpu_ids=gpu_ids,
+        label=label,
+    )
+
+
+def _aggregate_collectives(
+    prof: Profile,
+    gpu: int | None,
+    trim: tuple[int, int] | None,
+) -> dict[str, dict]:
+    if not prof.schema.kernel_table:
+        return {}
+    try:
+        kernels = prof.kernels(gpu, trim)
+    except Exception:
+        _log.debug("NCCL collective aggregation failed", exc_info=True)
+        return {}
+
+    out: dict[str, dict] = {}
+    for k in kernels:
+        name = str(k.get("name") or "")
+        demangled = str(k.get("demangled") or "")
+        ctype = classify_kernel(f"{name} {demangled}")
+        if not ctype.startswith("nccl_"):
+            continue
+        start = _safe_int(k.get("start"))
+        end = _safe_int(k.get("end"))
+        if end <= start:
+            continue
+        key = ctype.replace("nccl_", "")
+        dur = end - start
+        row = out.setdefault(
+            key,
+            {
+                "total_ns": 0,
+                "count": 0,
+                "max_ns": -1,
+                "bounds": None,
+                "device_id": None,
+            },
+        )
+        row["total_ns"] += dur
+        row["count"] += 1
+        if dur > row["max_ns"]:
+            row["max_ns"] = dur
+            row["bounds"] = (start, end)
+            device_id = k.get("deviceId")
+            row["device_id"] = int(device_id) if device_id is not None else None
+    return out
+
+
+def build_communication_summary(
+    before_prof: Profile,
+    after_prof: Profile,
+    before: ProfileSummary,
+    after: ProfileSummary,
+    category_attribution: list[CategoryDelta],
+    diff_id: str,
+    *,
+    gpu: int | None,
+    trim_before: tuple[int, int] | None,
+    trim_after: tuple[int, int] | None,
+    limit: int,
+) -> DiffAxisSummary | None:
+    b_aggs = _aggregate_collectives(before_prof, gpu, trim_before)
+    a_aggs = _aggregate_collectives(after_prof, gpu, trim_after)
+    cat = _category_delta(category_attribution, "communication")
+
+    before_ms = cat.before_ms if cat else _round_ms(sum(v["total_ns"] for v in b_aggs.values()))
+    after_ms = cat.after_ms if cat else _round_ms(sum(v["total_ns"] for v in a_aggs.values()))
+
+    entries: list[DiffAxisEntry] = []
+    for key in sorted(set(b_aggs) | set(a_aggs)):
+        b = b_aggs.get(key, {})
+        a = a_aggs.get(key, {})
+        before_ns = int(b.get("total_ns", 0) or 0)
+        after_ns = int(a.get("total_ns", 0) or 0)
+        delta_ns = after_ns - before_ns
+        if delta_ns == 0:
+            continue
+        entry_before_ms = _round_ms(before_ns)
+        entry_after_ms = _round_ms(after_ns)
+        side = a if delta_ns >= 0 and a else b
+        side_profile = after if side is a else before
+        side_name = "after" if side is a else "before"
+        device_id = side.get("device_id")
+        gpu_ids = [int(device_id)] if device_id is not None else ([gpu] if gpu is not None else None)
+        label = f"NCCL {key} {_round_ms(delta_ns):+.3f}ms"
+        selection = _axis_selection(
+            axis="communication",
+            key=key,
+            profile_id=side_profile.profile_id,
+            diff_id=diff_id,
+            bounds=side.get("bounds"),
+            gpu_ids=gpu_ids,
+            label=label,
+            before_ns=before_ns,
+            after_ns=after_ns,
+        )
+        entries.append(
+            DiffAxisEntry(
+                key=key,
+                label=f"NCCL {key}",
+                before_ms=entry_before_ms,
+                after_ms=entry_after_ms,
+                delta_ms=round(entry_after_ms - entry_before_ms, 3),
+                delta_pct=_delta_pct(entry_before_ms, entry_after_ms),
+                before_count=int(b.get("count", 0) or 0),
+                after_count=int(a.get("count", 0) or 0),
+                classification=_classify_delta(delta_ns, before_ns, after_ns),
+                selection=selection,
+                metadata={"selection_side": side_name},
+            )
+        )
+
+    entries.sort(key=lambda e: abs(e.delta_ms), reverse=True)
+    return DiffAxisSummary(
+        axis="communication",
+        title="Communication/NCCL Summary",
+        before_ms=round(before_ms, 3),
+        after_ms=round(after_ms, 3),
+        delta_ms=round(after_ms - before_ms, 3),
+        delta_pct=_delta_pct(before_ms, after_ms),
+        entries=entries[: max(0, int(limit))],
+    )
+
+
+def _kernel_label(k: dict) -> str:
+    return str(k.get("demangled") or k.get("name") or "")
+
+
+def _collect_idle_gaps(
+    prof: Profile,
+    gpu: int | None,
+    trim: tuple[int, int] | None,
+) -> dict[str, dict]:
+    if not prof.schema.kernel_table:
+        return {}
+    try:
+        kernels = sorted(
+            prof.kernels(gpu, trim),
+            key=lambda k: (
+                _safe_int(k.get("deviceId")),
+                _safe_int(k.get("streamId")),
+                _safe_int(k.get("start")),
+                _safe_int(k.get("end")),
+            ),
+        )
+    except Exception:
+        _log.debug("idle gap collection failed", exc_info=True)
+        return {}
+
+    out: dict[str, dict] = {}
+    ordinals: dict[str, int] = {}
+    prev_by_stream: dict[tuple[int, int], dict] = {}
+    for k in kernels:
+        device_id = _safe_int(k.get("deviceId"))
+        stream_id = _safe_int(k.get("streamId"))
+        start = _safe_int(k.get("start"))
+        end = _safe_int(k.get("end"))
+        stream_key = (device_id, stream_id)
+        prev = prev_by_stream.get(stream_key)
+        if prev is not None:
+            prev_end = _safe_int(prev.get("end"))
+            if start > prev_end:
+                before_kernel = _kernel_label(prev)
+                after_kernel = _kernel_label(k)
+                base_key = json.dumps(
+                    {
+                        "device_id": device_id,
+                        "stream_id": stream_id,
+                        "before_kernel": before_kernel,
+                        "after_kernel": after_kernel,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                ordinal = ordinals.get(base_key, 0)
+                ordinals[base_key] = ordinal + 1
+                key = f"{base_key}:{ordinal}"
+                gap_ns = start - prev_end
+                out[key] = {
+                    "gap_ns": gap_ns,
+                    "count": 1,
+                    "bounds": (prev_end, start),
+                    "device_id": device_id,
+                    "stream_id": stream_id,
+                    "before_kernel": before_kernel,
+                    "after_kernel": after_kernel,
+                    "ordinal": ordinal,
+                }
+        if prev is None or end >= _safe_int(prev.get("end")):
+            prev_by_stream[stream_key] = k
+    return out
+
+
+def build_idle_summary(
+    before_prof: Profile,
+    after_prof: Profile,
+    before: ProfileSummary,
+    after: ProfileSummary,
+    category_attribution: list[CategoryDelta],
+    diff_id: str,
+    *,
+    gpu: int | None,
+    trim_before: tuple[int, int] | None,
+    trim_after: tuple[int, int] | None,
+    limit: int,
+) -> DiffAxisSummary | None:
+    b_gaps = _collect_idle_gaps(before_prof, gpu, trim_before)
+    a_gaps = _collect_idle_gaps(after_prof, gpu, trim_after)
+    cat = _category_delta(category_attribution, "idle")
+
+    before_ms = cat.before_ms if cat else _round_ms(sum(v["gap_ns"] for v in b_gaps.values()))
+    after_ms = cat.after_ms if cat else _round_ms(sum(v["gap_ns"] for v in a_gaps.values()))
+
+    entries: list[DiffAxisEntry] = []
+    for key in sorted(set(b_gaps) | set(a_gaps)):
+        b = b_gaps.get(key, {})
+        a = a_gaps.get(key, {})
+        before_ns = int(b.get("gap_ns", 0) or 0)
+        after_ns = int(a.get("gap_ns", 0) or 0)
+        delta_ns = after_ns - before_ns
+        if delta_ns == 0:
+            continue
+        entry_before_ms = _round_ms(before_ns)
+        entry_after_ms = _round_ms(after_ns)
+        side = a if delta_ns >= 0 and a else b
+        side_profile = after if side is a else before
+        side_name = "after" if side is a else "before"
+        device_id = side.get("device_id")
+        gpu_ids = [int(device_id)] if device_id is not None else ([gpu] if gpu is not None else None)
+        stream_id = side.get("stream_id")
+        label = f"Idle gap {_round_ms(delta_ns):+.3f}ms"
+        selection = _axis_selection(
+            axis="idle",
+            key=key,
+            profile_id=side_profile.profile_id,
+            diff_id=diff_id,
+            bounds=side.get("bounds"),
+            gpu_ids=gpu_ids,
+            label=label,
+            before_ns=before_ns,
+            after_ns=after_ns,
+        )
+        before_kernel = str(side.get("before_kernel") or "")
+        after_kernel = str(side.get("after_kernel") or "")
+        if delta_ns > 0:
+            classification = "new" if before_ns <= 0 else "grown"
+        elif delta_ns < 0:
+            classification = "removed" if after_ns <= 0 else "shrunk"
+        else:
+            classification = "neutral"
+        entries.append(
+            DiffAxisEntry(
+                key=key,
+                label=f"GPU {device_id} stream {stream_id}: {before_kernel} -> {after_kernel}",
+                before_ms=entry_before_ms,
+                after_ms=entry_after_ms,
+                delta_ms=round(entry_after_ms - entry_before_ms, 3),
+                delta_pct=_delta_pct(entry_before_ms, entry_after_ms),
+                before_count=int(b.get("count", 0) or 0),
+                after_count=int(a.get("count", 0) or 0),
+                classification=classification,
+                selection=selection,
+                metadata={
+                    "device_id": device_id,
+                    "stream_id": stream_id,
+                    "before_kernel": before_kernel,
+                    "after_kernel": after_kernel,
+                    "selection_side": side_name,
+                },
+            )
+        )
+
+    entries.sort(key=lambda e: abs(e.delta_ms), reverse=True)
+    return DiffAxisSummary(
+        axis="idle",
+        title="Idle Gap Summary",
+        before_ms=round(before_ms, 3),
+        after_ms=round(after_ms, 3),
+        delta_ms=round(after_ms - before_ms, 3),
+        delta_pct=_delta_pct(before_ms, after_ms),
+        entries=entries[: max(0, int(limit))],
+    )
+
+
 def diff_profiles(
     before_prof: Profile,
     after_prof: Profile,
@@ -648,6 +1006,30 @@ def diff_profiles(
     verdict = compute_verdict(
         step_time_delta_pct, comparability_confidence, regression_pct=regression_pct
     )
+    communication_summary = build_communication_summary(
+        before_prof,
+        after_prof,
+        before,
+        after,
+        category_attribution,
+        diff_id,
+        gpu=gpu,
+        trim_before=t_before,
+        trim_after=t_after,
+        limit=limit,
+    )
+    idle_summary = build_idle_summary(
+        before_prof,
+        after_prof,
+        before,
+        after,
+        category_attribution,
+        diff_id,
+        gpu=gpu,
+        trim_before=t_before,
+        trim_after=t_after,
+        limit=limit,
+    )
     return ProfileDiffSummary(
         before=before,
         after=after,
@@ -662,6 +1044,8 @@ def diff_profiles(
         verdict=verdict,
         comparability_confidence=comparability_confidence,
         category_attribution=category_attribution,
+        communication_summary=communication_summary,
+        idle_summary=idle_summary,
         step_time_delta_ms=step_time_delta_ms,
         step_time_delta_pct=step_time_delta_pct,
         diff_id=diff_id,
