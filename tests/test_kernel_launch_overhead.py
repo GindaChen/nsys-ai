@@ -45,7 +45,9 @@ class TestExecuteIntegration:
             assert "_global_sync_count" in r
 
     def test_min_overhead_non_negative(self, minimal_nsys_conn):
-        """Post-ROW_NUMBER-fix invariant: no negative overheads from bad joins."""
+        """Filtering runtime rows to launch APIs only is what actually prevents
+        negative overheads — without that filter, non-launch APIs sharing a
+        correlationId can produce r.start > k.start."""
         rows = SKILL.execute_fn(minimal_nsys_conn, device=0, min_launches=1)
         assert len(rows) > 0
         for r in rows:
@@ -114,7 +116,6 @@ def test_small_kernel_overhead_triggers():
     assert f.category == "kernels"
     assert f.evidence[0].provenance["root_cause"] == "src/nsys_ai/data/book.md#5"
     assert f.evidence[0].units["avg_kernel_us"] == "microseconds"
-    assert "src/nsys_ai/data/book.md Root Cause #5" in f.explanation
 
 
 def test_small_kernel_does_not_trigger_when_kernel_large():
@@ -131,16 +132,18 @@ def test_small_kernel_does_not_trigger_when_kernel_large():
     assert not any("small_kernel_overhead" in (f.id or "") for f in findings)
 
 
-def test_small_kernel_does_not_trigger_when_overhead_low():
-    """overhead_pct <= 50 → should NOT fire even if kernel is tiny."""
+def test_small_kernel_triggers_regardless_of_overhead_pct():
+    """Per reviewer feedback: overhead_pct is queue-depth-confounded in async
+    workloads (near-100% for nearly every small kernel), so it is NOT used as
+    a gate. A tiny+frequent kernel must fire even with low overhead_pct."""
     rows = [_klo_row(
         kernel_name="tiny_op",
         launch_count=1000,
         total_kernel_ms=5.0,        # avg_kernel_us = 5μs (tiny)
-        overhead_pct=30.0,           # overhead < kernel duration → not launch-bound
+        overhead_pct=30.0,           # low — but no longer a gate
     )]
     findings = SKILL.to_findings_fn(rows, context={"profile_id": "test"})
-    assert not any("small_kernel_overhead" in (f.id or "") for f in findings)
+    assert any("small_kernel_overhead" in (f.id or "") for f in findings)
 
 
 def test_small_kernel_does_not_trigger_when_launch_count_low():

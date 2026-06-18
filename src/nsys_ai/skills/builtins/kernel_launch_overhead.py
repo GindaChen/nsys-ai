@@ -32,10 +32,13 @@ def _execute(conn, **kwargs):
         trim_runtime = ' AND r.start >= ? AND r."end" <= ?'
         params = [trim_start, trim_end, trim_start, trim_end]
 
-    # Best-match join via MAX greatest-per-group (instead of ROW_NUMBER window
-    # function, which crashes DuckDB 1.5.0 with a BIGINT/INTEGER type mismatch).
-    # For each kernel row, pick the most recent runtime event (with the same
-    # correlationId) that started at or before the kernel.
+    # The `launch_runtime` CTE filters runtime rows to just cuda{,Launch}Kernel*
+    # APIs — this is the actual fix that prevents negative overheads (which
+    # arose from joining non-launch runtime rows that happen to share a
+    # correlationId). In observed profiles correlationId is 1:1 between launch
+    # API and kernel, so the MAX(r.start) is effectively a single-row selector;
+    # we still use MAX(...) GROUP BY (rather than a window function) to stay
+    # compatible with DuckDB 1.5.0 (ROW_NUMBER crashes on BIGINT/INTEGER mix).
     sql = f"""
         WITH launch_runtime AS (
             SELECT r.correlationId, r.start, r."end"
@@ -154,9 +157,11 @@ def _format(rows):
     return "\n".join(lines)
 
 _SMALL_KERNEL_EXPLANATION = (
-    "Many short kernels (<10μs avg) where launch overhead exceeds execution time. "
-    "Per src/nsys_ai/data/book.md Root Cause #5 (Small Kernel Overhead): each launch wastes more time on "
-    "dispatch/queue than the kernel actually runs."
+    "A kernel that runs <10μs on average and is launched 100+ times — the "
+    "classic small-and-frequent pattern targeted by Root Cause #5 (Small Kernel "
+    "Overhead). At this size the per-launch fixed cost (CPU-side dispatch, "
+    "driver work, queue management) is non-trivial relative to actual kernel "
+    "execution, making the kernel a strong candidate for fusion or CUDA Graphs."
 )
 _EXCESSIVE_SYNC_EXPLANATION = (
     "Profile contains many cudaDeviceSynchronize calls. Per src/nsys_ai/data/book.md Root Cause #10 "
@@ -171,25 +176,28 @@ _SUGGESTED_ACTIONS = [
     "Replace cudaDeviceSynchronize with event-based dependencies",
 ]
 _FALSE_POSITIVE_NOTES = [
-    "Modern async / CUDA-Graphs workloads naturally show high overhead — interpret as queue time, not pure dispatch latency",
-    "Initialization phase kernels (one-time setup) inflate overhead but are not steady-state",
-    "Profiles with very few launches lack statistical confidence",
-    "A few sync calls are normal (e.g. at end of training step)",
+    "The reported overhead (k.start − r.start) is CPU-runs-ahead queue depth in any async workload, not pure dispatch latency — treat it as a directional signal, not an exact cost",
+    "Initialization-phase kernels (one-time setup) may appear small-and-frequent in short profiles but are not steady-state",
+    "Profiles with very few launches lack statistical confidence even if a kernel looks tiny",
+    "A few cudaDeviceSynchronize calls are normal (e.g. at end of training step or for diagnostic logging)",
 ]
 
 # Thresholds (sourced from book.md root causes where noted)
 _SMALL_KERNEL_AVG_US_THRESHOLD = 10.0     # src/nsys_ai/data/book.md Root Cause #5: "tiny kernels < 10μs"
-_SMALL_KERNEL_OVERHEAD_PCT_THRESHOLD = 50.0  # src/nsys_ai/data/book.md Root Cause #5: "overhead > kernel duration"
 _MIN_LAUNCH_COUNT = 100                    # statistical confidence floor
 _EXCESSIVE_SYNC_COUNT_THRESHOLD = 100      # book.md src/nsys_ai/data/book.md Root Cause #10 calibration
 
 
-def _small_kernel_confidence(avg_kernel_us: float, overhead_pct: float, launch_count: int) -> float:
+def _small_kernel_confidence(avg_kernel_us: float, launch_count: int) -> float:
+    # Confidence ramps on the two physical signals we actually trust:
+    # how small the kernel is, and how often it runs. The k.start - r.start
+    # "overhead" metric is queue-depth-confounded in async workloads, so we
+    # deliberately do not use it for gating or confidence.
     if launch_count < 100:
         return 0.5
-    if avg_kernel_us < 5 and overhead_pct > 90:
+    if avg_kernel_us < 5 and launch_count >= 1000:
         return 0.95
-    if avg_kernel_us < 10 and overhead_pct > 70:
+    if avg_kernel_us < 10 and launch_count >= 500:
         return 0.85
     return 0.70
 
@@ -216,13 +224,11 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     sync_count = rows[0].get("_global_sync_count", 0)
 
     # Finding 1: Small Kernel Overhead — per src/nsys_ai/data/book.md Root Cause #5
-    # Signal: tiny kernel (< 10μs avg) where overhead > kernel duration (overhead_pct > 50)
     for r in rows:
         if r.get("launch_count", 0) == 0:
             continue  # skip metadata-only synthetic row
         avg_kernel_us = r["total_kernel_ms"] * 1000.0 / r["launch_count"] if r["launch_count"] else 0
         if (avg_kernel_us < _SMALL_KERNEL_AVG_US_THRESHOLD
-                and r["overhead_pct"] > _SMALL_KERNEL_OVERHEAD_PCT_THRESHOLD
                 and r["launch_count"] >= _MIN_LAUNCH_COUNT):
             finding_id = f"klo_small_kernel_overhead_{r['kernel_name'][:30]}"
             selection = TraceSelection(
@@ -239,23 +245,23 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 values={
                     "kernel_name": r["kernel_name"],
                     "avg_kernel_us": round(avg_kernel_us, 2),
-                    "overhead_pct": r["overhead_pct"],
                     "launch_count": r["launch_count"],
+                    "total_kernel_ms": r["total_kernel_ms"],
                 },
-                units={"avg_kernel_us": "microseconds", "overhead_pct": "percent", "launch_count": "count"},
+                units={"avg_kernel_us": "microseconds", "launch_count": "count", "total_kernel_ms": "ms"},
                 selection_id=selection.id,
                 provenance={"row_kind": "small_kernel_overhead", "kernel_name": r["kernel_name"], "root_cause": "src/nsys_ai/data/book.md#5"},
             )
             findings.append(Finding(
                 type="region",
-                label=f"Small Kernel Overhead: {r['kernel_name'][:40]} ({avg_kernel_us:.1f}μs exec, {r['overhead_pct']:.0f}% overhead)",
+                label=f"Small Kernel Overhead: {r['kernel_name'][:40]} ({avg_kernel_us:.1f}μs avg, {r['launch_count']} launches)",
                 start_ns=start_ns, end_ns=end_ns,
                 gpu_id=device,
                 severity="warning",
-                note=f"{r['kernel_name']}: kernel runs only {avg_kernel_us:.1f}μs avg but {r['overhead_pct']:.1f}% of time is launch overhead — fuse candidate.",
+                note=f"{r['kernel_name']}: runs only {avg_kernel_us:.1f}μs per call and is launched {r['launch_count']} times — small-and-frequent pattern, candidate for fusion or CUDA Graphs.",
                 id=finding_id,
                 category="kernels",
-                confidence=_small_kernel_confidence(avg_kernel_us, r["overhead_pct"], r["launch_count"]),
+                confidence=_small_kernel_confidence(avg_kernel_us, r["launch_count"]),
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_SMALL_KERNEL_EXPLANATION,
@@ -308,9 +314,12 @@ SKILL = Skill(
     name="kernel_launch_overhead",
     title="Kernel Launch Overhead",
     description=(
-        "Per-kernel aggregated CUDA launch overhead (gap between API call and GPU "
-        "execution start). Identifies launch-bound kernels and high dispatch latency. "
-        "Uses ROW_NUMBER best-match join to handle correlationId reuse correctly."
+        "Per-kernel aggregated gap between launch API call (cuda{,Launch}Kernel*) "
+        "and GPU execution start. In async workloads this gap conflates true "
+        "dispatch latency with CPU-runs-ahead queue depth, so treat it as a "
+        "directional signal for small-and-frequent kernels rather than an exact "
+        "dispatch cost. Joins kernels to launch-API runtime rows only (filtering "
+        "out non-launch APIs that share correlationIds in some captures)."
     ),
     category="kernels",
     execute_fn=_execute,
