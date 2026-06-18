@@ -431,6 +431,22 @@ def _build_parser():
         help="Step-time regression threshold in percent for the verdict and CI gate "
         "(implies --exit-on-regression; default: 5.0)",
     )
+    decision = p.add_mutually_exclusive_group()
+    decision.add_argument(
+        "--accept",
+        action="store_true",
+        help="Persist an accepted user decision to diff.json (requires --reason)",
+    )
+    decision.add_argument(
+        "--reject",
+        action="store_true",
+        help="Persist a rejected user decision to diff.json (requires --reason)",
+    )
+    p.add_argument(
+        "--reason",
+        default=None,
+        help="Reason text required when using --accept or --reject",
+    )
     p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("diff-web", help="Serve web diff viewer for two profiles")

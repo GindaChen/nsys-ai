@@ -560,9 +560,9 @@ def format_diff_markdown_multi(
     return "\n".join(md).rstrip() + "\n"
 
 
-def to_diff_json(data: ProfileDiffSummary) -> str:
+def to_diff_dict(data: ProfileDiffSummary) -> dict:
     # Keep this relatively stable; tests can snapshot it.
-    payload = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER,
         "producer_version": _producer_version(),
@@ -683,4 +683,8 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             "delta": data.overlap_delta,
         },
     }
+
+
+def to_diff_json(data: ProfileDiffSummary) -> str:
+    payload = to_diff_dict(data)
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
