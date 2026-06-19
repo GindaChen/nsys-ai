@@ -996,6 +996,54 @@ def test_diff_cli_reject_writes_decision_status(tmp_path):
     assert record["decision"]["reason"] == "regression is too large"
 
 
+def test_diff_cli_decision_json_carries_lineage_for_top_regressions(tmp_path):
+    from nsys_ai.annotation import DiffLineage
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(
+        str(before),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2),
+            (10_000_000, 20_000_000, 0, 7, 2, 3, 4),
+        ],
+    )
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 20_000_000, 0, 7, 1, 1, 2),
+            (20_000_000, 35_000_000, 0, 7, 2, 3, 4),
+        ],
+    )
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--format",
+        "json",
+        "--limit",
+        "2",
+        "--accept",
+        "--reason",
+        "regressions are expected",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads((tmp_path / "diff.json").read_text(encoding="utf-8"))
+    regressions = record["top_regressions"]
+    assert len(regressions) == 2
+    for rank, row in enumerate(regressions):
+        lineage = row["diff_lineage"]
+        restored = DiffLineage.from_dict(lineage)
+        assert restored.to_dict() == lineage
+        assert lineage["diff_id"] == record["diff_id"]
+        assert lineage["role"] == "regression"
+        assert lineage["rank"] == rank
+        assert lineage["baseline_profile_id"] == record["before"]["profile_id"]
+
+
 def test_diff_cli_decision_missing_reason_is_refused(tmp_path):
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"
