@@ -70,3 +70,44 @@ def test_agent_run_skill(minimal_nsys_db_path):
         assert isinstance(result, str)
     finally:
         agent.close()
+
+
+def test_agent_ask_uses_evidence_first_template(minimal_nsys_db_path, monkeypatch):
+    """Targeted answers should be grounded and end with a runnable verify command."""
+    from nsys_ai.agent.loop import Agent
+
+    monkeypatch.setattr("nsys_ai.chat_config._get_model_and_key", lambda: (None, None))
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        answer = agent.ask("why is this slow?")
+    finally:
+        agent.close()
+
+    assert answer.startswith("## Summary")
+    for heading in (
+        "## Primary Diagnosis",
+        "## Evidence",
+        "## Confidence",
+        "## Recommended Action",
+        "## Verify",
+    ):
+        assert heading in answer
+    assert "source_skill=" in answer
+    assert "window=" in answer
+    assert "`nsys-ai skill run" in answer
+    assert answer.strip().splitlines()[-1].startswith("`nsys-ai skill run")
+
+
+def test_agent_verify_fallback_when_no_skill_evidence(minimal_nsys_db_path):
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        answer = agent._format_evidence_first_answer("what happened?", {}, [])
+    finally:
+        agent.close()
+
+    assert "Could not build a runnable verification command" in answer
+    assert "`nsys-ai skill list`" in answer
+    assert answer.strip().splitlines()[-1] == "`nsys-ai skill list`"
