@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 from .ai.diff_narrative import DiffNarrative
-from .annotation import PRODUCER, SCHEMA_VERSION, _producer_version
+from .annotation import PRODUCER, SCHEMA_VERSION, DiffLineage, _producer_version
 from .diff import ProfileDiffSummary
 
 
@@ -83,6 +83,15 @@ _AXIS_ENTRY_FOOTNOTE = (
     "per-item values are raw component time and can exceed the total above when "
     "compute, communication, and idle overlap"
 )
+
+
+def _diff_lineage_to_dict(data: ProfileDiffSummary, role: str, rank: int) -> dict:
+    return DiffLineage(
+        diff_id=data.diff_id,
+        role=role,
+        rank=rank,
+        baseline_profile_id=data.before.profile_id,
+    ).to_dict()
 
 
 def format_diff_terminal(
@@ -560,9 +569,9 @@ def format_diff_markdown_multi(
     return "\n".join(md).rstrip() + "\n"
 
 
-def to_diff_json(data: ProfileDiffSummary) -> str:
+def to_diff_dict(data: ProfileDiffSummary) -> dict:
     # Keep this relatively stable; tests can snapshot it.
-    payload = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER,
         "producer_version": _producer_version(),
@@ -625,8 +634,9 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
                 "selection": k.selection.to_dict() if k.selection else None,
+                "diff_lineage": _diff_lineage_to_dict(data, "regression", rank),
             }
-            for k in data.top_regressions
+            for rank, k in enumerate(data.top_regressions)
         ],
         "top_improvements": [
             {
@@ -643,8 +653,9 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
                 "selection": k.selection.to_dict() if k.selection else None,
+                "diff_lineage": _diff_lineage_to_dict(data, "improvement", rank),
             }
-            for k in data.top_improvements
+            for rank, k in enumerate(data.top_improvements)
         ],
         "nvtx_regressions": [
             {
@@ -683,4 +694,8 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             "delta": data.overlap_delta,
         },
     }
+
+
+def to_diff_json(data: ProfileDiffSummary) -> str:
+    payload = to_diff_dict(data)
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
