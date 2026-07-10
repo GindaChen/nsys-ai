@@ -27,3 +27,6 @@ data/nsys-hero/
 examples/*/output/
 snapshot_report.html
 uv.lock
+
+# Local baseline snapshot store (nsys-ai baseline tag)
+.nsys-ai-baselines/

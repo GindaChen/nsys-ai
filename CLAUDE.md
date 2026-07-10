@@ -55,6 +55,7 @@ Profiles are `.sqlite` files from NVIDIA Nsight Systems. Key tables: `CUPTI_ACTI
 - `viewer.py` — Perfetto JSON trace export
 - `web.py` — Local HTTP server (stdlib `http.server` + custom `_ThreadPoolMixIn`; no Flask/Jinja2)
 - `diff.py` / `diff_tools.py` / `diff_render.py` / `diff_web.py` — before/after profile comparison + verdict
+- `baseline.py` — local baseline snapshot store (tag/list/show + `diff --against` resolution)
 
 ### Skill System (`src/nsys_ai/skills/`)
 

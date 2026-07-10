@@ -342,3 +342,164 @@ def test_skill_run_duckdb_cache(tmp_path):
     assert cache_dir.exists(), f"Cache directory {cache_dir} was not created"
     parquet_files = list(cache_dir.glob("*.parquet"))
     assert len(parquet_files) >= 1, "No .parquet files found in cache directory"
+
+
+def _write_min_profile(path, *, dur_ns):
+    """Minimal Nsight-like SQLite export sufficient for the diff pipeline."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT)"
+    )
+    conn.execute("CREATE TABLE NVTX_EVENTS(text TEXT, globalTid INT, start INT, [end] INT)")
+    conn.executemany(
+        "INSERT INTO StringIds(id, value) VALUES(?,?)",
+        [(1, "kA"), (2, "kA_dem")],
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL(start, [end], deviceId, streamId, "
+        "correlationId, shortName, demangledName) VALUES(?,?,?,?,?,?,?)",
+        (0, dur_ns, 0, 7, 1, 1, 2),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_baseline_subcommand_help():
+    """baseline subcommand should expose tag/list/show."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    for word in ("tag", "list", "show"):
+        assert word in result.stdout
+
+
+def test_baseline_tag_list_show_roundtrip(tmp_path):
+    """tag records a snapshot + meta.json; list/show read it back."""
+    import json
+
+    prof = tmp_path / "before.sqlite"
+    _write_min_profile(prof, dur_ns=10_000_000)
+
+    tag = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "tag", "v1", str(prof),
+         "--reason", "known good"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert tag.returncode == 0, f"stderr: {tag.stderr}\nstdout: {tag.stdout}"
+
+    entry = tmp_path / ".nsys-ai-baselines" / "v1"
+    assert (entry / "snapshot.sqlite").is_file()
+    meta = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
+    assert meta["name"] == "v1"
+    assert meta["reason"] == "known good"
+    assert meta["runspec"] is None
+    assert meta["profile_id"].startswith("nsys1:")
+    assert meta["tagger"]
+    assert meta["tagged_at"].endswith("Z")
+
+    listed = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "list"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert listed.returncode == 0
+    assert "v1" in listed.stdout
+
+    shown = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "show", "v1"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert shown.returncode == 0
+    assert json.loads(shown.stdout)["name"] == "v1"
+
+
+def test_baseline_tag_blank_reason_rejected(tmp_path):
+    prof = tmp_path / "before.sqlite"
+    _write_min_profile(prof, dur_ns=10_000_000)
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "tag", "v1", str(prof),
+         "--reason", "   "],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "reason" in result.stderr.lower()
+
+
+def test_baseline_show_unknown_rejected(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "show", "nope"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "unknown baseline" in result.stderr.lower()
+
+
+def test_diff_against_baseline_ref(tmp_path):
+    """diff --against baseline:<name> resolves the tag and produces diff output."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _write_min_profile(before, dur_ns=10_000_000)
+    _write_min_profile(after, dur_ns=30_000_000)
+
+    tag = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "baseline", "tag", "v1", str(before),
+         "--reason", "known good"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert tag.returncode == 0, f"stderr: {tag.stderr}"
+
+    # --against form
+    diff1 = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--against", "baseline:v1",
+         str(after), "--format", "markdown", "--no-ai"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert diff1.returncode == 0, f"stderr: {diff1.stderr}\nstdout: {diff1.stdout}"
+    assert "not found" not in diff1.stderr.lower()
+    assert diff1.stdout.strip()
+
+    # positional token form
+    diff2 = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "baseline:v1", str(after),
+         "--format", "markdown", "--no-ai"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert diff2.returncode == 0, f"stderr: {diff2.stderr}\nstdout: {diff2.stdout}"
+    assert diff2.stdout.strip()
+
+
+def test_diff_against_unknown_baseline_errors(tmp_path):
+    after = tmp_path / "after.sqlite"
+    _write_min_profile(after, dur_ns=30_000_000)
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--against", "baseline:missing",
+         str(after)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "unknown baseline" in result.stderr.lower()
