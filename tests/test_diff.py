@@ -1,7 +1,9 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 
 
 def _make_db_with_target_info(path: str, gpu_name: str = "NVIDIA A100-SXM4-80GB"):
@@ -838,12 +840,30 @@ def test_diff_cli_exit_on_regression_allows_inconclusive(tmp_path):
     assert "Diff gate failed" not in result.stderr
 
 
-def _run_diff_cli(before, after, *extra):
+def _run_diff_cli(before, after, *extra, cwd=None, env=None):
     return subprocess.run(
         [sys.executable, "-m", "nsys_ai", "diff", str(before), str(after), "--gpu", "0", *extra],
         capture_output=True,
+        cwd=cwd,
+        env=env,
         text=True,
     )
+
+
+def _decision_cli_env(tmp_path):
+    env = os.environ.copy()
+    src_path = os.path.abspath("src")
+    env["PYTHONPATH"] = (
+        src_path
+        if not env.get("PYTHONPATH")
+        else os.pathsep.join([src_path, env["PYTHONPATH"]])
+    )
+    empty_gitconfig = tmp_path / "empty.gitconfig"
+    empty_gitconfig.write_text("", encoding="utf-8")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = str(empty_gitconfig)
+    env["USER"] = "fallback-user"
+    return env
 
 
 def test_diff_cli_gate_help_and_validation(tmp_path):
@@ -900,6 +920,161 @@ def test_diff_cli_gate_loosens_threshold(tmp_path):
     assert loose.returncode == 0, loose.stderr
     assert json.loads(loose.stdout)["verdict"] == "neutral"
     assert "Diff gate failed" not in loose.stderr
+
+
+def test_diff_cli_decision_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--accept" in result.stdout
+    assert "--reject" in result.stdout
+    assert "--reason" in result.stdout
+
+
+def test_diff_cli_accept_writes_stable_decision_json(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--format",
+        "json",
+        "--accept",
+        "--reason",
+        "candidate is faster",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    diff_path = tmp_path / "diff.json"
+    assert diff_path.exists()
+    record = json.loads(diff_path.read_text(encoding="utf-8"))
+    stdout_payload = json.loads(result.stdout)
+
+    assert record["diff_id"] == stdout_payload["diff_id"]
+    assert record["verdict"] == stdout_payload["verdict"]
+    assert record["comparability_confidence"] == stdout_payload["comparability_confidence"]
+    assert record["category_attribution"] == stdout_payload["category_attribution"]
+    assert record["before"]["profile_id"].startswith("nsys1:")
+    assert record["after"]["profile_id"].startswith("nsys1:")
+    assert record["decision"]["status"] == "accepted"
+    assert record["decision"]["reason"] == "candidate is faster"
+    assert record["decision"]["decider"] == "fallback-user"
+    assert record["decision"]["decided_at"].endswith("Z")
+    assert diff_path.read_text(encoding="utf-8") == json.dumps(
+        record, indent=2, sort_keys=True
+    ) + "\n"
+    assert "Diff decision written to diff.json" in result.stderr
+
+
+def test_diff_cli_reject_writes_decision_status(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 12_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--reject",
+        "--reason",
+        "regression is too large",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads((tmp_path / "diff.json").read_text(encoding="utf-8"))
+    assert record["decision"]["status"] == "rejected"
+    assert record["decision"]["reason"] == "regression is too large"
+
+
+def test_diff_cli_decision_missing_reason_is_refused(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--accept",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 2
+    assert "--reason is required" in result.stderr
+    assert not (tmp_path / "diff.json").exists()
+
+
+def test_diff_cli_decision_low_comparability_stamps_inconclusive(tmp_path):
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 12_000_000, 0, 7, 1, 1, 2),
+            (12_000_000, 24_000_000, 0, 7, 2, 1, 2),
+            (24_000_000, 36_000_000, 0, 7, 3, 1, 2),
+        ],
+    )
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--format",
+        "json",
+        "--accept",
+        "--reason",
+        "ship despite mismatch",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads((tmp_path / "diff.json").read_text(encoding="utf-8"))
+    assert record["decision"]["status"] == "accepted"
+    assert record["verdict"] == "inconclusive"
+    assert record["comparability_confidence"] < 0.5
+    assert any("stamping verdict as inconclusive" in w for w in record["warnings"])
+    assert "Warning: comparability_confidence" in result.stderr
+
+
+def test_diff_decision_requires_profile_ids(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_decision import build_diff_decision_record
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        summary = diff_profiles(b, a, gpu=0)
+
+    missing_before_id = replace(summary, before=replace(summary.before, profile_id=""))
+    try:
+        build_diff_decision_record(
+            missing_before_id,
+            decision="accepted",
+            reason="candidate is faster",
+            decider="tester@example.com",
+            decided_at="2026-06-18T00:00:00Z",
+        )
+    except ValueError as exc:
+        assert "profile_id" in str(exc)
+    else:
+        raise AssertionError("expected missing profile_id to be refused")
 
 
 def test_compute_verdict_custom_regression_pct():

@@ -517,6 +517,7 @@ def _cmd_report(args, _profile):
 
 def _cmd_diff(args, _profile):
     from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
+    from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
         format_diff_markdown,
         format_diff_markdown_multi,
@@ -530,6 +531,27 @@ def _cmd_diff(args, _profile):
     gate_summary = None
     gate_pct = getattr(args, "gate", None)
     regression_pct = gate_pct if gate_pct is not None else STEP_TIME_REGRESSION_PCT
+    decision = None
+    if getattr(args, "accept", False):
+        decision = "accepted"
+    elif getattr(args, "reject", False):
+        decision = "rejected"
+    reason = getattr(args, "reason", None)
+    if decision is not None:
+        if getattr(args, "chat", False):
+            print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
+            sys.exit(2)
+        if not reason or not reason.strip():
+            print("Error: --reason is required with --accept/--reject", file=sys.stderr)
+            sys.exit(2)
+        if getattr(args, "output", None) and os.path.abspath(args.output) == os.path.abspath(
+            "diff.json"
+        ):
+            print(
+                "Error: --output diff.json conflicts with the decision record path",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     def _narrative_for(summary):
         if args.format not in ("terminal", "markdown"):
@@ -660,6 +682,21 @@ def _cmd_diff(args, _profile):
                 out = to_diff_json(global_summary)
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
+
+    if decision is not None and gate_summary is not None:
+        try:
+            decision_path, _, decision_warnings = write_diff_decision_json(
+                gate_summary,
+                decision=decision,
+                reason=reason or "",
+                path="diff.json",
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        for warning in decision_warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
+        print(f"Diff decision written to {decision_path}", file=sys.stderr)
 
     if args.output:
         out_dir = os.path.dirname(args.output)
