@@ -15,6 +15,7 @@ def test_list_skills():
         "arithmetic_intensity",
         "code_attribution_candidates",
         "cpu_gpu_pipeline",
+        "critical_path",
         "cutracer_analysis",
         "gc_impact",
         "gpu_idle_gaps",
