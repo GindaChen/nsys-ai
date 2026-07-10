@@ -4,6 +4,7 @@ diff_decision.py - Persist auditable user decisions for profile diffs.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess  # nosec B404
@@ -39,15 +40,21 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def build_diff_decision_record(
-    summary: ProfileDiffSummary,
+def build_diff_decision_record_from_diff_dict(
+    diff_dict: dict,
     *,
     decision: str,
     reason: str,
     decider: str | None = None,
     decided_at: str | None = None,
 ) -> tuple[dict, list[str]]:
-    """Build the byte-stable diff.json payload and return advisory warnings."""
+    """Build the byte-stable diff.json payload from a ``to_diff_dict`` mapping.
+
+    Shared by the CLI (which renders the mapping from a fresh ``ProfileDiffSummary``)
+    and the web guided loop (which already holds the diff payload in loop state), so
+    both surfaces emit byte-identical decision records for the same diff. The input
+    mapping is copied, never mutated.
+    """
     normalized_decision = decision.strip().lower()
     if normalized_decision not in {"accepted", "rejected"}:
         raise ValueError("decision must be 'accepted' or 'rejected'")
@@ -56,17 +63,20 @@ def build_diff_decision_record(
     if not normalized_reason:
         raise ValueError("--reason is required with --accept/--reject")
 
-    if not summary.before.profile_id or not summary.after.profile_id:
+    before_id = (diff_dict.get("before") or {}).get("profile_id")
+    after_id = (diff_dict.get("after") or {}).get("profile_id")
+    if not before_id or not after_id:
         raise ValueError("cannot write diff decision without before and after profile_id")
 
-    payload = to_diff_dict(summary)
+    payload = copy.deepcopy(diff_dict)
     warnings = list(payload.get("warnings") or [])
     advisory_warnings: list[str] = []
 
-    if summary.comparability_confidence < MIN_COMPARABILITY_CONFIDENCE:
+    confidence = payload.get("comparability_confidence")
+    if isinstance(confidence, (int, float)) and confidence < MIN_COMPARABILITY_CONFIDENCE:
         warning = (
             "comparability_confidence "
-            f"{summary.comparability_confidence:.3f} is below "
+            f"{confidence:.3f} is below "
             f"{MIN_COMPARABILITY_CONFIDENCE:.3f}; stamping verdict as inconclusive"
         )
         if warning not in warnings:
@@ -82,6 +92,35 @@ def build_diff_decision_record(
         "decided_at": decided_at or _utc_now_iso(),
     }
     return payload, advisory_warnings
+
+
+def build_diff_decision_record(
+    summary: ProfileDiffSummary,
+    *,
+    decision: str,
+    reason: str,
+    decider: str | None = None,
+    decided_at: str | None = None,
+) -> tuple[dict, list[str]]:
+    """Build the byte-stable diff.json payload and return advisory warnings."""
+    return build_diff_decision_record_from_diff_dict(
+        to_diff_dict(summary),
+        decision=decision,
+        reason=reason,
+        decider=decider,
+        decided_at=decided_at,
+    )
+
+
+def _write_decision_payload(payload: dict, path: str | os.PathLike[str]) -> Path:
+    """Serialize a decision payload deterministically and write it to ``path``."""
+    out_path = Path(path)
+    if out_path.parent != Path("."):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return out_path
 
 
 def write_diff_decision_json(
@@ -101,10 +140,24 @@ def write_diff_decision_json(
         decider=decider,
         decided_at=decided_at,
     )
-    out_path = Path(path)
-    if out_path.parent != Path("."):
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    return out_path, payload, warnings
+    return _write_decision_payload(payload, path), payload, warnings
+
+
+def write_diff_decision_json_from_diff_dict(
+    diff_dict: dict,
+    *,
+    decision: str,
+    reason: str,
+    path: str | os.PathLike[str] = "diff.json",
+    decider: str | None = None,
+    decided_at: str | None = None,
+) -> tuple[Path, dict, list[str]]:
+    """Write a decision record from a stored diff payload (see the dict builder)."""
+    payload, warnings = build_diff_decision_record_from_diff_dict(
+        diff_dict,
+        decision=decision,
+        reason=reason,
+        decider=decider,
+        decided_at=decided_at,
+    )
+    return _write_decision_payload(payload, path), payload, warnings

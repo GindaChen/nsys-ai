@@ -3565,6 +3565,16 @@ function loopRenderState() {
         decEl.textContent = LOOP_STATE.decision || 'pending';
         decEl.className = `lstat-v ${loopTone(LOOP_STATE.decision)}`;
     }
+    const reasonEl = document.getElementById('loopDecisionReason');
+    if (reasonEl && LOOP_STATE.decision_reason && !reasonEl.value.trim()) {
+        reasonEl.value = LOOP_STATE.decision_reason;
+    }
+    const decPathEl = document.getElementById('loopDecisionPath');
+    if (decPathEl) {
+        const path = LOOP_STATE.decision_path;
+        decPathEl.textContent = path ? `Decision recorded to ${path}` : '';
+        decPathEl.classList.toggle('hidden', !path);
+    }
     const hasDiff = Boolean(LOOP_STATE.diff_summary);
     const stepTimeAvailable = hasDiff && step.before_ms != null && step.after_ms != null;
     const confidenceEl = document.getElementById('lstConfidence');
@@ -3739,11 +3749,22 @@ async function loopSetDecision(decision) {
         loopSetError('Run diff before accepting or rejecting.');
         return;
     }
+    const reasonEl = document.getElementById('loopDecisionReason');
+    const reason = (reasonEl?.value || '').trim();
+    if (!reason) {
+        loopSetError('A reason is required before accepting or rejecting.');
+        if (reasonEl) reasonEl.focus();
+        return;
+    }
     try {
         loopSetError('');
         loopSetBusy(true);
-        await loopPost('/api/loop/decision', { decision, reason: '' });
-        showToast(decision === 'accept' ? 'Change accepted' : 'Change rejected');
+        const data = await loopPost('/api/loop/decision', { decision, reason });
+        const path = (data && data.decision_path) || (LOOP_STATE && LOOP_STATE.decision_path);
+        showToast(
+            (decision === 'accept' ? 'Change accepted' : 'Change rejected') +
+            (path ? ` — written to ${path}` : '')
+        );
     } catch (err) { showToast(loopErrorMessage('Decision failed', err)); }
     finally { loopSetBusy(false); }
 }

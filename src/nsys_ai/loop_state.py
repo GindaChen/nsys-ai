@@ -7,6 +7,7 @@ diagnose -> propose -> reprofile -> diff -> accept.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -161,6 +162,8 @@ class DiffLoopState:
     expected_impact: str = ""
     decision: Decision | None = None
     decision_reason: str = ""
+    decision_path: str = ""
+    decision_warnings: list[str] = field(default_factory=list)
     diagnose_ran: bool = False
     diagnose_findings_count: int = 0
     top_findings: list[dict[str, Any]] = field(default_factory=list)
@@ -182,6 +185,8 @@ class DiffLoopState:
             "expected_impact": self.expected_impact,
             "decision": self.decision,
             "decision_reason": self.decision_reason,
+            "decision_path": self.decision_path,
+            "decision_warnings": self.decision_warnings,
             "diagnose_ran": self.diagnose_ran,
             "diagnose_findings_count": self.diagnose_findings_count,
             "top_findings": self.top_findings,
@@ -202,6 +207,8 @@ class DiffLoopState:
             expected_impact=str(payload.get("expected_impact") or ""),
             decision=payload.get("decision"),
             decision_reason=str(payload.get("decision_reason") or ""),
+            decision_path=str(payload.get("decision_path") or ""),
+            decision_warnings=list(payload.get("decision_warnings") or []),
             diagnose_ran=bool(payload.get("diagnose_ran")),
             diagnose_findings_count=int(payload.get("diagnose_findings_count") or 0),
             top_findings=list(payload.get("top_findings") or []),
@@ -320,10 +327,48 @@ class DiffLoopState:
         self.last_error = ""
         return payload
 
-    def set_decision(self, decision: Decision, reason: str = "") -> None:
+    def set_decision(
+        self,
+        decision: Decision,
+        reason: str = "",
+        *,
+        decision_dir: str | os.PathLike[str] | None = None,
+        decider: str | None = None,
+        decided_at: str | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Record an accept/reject decision and persist the shared diff.json record.
+
+        The record is written with the same encoder the CLI uses, so a decision
+        made in the web loop is byte-identical to ``diff --accept/--reject --reason``
+        for the same diff. Returns the written payload and any advisory warnings.
+        """
         if decision not in ("accept", "reject"):
             raise ValueError("decision must be 'accept' or 'reject'")
+        if self.diff_summary is None:
+            raise ValueError("run diff before recording a decision")
+        normalized_reason = (reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("a decision reason is required")
+
+        from .diff_decision import write_diff_decision_json_from_diff_dict
+
+        status = "accepted" if decision == "accept" else "rejected"
+        out_path = Path(decision_dir) / "diff.json" if decision_dir else Path("diff.json")
+        written_path, payload, warnings = write_diff_decision_json_from_diff_dict(
+            self.diff_summary,
+            decision=status,
+            reason=normalized_reason,
+            path=out_path,
+            decider=decider,
+            decided_at=decided_at,
+        )
         self.decision = decision
-        self.decision_reason = (reason or "").strip()
+        self.decision_reason = normalized_reason
+        self.decision_path = str(written_path)
+        self.decision_warnings = list(warnings)
+        # Reflect verdict stamping (e.g. low-comparability -> inconclusive) so the
+        # surfaced state agrees with the persisted record.
+        self.verdict = str(payload.get("verdict") or self.verdict)
         self.phase = "accept"
         self.last_error = ""
+        return payload, warnings
