@@ -1408,6 +1408,38 @@
             gap: 8px;
         }
 
+        .loop-decide .ldecide-reason-label {
+            display: block;
+            font-size: 11px;
+            opacity: 0.75;
+            margin: 4px 0 4px;
+        }
+
+        .loop-decide .ldecide-reason {
+            width: 100%;
+            box-sizing: border-box;
+            resize: vertical;
+            margin-bottom: 8px;
+            font: inherit;
+            font-size: 12px;
+            color: inherit;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            padding: 6px 8px;
+        }
+
+        .loop-decide .ldecide-path {
+            margin-top: 8px;
+            font-size: 11px;
+            opacity: 0.8;
+            word-break: break-all;
+        }
+
+        .loop-decide .ldecide-path.hidden {
+            display: none;
+        }
+
         .laccept {
             border-color: rgba(63, 185, 80, 0.5) !important;
             color: #aff5b4 !important;

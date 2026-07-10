@@ -1,7 +1,10 @@
+import json
 import os
 import shutil
 import time
 from pathlib import Path
+
+import pytest
 
 from nsys_ai import profile as _profile
 from nsys_ai.loop_state import (
@@ -13,7 +16,18 @@ from nsys_ai.loop_state import (
 )
 
 
-def test_loop_state_phase_and_proposal():
+def _comparable_diff_summary(confidence: float = 0.9) -> dict:
+    """Minimal diff payload (to_diff_dict shape) sufficient to record a decision."""
+    return {
+        "verdict": "neutral",
+        "comparability_confidence": confidence,
+        "warnings": [],
+        "before": {"path": "/tmp/before.sqlite", "profile_id": "before-id"},
+        "after": {"path": "/tmp/after.sqlite", "profile_id": "after-id"},
+    }
+
+
+def test_loop_state_phase_and_proposal(tmp_path):
     state = DiffLoopState(before_path="/tmp/before.sqlite")
     assert state.phase == "diagnose"
 
@@ -25,10 +39,54 @@ def test_loop_state_phase_and_proposal():
     assert state.expected_impact == "Lower step time"
     assert state.phase == "propose"
 
-    state.set_decision("accept", reason="speedup confirmed")
+    state.diff_summary = _comparable_diff_summary()
+    state.set_decision("accept", reason="speedup confirmed", decision_dir=tmp_path)
     assert state.phase == "accept"
     assert state.decision == "accept"
     assert state.decision_reason == "speedup confirmed"
+
+    written = tmp_path / "diff.json"
+    assert state.decision_path == str(written)
+    assert written.exists()
+    record = json.loads(written.read_text(encoding="utf-8"))
+    assert record["decision"]["status"] == "accepted"
+    assert record["decision"]["reason"] == "speedup confirmed"
+
+
+def test_set_decision_requires_reason_and_diff(tmp_path):
+    state = DiffLoopState()
+    # No diff run yet.
+    with pytest.raises(ValueError, match="run diff"):
+        state.set_decision("accept", reason="looks good", decision_dir=tmp_path)
+
+    state.diff_summary = _comparable_diff_summary()
+    with pytest.raises(ValueError, match="reason is required"):
+        state.set_decision("accept", reason="   ", decision_dir=tmp_path)
+    assert not (tmp_path / "diff.json").exists()
+    assert state.decision is None
+
+
+def test_set_decision_low_comparability_stamps_inconclusive(tmp_path):
+    state = DiffLoopState()
+    state.diff_summary = _comparable_diff_summary(confidence=0.3)
+    payload, warnings = state.set_decision(
+        "reject", reason="mismatched workloads", decision_dir=tmp_path
+    )
+    assert payload["verdict"] == "inconclusive"
+    assert state.verdict == "inconclusive"
+    assert any("stamping verdict as inconclusive" in w for w in warnings)
+    assert state.decision_warnings == warnings
+
+
+def test_set_decision_survives_state_roundtrip(tmp_path):
+    state = DiffLoopState()
+    state.diff_summary = _comparable_diff_summary()
+    state.set_decision("accept", reason="faster", decision_dir=tmp_path)
+
+    restored = DiffLoopState.from_dict(state.to_dict())
+    assert restored.decision == "accept"
+    assert restored.decision_reason == "faster"
+    assert restored.decision_path == str(tmp_path / "diff.json")
 
 
 def test_detect_h100_replay_preset_picks_newest_complete_snapshot(monkeypatch, tmp_path):

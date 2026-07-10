@@ -178,10 +178,13 @@
                 </section>
                 <section class="loop-section loop-card loop-decide" id="loopDecideSection">
                     <div class="loop-section-title">Final decision</div>
+                    <label class="ldecide-reason-label" for="loopDecisionReason">Reason (required, recorded in diff.json)</label>
+                    <textarea id="loopDecisionReason" class="ldecide-reason" rows="2" placeholder="Why accept or reject this change?"></textarea>
                     <div class="ldecide-row">
                         <button type="button" class="laction laccept" id="loopBtnAccept" onclick="loopSetDecision('accept')">Accept change</button>
                         <button type="button" class="laction lreject" id="loopBtnReject" onclick="loopSetDecision('reject')">Reject</button>
                     </div>
+                    <div class="ldecide-path hidden" id="loopDecisionPath"></div>
                 </section>
             </div>
         </div>

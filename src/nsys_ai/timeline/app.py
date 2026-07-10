@@ -48,6 +48,8 @@ Layout:
 
 from __future__ import annotations
 
+import os
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -836,15 +838,48 @@ class NsysTimelineApp(App):
             self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
 
     def action_loop_accept(self) -> None:
-        self._loop_state.set_decision("accept", reason="accepted in timeline TUI")
-        self.analysis_phase = self._loop_state.phase
-        self._update_title()
-        self.notify("Loop decision: accept", timeout=2)
+        self._record_loop_decision("accept", "accepted in timeline TUI")
 
     def set_loop_decision(self, decision: str, reason: str = "") -> None:
-        self._loop_state.set_decision(decision, reason=reason)
+        self._record_loop_decision(decision, reason)
+
+    def _loop_decision_dir(self) -> str:
+        """Directory the shared diff.json decision record is written to.
+
+        The record lands next to the candidate ('after') profile so it is
+        discoverable alongside the run it describes rather than dropped into
+        the process CWD.
+        """
+        after = self._loop_state.after_path
+        directory = os.path.dirname(after) if after else ""
+        return directory or "."
+
+    def _record_loop_decision(self, decision: str, reason: str) -> None:
+        """Persist a loop accept/reject decision, guarding TUI-side edge cases.
+
+        set_decision requires a completed diff and a non-empty reason and
+        writes diff.json as a side effect, so guard both and surface any
+        failure through a notification instead of crashing the app.
+        """
+        if self._loop_state.diff_summary is None:
+            self.notify(
+                "Run loop diff before recording a decision", severity="warning", timeout=4
+            )
+            return
+        reason = (reason or "").strip() or f"{decision}ed in timeline TUI"
+        try:
+            _payload, warnings = self._loop_state.set_decision(
+                decision, reason=reason, decision_dir=self._loop_decision_dir()
+            )
+        except Exception as e:
+            self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
+            return
         self.analysis_phase = self._loop_state.phase
         self._update_title()
+        msg = f"Loop decision: {decision} -> {self._loop_state.decision_path}"
+        if warnings:
+            msg += f" ({'; '.join(warnings)})"
+        self.notify(msg, timeout=3)
 
 
 # ---------------------------------------------------------------------------

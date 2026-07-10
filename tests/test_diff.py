@@ -1077,6 +1077,47 @@ def test_diff_decision_requires_profile_ids(tmp_path):
         raise AssertionError("expected missing profile_id to be refused")
 
 
+def test_diff_decision_dict_path_matches_summary_path(tmp_path):
+    """The web loop (dict) writer must be byte-identical to the CLI (summary) writer."""
+    import json as _json
+
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_decision import (
+        write_diff_decision_json,
+        write_diff_decision_json_from_diff_dict,
+    )
+    from nsys_ai.diff_render import to_diff_json
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        summary = diff_profiles(b, a, gpu=0)
+
+    # The web loop stores the diff payload as JSON (to_diff_json) and reloads it.
+    stored_dict = _json.loads(to_diff_json(summary))
+
+    kwargs = dict(
+        decision="accepted",
+        reason="candidate is faster",
+        decider="tester@example.com",
+        decided_at="2026-06-18T00:00:00Z",
+    )
+    cli_path, _, _ = write_diff_decision_json(
+        summary, path=tmp_path / "cli.json", **kwargs
+    )
+    gui_path, _, _ = write_diff_decision_json_from_diff_dict(
+        stored_dict, path=tmp_path / "gui.json", **kwargs
+    )
+
+    assert cli_path.read_bytes() == gui_path.read_bytes()
+    # The stored dict must not be mutated by the writer.
+    assert "decision" not in stored_dict
+
+
 def test_compute_verdict_custom_regression_pct():
     from nsys_ai.diff import compute_verdict
 
