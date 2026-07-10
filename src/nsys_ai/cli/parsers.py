@@ -17,6 +17,9 @@ from .handlers import (
     _cmd_agent_guide,
     _cmd_analyze,
     _cmd_ask,
+    _cmd_baseline_list,
+    _cmd_baseline_show,
+    _cmd_baseline_tag,
     _cmd_chat,
     _cmd_cutracer,
     _cmd_diff,
@@ -372,8 +375,21 @@ def _build_parser():
     p.set_defaults(handler=_cmd_report)
 
     p = sub.add_parser("diff", help="Compare two profiles (before/after)")
-    p.add_argument("before", help="Path to baseline profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "before",
+        nargs="?",
+        default=None,
+        help="Path to baseline profile (.sqlite or .nsys-rep), or a "
+        "'baseline:<name>' reference. Optional when --against is given.",
+    )
     p.add_argument("after", help="Path to candidate profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "--against",
+        default=None,
+        metavar="REF",
+        help="Baseline to diff against, supplying the before side "
+        "(e.g. 'baseline:<name>' or a profile path)",
+    )
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
     p.add_argument(
         "--trim",
@@ -464,6 +480,22 @@ def _build_parser():
     p.add_argument("--port", type=int, default=8145, help="HTTP port (default: 8145)")
     p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     p.set_defaults(handler=_cmd_diff_web)
+
+    p = sub.add_parser("baseline", help="Manage named baseline snapshots")
+    bl_sub = p.add_subparsers(dest="baseline_action", required=True)
+
+    sp = bl_sub.add_parser("tag", help="Record a tagged baseline snapshot")
+    sp.add_argument("name", help="Baseline name (e.g. 'main')")
+    sp.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    sp.add_argument("--reason", required=True, help="Why this snapshot is a baseline")
+    sp.set_defaults(handler=_cmd_baseline_tag)
+
+    sp = bl_sub.add_parser("list", help="List tagged baselines")
+    sp.set_defaults(handler=_cmd_baseline_list)
+
+    sp = bl_sub.add_parser("show", help="Show one tagged baseline")
+    sp.add_argument("name", help="Baseline name to inspect")
+    sp.set_defaults(handler=_cmd_baseline_show)
 
     p = sub.add_parser("export", help="Export Perfetto JSON traces")
     _add_gpu_trim(p, gpu_required=False)

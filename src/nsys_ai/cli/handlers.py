@@ -515,6 +515,80 @@ def _cmd_report(args, _profile):
     _cmd_analyze(args, _profile)
 
 
+def _resolve_diff_before(args):
+    """Fill and resolve the diff ``before`` side, including baseline refs.
+
+    ``--against`` (when given) supplies the before side; otherwise the ``before``
+    positional is used. Any ``baseline:<name>`` token on either side is resolved
+    to the stored snapshot path so the rest of ``_cmd_diff`` sees an ordinary
+    profile path.
+    """
+    from nsys_ai.baseline import parse_baseline_ref, resolve_baseline_ref
+
+    against = getattr(args, "against", None)
+    if against:
+        if getattr(args, "before", None):
+            print(
+                "Error: pass the baseline via --against or as the 'before' "
+                "positional, not both",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        args.before = against
+
+    if not getattr(args, "before", None):
+        print(
+            "Error: a 'before' profile is required (positional path or --against)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    for attr in ("before", "after"):
+        ref = getattr(args, attr, None)
+        if parse_baseline_ref(ref) is None:
+            continue
+        try:
+            setattr(args, attr, resolve_baseline_ref(ref))
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+
+def _cmd_baseline_tag(args, _profile):
+    from nsys_ai.baseline import tag_baseline
+
+    try:
+        meta = tag_baseline(args.name, args.profile, args.reason)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Tagged baseline {meta['name']!r} ({meta['profile_id']})")
+
+
+def _cmd_baseline_list(args, _profile):
+    from nsys_ai.baseline import list_baselines
+
+    entries = list_baselines()
+    if not entries:
+        print("No baselines tagged yet.")
+        return
+    for meta in entries:
+        print(f"{meta.get('name')}\t{meta.get('profile_id')}\t{meta.get('tagged_at')}")
+
+
+def _cmd_baseline_show(args, _profile):
+    import json as _json
+
+    from nsys_ai.baseline import show_baseline
+
+    try:
+        meta = show_baseline(args.name)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(_json.dumps(meta, indent=2, sort_keys=True))
+
+
 def _cmd_diff(args, _profile):
     from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
     from nsys_ai.diff_decision import write_diff_decision_json
@@ -526,6 +600,8 @@ def _cmd_diff(args, _profile):
         to_diff_json,
     )
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
+
+    _resolve_diff_before(args)
 
     no_ai = getattr(args, "no_ai", False)
     gate_summary = None
