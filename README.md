@@ -198,6 +198,43 @@ across every device.
 | `--exit-on-regression` | — | Exit 1 when the verdict is `regression_likely` |
 | `--gate PCT` | 5.0 | Regression threshold (%) for the verdict; implies `--exit-on-regression` |
 
+## Baselines
+
+A diff needs something to compare against. Passing a raw file path is fragile in
+CI: the path drifts between jobs and the file may not survive to the next run.
+The `baseline` command keeps a local store of named snapshots so a stable name,
+not a path, resolves the comparison.
+
+```bash
+# Tag a known-good run under a name (copies the resolved .sqlite into the store)
+nsys-ai baseline tag main run.sqlite --reason "green main @ abc123"
+
+# List and inspect what has been tagged
+nsys-ai baseline list
+nsys-ai baseline show main
+
+# Compare a candidate against a tagged baseline by name
+nsys-ai diff --against baseline:main candidate.sqlite
+```
+
+`tag` resolves the profile (including a `.nsys-rep` sidecar), copies the
+self-contained `.sqlite` into the store, and records a deterministic `meta.json`
+(content-derived `profile_id`, source path, reason, tagger, timestamp). The
+snapshot stays valid even if the original file moves.
+
+The store lives in `.nsys-ai-baselines/` under the current directory. Set
+`NSYS_AI_BASELINE_ROOT` to point tag and resolve at a shared location so a job
+that tags and a later job that diffs find the same store regardless of CWD:
+
+```bash
+export NSYS_AI_BASELINE_ROOT="$CI_CACHE/nsys-baselines"
+nsys-ai baseline tag main run.sqlite --reason "green main" \
+  && nsys-ai diff --against baseline:main candidate.sqlite
+```
+
+The `baseline:<name>` reference is accepted anywhere a baseline profile path is,
+via `--against` or as the `before` positional.
+
 ## Commands
 
 | Command | Description |
@@ -218,6 +255,7 @@ across every device.
 | `report` | Generate a performance report |
 | `diff` | Before/after profile comparison |
 | `diff-web` | Side-by-side comparison web viewer |
+| `baseline` | Manage named baseline snapshots (`tag`, `list`, `show`) |
 | `chat` | AI chat TUI for a profile |
 | `ask` | One-shot AI question about a profile |
 | `agent` | Agent auto-analysis (`analyze`, `ask`) |

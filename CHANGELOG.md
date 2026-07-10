@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `nsys-ai baseline` keeps a local store of named profile snapshots (`tag`,
+  `list`, `show`) so `diff --against baseline:<name>` resolves a stable name to a
+  known snapshot instead of a fragile path. The store lives in
+  `.nsys-ai-baselines/` and can be relocated with `NSYS_AI_BASELINE_ROOT` for
+  cross-job CI use.
 - `nsys-ai doctor` diagnoses the environment (Python, nsys CLI, Parquet cache,
   AI provider, CUTracer toolchain including the nvdisasm/framework CUDA match)
   and, when given a profile, its health (duration, GPUs, GPU model, NVTX and

@@ -145,3 +145,86 @@ def test_retag_overwrites(tmp_path, profile_a):
     meta = baseline.tag_baseline("v1", str(profile_a), "second", root=root)
     assert meta["reason"] == "second"
     assert baseline.show_baseline("v1", root=root)["reason"] == "second"
+
+
+def test_tag_refuses_symlinked_snapshot_destination(tmp_path, profile_a):
+    root = tmp_path / "store"
+    entry_dir = root / "v1"
+    entry_dir.mkdir(parents=True)
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do-not-touch", encoding="utf-8")
+
+    # Plant a symlink where the snapshot would be written.
+    link = entry_dir / baseline.SNAPSHOT_FILENAME
+    link.symlink_to(victim)
+
+    with pytest.raises(ValueError):
+        baseline.tag_baseline("v1", str(profile_a), "reason", root=root)
+
+    # The victim's contents must be untouched, and the link not followed.
+    assert victim.read_text(encoding="utf-8") == "do-not-touch"
+
+
+def test_tag_refuses_symlinked_entry_dir(tmp_path, profile_a):
+    root = tmp_path / "store"
+    root.mkdir(parents=True)
+
+    victim_dir = tmp_path / "outside"
+    victim_dir.mkdir()
+
+    # Plant a symlinked entry directory pointing outside the store.
+    (root / "v1").symlink_to(victim_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        baseline.tag_baseline("v1", str(profile_a), "reason", root=root)
+
+    # Nothing should have been written into the escape target.
+    assert not (victim_dir / baseline.SNAPSHOT_FILENAME).exists()
+    assert not (victim_dir / baseline.META_FILENAME).exists()
+
+
+def test_list_skips_non_dict_meta(tmp_path, profile_a):
+    root = tmp_path / "store"
+    baseline.tag_baseline("good", str(profile_a), "ok", root=root)
+    baseline.tag_baseline("bad", str(profile_a), "ok", root=root)
+
+    # Corrupt one entry's meta.json into a non-object JSON value.
+    (root / "bad" / baseline.META_FILENAME).write_text("[]\n", encoding="utf-8")
+
+    names = [m["name"] for m in baseline.list_baselines(root=root)]
+    assert names == ["good"]
+
+
+def test_show_non_dict_meta_raises(tmp_path, profile_a):
+    root = tmp_path / "store"
+    baseline.tag_baseline("bad", str(profile_a), "ok", root=root)
+    (root / "bad" / baseline.META_FILENAME).write_text('"x"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        baseline.show_baseline("bad", root=root)
+
+
+def test_env_root_used_when_no_explicit_root(tmp_path, profile_a, monkeypatch):
+    env_root = tmp_path / "env_store"
+    monkeypatch.setenv("NSYS_AI_BASELINE_ROOT", str(env_root))
+
+    # No root= passed: tag/list/resolve should read from the env-configured root.
+    baseline.tag_baseline("v1", str(profile_a), "reason")
+    assert (env_root / "v1" / baseline.SNAPSHOT_FILENAME).is_file()
+    assert [m["name"] for m in baseline.list_baselines()] == ["v1"]
+
+    resolved = baseline.resolve_baseline_ref("baseline:v1")
+    assert resolved.startswith(str(env_root))
+
+
+def test_explicit_root_overrides_env_root(tmp_path, profile_a, monkeypatch):
+    env_root = tmp_path / "env_store"
+    monkeypatch.setenv("NSYS_AI_BASELINE_ROOT", str(env_root))
+
+    explicit = tmp_path / "explicit_store"
+    baseline.tag_baseline("v1", str(profile_a), "reason", root=explicit)
+
+    # The explicit root wins; the env root stays empty.
+    assert (explicit / "v1" / baseline.SNAPSHOT_FILENAME).is_file()
+    assert not env_root.exists()

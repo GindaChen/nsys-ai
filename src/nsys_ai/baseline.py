@@ -35,6 +35,9 @@ from .fingerprint import get_profile_id
 DEFAULT_ROOT = ".nsys-ai-baselines"
 """Directory (relative to CWD) that holds the local baseline store."""
 
+_ROOT_ENV_VAR = "NSYS_AI_BASELINE_ROOT"
+"""Environment variable that relocates the store when no explicit root is given."""
+
 _REF_PREFIX = "baseline:"
 
 # Names become directory names, so keep them to a safe identifier alphabet and
@@ -46,7 +49,48 @@ META_FILENAME = "meta.json"
 
 
 def _store_root(root: str | os.PathLike[str] | None) -> Path:
-    return Path(root) if root is not None else Path(DEFAULT_ROOT)
+    # An explicit root always wins (tests and callers pass it directly). When
+    # unset, honour NSYS_AI_BASELINE_ROOT so a CI job can point tag and
+    # ``diff --against baseline:X`` at one shared store regardless of CWD.
+    if root is not None:
+        return Path(root)
+    env_root = os.environ.get(_ROOT_ENV_VAR)
+    if env_root and env_root.strip():
+        return Path(env_root)
+    return Path(DEFAULT_ROOT)
+
+
+def _reject_symlink(path: Path, label: str) -> None:
+    """Refuse to write *through* a symlink, so a planted link cannot redirect
+    the write to a target outside the store."""
+    if path.is_symlink():
+        raise ValueError(f"refusing to write {label} through a symlink: {path}")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _write_no_follow(path: Path, text: str) -> None:
+    """Write *text* to *path* without following a pre-existing symlink."""
+    _reject_symlink(path, path.name)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def _copy_no_follow(src: str | os.PathLike[str], dst: Path) -> None:
+    """Copy *src* to *dst* byte-for-byte without following a symlink at *dst*."""
+    _reject_symlink(dst, "baseline snapshot")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(dst, flags, 0o644)
+    with os.fdopen(fd, "wb") as out, open(src, "rb") as source:
+        shutil.copyfileobj(source, out)
 
 
 def _validate_name(name: str) -> str:
@@ -102,12 +146,23 @@ def tag_baseline(
     root_path = _store_root(root)
     entry_dir = root_path / clean_name
 
-    with _profile.open(os.fspath(profile_path)) as prof:
+    # Refuse a symlinked entry directory and enforce that the entry stays inside
+    # the store, so a planted symlink cannot make writes escape the root.
+    _reject_symlink(entry_dir, "baseline entry directory")
+    if not _is_within(entry_dir.resolve(), root_path.resolve()):
+        raise ValueError(
+            f"baseline entry directory escapes the store root: {entry_dir}"
+        )
+
+    # ``direct`` cache mode reads the profile in place; only prof.conn/prof.path
+    # are needed here, so avoid building a Parquet cache next to the user's
+    # source profile (surprising, and can fail if that directory is read-only).
+    with _profile.open(os.fspath(profile_path), cache_mode="direct") as prof:
         profile_id = get_profile_id(prof.conn, fallback_path=prof.path)
         source_path = os.path.abspath(prof.path)
 
         entry_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, entry_dir / SNAPSHOT_FILENAME)
+        _copy_no_follow(source_path, entry_dir / SNAPSHOT_FILENAME)
 
     meta = {
         "name": clean_name,
@@ -126,13 +181,18 @@ def tag_baseline(
 
 def _write_meta(path: str | os.PathLike[str], meta: dict) -> None:
     text = json.dumps(meta, indent=2, sort_keys=True) + "\n"
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    _write_no_follow(Path(path), text)
 
 
 def _read_meta(entry_dir: Path) -> dict:
     with open(entry_dir / META_FILENAME, encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    # A non-object meta.json (``[]``, ``"x"``, ``123``) parses fine but breaks
+    # every ``meta.get(...)`` caller; treat it as corrupt so list_baselines
+    # skips it and show_baseline surfaces a clean error instead of crashing.
+    if not isinstance(data, dict):
+        raise ValueError("meta.json is not a JSON object")
+    return data
 
 
 def list_baselines(root: str | os.PathLike[str] | None = None) -> list[dict]:
