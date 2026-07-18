@@ -10,7 +10,7 @@ import logging
 import os
 from collections.abc import Callable
 
-from .annotation import EvidenceReport, Finding
+from .annotation import EvidenceReport, Finding, rank_findings
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -139,9 +139,11 @@ class EvidenceBuilder:
                     "Analyzer %s (skill %s) failed: %s", analyzer_name, skill_name, e, exc_info=True
                 )
 
+        # Rank by optimization opportunity (headroom) so the biggest
+        # recoverable win surfaces first. No-op when no skill emits a headroom.
         return EvidenceReport(
             title="Auto-Analysis",
             profile_id=profile_id,
             profile_path=profile_path,
-            findings=findings,
+            findings=rank_findings(findings),
         )

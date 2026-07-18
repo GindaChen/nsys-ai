@@ -29,8 +29,16 @@ def _phase_index(phase: str) -> int:
 
 
 def _normalize_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rank findings so workflow surfaces high-signal rows first."""
-    ranked: list[tuple[int, dict[str, Any]]] = []
+    """Rank findings so the workflow surfaces the biggest opportunity first.
+
+    When any finding carries a ``headroom_ms`` (recoverable time), those lead —
+    largest headroom first — so a small idle gap with large upside outranks a
+    dramatic-looking finding with little room to improve; the rest fall back to
+    the legacy severity heuristic. When no finding carries a headroom the legacy
+    heuristic order is preserved exactly.
+    """
+    has_headroom = any(isinstance(f.get("headroom_ms"), (int, float)) for f in findings)
+    ranked: list[tuple[int, dict[str, Any], int, float | None]] = []
     for idx, f in enumerate(findings):
         severity = str(f.get("severity") or "").lower()
         kind = str(f.get("type") or "").lower()
@@ -42,9 +50,17 @@ def _normalize_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         confidence = f.get("confidence")
         if isinstance(confidence, (int, float)):
             score += int(confidence * 100)
-        ranked.append((score - idx, f))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    return [f for _, f in ranked]
+        hv = f.get("headroom_ms")
+        headroom = float(hv) if isinstance(hv, (int, float)) else None
+        ranked.append((idx, f, score, headroom))
+
+    if has_headroom:
+        ranked.sort(
+            key=lambda t: (0 if t[3] is not None else 1, -(t[3] or 0.0), -t[2], t[0])
+        )
+    else:
+        ranked.sort(key=lambda t: t[2] - t[0], reverse=True)
+    return [f for _, f, *_ in ranked]
 
 
 def normalize_profile_path(path: str, *, label: str = "profile") -> str:

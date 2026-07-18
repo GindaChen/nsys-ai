@@ -326,6 +326,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 id=finding_id,
                 category="communication",
                 confidence=_overlap_confidence(float(overlap_pct), float(nccl_ms), float(total_ms)),
+                # Exposed (non-overlapped) NCCL is the time recoverable if the
+                # collective were hidden under compute.
+                headroom_ms=r.get("nccl_only_ms", 0.0),
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_LOW_OVERLAP_EXPLANATION,
@@ -377,6 +380,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     id=finding_id,
                     category="communication",
                     confidence=_ratio_confidence(float(ratio)),
+                    # Exposed (non-overlapped) NCCL is the recoverable time.
+                    headroom_ms=r.get("nccl_only_ms", 0.0),
                     evidence=[evidence_row],
                     selection=selection,
                     explanation=_COMM_DOMINATED_EXPLANATION,

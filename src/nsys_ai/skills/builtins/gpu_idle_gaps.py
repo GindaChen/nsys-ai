@@ -387,6 +387,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         id=finding_id,
                         category="idle",
                         confidence=min(0.95, 0.4 + pct / 100),
+                        # All idle time on the pipeline is candidate recoverable
+                        # time — the opportunity if the bubbles were closed.
+                        headroom_ms=total_idle_ms,
                         evidence=[evidence_row],
                         selection=selection,
                         explanation=_EXPLANATION,
@@ -463,6 +466,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 id=finding_id,
                 category="idle",
                 confidence=_gap_confidence(gap_ms),
+                # The gap duration is the recoverable time if the bubble closed
+                # (an upper bound — some is unavoidable launch overhead).
+                headroom_ms=round(gap_ms, 3),
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_EXPLANATION,

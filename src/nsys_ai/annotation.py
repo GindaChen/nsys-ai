@@ -96,6 +96,13 @@ class Finding:
     false_positive_notes: list[str] | None = None
     provenance: dict[str, Any] | None = None
     diff_lineage: "DiffLineage | None" = None
+    # Potential recoverable time (ms) if this finding's inefficiency were
+    # removed — the optimization *opportunity*. Lets consumers rank by upside
+    # rather than only severity: a small idle gap with large headroom should
+    # outrank a dramatic-looking finding with little room to improve. Optional;
+    # drops from to_dict when None, and ranking is a no-op when no finding
+    # carries one (see :func:`rank_findings`).
+    headroom_ms: float | None = None
 
     def to_dict(self) -> dict:
         # Walk fields() directly for scalar / primitive fields; nested
@@ -144,6 +151,29 @@ class Finding:
         if filtered.get("diff_lineage") is not None:
             filtered["diff_lineage"] = DiffLineage.from_dict(filtered["diff_lineage"])
         return cls(**filtered)
+
+
+def rank_findings(findings: list["Finding"]) -> list["Finding"]:
+    """Order findings by optimization opportunity (largest headroom first).
+
+    Findings carrying a ``headroom_ms`` sort ahead of those without, largest
+    headroom first, so the biggest *recoverable* win surfaces first regardless
+    of how severe a finding merely looks. Findings without a headroom keep
+    their original relative order and follow the headroom-bearing ones.
+
+    The ranking is a deliberate no-op when **no** finding carries a headroom:
+    the input order is returned unchanged, so behaviour on legacy findings is
+    identical to before. The sort is stable.
+    """
+    if not any(f.headroom_ms is not None for f in findings):
+        return list(findings)
+
+    def _key(item: tuple[int, "Finding"]) -> tuple:
+        idx, f = item
+        has_headroom = f.headroom_ms is not None
+        return (0 if has_headroom else 1, -(f.headroom_ms or 0.0), idx)
+
+    return [f for _, f in sorted(enumerate(findings), key=_key)]
 
 
 @dataclass
