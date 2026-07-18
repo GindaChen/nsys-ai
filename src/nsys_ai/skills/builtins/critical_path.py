@@ -5,7 +5,13 @@ Classifies a run (or a trimmed iteration) as ``cpu-bound``,
 critical path through the trace rather than merely partitioning wall time
 by what happened to be running.
 
-Approach (a sound, testable approximation of a longest-path walk):
+Approach (a testable, best-effort approximation of a longest-path walk):
+
+The trace carries no dependency edges, so the true longest path is not
+computed. The busiest GPU device timeline is used as a *proxy* for the
+critical-path spine — a defensible approximation for single-GPU and
+compute-dominated runs, but only that. The class is reported with a
+confidence and refuses to commit on a near-tie or on too little on-path time.
 
 * Take the busiest GPU device timeline as the spine of the critical path.
 * At every instant on that spine, the time is attributed to exactly one of
@@ -67,6 +73,20 @@ _CATEGORY_TO_FINDING = {
 # reported as ``mixed`` so a near-tie never forces a confident-but-wrong
 # winner.
 _MARGIN_THRESHOLD = 0.15
+
+# The dominant category must also own at least this share of the critical path
+# to commit to a class. With three buckets a bare margin gate alone can crown a
+# ~43% plurality; requiring an outright majority keeps "gpu-compute-bound" from
+# being emitted when compute is under half the path.
+_MIN_DOMINANT_SHARE = 0.5
+
+# Below this much on-path time there is too little signal to classify — a
+# handful of microseconds of kernels should not yield a confident verdict.
+_MIN_CRITICAL_PATH_MS = 1.0
+
+# A committed class whose margin is only modestly above threshold is flagged
+# tentative in the note (the class is still emitted, but not oversold).
+_TENTATIVE_MARGIN = 0.25
 
 # How many on-path kernels / collectives to surface.
 _TOP_N = 5
@@ -146,7 +166,7 @@ def _top_on_path(adapter, kernel_table: str, device: int, trim):
     return compute[:_TOP_N], collectives[:_TOP_N]
 
 
-def _cpu_attribution(conn, device: int, trim, kwargs) -> dict:
+def _cpu_attribution(conn, device: int, trim) -> dict:
     """Best-effort attribution of the GPU-idle (cpu) bucket to host causes.
 
     Pulls total host-side synchronization wall time and CPU->GPU dispatch
@@ -249,6 +269,22 @@ def _execute(conn, **kwargs) -> list[dict]:
     comm_ms = float(ov.get("nccl_only_ms", 0.0))
     cpu_ms = float(ov.get("idle_ms", 0.0))
 
+    # `overlap_analysis` measures idle only *between* kernels, over the span of
+    # the kernels themselves (MIN start .. MAX end). When a trim window is
+    # given, GPU-idle before the first / after the last contained kernel is
+    # real host-wait inside the iteration but falls outside that span, so it is
+    # invisible to `idle_ms`. Fold that edge idle into the cpu bucket, or a step
+    # that stalls on the host then computes back-to-back is misread as
+    # compute-bound. (Without a trim there is no window bound, so edge idle is
+    # genuinely undefined and left uncounted.)
+    if trim is not None:
+        span_start = ov.get("span_start_ns")
+        span_end = ov.get("span_end_ns")
+        if span_start is not None and span_end is not None:
+            edge_idle_ms = ((trim[1] - trim[0]) - (int(span_end) - int(span_start))) / 1e6
+            if edge_idle_ms > 0:
+                cpu_ms += edge_idle_ms
+
     # Denominator is the sum of the on-path buckets so the shares always sum
     # to exactly 1.0 (avoids drift from independent per-bucket rounding and
     # from idle being clamped to >= 0 upstream).
@@ -271,16 +307,28 @@ def _execute(conn, **kwargs) -> list[dict]:
     second_share = ranked[1][1]
     margin = round(top_share - second_share, 4)
 
-    if margin >= _MARGIN_THRESHOLD:
+    # Commit to a class only when a single category both wins by a clear margin
+    # *and* owns an outright majority of the path, and there is enough on-path
+    # time to trust the split. Anything short of that is reported as ``mixed``
+    # with the reason recorded, rather than a confident-but-weak verdict.
+    if critical_path_ms < _MIN_CRITICAL_PATH_MS:
+        bound_class = _CLASS_MIXED
+        mixed_reason = "insufficient"
+    elif margin >= _MARGIN_THRESHOLD and top_share >= _MIN_DOMINANT_SHARE:
         bound_class = _CATEGORY_TO_CLASS[top_cat]
+        mixed_reason = None
+    elif margin < _MARGIN_THRESHOLD:
+        bound_class = _CLASS_MIXED
+        mixed_reason = "near_tie"
     else:
         bound_class = _CLASS_MIXED
+        mixed_reason = "no_majority"
     # Confidence is defined as the margin between the top bound and the
     # runner-up: a near-tie yields low confidence and a "mixed" verdict.
     confidence = max(0.0, margin)
 
     top_compute, top_collectives = _top_on_path(adapter, kernel_table, device, trim)
-    cpu_attribution = _cpu_attribution(conn, device, trim, kwargs)
+    cpu_attribution = _cpu_attribution(conn, device, trim)
 
     return [
         {
@@ -300,23 +348,46 @@ def _execute(conn, **kwargs) -> list[dict]:
             "top_compute_kernels": top_compute,
             "top_collectives": top_collectives,
             "cpu_attribution": cpu_attribution,
-            "note": _verdict_note(bound_class, top_cat, top_share, second_share),
+            "note": _verdict_note(
+                bound_class, top_cat, top_share, second_share, margin, mixed_reason
+            ),
         }
     ]
 
 
-def _verdict_note(bound_class: str, top_cat: str, top_share: float, second_share: float) -> str:
+def _verdict_note(
+    bound_class: str,
+    top_cat: str,
+    top_share: float,
+    second_share: float,
+    margin: float,
+    mixed_reason: str | None,
+) -> str:
     if bound_class == _CLASS_MIXED:
+        if mixed_reason == "insufficient":
+            return (
+                "Insufficient on-path time to classify — too few kernels or too "
+                "short a window to trust a bound class."
+            )
+        if mixed_reason == "no_majority":
+            return (
+                f"No single category owns a majority of the critical path "
+                f"(top {top_share * 100:.0f}%); reported as mixed rather than "
+                "forcing a plurality winner."
+            )
         return (
             "Near-tie between on-path categories "
             f"({top_share * 100:.0f}% vs {second_share * 100:.0f}%); no single "
             "bottleneck dominates the critical path."
         )
-    return (
+    note = (
         f"{_CATEGORY_TO_CLASS[top_cat]} — {top_share * 100:.0f}% of the critical "
         f"path is {top_cat.replace('_', '-')} on-path time "
         f"(runner-up {second_share * 100:.0f}%)."
     )
+    if margin < _TENTATIVE_MARGIN:
+        note += " Low margin over the runner-up — treat as tentative."
+    return note
 
 
 def _format(rows: list[dict]) -> str:
@@ -384,7 +455,8 @@ _EXPLANATION = (
     "Time is attributed to gpu-compute when a compute kernel runs (overlapping "
     "communication is hidden and counts as compute), to comm when only NCCL "
     "runs exposed, and to cpu when the GPU is idle waiting on the host. The "
-    "dominant on-path bucket is the bound class."
+    "dominant on-path bucket is the bound class. This is a proxy: the trace "
+    "carries no dependency edges, so the true longest path is not computed."
 )
 _SUGGESTED_ACTIONS = [
     "For gpu-compute-bound: profile the top on-path kernels for occupancy / MFU headroom",
@@ -393,6 +465,11 @@ _SUGGESTED_ACTIONS = [
     "Re-run on a single iteration (via --trim) to confirm the class is stable per step",
 ]
 _FALSE_POSITIVE_NOTES = [
+    "The trace carries no dependency edges; the busiest-device timeline is a proxy "
+    "for the true longest path, not the path itself",
+    "Selecting the busiest device by kernel time can under-rank a device that is "
+    "bottlenecked by being idle or exposed (a straggler); in distributed runs the "
+    "true critical device may differ",
     "Very short windows can misattribute time if they clip kernels or collectives",
     "GPU-idle attributed to cpu may include unavoidable launch overhead on tiny-kernel workloads",
     "Multi-GPU profiles are classified per device; the busiest device is used by default",
