@@ -466,9 +466,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 id=finding_id,
                 category="idle",
                 confidence=_gap_confidence(gap_ms),
-                # The gap duration is the recoverable time if the bubble closed
-                # (an upper bound — some is unavoidable launch overhead).
-                headroom_ms=round(gap_ms, 3),
+                # No per-gap headroom: the aggregate idle opportunity is carried
+                # once by the summary finding above, so each recoverable ms is
+                # attributed to exactly one finding rather than double-counted.
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_EXPLANATION,

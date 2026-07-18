@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .annotation import headroom_sort_prefix
+
 Phase = Literal["diagnose", "propose", "reprofile", "diff", "accept"]
 Decision = Literal["accept", "reject"]
 Scope = Literal["global", "gpu", "iteration", "region"]
@@ -55,9 +57,8 @@ def _normalize_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ranked.append((idx, f, score, headroom))
 
     if has_headroom:
-        ranked.sort(
-            key=lambda t: (0 if t[3] is not None else 1, -(t[3] or 0.0), -t[2], t[0])
-        )
+        # Opportunity-first, then the legacy heuristic score, then stable by idx.
+        ranked.sort(key=lambda t: (*headroom_sort_prefix(t[3]), -t[2], t[0]))
     else:
         ranked.sort(key=lambda t: t[2] - t[0], reverse=True)
     return [f for _, f, *_ in ranked]

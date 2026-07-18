@@ -82,6 +82,28 @@ def _format(rows):
     return "\n".join(lines)
 
 
+_EXPLANATION = (
+    "MFU (Model FLOPs Utilization) is achieved TFLOPS / hardware peak TFLOPS for "
+    "the region. The speed-of-light headroom is the GPU-busy time recoverable if "
+    "the region reached peak: union kernel time * (1 - MFU). It bounds the "
+    "opportunity; realizing it needs kernel-level work (better tiling, tensor-core "
+    "use, fusion)."
+)
+_SUGGESTED_ACTIONS = [
+    "Profile the region's top kernels for occupancy and tensor-core eligibility",
+    "Check for memory-bound kernels that cap achievable FLOPS below peak",
+    "Confirm the theoretical_flops used matches the region's actual math",
+]
+_FALSE_POSITIVE_NOTES = [
+    "MFU is only as correct as the user-supplied theoretical_flops; a wrong FLOP "
+    "count scales the headroom proportionally",
+    "The peak is the hardware datasheet ceiling for the chosen precision — real "
+    "attainable peak is lower, so the headroom is an upper bound",
+    "Region-level, not time-anchored: the finding sizes the opportunity, it does "
+    "not localize it to a specific kernel or timestamp",
+]
+
+
 def _to_findings(rows, *, context: dict | None = None) -> list:
     """Emit a speed-of-light finding carrying the region's MFU headroom.
 
@@ -149,10 +171,12 @@ def _to_findings(rows, *, context: dict | None = None) -> list:
             ),
             id=finding_id,
             category="compute",
-            confidence=None,
             headroom_ms=headroom,
             evidence=[evidence_row],
             selection=selection,
+            explanation=_EXPLANATION,
+            suggested_actions=list(_SUGGESTED_ACTIONS),
+            false_positive_notes=list(_FALSE_POSITIVE_NOTES),
             provenance={"skill": "region_mfu", "row_kind": "region_sol"},
         )
     ]

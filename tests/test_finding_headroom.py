@@ -72,6 +72,41 @@ def test_rank_findings_empty():
     assert rank_findings([]) == []
 
 
+def test_rank_findings_stable_on_equal_headroom():
+    """Findings with identical headroom keep their original relative order."""
+    a = _f("a", headroom_ms=50.0)
+    b = _f("b", headroom_ms=50.0)
+    c = _f("c", headroom_ms=50.0)
+    assert [f.label for f in rank_findings([a, b, c])] == ["a", "b", "c"]
+
+
+def test_build_ranks_findings_by_headroom(minimal_nsys_db_path, monkeypatch):
+    """EvidenceBuilder.build() must apply rank_findings so the largest-headroom
+    finding surfaces first — pinning the wiring, not just the primitive."""
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    lo = _f("low headroom / critical", severity="critical", headroom_ms=2.0)
+    hi = _f("high headroom / info", severity="info", headroom_ms=200.0)
+
+    class _FakeSkill:
+        to_findings_fn = staticmethod(lambda rows, context=None: [lo, hi])
+
+        def execute(self, conn, **kwargs):
+            return [{}]
+
+    monkeypatch.setattr("nsys_ai.skills.registry.get_skill", lambda name: _FakeSkill())
+    with Profile(minimal_nsys_db_path) as prof:
+        builder = EvidenceBuilder(prof, device=0)
+        builder._SKILL_PIPELINE = {"fake": ("fake", {})}
+        report = builder.build()
+
+    assert [f.label for f in report.findings] == [
+        "high headroom / info",
+        "low headroom / critical",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _normalize_findings (dict-based — the guided-loop path)
 # ---------------------------------------------------------------------------
@@ -96,6 +131,18 @@ def test_normalize_findings_legacy_when_no_headroom():
     assert [f["label"] for f in ranked] == ["critical", "info"]
 
 
+def test_normalize_findings_largest_first_then_none_last():
+    """Mixed set: largest headroom leads, headroom-less falls last — even when
+    the headroom-less one is more severe."""
+    findings = [
+        {"label": "hr3 crit", "severity": "critical", "type": "region", "headroom_ms": 3.0},
+        {"label": "none crit", "severity": "critical", "type": "region"},
+        {"label": "hr300 info", "severity": "info", "type": "region", "headroom_ms": 300.0},
+    ]
+    ranked = _normalize_findings(findings)
+    assert [f["label"] for f in ranked] == ["hr300 info", "hr3 crit", "none crit"]
+
+
 # ---------------------------------------------------------------------------
 # Producers populate headroom from their existing recoverable-ms evidence
 # ---------------------------------------------------------------------------
@@ -118,11 +165,13 @@ def test_gpu_idle_gaps_headroom():
     findings = _to_findings(rows, context={"profile_id": "p"})
     summary = next(f for f in findings if "Summary" in f.label)
     gap = next(f for f in findings if "Gap" in f.label)
-    assert summary.headroom_ms == 40.0  # total recoverable idle
-    assert gap.headroom_ms == 5.0  # the gap duration in ms
+    assert summary.headroom_ms == 40.0  # aggregate idle opportunity, counted once
+    assert gap.headroom_ms is None  # per-gap not double-counted against the summary
 
 
-def test_overlap_breakdown_headroom_is_exposed_nccl():
+def test_overlap_breakdown_headroom_single_count():
+    """Both findings can fire on one row; the exposed-NCCL headroom must land on
+    exactly one of them, never both (or the ranking double-counts the same ms)."""
     from nsys_ai.skills.builtins.overlap_breakdown import _to_findings
 
     rows = [{
@@ -131,9 +180,10 @@ def test_overlap_breakdown_headroom_is_exposed_nccl():
         "span_start_ns": 0, "span_end_ns": 45_000_000, "device_id": 0,
     }]
     findings = _to_findings(rows, context={"profile_id": "p"})
-    assert findings  # low-overlap and comm-dominated both fire
-    for f in findings:
-        assert f.headroom_ms == 30.0  # exposed (non-overlapped) NCCL
+    assert len(findings) == 2  # low-overlap and comm-dominated both fire
+    headrooms = [f.headroom_ms for f in findings]
+    assert headrooms.count(None) == 1  # exactly one carries it
+    assert sum(h for h in headrooms if h is not None) == 30.0
 
 
 def test_iteration_timing_headroom_is_slack_over_median():
@@ -206,6 +256,26 @@ def test_region_mfu_no_finding_without_flops():
 
     assert _to_findings([_mfu_result(0.0)]) == []
     assert _to_findings([{"error": {"code": "no_flops"}}]) == []
+
+
+def test_region_mfu_at_peak_has_no_headroom():
+    """MFU at/above 100% leaves nothing recoverable -> None, not a bogus 0, and
+    no finding is emitted."""
+    from nsys_ai.skills.builtins.region_mfu import _sol_headroom_ms, _to_findings
+
+    assert _sol_headroom_ms(_mfu_result(100.0, union_s=0.1)) is None
+    assert _to_findings([_mfu_result(100.0, union_s=0.1)]) == []
+
+
+def test_region_mfu_finding_has_guidance_fields():
+    """Consistency with sibling skills: the SOL finding carries explanation,
+    suggested actions, and false-positive notes for downstream consumers."""
+    from nsys_ai.skills.builtins.region_mfu import _to_findings
+
+    f = _to_findings([_mfu_result(30.0, union_s=0.1)], context={"profile_id": "p"})[0]
+    assert f.explanation
+    assert f.suggested_actions
+    assert f.false_positive_notes
 
 
 def test_region_mfu_format_renders_ms_not_zeros():
