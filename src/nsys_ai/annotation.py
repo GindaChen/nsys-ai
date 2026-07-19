@@ -96,6 +96,10 @@ class Finding:
     false_positive_notes: list[str] | None = None
     provenance: dict[str, Any] | None = None
     diff_lineage: "DiffLineage | None" = None
+    # Potential recoverable time (ms) if this finding's inefficiency were
+    # removed — the optimization *opportunity*, used by :func:`rank_findings`
+    # to order findings by upside rather than severity alone.
+    headroom_ms: float | None = None
 
     def to_dict(self) -> dict:
         # Walk fields() directly for scalar / primitive fields; nested
@@ -144,6 +148,30 @@ class Finding:
         if filtered.get("diff_lineage") is not None:
             filtered["diff_lineage"] = DiffLineage.from_dict(filtered["diff_lineage"])
         return cls(**filtered)
+
+
+def headroom_sort_prefix(headroom_ms: float | None) -> tuple[int, float]:
+    """Sort-key prefix that orders by optimization opportunity.
+
+    Items with a numeric ``headroom_ms`` come first, largest headroom first;
+    ``None`` (or any non-numeric value that survived deserialization) sorts
+    after. Shared by :func:`rank_findings` (Finding objects) and the guided
+    loop's dict-based ranking so both stay consistent.
+    """
+    hv = headroom_ms if isinstance(headroom_ms, (int, float)) else None
+    return (0 if hv is not None else 1, -(hv or 0.0))
+
+
+def rank_findings(findings: list["Finding"]) -> list["Finding"]:
+    """Order findings by optimization opportunity (largest headroom first).
+
+    Findings carrying a numeric ``headroom_ms`` sort ahead of those without,
+    largest first, so the biggest *recoverable* win surfaces first regardless
+    of how severe a finding merely looks. The sort is stable, so findings
+    without a headroom keep their original relative order and — when **no**
+    finding carries one — the input order is returned unchanged.
+    """
+    return sorted(findings, key=lambda f: headroom_sort_prefix(f.headroom_ms))
 
 
 @dataclass

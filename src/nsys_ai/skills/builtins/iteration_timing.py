@@ -78,6 +78,8 @@ def _to_findings(rows: list[dict]) -> list:
                         f"({pct:.0f}% of median {med:.1f}ms), "
                         f"{it.get('kernel_count', 0)} kernels"
                     ),
+                    # Recoverable time if this iteration ran at the median pace.
+                    headroom_ms=round(it["duration_ms"] - med, 3),
                 )
             )
     return findings

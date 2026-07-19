@@ -387,6 +387,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         id=finding_id,
                         category="idle",
                         confidence=min(0.95, 0.4 + pct / 100),
+                        # All idle time on the pipeline is candidate recoverable
+                        # time — the opportunity if the bubbles were closed.
+                        headroom_ms=total_idle_ms,
                         evidence=[evidence_row],
                         selection=selection,
                         explanation=_EXPLANATION,
@@ -463,6 +466,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 id=finding_id,
                 category="idle",
                 confidence=_gap_confidence(gap_ms),
+                # No per-gap headroom: the aggregate idle opportunity is carried
+                # once by the summary finding above, so each recoverable ms is
+                # attributed to exactly one finding rather than double-counted.
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_EXPLANATION,

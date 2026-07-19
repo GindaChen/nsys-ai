@@ -311,6 +311,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 id=finding_id,
                 category="communication",
                 confidence=_variability_confidence(ratio, r.get("count", 0)),
+                # Straggler slack: the slowest instance's excess over the
+                # average is recoverable if the variability were eliminated.
+                headroom_ms=round(r["max_ms"] - r["avg_ms"], 3),
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_HIGH_VARIABILITY_EXPLANATION,

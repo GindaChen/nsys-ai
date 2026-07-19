@@ -265,6 +265,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
 
     profile_id = (context or {}).get("profile_id", "unknown")
     r = rows[0]
+    # Exposed (non-overlapped) NCCL is the recoverable time. The low-overlap and
+    # comm-dominated findings below describe the same inefficiency and can both
+    # fire on one row, so the headroom is attributed to exactly one of them (the
+    # first to fire) — carrying it on both would double-count the same ms and
+    # corrupt the opportunity ranking. None (not 0.0) means "no signal".
+    exposed_nccl_ms = r.get("nccl_only_ms")
+    headroom_claimed = False
     nccl_ms = r.get("nccl_only_ms", 0) + r.get("overlap_ms", 0)
     compute_ms = r.get("compute_only_ms", 0)
     overlap_pct = r.get("overlap_pct", 0)
@@ -326,6 +333,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 id=finding_id,
                 category="communication",
                 confidence=_overlap_confidence(float(overlap_pct), float(nccl_ms), float(total_ms)),
+                headroom_ms=exposed_nccl_ms,
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_LOW_OVERLAP_EXPLANATION,
@@ -334,6 +342,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 provenance={"skill": "overlap_breakdown", "row_kind": "low_overlap"},
             )
         )
+        headroom_claimed = True
 
     # Communication dominated: NCCL > compute
     if nccl_ms > 0 and compute_ms > 0:
@@ -377,6 +386,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     id=finding_id,
                     category="communication",
                     confidence=_ratio_confidence(float(ratio)),
+                    # Exposed NCCL headroom already claimed by the low-overlap
+                    # finding if it fired; avoid double-counting the same ms.
+                    headroom_ms=None if headroom_claimed else exposed_nccl_ms,
                     evidence=[evidence_row],
                     selection=selection,
                     explanation=_COMM_DOMINATED_EXPLANATION,
