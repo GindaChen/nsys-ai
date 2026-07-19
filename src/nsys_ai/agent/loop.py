@@ -292,9 +292,9 @@ class Agent:
 
         return "\n".join(sections)
 
-    def run_skill(self, name: str, **kwargs) -> str:
+    def run_skill(self, skill_name: str, **kwargs) -> str:
         """Run a specific skill by name."""
-        return run_skill(name, self.conn, **kwargs)
+        return run_skill(skill_name, self.conn, **kwargs)
 
     def _try_llm_triage(self, question: str, triage_results: list[dict]) -> list[str]:
         """Use LLM to select the next set of skills based on the triage findings."""

@@ -1019,3 +1019,22 @@ def test_tensor_core_usage_duckdb():
     assert "ampere_fp16_fallback" in text
     assert "ampere_sgemm_128x128" in text
     assert "⚠️" in text
+
+
+def test_run_skill_name_param_does_not_collide(minimal_nsys_conn):
+    """Regression (#225): a skill exposing its own ``name`` parameter must run
+    through ``run_skill`` without a "got multiple values for argument 'name'"
+    TypeError. Before the fix the skill-name positional collided with the
+    skill's ``name`` kwarg (e.g. region_mfu)."""
+    from nsys_ai.skills.registry import run_skill
+
+    result = run_skill(
+        "region_mfu",
+        minimal_nsys_conn,
+        name="nonexistent_region",
+        source="kernel",
+        theoretical_flops=1e12,
+        peak_tflops=100.0,
+    )
+    # Returns formatted text (an error string is fine) — the point is no raise.
+    assert isinstance(result, str)
