@@ -551,17 +551,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # bottleneck would return. A gpu-compute-bound path has no headroom here —
     # its recoverable time is a speed-of-light question (region MFU), not a
     # bucket that can simply be removed — so it is left unset.
-    # Deliberately no headroom. This skill's contribution is the *verdict* —
-    # which resource bounds the run — not a new pool of recoverable time. The
-    # cpu bucket is the same GPU-idle that gpu_idle_gaps already claims, and the
-    # comm bucket the same exposed NCCL that overlap_breakdown claims; measured
-    # on a real 82.5s profile the two idle figures were 79.0s and 78.5s, so
+    # This skill reports no headroom by design. Its contribution is the
+    # *verdict* — which resource bounds the run — not a new pool of recoverable
+    # time: the cpu bucket is the same GPU-idle gpu_idle_gaps already claims and
+    # the comm bucket the same exposed NCCL overlap_breakdown claims. Measured on
+    # a real 82.5s profile those two idle figures were 79.0s and 78.5s, so
     # claiming both would report ~157s recoverable out of 82.5s. Those skills
     # keep the claim because they can also localize it to specific gaps and
-    # streams. The bucket sizes remain on the evidence row below, so nothing is
-    # lost — only the double count.
-    headroom_ms = None
-
+    # streams; the bucket sizes stay on the evidence row, so only the double
+    # count is lost.
     return [
         Finding(
             type="region",
@@ -574,8 +572,6 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             id=finding_id,
             category=_CATEGORY_TO_FINDING[top_cat],
             confidence=float(r.get("confidence", 0.0)),
-            headroom_ms=headroom_ms,
-            headroom_basis="capture_total" if headroom_ms is not None else None,
             evidence=[evidence_row],
             selection=selection,
             explanation=_EXPLANATION,

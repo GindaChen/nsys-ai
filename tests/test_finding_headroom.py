@@ -375,6 +375,13 @@ def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
     overlap_breakdown, so enrolling it while all three claimed headroom would
     report more recoverable time than the profile contains — measured at ~157s
     of claims on an 82.5s profile before this was fixed.
+
+    This is a coarse net: it catches a future producer that grossly over-claims,
+    but the synthetic fixture is small enough that a modest double count stays
+    under the bound (verified by mutation — restoring critical_path's headroom
+    does not trip this, though it does trip the sibling test below). The precise
+    assertion for this case is
+    ``test_critical_path_is_in_the_pipeline_without_claiming_headroom``.
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
     from nsys_ai.profile import Profile
@@ -382,6 +389,12 @@ def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
     with Profile(minimal_nsys_db_path) as prof:
         span_ms = (prof.meta.time_range[1] - prof.meta.time_range[0]) / 1e6
         report = EvidenceBuilder(prof, device=0).build()
+
+    carriers = [f for f in report.findings if f.headroom_ms is not None]
+    assert carriers, (
+        "fixture produced no headroom-bearing findings, so the bound below is "
+        "trivially satisfied and this test proves nothing"
+    )
 
     claimed = sum(f.headroom_ms or 0.0 for f in report.findings)
     assert claimed <= span_ms * 1.05, (
