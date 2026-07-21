@@ -386,10 +386,9 @@ def test_insufficient_on_path_time_reported_mixed():
 
 
 @pytest.mark.parametrize(
-    "label,kernels,expected_class,bucket",
+    "kernels,expected_class,bucket",
     [
         (
-            "cpu-bound",
             [
                 (0, 7, 1, 0, 100_000, 1),
                 (0, 7, 2, 20 * MS, 20 * MS + 100_000, 1),
@@ -399,7 +398,6 @@ def test_insufficient_on_path_time_reported_mixed():
             "cpu_ms",
         ),
         (
-            "comm-bound",
             [
                 (0, 7, 1, 0, 1 * MS, 1),  # 1ms compute
                 (0, 8, 2, 2 * MS, 20 * MS, 10),  # 18ms exposed NCCL
@@ -409,7 +407,7 @@ def test_insufficient_on_path_time_reported_mixed():
         ),
     ],
 )
-def test_reports_no_headroom_to_avoid_double_counting(label, kernels, expected_class, bucket):
+def test_reports_no_headroom_to_avoid_double_counting(kernels, expected_class, bucket):
     """The bound class is a verdict, not a new pool of recoverable time.
 
     Both committed branches must be covered: the cpu bucket is the idle

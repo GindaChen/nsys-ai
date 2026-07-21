@@ -366,52 +366,32 @@ def test_every_headroom_producer_declares_a_capture_scoped_basis():
     assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
 
 
-def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
+def test_claimed_idle_headroom_never_exceeds_measured_idle(minimal_nsys_db_path):
     """Cross-skill single-count invariant (#230).
 
     Each skill enforces single-counting internally, but the pipeline runs
-    several together and nothing checked them against each other. critical_path
-    measures the same idle as gpu_idle_gaps and the same exposed NCCL as
-    overlap_breakdown, so enrolling it while all three claimed headroom would
-    report more recoverable time than the profile contains — measured at ~157s
-    of claims on an 82.5s profile before this was fixed.
+    several together and nothing checked them against each other.
 
-    Scope, precisely: this guards the *other* producers. It cannot catch a
-    critical_path double count at any threshold, because that skill classifies
-    this fixture as ``mixed`` and ``_to_findings`` returns nothing for a
-    non-committed class — so it contributes zero findings here regardless of
-    what headroom it would claim. The critical_path case is covered by
-    ``test_critical_path_reports_no_headroom`` and
-    ``test_bound_class_finding_reaches_a_built_report``.
+    The bound is per category, not per profile: what double counting violates is
+    that the idle a report offers as recoverable exceeds the idle actually
+    measured. A whole-profile-span bound is far too loose to catch it — with the
+    per-gap findings restored to also claim their gaps, so every idle
+    millisecond is counted twice, the total stayed comfortably inside the span.
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.overlap import overlap_analysis
     from nsys_ai.profile import Profile
 
     with Profile(minimal_nsys_db_path) as prof:
-        span_ms = (prof.meta.time_range[1] - prof.meta.time_range[0]) / 1e6
+        measured_idle_ms = float(overlap_analysis(prof, 0).get("idle_ms", 0.0))
         report = EvidenceBuilder(prof, device=0).build()
 
-    carriers = [f for f in report.findings if f.headroom_ms is not None]
-    assert carriers, (
-        "fixture produced no headroom-bearing findings, so the bound below is "
-        "trivially satisfied and this test proves nothing"
+    claimed = sum(f.headroom_ms or 0.0 for f in report.findings if f.category == "idle")
+    assert claimed > 0, "fixture produced no idle headroom, so this proves nothing"
+    assert claimed <= measured_idle_ms + 0.01, (
+        f"report offers {claimed:.2f}ms of recoverable idle but only "
+        f"{measured_idle_ms:.2f}ms was measured — two skills are counting the same gaps"
     )
-
-    claimed = sum(f.headroom_ms or 0.0 for f in report.findings)
-    assert claimed <= span_ms * 1.05, (
-        f"pipeline claims {claimed:.1f}ms recoverable on a {span_ms:.1f}ms profile — "
-        "two skills are counting the same milliseconds"
-    )
-
-
-def test_critical_path_is_registered_in_the_pipeline():
-    """`to_findings_fn` has exactly one production call site, driven by this
-    dict, so absence from it makes the finding unreachable (#230). This is a
-    removal guard only — that the skill actually *works* through the pipeline is
-    asserted by test_bound_class_finding_reaches_a_built_report."""
-    from nsys_ai.evidence_builder import EvidenceBuilder
-
-    assert "critical_path" in {v[0] for v in EvidenceBuilder._SKILL_PIPELINE.values()}
 
 
 def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
@@ -426,9 +406,25 @@ def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
     from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
 
+    # The window spans the fixture's later kernels, where GPU-idle dominates
+    # clearly enough to commit to a class. Untrimmed, the fixture is `mixed` and
+    # correctly emits nothing, so the trim is load-bearing rather than cosmetic.
+    trim = (4_500_000, 9_000_000)
     with Profile(minimal_nsys_db_path) as prof:
-        report = EvidenceBuilder(prof, device=0, trim=(4_500_000, 9_000_000)).build()
+        conn = prof.db if prof.db is not None else prof.conn
+        classified = get_skill("critical_path").execute(conn, device=0,
+                                                        trim_start_ns=trim[0],
+                                                        trim_end_ns=trim[1])[0]
+        report = EvidenceBuilder(prof, device=0, trim=trim).build()
+
+    # Asserted first so a fixture change that flips the class fails here, saying
+    # why, instead of as an unexplained "verdict missing from the report".
+    assert classified["bound_class"] == "cpu-bound", (
+        f"fixture/trim no longer yields a committed class ({classified['bound_class']}); "
+        "adjust the window rather than the assertion below"
+    )
 
     cp = [f for f in report.findings if (f.provenance or {}).get("skill") == "critical_path"]
     assert len(cp) == 1, "the bound-class verdict must reach the report"
