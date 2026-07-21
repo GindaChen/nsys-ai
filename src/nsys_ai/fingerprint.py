@@ -10,10 +10,53 @@ artefacts (envelope and ``TraceSelection``).
 import hashlib
 import json
 import os
+import re
 import typing
 from dataclasses import dataclass, field
 
 from .connection import DB_ERRORS, wrap_connection
+
+# Characters kept when trace-derived text is placed into prompt context or a
+# report: word characters, whitespace and light punctuation. Anything else
+# (markup, control characters, template/chat-template markers) is dropped.
+_SCRUB_ALLOWED = re.compile(r"[^\w\s\-.,():'/]")
+
+
+def _scrub(text: str, limit: int) -> str:
+    """Normalize untrusted trace text for display: strip exotic characters,
+    collapse all whitespace to single spaces (so no newline can forge an extra
+    line in the prompt), and cap the length."""
+    if not text:
+        return ""
+    return " ".join(_SCRUB_ALLOWED.sub("", str(text)).split())[:limit]
+
+
+def _evidence_snippet(matched: str, keyword: str | None, width: int = 60) -> str:
+    """A short window of the matched string, centred on the keyword.
+
+    Captured strings are often whole log blocks — kilobytes long — so truncating
+    from the start typically cuts the match off entirely and shows the reader
+    nothing relevant. Centring the window on the hit is what makes the evidence
+    actually reviewable.
+    """
+    flat = " ".join(str(matched or "").split())
+    pos = flat.lower().find(keyword) if keyword else -1
+    if pos < 0:
+        return flat[:width]
+    start = max(0, pos - width // 3)
+    end = min(len(flat), start + width)
+    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+
+
+def _like_literal(keyword: str) -> str:
+    """Escape SQL ``LIKE`` wildcards so a keyword matches literally.
+
+    ``_`` matches any single character in SQL but is a literal in Python, so
+    without escaping, SQL matches strings (``optimizer.step`` for the keyword
+    ``optimizer_step``) that the Python-side keyword recovery cannot confirm —
+    which previously produced evidence naming a keyword that never matched.
+    """
+    return keyword.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
 
 
 @dataclass
@@ -31,25 +74,22 @@ class ProfileFingerprint:
     framework_evidence: str = ""
 
     def to_prompt_string(self) -> str:
-        import re
-
-        # The evidence snippet is arbitrary text lifted out of the trace (log
-        # lines, environment variables, mangled symbols) and this string is fed
-        # to the agent as prompt context, so it gets the same scrubbing and
-        # length cap already applied to nic_summary below.
+        # Both fields below carry text lifted out of the trace (NIC names, log
+        # lines, environment variables, mangled symbols) into the agent's prompt
+        # context, so both are scrubbed and length-capped the same way.
         framework_line = f"Framework: {self.framework}"
-        if self.framework_evidence:
-            safe_evidence = re.sub(r"[^\w\s\-.,():'/]", "", str(self.framework_evidence))
-            safe_evidence = " ".join(safe_evidence.split())[:120]
-            if safe_evidence:
-                framework_line += f" (matched {safe_evidence})"
+        safe_evidence = _scrub(self.framework_evidence, 120)
+        if safe_evidence:
+            # Labelled as trace-derived so the agent treats it as observed data
+            # rather than instruction.
+            framework_line += f' (matched, from trace text: "{safe_evidence}")'
         lines = [
             framework_line,
             f"Distributed training: {'yes' if self.distributed else 'no'}",
             f"Multi-node (RDMA): {'yes' if self.multi_node else 'no'}",
         ]
-        if self.nic_summary:
-            safe_nic = re.sub(r"[^\w\s\-.,()]", "", str(self.nic_summary)).strip()[:200]
+        safe_nic = _scrub(self.nic_summary, 200)
+        if safe_nic:
             lines.append(f"Network: {safe_nic}")
         if self.precision_notes:
             lines.append("Notes: " + "; ".join(self.precision_notes))
@@ -91,34 +131,35 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
     adapter = wrap_connection(conn)
     tables = adapter.get_table_names()
 
-    # Step A: framework detection by keyword sweep, in priority order — the
-    # first framework with a hit wins, so ordering encodes specificity. Each
-    # sweep is a `LIKE '%kw%'` scan stopped by LIMIT 1, so it is cheap when a
-    # match exists early and costs a full table scan per framework that does
-    # not match (noticeable only on multi-million-row StringIds tables).
     framework = "Generic CUDA"
     framework_evidence = ""
 
     def _check_framework(table: str, column: str) -> tuple[str, str] | None:
         """First framework (in priority order) with a keyword hit, plus evidence.
 
-        Keeps the single OR-ed sweep per framework (probing each keyword with
-        its own query would mean a full LIKE scan per keyword — seconds on a
-        multi-million-row StringIds table). The matched *value* is selected
-        rather than a literal 1, so the specific keyword is recovered in Python
-        for free, making the framework claim auditable instead of asserted.
+        One OR-ed sweep per framework, stopped by ``LIMIT 1`` — probing each
+        keyword separately would cost a full LIKE scan per keyword, seconds on a
+        multi-million-row StringIds table. The matched *value* is selected rather
+        than a literal 1 so the specific keyword is recovered in Python for free,
+        which is what makes the framework claim auditable rather than asserted.
         """
         try:
             for fw, lower_keywords in _LOWERCASE_FRAMEWORK_PRIORITY:
-                like_conds = " OR ".join(f"{column} LIKE '%{kw}%'" for kw in lower_keywords)
+                like_conds = " OR ".join(
+                    f"{column} LIKE '%{_like_literal(kw)}%' ESCAPE '\\'" for kw in lower_keywords
+                )
                 cur = adapter.execute(f"SELECT {column} FROM {table} WHERE {like_conds} LIMIT 1")
                 row = cur.fetchone()
                 if row:
                     matched = str(row[0] or "")
                     lowered = matched.lower()
-                    kw = next((k for k in lower_keywords if k in lowered), lower_keywords[0])
-                    snippet = " ".join(matched.split())[:60]
-                    return fw, f"'{kw}' in {table}: {snippet}"
+                    kw = next((k for k in lower_keywords if k in lowered), None)
+                    snippet = _evidence_snippet(matched, kw)
+                    # Never name a keyword that cannot be confirmed inside the
+                    # matched string: fabricated evidence would be worse than
+                    # none, and this field exists precisely to be trustworthy.
+                    origin = f"'{kw}' in {table}" if kw else table
+                    return fw, f"{origin}: {snippet}"
         except DB_ERRORS:
             pass
         return None
@@ -159,6 +200,18 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
             )
             row = cur.fetchone()
             if row and row[0] is not None and int(row[0]) > 1:
+                distributed = True
+        except DB_ERRORS:
+            pass
+
+    # Second fallback: NCCL collective kernels in the string pool. A multi-node
+    # run is normally captured one report per rank, so the multi-device check
+    # above sees a single device and would miss it — but a rank that runs NCCL
+    # collectives is participating in a distributed job by definition.
+    if not distributed and "StringIds" in tables:
+        try:
+            cur = adapter.execute("SELECT 1 FROM StringIds WHERE value LIKE '%nccl%' LIMIT 1")
+            if cur.fetchone():
                 distributed = True
         except DB_ERRORS:
             pass

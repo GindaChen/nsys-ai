@@ -65,12 +65,14 @@ _AUTO_TRIM_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 # _to_findings (the structured roll-up emitter) so a tweak in one place
 # can't drift from the other. Same constants-at-module-top convention as
 # PR #149 (kernel_launch_overhead) and PR #153 (top_kernels).
+
 # Profiler-overhead tiers. A few percent of per-event CUPTI cost is normal and
-# expected — at 1% a trace is *clean*, so the old 1% "contaminated" threshold
-# labelled healthy captures critical. Below _OVERHEAD_NOTABLE_PCT nothing is
-# reported at all; between the two it is a warning (timings slightly perturbed);
-# above _OVERHEAD_CONTAMINATED_PCT kernel durations are materially distorted.
-# These are calibration judgements, tuned to avoid crying wolf on clean traces.
+# expected — at 1% a trace is *clean*, yet the previous 1% threshold flagged such
+# captures as "contaminated" at critical severity. Below _OVERHEAD_NOTABLE_PCT
+# nothing is reported; between the two it is a warning (timings slightly
+# perturbed); above _OVERHEAD_CONTAMINATED_PCT kernel durations are materially
+# distorted. These are calibration judgements, chosen to avoid crying wolf on
+# clean traces.
 _OVERHEAD_NOTABLE_PCT = 5.0
 _OVERHEAD_CONTAMINATED_PCT = 15.0
 _SYNC_BOUND_DENSITY_PCT = 20.0
@@ -631,13 +633,20 @@ def _infer_bottleneck(m: dict) -> str:
 # Explanation strings interpolate the threshold constants at module load
 # so the prose stays in sync with the thresholds it cites. Hardcoded
 # values would silently drift if a threshold were ever tuned.
-_OVERHEAD_EXPLANATION = (
-    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_NOTABLE_PCT}% of "
-    "profile span, which perturbs kernel durations and launch timings enough to "
-    "mask small regressions. This measures the profiler's own cost — it is a "
-    "capture-quality caveat, not a bottleneck in the workload. Re-capture with "
-    "torch.cuda.profiler.start/stop() + --capture-range=cudaProfilerApi to scope "
-    "nsys to the region of interest."
+_OVERHEAD_RECAPTURE_ADVICE = (
+    "This measures the profiler's own cost — it is a capture-quality caveat, not a "
+    "bottleneck in the workload. Re-capture with torch.cuda.profiler.start/stop() + "
+    "--capture-range=cudaProfilerApi to scope nsys to the region of interest."
+)
+_OVERHEAD_WARNING_EXPLANATION = (
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_NOTABLE_PCT}% of profile "
+    "span, enough to perturb kernel durations and launch timings and mask small "
+    f"regressions. {_OVERHEAD_RECAPTURE_ADVICE}"
+)
+_OVERHEAD_CRITICAL_EXPLANATION = (
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
+    "profile span; at this level the captured kernel durations are no longer "
+    f"trustworthy. {_OVERHEAD_RECAPTURE_ADVICE}"
 )
 _SYNC_EXPLANATION = (
     "Synchronous CPU→GPU waits (cudaStreamSynchronize, cudaMemcpy, .item(), "
@@ -798,37 +807,43 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # more harm than good.
     if _OVERHEAD_NOTABLE_PCT < overhead_pct <= _OVERHEAD_PCT_SANITY_MAX:
         overhead_ms = float(dq.get("profiler_overhead_ms", 0) or 0)
-        contaminated = overhead_pct > _OVERHEAD_CONTAMINATED_PCT
+        # Resolve the tier once, so the label, severity, cited threshold and prose
+        # cannot drift apart — and so the two tiers can be read side by side.
+        if overhead_pct > _OVERHEAD_CONTAMINATED_PCT:
+            label = f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)"
+            severity = "critical"
+            threshold = _OVERHEAD_CONTAMINATED_PCT
+            explanation = _OVERHEAD_CRITICAL_EXPLANATION
+            trust = (
+                f"Above {_OVERHEAD_CONTAMINATED_PCT}% the captured kernel durations are "
+                "no longer trustworthy."
+            )
+        else:
+            label = f"Profiler overhead is elevated ({overhead_pct:.1f}%)"
+            severity = "warning"
+            threshold = _OVERHEAD_NOTABLE_PCT
+            explanation = _OVERHEAD_WARNING_EXPLANATION
+            trust = (
+                "Measurements are usable but slightly perturbed; treat small regressions "
+                "with care."
+            )
         _emit(
             finding_id="profile_overhead_contaminated",
-            label=(
-                f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)"
-                if contaminated
-                else f"Profiler overhead is elevated ({overhead_pct:.1f}%)"
-            ),
-            severity="critical" if contaminated else "warning",
+            label=label,
+            severity=severity,
             category="profile_quality",
             values={
                 "overhead_pct": round(overhead_pct, 2),
                 "overhead_ms": round(overhead_ms, 2),
-                "threshold_pct": (
-                    _OVERHEAD_CONTAMINATED_PCT if contaminated else _OVERHEAD_NOTABLE_PCT
-                ),
+                "threshold_pct": threshold,
             },
             units={"overhead_pct": "percent", "overhead_ms": "ms", "threshold_pct": "percent"},
             note=(
                 f"Per-event profiler overhead is {overhead_pct:.1f}% of profile span "
-                f"({overhead_ms:.1f}ms). "
-                + (
-                    f"Above {_OVERHEAD_CONTAMINATED_PCT}% the captured kernel durations are "
-                    "no longer trustworthy."
-                    if contaminated
-                    else "Measurements are usable but slightly perturbed; treat small "
-                    "regressions with care."
-                )
-                + " This is a property of the capture, not a workload bottleneck."
+                f"({overhead_ms:.1f}ms). {trust} This is a property of the capture, "
+                "not a workload bottleneck."
             ),
-            explanation=_OVERHEAD_EXPLANATION,
+            explanation=explanation,
             actions=_OVERHEAD_ACTIONS,
         )
 
@@ -1090,7 +1105,7 @@ def _format(rows):
         # line or environment variable.
         evidence = fp.get("framework_evidence")
         if evidence:
-            lines.append(f"                └ matched {evidence}")
+            lines.append(f"                └─ matched {evidence}")
 
     lines.append(f"  GPU:          {m.get('gpu', '?')}")
     lines.append(f"  Profile span: {m.get('profile_span_ms', 0):.1f}ms")
@@ -1101,9 +1116,9 @@ def _format(rows):
         # Only flag the overhead once it is actually notable; a fraction of a
         # percent is a clean capture and carrying a warning glyph there is the
         # same over-signalling as calling it a bottleneck.
-        marker = "⚠️" if overhead_pct_raw > _OVERHEAD_NOTABLE_PCT else "  "
+        overhead_icon = "⚠️" if overhead_pct_raw > _OVERHEAD_NOTABLE_PCT else "  "
         lines.append(
-            f"  {marker} Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms "
+            f"  {overhead_icon} Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms "
             f"({dq.get('overhead_pct', overhead_pct_raw)}% of span)"
         )
 
@@ -1208,8 +1223,11 @@ SKILL = Skill(
         "covering GPU info, top kernels, compute/NCCL overlap, NCCL summary, "
         "communicator-aware NCCL hints, idle gaps, root cause findings, and NVTX summary "
         "(top regions + iteration count/median/slowest) — all in a single call. "
-        "If Profiler Overhead is >1%, advise the user to use torch.cuda.profiler.start/stop() "
-        "and --capture-range=cudaProfilerApi instead of full-script profiling. "
+        f"If Profiler Overhead exceeds {_OVERHEAD_NOTABLE_PCT}%, advise the user to use "
+        "torch.cuda.profiler.start/stop() and --capture-range=cudaProfilerApi instead of "
+        "full-script profiling; below that the capture is clean and needs no action. "
+        "Profiler overhead measures the capture, never the workload — never report it as "
+        "a bottleneck. "
         "Use this as the FIRST skill to call on any new profile. "
         "The nvtx.iteration_count, nvtx.median_iter_ms, and nvtx.slowest_iter_ms fields "
         "let you skip the first iteration_timing call for Mode 5 and Mode 9."
