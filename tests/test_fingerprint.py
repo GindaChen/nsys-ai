@@ -388,3 +388,64 @@ def test_get_profile_id_handles_missing_gpu_uuid_column():
     oc.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, 'different-uuid')")
     other.commit()
     assert get_profile_id(other, fallback_path="/x.sqlite") != pid
+
+
+# ── #216: framework claims must be grounded, topology must be consistent ──
+
+
+def test_generic_tokens_do_not_imply_deepspeed():
+    """Regression (#216): 'ZeRO'/'offload' matched `at::zeros`-style symbols and
+    an unrelated OFFLOAD_TARGET_NAMES env var, making DeepSpeed the reported
+    framework for most PyTorch traces."""
+    conn = build_mock_db(
+        [
+            "void at::native::vectorized_elementwise_kernel<at::zeros>",
+            "OFFLOAD_TARGET_NAMES=nvptx-none:amdgcn-amdhsa TORCHINDUCTOR_CACHE_DIR=/tmp",
+            "Qwen3Model.forward",
+        ]
+    )
+    fp = get_fingerprint(conn)
+    assert fp.framework != "DeepSpeed"
+    assert fp.framework == "PyTorch"  # the honest read of these strings
+
+
+def test_real_deepspeed_markers_still_detected():
+    """Tightening the keywords must not lose true positives."""
+    for marker in ("DeepSpeedEngine", "deepspeed", "zero_optimization"):
+        fp = get_fingerprint(build_mock_db([marker]))
+        assert fp.framework == "DeepSpeed", marker
+
+
+def test_framework_evidence_is_recorded():
+    """The claim must carry what it rests on, so a match in a log line is
+    distinguishable from one against a real framework symbol."""
+    conn = build_mock_db(["SamplerOutput"])
+    fp = get_fingerprint(conn)
+    assert fp.framework == "vLLM"
+    assert "samploutput" in fp.framework_evidence.lower() or "SamplerOutput" in fp.framework_evidence
+    assert "StringIds" in fp.framework_evidence
+
+
+def test_nic_alone_does_not_imply_multi_node():
+    """Regression (#216): an RDMA-capable NIC on the host is not evidence the
+    run spanned nodes. Reporting it as such produced the self-contradictory
+    'Distributed: no, Multi-node: yes'."""
+    conn = build_mock_db([], target_info=[("5555", "mlx5_0")])
+    fp = get_fingerprint(conn)
+    assert fp.distributed is False
+    assert fp.multi_node is False, "multi_node must require distributed evidence"
+    # The hardware observation itself is still reported, only the claim is gated.
+    assert "mlx5_0" in fp.nic_summary
+
+
+def test_multi_node_never_contradicts_distributed():
+    """The contradiction must be structurally impossible across combinations."""
+    cases = [
+        build_mock_db([], target_info=[("5555", "mlx5_0")]),
+        build_mock_db([], payload_schemas=["NCCL communicator"]),
+        build_mock_db([], target_info=[("5555", "mlx5_0")], payload_schemas=["NCCL communicator"]),
+        build_mock_db([]),
+    ]
+    for conn in cases:
+        fp = get_fingerprint(conn)
+        assert not (fp.multi_node and not fp.distributed)

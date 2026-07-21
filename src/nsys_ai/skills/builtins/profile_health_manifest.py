@@ -65,7 +65,14 @@ _AUTO_TRIM_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 # _to_findings (the structured roll-up emitter) so a tweak in one place
 # can't drift from the other. Same constants-at-module-top convention as
 # PR #149 (kernel_launch_overhead) and PR #153 (top_kernels).
-_OVERHEAD_CONTAMINATED_PCT = 1.0
+# Profiler-overhead tiers. A few percent of per-event CUPTI cost is normal and
+# expected — at 1% a trace is *clean*, so the old 1% "contaminated" threshold
+# labelled healthy captures critical. Below _OVERHEAD_NOTABLE_PCT nothing is
+# reported at all; between the two it is a warning (timings slightly perturbed);
+# above _OVERHEAD_CONTAMINATED_PCT kernel durations are materially distorted.
+# These are calibration judgements, tuned to avoid crying wolf on clean traces.
+_OVERHEAD_NOTABLE_PCT = 5.0
+_OVERHEAD_CONTAMINATED_PCT = 15.0
 _SYNC_BOUND_DENSITY_PCT = 20.0
 _COMM_BOUND_OVERLAP_PCT = 30.0
 _IDLE_DOMINANT_PCT = 15.0
@@ -580,11 +587,12 @@ def _infer_bottleneck(m: dict) -> str:
     if sync_density > _SYNC_BOUND_DENSITY_PCT:
         return f"High CPU Synchronization Blocking ({sync_density:.1f}% of span)"
 
-    dq = m.get("data_quality", {})
-    overhead_pct_val = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
-    if overhead_pct_val > _OVERHEAD_CONTAMINATED_PCT:
-        return f"Profiler Overhead ({dq.get('overhead_pct', overhead_pct_val)}%) contaminated the profile"
-
+    # Profiler overhead is deliberately NOT a candidate bottleneck. It is the
+    # measurement tool's own cost, not a property of the workload, so naming it
+    # the suspected bottleneck is a category error — and because this check ran
+    # near the front, a few percent of instrumentation cost used to preempt every
+    # real bottleneck below (NCCL serialization, idle, hotspots). It remains
+    # reported as a profile-quality signal via its own finding.
     overlap = m.get("overlap", {})
     idle = m.get("idle", {})
     nccl = m.get("nccl", {})
@@ -624,10 +632,12 @@ def _infer_bottleneck(m: dict) -> str:
 # so the prose stays in sync with the thresholds it cites. Hardcoded
 # values would silently drift if a threshold were ever tuned.
 _OVERHEAD_EXPLANATION = (
-    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_NOTABLE_PCT}% of "
     "profile span, which perturbs kernel durations and launch timings enough to "
-    "mask real regressions. Re-capture with torch.cuda.profiler.start/stop() + "
-    "--capture-range=cudaProfilerApi to scope nsys to the region of interest."
+    "mask small regressions. This measures the profiler's own cost — it is a "
+    "capture-quality caveat, not a bottleneck in the workload. Re-capture with "
+    "torch.cuda.profiler.start/stop() + --capture-range=cudaProfilerApi to scope "
+    "nsys to the region of interest."
 )
 _SYNC_EXPLANATION = (
     "Synchronous CPU→GPU waits (cudaStreamSynchronize, cudaMemcpy, .item(), "
@@ -786,23 +796,37 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # (``overhead_pct > 100``); that value can only come from a scope
     # mismatch upstream, and surfacing it as a ``critical`` finding does
     # more harm than good.
-    if _OVERHEAD_CONTAMINATED_PCT < overhead_pct <= _OVERHEAD_PCT_SANITY_MAX:
+    if _OVERHEAD_NOTABLE_PCT < overhead_pct <= _OVERHEAD_PCT_SANITY_MAX:
         overhead_ms = float(dq.get("profiler_overhead_ms", 0) or 0)
+        contaminated = overhead_pct > _OVERHEAD_CONTAMINATED_PCT
         _emit(
             finding_id="profile_overhead_contaminated",
-            label=f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)",
-            severity="critical",
+            label=(
+                f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)"
+                if contaminated
+                else f"Profiler overhead is elevated ({overhead_pct:.1f}%)"
+            ),
+            severity="critical" if contaminated else "warning",
             category="profile_quality",
             values={
                 "overhead_pct": round(overhead_pct, 2),
                 "overhead_ms": round(overhead_ms, 2),
-                "threshold_pct": _OVERHEAD_CONTAMINATED_PCT,
+                "threshold_pct": (
+                    _OVERHEAD_CONTAMINATED_PCT if contaminated else _OVERHEAD_NOTABLE_PCT
+                ),
             },
             units={"overhead_pct": "percent", "overhead_ms": "ms", "threshold_pct": "percent"},
             note=(
                 f"Per-event profiler overhead is {overhead_pct:.1f}% of profile span "
-                f"({overhead_ms:.1f}ms). Above {_OVERHEAD_CONTAMINATED_PCT}% the captured "
-                "kernel durations are no longer trustworthy."
+                f"({overhead_ms:.1f}ms). "
+                + (
+                    f"Above {_OVERHEAD_CONTAMINATED_PCT}% the captured kernel durations are "
+                    "no longer trustworthy."
+                    if contaminated
+                    else "Measurements are usable but slightly perturbed; treat small "
+                    "regressions with care."
+                )
+                + " This is a property of the capture, not a workload bottleneck."
             ),
             explanation=_OVERHEAD_EXPLANATION,
             actions=_OVERHEAD_ACTIONS,
@@ -1060,6 +1084,13 @@ def _format(rows):
         dist_str = "Distributed: yes" if fp.get("distributed") else "Distributed: no"
         mn_str = "Multi-node: yes" if fp.get("multi_node") else "Multi-node: no"
         lines.append(f"  Framework:    {fp.get('framework', 'Unknown')} ({dist_str}, {mn_str})")
+        # Show what the framework claim rests on. Framework detection is a
+        # substring match over captured strings, so the evidence is the only way
+        # a reader can tell a real symbol match from an incidental one in a log
+        # line or environment variable.
+        evidence = fp.get("framework_evidence")
+        if evidence:
+            lines.append(f"                └ matched {evidence}")
 
     lines.append(f"  GPU:          {m.get('gpu', '?')}")
     lines.append(f"  Profile span: {m.get('profile_span_ms', 0):.1f}ms")
@@ -1067,8 +1098,13 @@ def _format(rows):
     dq = m.get("data_quality", {})
     overhead_pct_raw = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
     if overhead_pct_raw >= 0.1:
+        # Only flag the overhead once it is actually notable; a fraction of a
+        # percent is a clean capture and carrying a warning glyph there is the
+        # same over-signalling as calling it a bottleneck.
+        marker = "⚠️" if overhead_pct_raw > _OVERHEAD_NOTABLE_PCT else "  "
         lines.append(
-            f"  ⚠️ Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms ({dq.get('overhead_pct', overhead_pct_raw)}% of span)"
+            f"  {marker} Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms "
+            f"({dq.get('overhead_pct', overhead_pct_raw)}% of span)"
         )
 
     # Top kernels

@@ -13,6 +13,7 @@ from nsys_ai.skills.builtins.profile_health_manifest import (
     _KERNEL_HOTSPOT_PCT,
     _MIN_ITERATIONS_FOR_NVTX_COVERAGE,
     _OVERHEAD_CONTAMINATED_PCT,
+    _OVERHEAD_NOTABLE_PCT,
     _OVERHEAD_PCT_SANITY_MAX,
     _SYNC_BOUND_DENSITY_PCT,
     _to_findings,
@@ -93,8 +94,26 @@ class TestOverheadContaminated:
 
     def test_silent_at_threshold(self):
         m = _healthy_manifest()
-        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_NOTABLE_PCT
         assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_low_overhead_is_a_clean_trace_not_a_finding(self):
+        """A trace with ~1% profiler overhead is *clean*; reporting it as a
+        contaminated profile was the over-claim in the original report."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 1.0
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_elevated_overhead_warns_rather_than_criticals(self):
+        """Between the notable and contaminated tiers the capture is usable, so
+        the finding is a warning, not critical."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = (
+            _OVERHEAD_NOTABLE_PCT + _OVERHEAD_CONTAMINATED_PCT
+        ) / 2
+        f = next(f for f in _to_findings([m]) if f.id == "profile_overhead_contaminated")
+        assert f.severity == "warning"
+        assert "not a workload bottleneck" in f.note
 
     def test_silent_when_pct_exceeds_sanity_max(self):
         # An overhead_pct above 100% can only come from a scope mismatch
@@ -334,7 +353,7 @@ class TestStructuralInvariants:
     def test_all_findings_have_required_envelope(self):
         # Trigger every finding type at once.
         m = _healthy_manifest()
-        m["data_quality"]["overhead_pct_raw"] = 5.0
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT + 1.0
         m["sync"]["sync_density_pct"] = 30.0
         m["overlap"]["overlap_pct"] = 10
         m["overlap"]["nccl_only_ms"] = 200.0
@@ -396,3 +415,28 @@ class TestStructuralInvariants:
             assert "evidence" in d
             assert "selection" in d
             assert "suggested_actions" in d
+
+
+class TestBottleneckNeverProfilerOverhead:
+    """Regression (#216): profiler overhead is the measurement tool's own cost,
+    not a workload bottleneck, and must never be named as the suspected one —
+    nor preempt the real bottleneck checks that follow it."""
+
+    def test_overhead_is_not_a_suspected_bottleneck(self):
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 40.0  # extreme overhead
+        assert "overhead" not in _infer_bottleneck(m).lower()
+
+    def test_real_bottleneck_still_surfaces_despite_high_overhead(self):
+        """High overhead used to short-circuit the inference and mask the real
+        finding; the genuine bottleneck must still win."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 40.0
+        m["overlap"]["overlap_pct"] = 5
+        m["overlap"]["nccl_only_ms"] = 500.0
+        bottleneck = _infer_bottleneck(m)
+        assert "NCCL" in bottleneck
