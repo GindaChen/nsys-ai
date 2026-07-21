@@ -169,10 +169,30 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
         min(round(100 * total_gap_ns / effective_span, 1), 100.0) if effective_span > 0 else 0
     )
 
+    # Device-level idle: time when *no* stream had a kernel running, computed by
+    # the same sweep-line union overlap_analysis uses. This is what is actually
+    # recoverable, and it is not `total_idle_ms`: gaps are summed per stream, so
+    # a stream idling while another stream keeps the device busy inflates that
+    # total without any device time being lost. Measured on a two-stream vLLM
+    # profile the per-stream sum was 1.86x the device idle. Left as None when it
+    # cannot be computed, so callers can decline to claim rather than overstate.
+    device_idle_ms: float | None = None
+    try:
+        from ...overlap import overlap_analysis
+        from ...profile import Profile
+
+        _trim = (int(trim_start), int(trim_end)) if trim_start and trim_end else None
+        _ov = overlap_analysis(Profile._from_conn(conn), device, trim=_trim)
+        if "error" not in _ov:
+            device_idle_ms = float(_ov.get("idle_ms", 0.0))
+    except Exception:  # noqa: BLE001 — enrichment only; absence is handled above
+        _log.debug("gpu_idle_gaps device-idle enrichment failed", exc_info=True)
+
     summary = {
         "_summary": True,
         "gap_count": agg.get("gap_count") or 0,
         "total_idle_ms": round(total_gap_ns / 1e6, 2),
+        "device_idle_ms": round(device_idle_ms, 2) if device_idle_ms is not None else None,
         "pct_of_profile": pct_of_profile,
         "gaps_1_5ms": agg.get("gaps_1_5ms") or 0,
         "gaps_5_50ms": agg.get("gaps_5_50ms") or 0,
@@ -342,6 +362,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 and profile_end_ns > profile_start_ns
             ):
                 total_idle_ms = r.get("total_idle_ms", 0)
+                device_idle_ms = r.get("device_idle_ms")
                 gap_count = r.get("gap_count", 0)
                 finding_id = f"idle_summary_gpu{target_device}"
 
@@ -359,6 +380,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     source_skill="gpu_idle_gaps",
                     values={
                         "total_idle_ms": total_idle_ms,
+                        "device_idle_ms": device_idle_ms,
                         "gap_count": gap_count,
                         "pct_of_profile": pct,
                     },
@@ -387,10 +409,13 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         id=finding_id,
                         category="idle",
                         confidence=min(0.95, 0.4 + pct / 100),
-                        # All idle time on the pipeline is candidate recoverable
-                        # time — the opportunity if the bubbles were closed.
-                        headroom_ms=total_idle_ms,
-                        headroom_basis="capture_total",
+                        # Only device-level idle is recoverable. `total_idle_ms`
+                        # sums gaps per stream, so a stream idling while another
+                        # keeps the device busy inflates it without any device
+                        # time being lost. When the device figure is unavailable
+                        # no headroom is claimed, rather than overstating it.
+                        headroom_ms=device_idle_ms,
+                        headroom_basis="capture_total" if device_idle_ms is not None else None,
                         evidence=[evidence_row],
                         selection=selection,
                         explanation=_EXPLANATION,

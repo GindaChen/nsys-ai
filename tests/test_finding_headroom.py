@@ -1,5 +1,7 @@
 """Tests for Finding.headroom_ms and opportunity-based ranking (#190)."""
 
+import pytest
+
 from nsys_ai.annotation import Finding, rank_findings
 from nsys_ai.loop_state import _normalize_findings
 
@@ -163,14 +165,20 @@ def test_normalize_findings_largest_first_then_none_last():
 # ---------------------------------------------------------------------------
 
 
-def test_gpu_idle_gaps_headroom():
+def test_gpu_idle_gaps_headroom_is_device_level():
+    """Headroom must be the device-level idle, not the per-stream gap sum.
+
+    Gaps are summed per stream, so a stream idling while another keeps the
+    device busy inflates that total without any device time being recoverable —
+    measured at 1.86x on a two-stream vLLM profile.
+    """
     from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
 
     rows = [
-        {  # summary row
+        {  # summary row: per-stream sum is 40ms, but the device idled only 25ms
             "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
             "profile_start_ns": 0, "profile_end_ns": 100_000_000,
-            "total_idle_ms": 40.0, "gap_count": 3,
+            "total_idle_ms": 40.0, "device_idle_ms": 25.0, "gap_count": 3,
         },
         {  # a single 5ms gap
             "gap_ns": 5_000_000, "start_ns": 10_000_000, "end_ns": 15_000_000,
@@ -180,8 +188,24 @@ def test_gpu_idle_gaps_headroom():
     findings = _to_findings(rows, context={"profile_id": "p"})
     summary = next(f for f in findings if "Summary" in f.label)
     gap = next(f for f in findings if "Gap" in f.label)
-    assert summary.headroom_ms == 40.0  # aggregate idle opportunity, counted once
+    assert summary.headroom_ms == 25.0, "must claim device idle, not the 40ms stream sum"
+    assert summary.evidence[0].values["total_idle_ms"] == 40.0  # still reported
     assert gap.headroom_ms is None  # per-gap not double-counted against the summary
+
+
+def test_gpu_idle_gaps_declines_to_claim_without_a_device_figure():
+    """If device idle could not be computed, claim nothing rather than fall back
+    to the inflated per-stream sum."""
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
+
+    rows = [{
+        "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
+        "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        "total_idle_ms": 40.0, "device_idle_ms": None, "gap_count": 3,
+    }]
+    summary = next(f for f in _to_findings(rows, context={"profile_id": "p"}) if "Summary" in f.label)
+    assert summary.headroom_ms is None
+    assert summary.headroom_basis is None
 
 
 def test_overlap_breakdown_headroom_single_count():
@@ -438,3 +462,60 @@ def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
     cp = [f for f in report.findings if (f.provenance or {}).get("skill") == "critical_path"]
     assert len(cp) == 1, "the bound-class verdict must reach the report"
     assert cp[0].headroom_ms is None, "and must not claim time another skill localizes"
+
+
+def test_idle_headroom_not_inflated_by_a_busy_parallel_stream(tmp_path):
+    """End-to-end guard for #240 on the layout that exposed it.
+
+    One stream idles for 49ms while another keeps the device busy throughout.
+    Nothing is recoverable — the GPU never stopped working — but the per-stream
+    gap sum reports 49ms. This is the compute-stream + NCCL-stream shape this
+    project targets, so the inflation appears on real workloads (1.86x measured
+    on a two-stream vLLM profile).
+    """
+    import sqlite3
+
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    ms = 1_000_000
+    db = tmp_path / "two_stream.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (globalPid INTEGER DEFAULT 0,"
+        " deviceId INTEGER DEFAULT 0, streamId INTEGER DEFAULT 0,"
+        " correlationId INTEGER DEFAULT 0, start INTEGER, end INTEGER,"
+        " shortName INTEGER, demangledName INTEGER DEFAULT 0);"
+    )
+    conn.execute("INSERT INTO StringIds VALUES (1,'compute_kernel')")
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
+        "(deviceId,streamId,correlationId,start,end,shortName,demangledName)"
+        " VALUES (?,?,?,?,?,?,?)",
+        [
+            (0, 7, 1, 0, 1 * ms, 1, 1),          # stream 7 runs, then idles...
+            (0, 8, 3, 1 * ms, 50 * ms, 1, 1),    # ...while stream 8 covers the device
+            (0, 7, 2, 50 * ms, 51 * ms, 1, 1),   # stream 7 resumes
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    skill = get_skill("gpu_idle_gaps")
+    with Profile(str(db)) as prof:
+        c = prof.db if prof.db is not None else prof.conn
+        rows = skill.execute(c, device=0)
+        findings = skill.to_findings_fn(rows, context={"profile_id": "p"})
+
+    summary_row = next(r for r in rows if r.get("_summary"))
+    assert summary_row["total_idle_ms"] == pytest.approx(49.0, abs=0.5), (
+        "precondition: the per-stream sum should see the 49ms gap"
+    )
+    assert summary_row["device_idle_ms"] == pytest.approx(0.0, abs=0.5), (
+        "the device was busy throughout, so no time is recoverable"
+    )
+    claimed = [f.headroom_ms for f in findings if f.headroom_ms is not None]
+    assert all(h == pytest.approx(0.0, abs=0.5) for h in claimed), (
+        f"no recoverable time exists, but {claimed} was claimed"
+    )
