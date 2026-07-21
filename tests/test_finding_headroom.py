@@ -380,6 +380,11 @@ def test_idle_headroom_is_claimed_by_exactly_one_finding(minimal_nsys_db_path):
     double count anywhere — a false positive on this project's core workload,
     which is worse in a guard than a missed bug. How many findings claim the
     same pool is basis-independent and is what double counting actually means.
+
+    Only ``idle`` is asserted, deliberately. A symmetric check on ``communication``
+    would be wrong: overlap_breakdown claims exposed NCCL while nccl_breakdown
+    claims straggler variance, and those are different pools that can legitimately
+    both fire on one profile — the same false positive in a new place.
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
     from nsys_ai.profile import Profile
