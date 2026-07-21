@@ -364,3 +364,77 @@ def test_every_headroom_producer_declares_a_capture_scoped_basis():
         if n_headroom != n_basis:
             offenders.append(f"{path.name}: {n_headroom} headroom_ms vs {n_basis} headroom_basis")
     assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
+
+
+def test_idle_headroom_is_claimed_by_exactly_one_finding(minimal_nsys_db_path):
+    """Cross-skill single-count invariant (#230).
+
+    Each skill enforces single-counting internally, but the pipeline runs
+    several together and nothing checked them against each other.
+
+    The invariant is stated as a count, not a magnitude. Comparing claimed idle
+    against a device-level idle measurement would be comparing different
+    quantities: gpu_idle_gaps sums gaps per stream, while the device is only
+    idle when *every* stream is. A compute stream idling while an NCCL stream
+    runs is legitimate and would make a magnitude bound fire with no
+    double count anywhere — a false positive on this project's core workload,
+    which is worse in a guard than a missed bug. How many findings claim the
+    same pool is basis-independent and is what double counting actually means.
+
+    Only ``idle`` is asserted, deliberately. A symmetric check on ``communication``
+    would be wrong: overlap_breakdown claims exposed NCCL while nccl_breakdown
+    claims straggler variance, and those are different pools that can legitimately
+    both fire on one profile — the same false positive in a new place.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    with Profile(minimal_nsys_db_path) as prof:
+        report = EvidenceBuilder(prof, device=0).build()
+
+    claimants = [
+        f for f in report.findings if f.category == "idle" and f.headroom_ms is not None
+    ]
+    assert claimants, "fixture produced no idle headroom, so this proves nothing"
+    assert len(claimants) == 1, (
+        "the recoverable idle pool is claimed by "
+        + ", ".join(f"{f.id or f.label}" for f in claimants)
+        + " — it must be attributed to exactly one finding"
+    )
+
+
+def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
+    """The point of #230: the verdict must actually appear in a report.
+
+    Every other critical_path test drives a raw sqlite connection, while the
+    pipeline runs on the DuckDB-backed one and `EvidenceBuilder.build` swallows
+    per-skill exceptions — so a failure confined to the pipeline path would be
+    silent. This exercises that path end to end. The trim is required because
+    the untrimmed fixture classifies as `mixed`, which emits no finding by
+    design.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    # The window spans the fixture's later kernels, where GPU-idle dominates
+    # clearly enough to commit to a class. Untrimmed, the fixture is `mixed` and
+    # correctly emits nothing, so the trim is load-bearing rather than cosmetic.
+    trim = (4_500_000, 9_000_000)
+    with Profile(minimal_nsys_db_path) as prof:
+        conn = prof.db if prof.db is not None else prof.conn
+        classified = get_skill("critical_path").execute(conn, device=0,
+                                                        trim_start_ns=trim[0],
+                                                        trim_end_ns=trim[1])[0]
+        report = EvidenceBuilder(prof, device=0, trim=trim).build()
+
+    # Asserted first so a fixture change that flips the class fails here, saying
+    # why, instead of as an unexplained "verdict missing from the report".
+    assert classified["bound_class"] == "cpu-bound", (
+        f"fixture/trim no longer yields a committed class ({classified['bound_class']}); "
+        "adjust the window rather than the assertion below"
+    )
+
+    cp = [f for f in report.findings if (f.provenance or {}).get("skill") == "critical_path"]
+    assert len(cp) == 1, "the bound-class verdict must reach the report"
+    assert cp[0].headroom_ms is None, "and must not claim time another skill localizes"

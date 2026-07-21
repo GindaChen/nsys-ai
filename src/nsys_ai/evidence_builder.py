@@ -74,6 +74,12 @@ class EvidenceBuilder:
         "memory_anomalies": ("memory_bandwidth", {"limit": 5}),
         "h2d_spikes": ("h2d_distribution", {}),
         "nccl_breakdown": ("nccl_breakdown", {}),
+        # Profile-level bound class. Contributes the verdict only and reports
+        # no headroom by design (the reasoning lives in
+        # critical_path._to_findings). It therefore ranks below every
+        # headroom-bearing finding — read the verdict from the finding itself,
+        # not from its position.
+        "bound_class": ("critical_path", {}),
         # Roll-up characterization of the whole profile (comm-bound,
         # sync-bound, idle-dominant, coverage gaps). Reads only the
         # already-assembled manifest dict, so its findings are
