@@ -16,6 +16,7 @@ than skipping the check — a CI gate that silently does not run is worse than n
 gate at all, because the pipeline reports green either way.
 """
 
+import math
 from dataclasses import dataclass
 
 __all__ = [
@@ -118,9 +119,11 @@ def resolve_theoretical_flops(cli_value: float | None) -> float:
     MFU number with no basis.
     """
     if cli_value is not None:
-        if cli_value <= 0:
+        # NaN slips past every ordered comparison (`nan <= 0` is False), so it
+        # must be excluded explicitly or it propagates into a NaN MFU.
+        if not math.isfinite(cli_value) or cli_value <= 0:
             raise SolGateError(
-                f"--theoretical-flops must be positive, got {cli_value:g}"
+                f"--theoretical-flops must be a positive finite number, got {cli_value:g}"
             )
         return float(cli_value)
     raise SolGateError(
@@ -201,6 +204,15 @@ def evaluate_sol_gates(
                 f"--gate-sol {spec}: region {spec.region!r} produced no MFU value"
             )
         mfu = float(mfu)
+        # A non-finite or negative MFU is a broken measurement, not a slow
+        # region. Left alone it would surface as an ordinary gate failure —
+        # NaN fails every comparison, including the ceiling check below — and
+        # CI could not tell it from a genuine regression.
+        if not math.isfinite(mfu) or mfu < 0:
+            raise SolGateError(
+                f"--gate-sol {spec}: region {spec.region!r} produced a non-measurable "
+                f"MFU ({mfu}); the profile or the supplied FLOPs are unusable"
+            )
         if mfu > _IMPLAUSIBLE_MFU_PCT:
             # Exceeding the hardware ceiling means the inputs do not describe
             # the measured region — almost always step-scoped FLOPs applied to a

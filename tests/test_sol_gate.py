@@ -275,3 +275,21 @@ class TestImplausibleMfu:
             None, [parse_sol_gate("attn:60")], theoretical_flops=1e13
         )
         assert r.passed is True
+
+
+class TestNonFiniteInputs:
+    """NaN slips past every ordered comparison, so it needs explicit exclusion —
+    otherwise a broken measurement is indistinguishable from a regression."""
+
+    def test_nan_and_inf_flops_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(SolGateError, match="finite"):
+                resolve_theoretical_flops(bad)
+
+    @pytest.mark.parametrize("bad_mfu", [float("nan"), float("inf"), -5.0])
+    def test_non_measurable_mfu_is_an_error_not_a_gate_failure(self, monkeypatch, bad_mfu):
+        """Must raise (exit 2, misconfigured) rather than report passed=False
+        (exit 1, regressed) — CI has to be able to tell those apart."""
+        _patch_skill(monkeypatch, _FakeSkill(_mfu_row(bad_mfu)))
+        with pytest.raises(SolGateError, match="non-measurable"):
+            evaluate_sol_gates(None, [parse_sol_gate("attn:60")], theoretical_flops=1e13)
