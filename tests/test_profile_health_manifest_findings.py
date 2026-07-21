@@ -511,3 +511,60 @@ class TestFormatRendering:
         )
         assert "Profiler Overhead" in clean and "⚠️" not in clean
         assert "Profiler Overhead" in noisy and "⚠️" in noisy
+
+
+class TestCommBoundConventionIsConsistent:
+    """Regression (#232): the manifest headline and its own comm_bound finding
+    used opposite overlap conventions, so the same profile could be called
+    communication-bound by one and healthy by the other."""
+
+    def _comm_manifest(self, compute_only, nccl_only, overlap_ms, total_nccl):
+        m = _healthy_manifest()
+        m["overlap"]["compute_only_ms"] = compute_only
+        m["overlap"]["nccl_only_ms"] = nccl_only
+        m["overlap"]["overlap_ms"] = overlap_ms
+        m["overlap"]["overlap_pct"] = 75  # healthy, so low_overlap does not fire
+        m["nccl"]["total_nccl_ms"] = total_nccl
+        return m
+
+    def test_heavily_overlapped_run_is_not_called_communication_bound(self):
+        """Overlapped NCCL is hidden behind compute. Counting it as comm *and*
+        excluding it from compute penalised overlap twice: this profile has
+        400ms of well-overlapped NCCL and used to be reported comm-bound."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = self._comm_manifest(
+            compute_only=100.0, nccl_only=0.0, overlap_ms=400.0, total_nccl=400.0
+        )
+        assert "ommunication-bound" not in _infer_bottleneck(m)
+
+    def test_genuinely_exposed_comm_is_still_reported(self):
+        """The fix must not silence a real comm-bound run."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = self._comm_manifest(
+            compute_only=100.0, nccl_only=500.0, overlap_ms=0.0, total_nccl=500.0
+        )
+        assert "ommunication-bound" in _infer_bottleneck(m)
+
+    def test_headline_and_finding_never_disagree(self):
+        """The two paths must agree across the overlap spectrum."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        for compute_only, nccl_only, overlap_ms in [
+            (100.0, 0.0, 400.0),    # fully hidden
+            (100.0, 50.0, 200.0),   # partly exposed, compute still dominant
+            (100.0, 500.0, 0.0),    # clearly exposed
+            (0.0, 0.0, 0.0),        # no data
+        ]:
+            m = self._comm_manifest(compute_only, nccl_only, overlap_ms, nccl_only + overlap_ms)
+            headline_comm = "ommunication-bound" in _infer_bottleneck(m)
+            finding_comm = any(
+                f.id == "profile_comm_bound"
+                and "nccl_exceeds_compute" in f.provenance.get("triggers", "")
+                for f in _to_findings([m])
+            )
+            assert headline_comm == finding_comm, (
+                f"headline={headline_comm} finding={finding_comm} for "
+                f"compute_only={compute_only} nccl_only={nccl_only} overlap={overlap_ms}"
+            )
