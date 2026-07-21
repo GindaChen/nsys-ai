@@ -193,6 +193,27 @@ def test_gpu_idle_gaps_headroom_is_device_level():
     assert gap.headroom_ms is None  # per-gap not double-counted against the summary
 
 
+def test_gpu_idle_gaps_headroom_excludes_sub_threshold_slivers():
+    """The per-stream sum bounds the claim from the other side.
+
+    Device idle sweeps up every sliver between kernels; the gap sum only counts
+    gaps above ``min_gap_ns``. On a single-stream profile the device figure is
+    therefore the *larger* of the two, and claiming it would book sub-1ms launch
+    overhead as recoverable — measured at 4.3s on a 3.5GB single-stream profile.
+    """
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
+
+    rows = [{  # one busy stream: device idle exceeds the thresholded gap sum
+        "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
+        "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        "total_idle_ms": 139179.81, "device_idle_ms": 143531.45, "gap_count": 3,
+    }]
+    summary = next(f for f in _to_findings(rows, context={"profile_id": "p"}) if "Summary" in f.label)
+    assert summary.headroom_ms == 139179.81, "must not claim idle below min_gap_ns"
+    assert summary.evidence[0].values["device_idle_ms"] == 143531.45  # still reported
+    assert summary.evidence[0].units["device_idle_ms"] == "ms"
+
+
 def test_gpu_idle_gaps_declines_to_claim_without_a_device_figure():
     """If device idle could not be computed, claim nothing rather than fall back
     to the inflated per-stream sum."""

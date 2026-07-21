@@ -9,6 +9,7 @@ import logging
 import sqlite3
 
 from nsys_ai.connection import DB_ERRORS, wrap_connection
+from nsys_ai.exceptions import SchemaError
 
 from ..base import Skill, SkillParam
 
@@ -181,11 +182,21 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
         from ...overlap import overlap_analysis
         from ...profile import Profile
 
-        _trim = (int(trim_start), int(trim_end)) if trim_start and trim_end else None
+        # `is not None`, matching the trim clause above: a window starting at
+        # ns 0 is falsy, and treating it as absent would scope the device idle
+        # to the whole profile while the gaps were scoped to the window.
+        _trim = (
+            (int(trim_start), int(trim_end))
+            if trim_start is not None and trim_end is not None
+            else None
+        )
         _ov = overlap_analysis(Profile._from_conn(conn), device, trim=_trim)
         if "error" not in _ov:
             device_idle_ms = float(_ov.get("idle_ms", 0.0))
-    except Exception:  # noqa: BLE001 — enrichment only; absence is handled above
+    except (*DB_ERRORS, SchemaError):
+        # The two ways this can legitimately fail: an engine error, or a profile
+        # with no kernel activity for overlap_analysis to sweep. Anything else is
+        # a bug and should surface rather than silently drop the headroom.
         _log.debug("gpu_idle_gaps device-idle enrichment failed", exc_info=True)
 
     summary = {
@@ -263,6 +274,10 @@ def _format(rows):
             f"{summary['total_idle_ms']:.1f}ms idle "
             f"({summary['pct_of_profile']}% of profile)"
         )
+        # Summed per stream above; on a multi-stream profile that overstates the
+        # wall-clock lost, so show what the device itself idled when known.
+        if summary.get("device_idle_ms") is not None:
+            lines.append(f"  Device-level idle: {summary['device_idle_ms']:.1f}ms")
         lines.append(
             f"  Distribution: "
             f"{summary['gaps_1_5ms']} × 1-5ms, "
@@ -364,6 +379,20 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 total_idle_ms = r.get("total_idle_ms", 0)
                 device_idle_ms = r.get("device_idle_ms")
                 gap_count = r.get("gap_count", 0)
+                # Both figures are upper bounds on what is recoverable, and they
+                # bind in opposite directions, so the claim is the smaller one:
+                #   - device idle bounds it because time the device spent busy on
+                #     some other stream was never lost in the first place;
+                #   - the per-stream sum bounds it because it only counts gaps
+                #     above `min_gap_ns`, and the sub-threshold slivers device
+                #     idle also sweeps up are launch overhead, not real stalls
+                #     (see _FALSE_POSITIVE_NOTES).
+                # On a two-stream vLLM profile the first bound removed 59s; on a
+                # single-stream one the second removed 4.3s of 1ms-and-under
+                # slivers that device idle alone would have claimed.
+                headroom_ms = (
+                    min(device_idle_ms, total_idle_ms) if device_idle_ms is not None else None
+                )
                 finding_id = f"idle_summary_gpu{target_device}"
 
                 selection = TraceSelection(
@@ -386,6 +415,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     },
                     units={
                         "total_idle_ms": "ms",
+                        "device_idle_ms": "ms",
                         "gap_count": "count",
                         "pct_of_profile": "percent",
                     },
@@ -401,21 +431,26 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         end_ns=profile_end_ns,
                         gpu_id=target_device,
                         severity="info" if pct < 15 else "warning",
+                        # The gap sum is per stream, so on a multi-stream profile
+                        # it exceeds the wall-clock the device actually lost. Say
+                        # both numbers, or the reader cannot reconcile the note
+                        # with the smaller headroom claimed below.
                         note=(
                             f"Total: {total_idle_ms:.1f}ms idle across "
                             f"{gap_count} gaps ({pct}% of profiled span)"
+                            + (
+                                f"; {headroom_ms:.1f}ms of that is device-level "
+                                "idle and recoverable"
+                                if headroom_ms is not None
+                                else ""
+                            )
                         ),
                         # v0.1 fields
                         id=finding_id,
                         category="idle",
                         confidence=min(0.95, 0.4 + pct / 100),
-                        # Only device-level idle is recoverable. `total_idle_ms`
-                        # sums gaps per stream, so a stream idling while another
-                        # keeps the device busy inflates it without any device
-                        # time being lost. When the device figure is unavailable
-                        # no headroom is claimed, rather than overstating it.
-                        headroom_ms=device_idle_ms,
-                        headroom_basis="capture_total" if device_idle_ms is not None else None,
+                        headroom_ms=headroom_ms,
+                        headroom_basis="capture_total" if headroom_ms is not None else None,
                         evidence=[evidence_row],
                         selection=selection,
                         explanation=_EXPLANATION,
