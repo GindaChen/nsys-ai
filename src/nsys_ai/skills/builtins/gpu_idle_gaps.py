@@ -171,12 +171,13 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     )
 
     # Device-level idle: time when *no* stream had a kernel running, computed by
-    # the same sweep-line union overlap_analysis uses. This is what is actually
-    # recoverable, and it is not `total_idle_ms`: gaps are summed per stream, so
-    # a stream idling while another stream keeps the device busy inflates that
-    # total without any device time being lost. Measured on a two-stream vLLM
-    # profile the per-stream sum was 1.86x the device idle. Left as None when it
-    # cannot be computed, so callers can decline to claim rather than overstate.
+    # the same sweep-line union overlap_analysis uses. It differs from
+    # `total_idle_ms`, which sums gaps per stream and so counts a stream idling
+    # while another keeps the device busy — 1.86x the device figure on a
+    # two-stream vLLM profile. Note this sweep ignores `min_gap_ns` and includes
+    # sub-threshold slivers, so it is a bound on recoverable time rather than the
+    # recoverable time itself; `_to_findings` takes the min of the two. Left as
+    # None when it cannot be computed, so callers can decline to claim.
     device_idle_ms: float | None = None
     try:
         from ...overlap import overlap_analysis
@@ -432,16 +433,17 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         gpu_id=target_device,
                         severity="info" if pct < 15 else "warning",
                         # The gap sum is per stream, so on a multi-stream profile
-                        # it exceeds the wall-clock the device actually lost. Say
-                        # both numbers, or the reader cannot reconcile the note
-                        # with the smaller headroom claimed below.
+                        # it exceeds the wall-clock the device lost and the
+                        # headroom below is visibly smaller than the number
+                        # narrated here. Name the gap when there is one; when the
+                        # two agree the clause would only repeat itself.
                         note=(
                             f"Total: {total_idle_ms:.1f}ms idle across "
                             f"{gap_count} gaps ({pct}% of profiled span)"
                             + (
-                                f"; {headroom_ms:.1f}ms of that is device-level "
-                                "idle and recoverable"
-                                if headroom_ms is not None
+                                f"; {headroom_ms:.1f}ms of that is recoverable "
+                                "device time"
+                                if headroom_ms is not None and headroom_ms < total_idle_ms
                                 else ""
                             )
                         ),

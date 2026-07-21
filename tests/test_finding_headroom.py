@@ -190,6 +190,9 @@ def test_gpu_idle_gaps_headroom_is_device_level():
     gap = next(f for f in findings if "Gap" in f.label)
     assert summary.headroom_ms == 25.0, "must claim device idle, not the 40ms stream sum"
     assert summary.evidence[0].values["total_idle_ms"] == 40.0  # still reported
+    # Both numbers must appear, or the 40ms in the note reads as the opportunity
+    # while the ranking is driven by a 25ms headroom the reader never sees.
+    assert "40.0ms idle" in summary.note and "25.0ms of that is recoverable" in summary.note
     assert gap.headroom_ms is None  # per-gap not double-counted against the summary
 
 
@@ -212,6 +215,10 @@ def test_gpu_idle_gaps_headroom_excludes_sub_threshold_slivers():
     assert summary.headroom_ms == 139179.81, "must not claim idle below min_gap_ns"
     assert summary.evidence[0].values["device_idle_ms"] == 143531.45  # still reported
     assert summary.evidence[0].units["device_idle_ms"] == "ms"
+    # The headroom equals the narrated gap sum here, so the reconciling clause
+    # would just repeat the same number back — and calling it "device" time
+    # would misname it, the device idled 143531.45ms.
+    assert "recoverable" not in summary.note
 
 
 def test_gpu_idle_gaps_declines_to_claim_without_a_device_figure():
