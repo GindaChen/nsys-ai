@@ -390,6 +390,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         # All idle time on the pipeline is candidate recoverable
                         # time — the opportunity if the bubbles were closed.
                         headroom_ms=total_idle_ms,
+                        headroom_basis="capture_total",
                         evidence=[evidence_row],
                         selection=selection,
                         explanation=_EXPLANATION,

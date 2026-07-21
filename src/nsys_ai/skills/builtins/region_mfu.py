@@ -172,6 +172,7 @@ def _to_findings(rows, *, context: dict | None = None) -> list:
             id=finding_id,
             category="compute",
             headroom_ms=headroom,
+            headroom_basis="capture_total",
             evidence=[evidence_row],
             selection=selection,
             explanation=_EXPLANATION,

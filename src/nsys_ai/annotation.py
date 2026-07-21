@@ -100,6 +100,13 @@ class Finding:
     # removed — the optimization *opportunity*, used by :func:`rank_findings`
     # to order findings by upside rather than severity alone.
     headroom_ms: float | None = None
+    # What span ``headroom_ms`` covers. Ranking compares the raw magnitudes, so
+    # producers must agree on the span or the ordering is meaningless — a
+    # per-instance value loses to a capture-wide one for reasons that have
+    # nothing to do with opportunity. Every producer currently emits
+    # ``"capture_total"``; the field exists so a new one has to state its basis
+    # rather than diverge silently.
+    headroom_basis: str | None = None
 
     def to_dict(self) -> dict:
         # Walk fields() directly for scalar / primitive fields; nested
