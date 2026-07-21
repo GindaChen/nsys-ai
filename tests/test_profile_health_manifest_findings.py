@@ -555,6 +555,7 @@ class TestCommBoundConventionIsConsistent:
             (100.0, 0.0, 400.0),    # fully hidden
             (100.0, 50.0, 200.0),   # partly exposed, compute still dominant
             (100.0, 500.0, 0.0),    # clearly exposed
+            (0.0, 500.0, 0.0),      # comm present, no compute recorded
             (0.0, 0.0, 0.0),        # no data
         ]:
             m = self._comm_manifest(compute_only, nccl_only, overlap_ms, nccl_only + overlap_ms)
