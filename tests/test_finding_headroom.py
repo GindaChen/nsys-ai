@@ -376,12 +376,13 @@ def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
     report more recoverable time than the profile contains — measured at ~157s
     of claims on an 82.5s profile before this was fixed.
 
-    This is a coarse net: it catches a future producer that grossly over-claims,
-    but the synthetic fixture is small enough that a modest double count stays
-    under the bound (verified by mutation — restoring critical_path's headroom
-    does not trip this, though it does trip the sibling test below). The precise
-    assertion for this case is
-    ``test_critical_path_is_in_the_pipeline_without_claiming_headroom``.
+    Scope, precisely: this guards the *other* producers. It cannot catch a
+    critical_path double count at any threshold, because that skill classifies
+    this fixture as ``mixed`` and ``_to_findings`` returns nothing for a
+    non-committed class — so it contributes zero findings here regardless of
+    what headroom it would claim. The critical_path case is covered by
+    ``test_critical_path_reports_no_headroom`` and
+    ``test_bound_class_finding_reaches_a_built_report``.
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
     from nsys_ai.profile import Profile
@@ -403,23 +404,32 @@ def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
     )
 
 
-def test_critical_path_is_in_the_pipeline_without_claiming_headroom():
-    """It must be reachable from a report (#230) but contribute the verdict,
-    not a competing claim on time another skill already localizes."""
+def test_critical_path_is_registered_in_the_pipeline():
+    """`to_findings_fn` has exactly one production call site, driven by this
+    dict, so absence from it makes the finding unreachable (#230). This is a
+    removal guard only — that the skill actually *works* through the pipeline is
+    asserted by test_bound_class_finding_reaches_a_built_report."""
     from nsys_ai.evidence_builder import EvidenceBuilder
 
-    names = {v[0] for v in EvidenceBuilder._SKILL_PIPELINE.values()}
-    assert "critical_path" in names
+    assert "critical_path" in {v[0] for v in EvidenceBuilder._SKILL_PIPELINE.values()}
 
-    from nsys_ai.skills.builtins.critical_path import _to_findings
 
-    row = {
-        "bound_class": "cpu-bound", "confidence": 0.9, "device": 0,
-        "critical_path_ms": 100.0,
-        "breakdown": {"gpu_compute_ms": 10.0, "comm_ms": 0.0, "cpu_ms": 90.0,
-                      "gpu_compute_share": 0.1, "comm_share": 0.0, "cpu_share": 0.9},
-        "top_compute_kernels": [], "top_collectives": [], "note": "n",
-    }
-    (f,) = _to_findings([row])
-    assert f.headroom_ms is None
-    assert f.evidence[0].values["cpu_ms"] == 90.0  # the measurement is still reported
+def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
+    """The point of #230: the verdict must actually appear in a report.
+
+    Every other critical_path test drives a raw sqlite connection, while the
+    pipeline runs on the DuckDB-backed one and `EvidenceBuilder.build` swallows
+    per-skill exceptions — so a failure confined to the pipeline path would be
+    silent. This exercises that path end to end. The trim is required because
+    the untrimmed fixture classifies as `mixed`, which emits no finding by
+    design.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    with Profile(minimal_nsys_db_path) as prof:
+        report = EvidenceBuilder(prof, device=0, trim=(4_500_000, 9_000_000)).build()
+
+    cp = [f for f in report.findings if (f.provenance or {}).get("skill") == "critical_path"]
+    assert len(cp) == 1, "the bound-class verdict must reach the report"
+    assert cp[0].headroom_ms is None, "and must not claim time another skill localizes"

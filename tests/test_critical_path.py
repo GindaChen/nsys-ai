@@ -385,26 +385,48 @@ def test_insufficient_on_path_time_reported_mixed():
 # ---------------------------------------------------------------------------
 
 
-def test_reports_no_headroom_to_avoid_double_counting():
-    """The bound class is a verdict, not a new pool of recoverable time. Its
-    cpu bucket is the idle gpu_idle_gaps already claims and its comm bucket the
-    exposed NCCL overlap_breakdown claims, so claiming it again would inflate
-    the opportunity ranking. The bucket sizes stay on the evidence row."""
-    cpu = [
-        (0, 7, 1, 0, 100_000, 1),
-        (0, 7, 2, 20 * MS, 20 * MS + 100_000, 1),
-        (0, 7, 3, 40 * MS, 40 * MS + 100_000, 1),
-    ]
-    conn = _make_conn(cpu)
+@pytest.mark.parametrize(
+    "label,kernels,expected_class,bucket",
+    [
+        (
+            "cpu-bound",
+            [
+                (0, 7, 1, 0, 100_000, 1),
+                (0, 7, 2, 20 * MS, 20 * MS + 100_000, 1),
+                (0, 7, 3, 40 * MS, 40 * MS + 100_000, 1),
+            ],
+            "cpu-bound",
+            "cpu_ms",
+        ),
+        (
+            "comm-bound",
+            [
+                (0, 7, 1, 0, 1 * MS, 1),  # 1ms compute
+                (0, 8, 2, 2 * MS, 20 * MS, 10),  # 18ms exposed NCCL
+            ],
+            "comm-bound",
+            "comm_ms",
+        ),
+    ],
+)
+def test_reports_no_headroom_to_avoid_double_counting(label, kernels, expected_class, bucket):
+    """The bound class is a verdict, not a new pool of recoverable time.
+
+    Both committed branches must be covered: the cpu bucket is the idle
+    gpu_idle_gaps already claims, and the comm bucket the exposed NCCL
+    overlap_breakdown already claims. Testing only cpu-bound left the comm
+    half — cited as half the justification for this change — unguarded.
+    """
+    conn = _make_conn(kernels)
     skill, r = _run(conn)
     findings = skill.to_findings_fn([r])
     conn.close()
 
-    assert r["bound_class"] == "cpu-bound"
+    assert r["bound_class"] == expected_class
     assert findings[0].headroom_ms is None
     assert findings[0].headroom_basis is None
     # The measurement itself is still reported, just not claimed as headroom.
-    assert findings[0].evidence[0].values["cpu_ms"] == r["breakdown"]["cpu_ms"]
+    assert findings[0].evidence[0].values[bucket] == r["breakdown"][bucket]
 
 
 def test_cpu_attribution_grounds_cpu_bucket():
