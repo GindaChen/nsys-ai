@@ -22,6 +22,7 @@ if typing.TYPE_CHECKING:
 
 
 from nsys_ai import parquet_cache
+from nsys_ai.connection import DB_ERRORS
 from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
@@ -70,8 +71,17 @@ class NsightSchema:
 
         self.tables = list(self._adapter.get_table_names())
 
+        # Read the metadata tables once; both version fields derive from it.
+        self._meta: dict[str, str] = {}
+        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
+            self._meta.update(self._read_kv_table(table))
+
         self.version: str | None = self._detect_version()
-        self.schema_version: str | None = self._detect_schema_version()
+        # The export schema version is what actually changes shape between
+        # releases — NVIDIA documents that the SQLite schema "can and will
+        # change" — so this, not the product version, is what compatibility
+        # handling should key off.
+        self.schema_version: str | None = self._meta.get("EXPORT_SCHEMA_VERSION") or None
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
 
@@ -91,13 +101,13 @@ class NsightSchema:
             try:
                 if table not in self._meta_adapter.get_table_names():
                     return {}
-            except Exception:
+            except DB_ERRORS:
                 return {}
             adapter = self._meta_adapter
 
         try:
             cols = adapter.get_table_columns(table)
-        except Exception:
+        except DB_ERRORS:
             return {}
         key_col = None
         val_col = None
@@ -124,7 +134,7 @@ class NsightSchema:
         try:
             cur = adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")  # noqa: S608
             rows = cur.fetchall()
-        except Exception:
+        except DB_ERRORS:
             return {}
         for k, v in rows:
             if k is not None and v is not None:
@@ -132,10 +142,8 @@ class NsightSchema:
         return kv
 
     def _detect_version(self) -> str | None:
-        """Try to infer Nsight Systems version from META_DATA tables."""
-        meta: dict[str, str] = {}
-        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
-            meta.update(self._read_kv_table(table))
+        """Infer the Nsight Systems version from the metadata tables."""
+        meta = self._meta
 
         # The canonical key in current exports. Checked first and by exact name
         # so the product *name* ("NVIDIA Nsight Systems") can never be mistaken
@@ -155,18 +163,6 @@ class NsightSchema:
             if "Nsight Systems" in val and any(ch.isdigit() for ch in val):
                 return val
         return None
-
-    def _detect_schema_version(self) -> str | None:
-        """The export schema version, which is what actually changes shape.
-
-        NVIDIA documents that the SQLite schema "can and will change" between
-        releases, so this is the field to key any compatibility handling off —
-        the product version can move without the schema doing so.
-        """
-        meta: dict[str, str] = {}
-        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
-            meta.update(self._read_kv_table(table))
-        return meta.get("EXPORT_SCHEMA_VERSION") or None
 
     # ── Table detection ────────────────────────────────────────────────
 

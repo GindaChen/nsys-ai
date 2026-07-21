@@ -79,3 +79,60 @@ def test_metadata_falls_back_to_the_sqlite_connection():
     assert "META_DATA_EXPORT" not in s.tables  # genuinely absent from the primary conn
     assert s.version == "2026.1.1.204"  # ...but recovered from the metadata source
     assert s.schema_version == "3.24.14"
+
+
+class TestMetadataReaderDegradesCleanly:
+    """The reader's error paths only evaluate their exception tuple when an
+    error actually fires, so a missing import there passes every happy-path
+    test and raises NameError in production. These exercise each path."""
+
+    def _schema(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE StringIds (id INTEGER)")
+        conn.commit()
+        return NsightSchema(conn)
+
+    def _apply(self, schema, adapter):
+        schema._meta_adapter = adapter
+        schema.tables = []
+        return schema._read_kv_table("META_DATA_EXPORT")
+
+    def test_metadata_source_table_listing_failure(self):
+        class Boom:
+            def get_table_names(self):
+                raise sqlite3.OperationalError("boom")
+
+        assert self._apply(self._schema(), Boom()) == {}
+
+    def test_column_probe_failure(self):
+        class BadCols:
+            def get_table_names(self):
+                return ["META_DATA_EXPORT"]
+
+            def get_table_columns(self, table):
+                raise sqlite3.OperationalError("no cols")
+
+        assert self._apply(self._schema(), BadCols()) == {}
+
+    def test_query_failure(self):
+        class BadExec:
+            def get_table_names(self):
+                return ["META_DATA_EXPORT"]
+
+            def get_table_columns(self, table):
+                return ["name", "value"]
+
+            def execute(self, query):
+                raise sqlite3.OperationalError("exec fail")
+
+        assert self._apply(self._schema(), BadExec()) == {}
+
+    def test_unrecognised_columns_yield_nothing(self):
+        class OddCols:
+            def get_table_names(self):
+                return ["META_DATA_EXPORT"]
+
+            def get_table_columns(self, table):
+                return ["foo", "bar"]
+
+        assert self._apply(self._schema(), OddCols()) == {}
