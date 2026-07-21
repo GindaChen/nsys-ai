@@ -48,6 +48,10 @@ class NvtxAgg:
 class ProfileSummary:
     path: str
     gpu: int | None
+    # Export *schema* version (e.g. "3.24.14") — the table/column layout, and
+    # the only thing that can make two profiles structurally incomparable.
+    # Distinct from `product_version`, the nsys build that wrote them
+    # (e.g. "2026.1.1.204"), which moves far more often than the schema does.
     schema_version: str | None
     total_gpu_ns: int
     kernel_rows: int
@@ -55,6 +59,7 @@ class ProfileSummary:
     nvtx: list[NvtxAgg]
     overlap: dict
     profile_id: str = ""
+    product_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +263,8 @@ def build_profile_summary(
     return ProfileSummary(
         path=prof.path,
         gpu=gpu,
-        schema_version=prof.schema.version,
+        schema_version=prof.schema.schema_version,
+        product_version=prof.schema.version,
         total_gpu_ns=total_gpu_ns,
         kernel_rows=kernel_rows,
         kernels=kernels,
@@ -285,9 +291,23 @@ def collect_sanity_warnings(
         and before.schema_version != after.schema_version
     ):
         warnings.append(
-            f"Nsight schema/version differs: before='{before.schema_version}' after='{after.schema_version}'."
+            f"Nsight export schema differs: before='{before.schema_version}' "
+            f"after='{after.schema_version}'."
         )
         c_schema = 0.0
+    elif (
+        before.product_version
+        and after.product_version
+        and before.product_version != after.product_version
+    ):
+        # Same schema, different nsys build. Worth saying, but it does not make
+        # the two structurally incomparable, and zeroing confidence here would
+        # fire on the ordinary case of re-profiling after a toolkit update:
+        # 2026.1.1.204 and 2026.1.2.63 both export schema 3.24.14.
+        warnings.append(
+            f"Nsight build differs: before='{before.product_version}' "
+            f"after='{after.product_version}' (same export schema, still comparable)."
+        )
     if before.gpu is not None and after.gpu is not None and before.gpu != after.gpu:
         warnings.append("Different GPU IDs selected between before/after (unexpected).")
         c_gpu = 0.0

@@ -600,6 +600,7 @@ def to_diff_dict(data: ProfileDiffSummary) -> dict:
             "profile_id": data.before.profile_id,
             "gpu": data.before.gpu,
             "schema_version": data.before.schema_version,
+            "product_version": data.before.product_version,
             "total_gpu_ns": data.before.total_gpu_ns,
         },
         "after": {
@@ -607,6 +608,7 @@ def to_diff_dict(data: ProfileDiffSummary) -> dict:
             "profile_id": data.after.profile_id,
             "gpu": data.after.gpu,
             "schema_version": data.after.schema_version,
+            "product_version": data.after.product_version,
             "total_gpu_ns": data.after.total_gpu_ns,
         },
         "warnings": list(data.warnings),
