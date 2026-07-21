@@ -331,19 +331,22 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 )
 
     # --- Small Kernel Overhead ---
+    # We deliberately do NOT gate on overhead_pct: k.start - r.start is
+    # CPU-runs-ahead queue depth in any async workload, so overhead_pct is
+    # near-100% for almost every small kernel and adds no discriminating power.
+    # The actual signal is "kernel is small AND launched frequently".
     if launch_data:
-        # overhead_us > kernel_ms*1000 means overhead > kernel duration
         high_overhead = [
             e
             for e in launch_data
-            if e.get("kernel_ms", 0) > 0 and e.get("overhead_us", 0) > e["kernel_ms"] * 1000
+            if e.get("launch_count", 0) >= 100
         ]
         if len(high_overhead) >= 5:
             findings.append(
                 {
                     "pattern": "Small Kernel Overhead",
                     "severity": "warning",
-                    "evidence": f"{len(high_overhead)} kernels with launch overhead > kernel duration",
+                    "evidence": f"{len(high_overhead)} small-and-frequent kernels (launch_count >= 100)",
                     "recommendation": (
                         "Use torch.compile() to fuse element-wise ops, "
                         "enable cudnn.benchmark, or use CUDA graphs."
