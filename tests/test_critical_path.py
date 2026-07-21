@@ -385,10 +385,11 @@ def test_insufficient_on_path_time_reported_mixed():
 # ---------------------------------------------------------------------------
 
 
-def test_headroom_is_dominant_bucket_for_confident_class():
-    """cpu-bound / comm-bound findings carry headroom == the recoverable bucket;
-    gpu-compute-bound carries none (its headroom is a speed-of-light question)."""
-    # cpu-bound
+def test_reports_no_headroom_to_avoid_double_counting():
+    """The bound class is a verdict, not a new pool of recoverable time. Its
+    cpu bucket is the idle gpu_idle_gaps already claims and its comm bucket the
+    exposed NCCL overlap_breakdown claims, so claiming it again would inflate
+    the opportunity ranking. The bucket sizes stay on the evidence row."""
     cpu = [
         (0, 7, 1, 0, 100_000, 1),
         (0, 7, 2, 20 * MS, 20 * MS + 100_000, 1),
@@ -398,17 +399,12 @@ def test_headroom_is_dominant_bucket_for_confident_class():
     skill, r = _run(conn)
     findings = skill.to_findings_fn([r])
     conn.close()
-    assert r["bound_class"] == "cpu-bound"
-    assert findings[0].headroom_ms == r["breakdown"]["cpu_ms"]
 
-    # gpu-compute-bound -> no bucket headroom
-    gpu = [(0, 7, 1, 0, 10 * MS, 1), (0, 7, 2, 10 * MS, 20 * MS, 1), (0, 7, 3, 20 * MS, 30 * MS, 1)]
-    conn = _make_conn(gpu)
-    skill, r = _run(conn)
-    findings = skill.to_findings_fn([r])
-    conn.close()
-    assert r["bound_class"] == "gpu-compute-bound"
+    assert r["bound_class"] == "cpu-bound"
     assert findings[0].headroom_ms is None
+    assert findings[0].headroom_basis is None
+    # The measurement itself is still reported, just not claimed as headroom.
+    assert findings[0].evidence[0].values["cpu_ms"] == r["breakdown"]["cpu_ms"]
 
 
 def test_cpu_attribution_grounds_cpu_bucket():

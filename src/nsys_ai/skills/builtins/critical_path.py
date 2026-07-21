@@ -551,8 +551,16 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # bottleneck would return. A gpu-compute-bound path has no headroom here —
     # its recoverable time is a speed-of-light question (region MFU), not a
     # bucket that can simply be removed — so it is left unset.
-    _headroom_by_cat = {"cpu": b.get("cpu_ms"), "comm": b.get("comm_ms")}
-    headroom_ms = _headroom_by_cat.get(top_cat)
+    # Deliberately no headroom. This skill's contribution is the *verdict* —
+    # which resource bounds the run — not a new pool of recoverable time. The
+    # cpu bucket is the same GPU-idle that gpu_idle_gaps already claims, and the
+    # comm bucket the same exposed NCCL that overlap_breakdown claims; measured
+    # on a real 82.5s profile the two idle figures were 79.0s and 78.5s, so
+    # claiming both would report ~157s recoverable out of 82.5s. Those skills
+    # keep the claim because they can also localize it to specific gaps and
+    # streams. The bucket sizes remain on the evidence row below, so nothing is
+    # lost — only the double count.
+    headroom_ms = None
 
     return [
         Finding(

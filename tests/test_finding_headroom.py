@@ -364,3 +364,49 @@ def test_every_headroom_producer_declares_a_capture_scoped_basis():
         if n_headroom != n_basis:
             offenders.append(f"{path.name}: {n_headroom} headroom_ms vs {n_basis} headroom_basis")
     assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
+
+
+def test_pipeline_headroom_never_exceeds_the_profile_span(minimal_nsys_db_path):
+    """Cross-skill single-count invariant (#230).
+
+    Each skill enforces single-counting internally, but the pipeline runs
+    several together and nothing checked them against each other. critical_path
+    measures the same idle as gpu_idle_gaps and the same exposed NCCL as
+    overlap_breakdown, so enrolling it while all three claimed headroom would
+    report more recoverable time than the profile contains — measured at ~157s
+    of claims on an 82.5s profile before this was fixed.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    with Profile(minimal_nsys_db_path) as prof:
+        span_ms = (prof.meta.time_range[1] - prof.meta.time_range[0]) / 1e6
+        report = EvidenceBuilder(prof, device=0).build()
+
+    claimed = sum(f.headroom_ms or 0.0 for f in report.findings)
+    assert claimed <= span_ms * 1.05, (
+        f"pipeline claims {claimed:.1f}ms recoverable on a {span_ms:.1f}ms profile — "
+        "two skills are counting the same milliseconds"
+    )
+
+
+def test_critical_path_is_in_the_pipeline_without_claiming_headroom():
+    """It must be reachable from a report (#230) but contribute the verdict,
+    not a competing claim on time another skill already localizes."""
+    from nsys_ai.evidence_builder import EvidenceBuilder
+
+    names = {v[0] for v in EvidenceBuilder._SKILL_PIPELINE.values()}
+    assert "critical_path" in names
+
+    from nsys_ai.skills.builtins.critical_path import _to_findings
+
+    row = {
+        "bound_class": "cpu-bound", "confidence": 0.9, "device": 0,
+        "critical_path_ms": 100.0,
+        "breakdown": {"gpu_compute_ms": 10.0, "comm_ms": 0.0, "cpu_ms": 90.0,
+                      "gpu_compute_share": 0.1, "comm_share": 0.0, "cpu_share": 0.9},
+        "top_compute_kernels": [], "top_collectives": [], "note": "n",
+    }
+    (f,) = _to_findings([row])
+    assert f.headroom_ms is None
+    assert f.evidence[0].values["cpu_ms"] == 90.0  # the measurement is still reported
