@@ -48,40 +48,58 @@ def _to_findings(rows: list[dict]) -> list:
     if med <= 0:
         return findings
 
-    for it in real:
-        if it.get("duration_ms", 0) > 1.5 * med:
-            pct = 100 * it["duration_ms"] / med
-            # Prefer nanosecond-precision timestamps if available; fall back to seconds-based values.
-            start_ns = it.get("gpu_start_ns")
-            if start_ns is None:
-                start_ns = int(it.get("gpu_start_s", 0) * 1e9)
-            else:
-                start_ns = int(start_ns)
-            end_ns = it.get("gpu_end_ns")
-            if end_ns is None:
-                end_ns = int(it.get("gpu_end_s", 0) * 1e9)
-            else:
-                end_ns = int(end_ns)
+    slow = [it for it in real if it.get("duration_ms", 0) > 1.5 * med]
+    # The recoverable opportunity is the total slack across every slow
+    # iteration, which is a capture-scoped quantity comparable with the other
+    # headroom producers. A single iteration's slack is not: ranking it against
+    # a profile-wide idle total silently favours the aggregate. Following the
+    # gpu_idle_gaps convention, the aggregate is carried once — by the worst
+    # iteration, which is where a reader would start — and the remaining
+    # findings carry none, so no millisecond is attributed twice.
+    total_slack_ms = round(sum(it["duration_ms"] - med for it in slow), 3)
+    worst = max(slow, key=lambda it: it["duration_ms"], default=None)
 
-            findings.append(
-                Finding(
-                    type="region",
-                    label=f"Slow Iteration {it.get('iteration', '?')}",
-                    start_ns=start_ns,
-                    end_ns=end_ns,
-                    gpu_id=it.get(
-                        "device_id", 0
-                    ),  # Assuming device_id is available or defaults to 0
-                    severity="warning",
-                    note=(
-                        f"{it['duration_ms']:.1f}ms "
-                        f"({pct:.0f}% of median {med:.1f}ms), "
-                        f"{it.get('kernel_count', 0)} kernels"
-                    ),
-                    # Recoverable time if this iteration ran at the median pace.
-                    headroom_ms=round(it["duration_ms"] - med, 3),
-                )
+    for it in slow:
+        pct = 100 * it["duration_ms"] / med
+        # Prefer nanosecond-precision timestamps if available; fall back to seconds-based values.
+        start_ns = it.get("gpu_start_ns")
+        if start_ns is None:
+            start_ns = int(it.get("gpu_start_s", 0) * 1e9)
+        else:
+            start_ns = int(start_ns)
+        end_ns = it.get("gpu_end_ns")
+        if end_ns is None:
+            end_ns = int(it.get("gpu_end_s", 0) * 1e9)
+        else:
+            end_ns = int(end_ns)
+
+        carries_headroom = it is worst
+        note = (
+            f"{it['duration_ms']:.1f}ms "
+            f"({pct:.0f}% of median {med:.1f}ms), "
+            f"{it.get('kernel_count', 0)} kernels"
+        )
+        if carries_headroom and len(slow) > 1:
+            note += (
+                f". Headroom is the total slack across all {len(slow)} slow "
+                "iterations, counted once here."
             )
+
+        findings.append(
+            Finding(
+                type="region",
+                label=f"Slow Iteration {it.get('iteration', '?')}",
+                start_ns=start_ns,
+                end_ns=end_ns,
+                gpu_id=it.get(
+                    "device_id", 0
+                ),  # Assuming device_id is available or defaults to 0
+                severity="warning",
+                note=note,
+                headroom_ms=total_slack_ms if carries_headroom else None,
+                headroom_basis="capture_total" if carries_headroom else None,
+            )
+        )
     return findings
 
 

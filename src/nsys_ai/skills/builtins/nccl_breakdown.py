@@ -135,6 +135,24 @@ def _serialization_confidence(nccl_capture_pct: float, captured_ms: float = 0.0)
         return 0.85
     return 0.70
 
+def _variability_headroom_ms(row: dict) -> float | None:
+    """Capture-scoped recoverable time for a high-variability collective.
+
+    If every instance ran at the fastest observed time instead of the average,
+    ``count * (avg - min)`` would be saved. An upper bound — some spread is
+    unavoidable — but it spans the whole capture, so it is comparable with the
+    other headroom producers. Returns ``None`` when the row lacks the fields to
+    compute it honestly rather than guessing a value.
+    """
+    count = row.get("count")
+    avg_ms = row.get("avg_ms")
+    min_ms = row.get("min_ms")
+    if not count or avg_ms is None or min_ms is None:
+        return None
+    recoverable = count * (float(avg_ms) - float(min_ms))
+    return round(recoverable, 3) if recoverable > 0 else None
+
+
 def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
     from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
 
@@ -311,9 +329,15 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 id=finding_id,
                 category="communication",
                 confidence=_variability_confidence(ratio, r.get("count", 0)),
-                # Straggler slack: the slowest instance's excess over the
-                # average is recoverable if the variability were eliminated.
-                headroom_ms=round(r["max_ms"] - r["avg_ms"], 3),
+                # Recoverable time across the whole capture if the variability
+                # were eliminated and every instance ran at the fastest observed
+                # time: count x (avg - min). An upper bound — some spread is
+                # unavoidable — but capture-scoped, so it is comparable with the
+                # other headroom producers. (The previous value, one instance's
+                # max - avg, undercounted by a factor of `count` and made a
+                # thousand slow collectives rank below a single idle gap.)
+                headroom_ms=_variability_headroom_ms(r),
+                headroom_basis="capture_total" if _variability_headroom_ms(r) else None,
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_HIGH_VARIABILITY_EXPLANATION,

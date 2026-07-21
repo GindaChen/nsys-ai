@@ -567,6 +567,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             category=_CATEGORY_TO_FINDING[top_cat],
             confidence=float(r.get("confidence", 0.0)),
             headroom_ms=headroom_ms,
+            headroom_basis="capture_total" if headroom_ms is not None else None,
             evidence=[evidence_row],
             selection=selection,
             explanation=_EXPLANATION,

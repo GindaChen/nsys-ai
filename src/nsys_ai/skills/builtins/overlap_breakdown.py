@@ -334,6 +334,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 category="communication",
                 confidence=_overlap_confidence(float(overlap_pct), float(nccl_ms), float(total_ms)),
                 headroom_ms=exposed_nccl_ms,
+                headroom_basis="capture_total",
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_LOW_OVERLAP_EXPLANATION,
@@ -389,6 +390,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     # Exposed NCCL headroom already claimed by the low-overlap
                     # finding if it fired; avoid double-counting the same ms.
                     headroom_ms=None if headroom_claimed else exposed_nccl_ms,
+                    headroom_basis=None if headroom_claimed else "capture_total",
                     evidence=[evidence_row],
                     selection=selection,
                     explanation=_COMM_DOMINATED_EXPLANATION,

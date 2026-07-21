@@ -200,9 +200,49 @@ def test_iteration_timing_headroom_is_slack_over_median():
     findings = _to_findings(rows)
     assert len(findings) == 1  # only iter 3 exceeds 1.5x median
     assert findings[0].headroom_ms == 30.0  # 40ms - median(10ms)
+    assert findings[0].headroom_basis == "capture_total"
 
 
-def test_nccl_variability_headroom_is_straggler_slack():
+def test_iteration_timing_headroom_is_aggregated_and_counted_once():
+    """With several slow iterations the headroom is the total slack across all
+    of them, carried by the worst one only — a per-iteration value would not be
+    comparable with the capture-scoped producers."""
+    from nsys_ai.skills.builtins.iteration_timing import _to_findings
+
+    rows = [
+        {"iteration": i, "duration_ms": d, "gpu_start_ns": i * 10_000_000,
+         "gpu_end_ns": i * 10_000_000 + int(d * 1e6), "kernel_count": 5}
+        for i, d in enumerate([10.0, 10.0, 10.0, 40.0, 25.0])
+    ]
+    findings = _to_findings(rows)
+    assert len(findings) == 2  # iterations of 40ms and 25ms exceed 1.5x median(10)
+    carriers = [f for f in findings if f.headroom_ms is not None]
+    assert len(carriers) == 1, "the aggregate must be attributed exactly once"
+    # (40-10) + (25-10) = 45ms total slack, on the worst iteration.
+    assert carriers[0].headroom_ms == 45.0
+    assert carriers[0].label.endswith("3")  # the 40ms iteration
+    assert carriers[0].headroom_basis == "capture_total"
+
+
+def test_nccl_variability_headroom_is_capture_scoped():
+    """The recoverable total across the whole capture, not one instance's
+    excess — otherwise 1000 slow collectives rank below a single idle gap."""
+    from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
+
+    rows = [{
+        "type": "allreduce", "pct": 50.0, "total_ms": 100.0,
+        "avg_ms": 5.0, "min_ms": 2.0, "max_ms": 20.0, "count": 10, "stream_id": 7,
+        "device_id": 0, "span_start_ns": 0, "span_end_ns": 100_000_000,
+    }]
+    findings = _to_findings(rows, context={"profile_id": "p"})
+    var = next(f for f in findings if "Variability" in f.label)
+    assert var.headroom_ms == 30.0  # count(10) * (avg 5 - min 2)
+    assert var.headroom_basis == "capture_total"
+
+
+def test_nccl_variability_headroom_absent_when_fields_missing():
+    """Without min_ms the capture-scoped value cannot be computed honestly, so
+    no headroom is claimed rather than a guessed one."""
     from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
 
     rows = [{
@@ -210,9 +250,11 @@ def test_nccl_variability_headroom_is_straggler_slack():
         "avg_ms": 5.0, "max_ms": 20.0, "count": 10, "stream_id": 7,
         "device_id": 0, "span_start_ns": 0, "span_end_ns": 100_000_000,
     }]
-    findings = _to_findings(rows, context={"profile_id": "p"})
-    var = next(f for f in findings if "Variability" in f.label)
-    assert var.headroom_ms == 15.0  # max(20) - avg(5)
+    var = next(
+        f for f in _to_findings(rows, context={"profile_id": "p"}) if "Variability" in f.label
+    )
+    assert var.headroom_ms is None
+    assert var.headroom_basis is None
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +329,23 @@ def test_region_mfu_format_renders_ms_not_zeros():
     assert "50.00ms" in text  # kernel union rendered from seconds
     assert "40.0%" in text  # MFU rendered
     assert "SOL headroom" in text
+
+
+def test_every_headroom_producer_declares_a_capture_scoped_basis():
+    """Cross-producer invariant (#231): ranking compares raw magnitudes, so a
+    producer that emits a different span silently distorts the ordering. Any
+    finding carrying headroom must declare its basis, and all builtins agree."""
+    import pathlib
+    import re
+
+    builtins = pathlib.Path("src/nsys_ai/skills/builtins")
+    offenders = []
+    for path in sorted(builtins.glob("*.py")):
+        src = path.read_text()
+        # Each headroom_ms assignment must be accompanied by a headroom_basis
+        # within the same Finding(...) construction.
+        n_headroom = len(re.findall(r"\bheadroom_ms=", src))
+        n_basis = len(re.findall(r"\bheadroom_basis=", src))
+        if n_headroom != n_basis:
+            offenders.append(f"{path.name}: {n_headroom} headroom_ms vs {n_basis} headroom_basis")
+    assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
