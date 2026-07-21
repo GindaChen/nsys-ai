@@ -54,15 +54,24 @@ class NsightSchema:
     and exposes canonical table choices (e.g., kernel activity table).
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, meta_conn=None):
         self._conn = conn
         from .connection import wrap_connection
 
         self._adapter = wrap_connection(conn)
+        # ``META_DATA_*`` lives only in the SQLite export — the Parquet/DuckDB
+        # cache materializes the analysis tables and not the metadata ones. When
+        # the schema is built on the cache (the normal path), those lookups must
+        # fall back to the original SQLite connection or every metadata field
+        # silently reads as absent.
+        self._meta_adapter = (
+            wrap_connection(meta_conn) if meta_conn is not None and meta_conn is not conn else None
+        )
 
         self.tables = list(self._adapter.get_table_names())
 
         self.version: str | None = self._detect_version()
+        self.schema_version: str | None = self._detect_schema_version()
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
 
@@ -73,29 +82,51 @@ class NsightSchema:
         Best-effort reader for META_DATA_* style tables which may use
         slightly different column names across Nsight versions.
         """
+        adapter = self._adapter
         if table not in self.tables:
-            return {}
+            # Not in the primary connection — try the metadata source before
+            # giving up (see the note in __init__).
+            if self._meta_adapter is None:
+                return {}
+            try:
+                if table not in self._meta_adapter.get_table_names():
+                    return {}
+            except Exception:
+                return {}
+            adapter = self._meta_adapter
 
-        cols = self._adapter.get_table_columns(table)
+        try:
+            cols = adapter.get_table_columns(table)
+        except Exception:
+            return {}
         key_col = None
         val_col = None
 
-        # Common patterns seen in Nsight exports
-        for cand in ("key", "Key", "NAME", "Name"):
-            if cand in cols:
-                key_col = cand
+        # Common patterns seen in Nsight exports. Matching is case-insensitive
+        # because the real exports use lowercase ``name``/``value`` while older
+        # probes only listed ``NAME``/``Name`` — the omission silently produced
+        # an empty mapping, so every consumer of these tables (version
+        # detection, GPU clock) degraded to None on every real profile.
+        lowered = {str(c).lower(): c for c in cols}
+        for cand in ("name", "key"):
+            if cand in lowered:
+                key_col = lowered[cand]
                 break
-        for cand in ("value", "Value", "VAL", "Val"):
-            if cand in cols:
-                val_col = cand
+        for cand in ("value", "val"):
+            if cand in lowered:
+                val_col = lowered[cand]
                 break
 
         if not key_col or not val_col:
             return {}
 
         kv: dict[str, str] = {}
-        cur = self._adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")
-        for k, v in cur.fetchall():
+        try:
+            cur = adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")  # noqa: S608
+            rows = cur.fetchall()
+        except Exception:
+            return {}
+        for k, v in rows:
             if k is not None and v is not None:
                 kv[str(k)] = str(v)
         return kv
@@ -106,16 +137,36 @@ class NsightSchema:
         for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
             meta.update(self._read_kv_table(table))
 
+        # The canonical key in current exports. Checked first and by exact name
+        # so the product *name* ("NVIDIA Nsight Systems") can never be mistaken
+        # for the version, which the old value-substring fallback allowed.
+        for key in ("EXPORT_PRODUCT_VERSION", "PRODUCT_VERSION"):
+            if meta.get(key):
+                return meta[key]
+
         # Heuristic keys that might carry version information
         for key in meta:
             lk = key.lower()
             if "nsight systems version" in lk or "exporter version" in lk:
                 return meta[key]
-        # Fallback: sometimes the value itself contains 'Nsight Systems X.Y'
+        # Fallback: a value carrying 'Nsight Systems X.Y'. Require a digit so a
+        # bare product name is not returned as a version.
         for val in meta.values():
-            if "Nsight Systems" in val:
+            if "Nsight Systems" in val and any(ch.isdigit() for ch in val):
                 return val
         return None
+
+    def _detect_schema_version(self) -> str | None:
+        """The export schema version, which is what actually changes shape.
+
+        NVIDIA documents that the SQLite schema "can and will change" between
+        releases, so this is the field to key any compatibility handling off —
+        the product version can move without the schema doing so.
+        """
+        meta: dict[str, str] = {}
+        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
+            meta.update(self._read_kv_table(table))
+        return meta.get("EXPORT_SCHEMA_VERSION") or None
 
     # ── Table detection ────────────────────────────────────────────────
 
@@ -239,7 +290,11 @@ class Profile:
         from .connection import wrap_connection
 
         self.adapter = wrap_connection(self.db if self.db is not None else self.conn)
-        self.schema = NsightSchema(self.db if self.db is not None else self.conn)
+        self.schema = NsightSchema(
+            self.db if self.db is not None else self.conn,
+            # The SQLite export is the only place META_DATA_* exists.
+            meta_conn=self.conn,
+        )
         self.meta = self._discover()
         self._nvtx_has_text_id = self.adapter.detect_nvtx_text_id()
 
