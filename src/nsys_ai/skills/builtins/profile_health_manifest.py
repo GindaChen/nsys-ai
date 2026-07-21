@@ -597,7 +597,6 @@ def _infer_bottleneck(m: dict) -> str:
     # reported as a profile-quality signal via its own finding.
     overlap = m.get("overlap", {})
     idle = m.get("idle", {})
-    nccl = m.get("nccl", {})
 
     # Check NCCL serialization first (most impactful)
     if overlap.get("overlap_pct", 100) < _COMM_BOUND_OVERLAP_PCT and overlap.get("nccl_only_ms", 0) > 0:
@@ -615,9 +614,17 @@ def _infer_bottleneck(m: dict) -> str:
         if top_pct > _KERNEL_HOTSPOT_PCT:
             return f"Kernel hotspot: {top_k[0]['name']} ({top_pct:.0f}%)"
 
-    # Check NCCL dominance
-    if nccl.get("total_nccl_ms", 0) > overlap.get("compute_only_ms", float("inf")):
-        return "Communication-bound (NCCL > compute)"
+    # Check NCCL dominance. Compare wall-clock exposed NCCL against wall-clock
+    # compute, mirroring the comm_bound finding below exactly — the two must not
+    # disagree. The per-stream sum ``total_nccl_ms`` used here previously
+    # overcounts when NCCL runs concurrently on multiple streams, and it also
+    # counts overlapped NCCL that ``compute_only_ms`` has already excluded from
+    # compute, so overlap was penalised twice and this headline could claim
+    # "communication-bound" for a run the findings path called healthy.
+    nccl_only_ms = float(overlap.get("nccl_only_ms", 0) or 0)
+    compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
+    if nccl_only_ms > 0 and nccl_only_ms > compute_only_ms:
+        return "Communication-bound (exposed NCCL > compute)"
 
     # Check iteration variance (spike pattern)
     nvtx = m.get("nvtx", {})
