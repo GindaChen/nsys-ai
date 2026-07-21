@@ -447,6 +447,39 @@ def _build_parser():
         help="Step-time regression threshold in percent for the verdict and CI gate "
         "(implies --exit-on-regression; default: 5.0)",
     )
+    p.add_argument(
+        "--gate-sol",
+        action="append",
+        default=None,
+        metavar="REGION:PCT",
+        help="Absolute speed-of-light gate: require REGION to stay at or above PCT "
+        "percent of its hardware ceiling in the after profile (e.g. 'attn:60'). "
+        "Repeatable. Unlike --gate this is an absolute target, so it does not drift "
+        "when the baseline is itself slow. Requires --theoretical-flops",
+    )
+    p.add_argument(
+        "--gate-sol-source",
+        choices=("nvtx", "kernel"),
+        default="nvtx",
+        help="Whether --gate-sol REGION names an NVTX range or a kernel "
+        "(default: nvtx)",
+    )
+    p.add_argument(
+        "--theoretical-flops",
+        type=float,
+        default=None,
+        metavar="FLOPS",
+        help="Model FLOPs per step, required by --gate-sol. Cannot be derived from a "
+        "trace, so it must be supplied (see the theoretical_flops skill to compute it)",
+    )
+    p.add_argument(
+        "--peak-tflops",
+        type=float,
+        default=None,
+        metavar="TFLOPS",
+        help="GPU peak TFLOPS used as the speed-of-light ceiling for --gate-sol "
+        "(auto-detected from the profile's GPU when omitted)",
+    )
     decision = p.add_mutually_exclusive_group()
     decision.add_argument(
         "--accept",

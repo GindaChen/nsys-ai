@@ -600,6 +600,12 @@ def _cmd_diff(args, _profile):
         to_diff_json,
     )
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
+    from nsys_ai.sol_gate import (
+        SolGateError,
+        evaluate_sol_gates,
+        parse_sol_gate,
+        resolve_theoretical_flops,
+    )
 
     _resolve_diff_before(args)
 
@@ -759,6 +765,31 @@ def _cmd_diff(args, _profile):
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
 
+    # Absolute speed-of-light gate. Evaluated on the *after* profile, since that
+    # is the candidate under judgement, and independently of the relative gate —
+    # a run can fail for regressing against its baseline, for sitting below its
+    # hardware ceiling, or for both.
+    sol_results = []
+    sol_specs_raw = getattr(args, "gate_sol", None) or []
+    if sol_specs_raw:
+        try:
+            sol_specs = [parse_sol_gate(s) for s in sol_specs_raw]
+            sol_flops = resolve_theoretical_flops(getattr(args, "theoretical_flops", None))
+            with _profile.open(args.after) as sol_after:
+                sol_conn = sol_after.db if sol_after.db is not None else sol_after.conn
+                sol_results = evaluate_sol_gates(
+                    sol_conn,
+                    sol_specs,
+                    theoretical_flops=sol_flops,
+                    peak_tflops=getattr(args, "peak_tflops", None),
+                    source=getattr(args, "gate_sol_source", "nvtx"),
+                )
+        except SolGateError as exc:
+            # Configuration/measurement problems exit 2, distinct from a gate
+            # failure (1), so CI can tell "misconfigured" from "regressed".
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
     if decision is not None and gate_summary is not None:
         try:
             decision_path, _, decision_warnings = write_diff_decision_json(
@@ -784,19 +815,41 @@ def _cmd_diff(args, _profile):
     else:
         print(out, end="")
 
+    # Report every speed-of-light target, passing or failing, so the CI log shows
+    # what was actually checked rather than only what broke.
+    for r in sol_results:
+        headroom = f" headroom={r.headroom_ms:.1f}ms" if r.headroom_ms is not None else ""
+        print(
+            f"SOL gate {'PASS' if r.passed else 'FAIL'}: region={r.region} "
+            f"mfu={r.mfu_pct:.1f}% threshold={r.threshold_pct:.1f}%{headroom}",
+            file=sys.stderr,
+        )
+
     gate_enabled = getattr(args, "exit_on_regression", False) or gate_pct is not None
-    if gate_enabled and gate_summary is not None:
-        if gate_summary.verdict == "regression_likely":
-            print(
-                "Diff gate failed: "
-                f"verdict={gate_summary.verdict} "
-                f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
-                f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
-                f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
-                f"gate_pct={regression_pct:.2f}%.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    relative_failed = (
+        gate_enabled and gate_summary is not None and gate_summary.verdict == "regression_likely"
+    )
+    if relative_failed:
+        print(
+            "Diff gate failed: "
+            f"verdict={gate_summary.verdict} "
+            f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
+            f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
+            f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+            f"gate_pct={regression_pct:.2f}%.",
+            file=sys.stderr,
+        )
+
+    sol_failed = [r for r in sol_results if not r.passed]
+    if sol_failed:
+        detail = ", ".join(
+            f"{r.region} at {r.mfu_pct:.1f}% of speed-of-light (needs {r.threshold_pct:.1f}%)"
+            for r in sol_failed
+        )
+        print(f"SOL gate failed: {detail}.", file=sys.stderr)
+
+    if relative_failed or sol_failed:
+        sys.exit(1)
 
 
 def _run_diff_chat(args, _profile):
