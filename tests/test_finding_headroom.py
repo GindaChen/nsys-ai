@@ -366,31 +366,35 @@ def test_every_headroom_producer_declares_a_capture_scoped_basis():
     assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
 
 
-def test_claimed_idle_headroom_never_exceeds_measured_idle(minimal_nsys_db_path):
+def test_idle_headroom_is_claimed_by_exactly_one_finding(minimal_nsys_db_path):
     """Cross-skill single-count invariant (#230).
 
     Each skill enforces single-counting internally, but the pipeline runs
     several together and nothing checked them against each other.
 
-    The bound is per category, not per profile: what double counting violates is
-    that the idle a report offers as recoverable exceeds the idle actually
-    measured. A whole-profile-span bound is far too loose to catch it — with the
-    per-gap findings restored to also claim their gaps, so every idle
-    millisecond is counted twice, the total stayed comfortably inside the span.
+    The invariant is stated as a count, not a magnitude. Comparing claimed idle
+    against a device-level idle measurement would be comparing different
+    quantities: gpu_idle_gaps sums gaps per stream, while the device is only
+    idle when *every* stream is. A compute stream idling while an NCCL stream
+    runs is legitimate and would make a magnitude bound fire with no
+    double count anywhere — a false positive on this project's core workload,
+    which is worse in a guard than a missed bug. How many findings claim the
+    same pool is basis-independent and is what double counting actually means.
     """
     from nsys_ai.evidence_builder import EvidenceBuilder
-    from nsys_ai.overlap import overlap_analysis
     from nsys_ai.profile import Profile
 
     with Profile(minimal_nsys_db_path) as prof:
-        measured_idle_ms = float(overlap_analysis(prof, 0).get("idle_ms", 0.0))
         report = EvidenceBuilder(prof, device=0).build()
 
-    claimed = sum(f.headroom_ms or 0.0 for f in report.findings if f.category == "idle")
-    assert claimed > 0, "fixture produced no idle headroom, so this proves nothing"
-    assert claimed <= measured_idle_ms + 0.01, (
-        f"report offers {claimed:.2f}ms of recoverable idle but only "
-        f"{measured_idle_ms:.2f}ms was measured — two skills are counting the same gaps"
+    claimants = [
+        f for f in report.findings if f.category == "idle" and f.headroom_ms is not None
+    ]
+    assert claimants, "fixture produced no idle headroom, so this proves nothing"
+    assert len(claimants) == 1, (
+        "the recoverable idle pool is claimed by "
+        + ", ".join(f"{f.id or f.label}" for f in claimants)
+        + " — it must be attributed to exactly one finding"
     )
 
 
