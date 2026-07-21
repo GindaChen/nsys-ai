@@ -304,7 +304,9 @@ catalog.
 
 The agent is a CUDA performance expert that runs the skills and cites the
 evidence — kernel names, durations, timestamps — behind each diagnosis rather
-than guessing.
+than guessing. Targeted `ask` answers use a fixed evidence-first shape:
+summary, primary diagnosis, cited evidence, confidence, recommended action,
+and a final runnable verification command.
 
 ```bash
 nsys-ai agent analyze profile.sqlite
@@ -328,8 +330,8 @@ Install the dependencies with the `agent` extra:
 pip install 'nsys-ai[agent]'
 ```
 
-If no key is set, the agent still runs the deterministic skills and prints their
-results; it just skips the natural-language synthesis.
+If no key is set, the agent still runs deterministic skills and returns the
+same evidence-first answer shape; it just skips the natural-language synthesis.
 
 ## Claude Code plugin
 

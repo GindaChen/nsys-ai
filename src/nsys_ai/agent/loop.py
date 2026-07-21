@@ -8,6 +8,7 @@ extra installed, can delegate to an LLM for natural language analysis.
 """
 
 import logging
+import shlex
 import sqlite3
 
 from ..exceptions import NsysAiError, ProfileNotFoundError
@@ -233,7 +234,6 @@ class Agent:
             model, api_key = None, None
         has_llm = bool(model and api_key)
 
-        sections = [f"Question: {question}\n"]
         evidence = {}
 
         # Stage 1: Triage (Unconditional root_cause_matcher)
@@ -243,12 +243,8 @@ class Agent:
             if skill:
                 rows = skill.execute(self.conn, **self._trim_kwargs)
                 evidence[triage_skill] = rows
-                sections.append("── Phase 1: Triage (Root Cause Matcher) ──")
-                sections.append(skill.format_rows(rows))
-                sections.append("")
         except Exception as e:
             log.debug("Triage skill '%s' failed: %s", triage_skill, e, exc_info=True)
-            sections.append(f"({triage_skill}: skipped — {e})\n")
 
         # Select Deep Dive Skills
         if has_llm:
@@ -260,7 +256,6 @@ class Agent:
                 selected = self._select_skills(question)
             if not selected:
                 selected = ["top_kernels", "gpu_idle_gaps"]
-            sections.append(f"── Phase 2: AI Triage selected skills: {', '.join(selected)} ──\n")
         else:
             selected = self._select_skills(question)
             if not selected:
@@ -276,21 +271,21 @@ class Agent:
                     continue
                 rows = skill.execute(self.conn, **self._trim_kwargs)
                 evidence[skill_name] = rows
-                text = skill.format_rows(rows)
-                sections.append(text)
-                sections.append("")
             except Exception as e:
                 log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
-                sections.append(f"({skill_name}: skipped — {e})\n")
 
         # Try LLM synthesis with combined structured evidence
+        llm_answer = None
         if has_llm:
             llm_answer = self._try_llm_synthesis(question, evidence)
-            if llm_answer:
-                sections.append("── Phase 3: AI Final Analysis ──")
-                sections.append(llm_answer)
 
-        return "\n".join(sections)
+        answer = self._format_evidence_first_answer(
+            question,
+            evidence,
+            selected_skills=[triage_skill, *selected],
+            llm_answer=llm_answer,
+        )
+        return answer
 
     def run_skill(self, skill_name: str, **kwargs) -> str:
         """Run a specific skill by name."""
@@ -353,6 +348,226 @@ class Agent:
             if keyword in q_lower:
                 selected.update(skill_names)
         return sorted(selected)
+
+    def _format_evidence_first_answer(
+        self,
+        question: str,
+        evidence: dict[str, list[dict]],
+        selected_skills: list[str],
+        llm_answer: str | None = None,
+    ) -> str:
+        """Build the fixed answer shape required by issue #205."""
+        selected_skills = list(dict.fromkeys(skill for skill in selected_skills if skill))
+        diagnosis_row = self._first_actionable_row(evidence.get("root_cause_matcher", []))
+        diagnosis = self._primary_diagnosis(question, evidence, diagnosis_row)
+        evidence_lines = self._evidence_lines(evidence)
+        confidence = self._confidence_label(evidence, diagnosis_row)
+        action = self._recommended_action(diagnosis_row)
+        verify_skill = self._choose_verify_skill(evidence, selected_skills)
+        verify_command = self._verify_command(verify_skill)
+
+        if llm_answer:
+            summary = (
+                "Ran targeted skills and generated a grounded answer from their structured "
+                "outputs; model synthesis was available, but the final answer is constrained "
+                "to the evidence-first template."
+            )
+        else:
+            ran = ", ".join(skill for skill in selected_skills if skill)
+            if ran:
+                summary = (
+                    f"Ran {ran} against the profile and summarized the strongest supported "
+                    "signal in a verification-friendly format."
+                )
+            else:
+                summary = (
+                    "No skill returned usable evidence, so the answer is limited to a "
+                    "verification fallback."
+                )
+
+        lines = [
+            "## Summary",
+            summary,
+            "",
+            "## Primary Diagnosis",
+            diagnosis,
+            "",
+            "## Evidence",
+        ]
+        if evidence_lines:
+            lines.extend(evidence_lines)
+        else:
+            lines.append(
+                "- source_skill=none; metric=none; window=full profile; "
+                "scope=profile; evidence=no skill returned usable rows"
+            )
+        lines.extend(
+            [
+                "",
+                "## Confidence",
+                confidence,
+                "",
+                "## Recommended Action",
+                action,
+                "",
+                "## Verify",
+            ]
+        )
+        if verify_command:
+            lines.append(f"`{verify_command}`")
+        else:
+            lines.append(
+                "Could not build a runnable verification command because no skill "
+                "produced evidence. Inspect available skills with:"
+            )
+            lines.append("`nsys-ai skill list`")
+        return "\n".join(lines)
+
+    def _first_actionable_row(self, rows: list[dict]) -> dict | None:
+        for row in rows:
+            pattern = str(row.get("pattern", ""))
+            if pattern and pattern != "No Known Anti-Patterns Detected":
+                return row
+        return None
+
+    def _primary_diagnosis(
+        self,
+        question: str,
+        evidence: dict[str, list[dict]],
+        diagnosis_row: dict | None,
+    ) -> str:
+        if diagnosis_row:
+            pattern = diagnosis_row.get("pattern") or diagnosis_row.get("label")
+            if pattern:
+                return str(pattern)
+        for skill_name, rows in evidence.items():
+            if rows:
+                row = rows[0]
+                label = row.get("label") or row.get("name") or row.get("kernel_name")
+                if label:
+                    return f"{label} ({skill_name})"
+        return f"No specific diagnosis could be grounded for: {question}"
+
+    def _recommended_action(self, diagnosis_row: dict | None) -> str:
+        if diagnosis_row:
+            rec = diagnosis_row.get("recommendation") or diagnosis_row.get("action")
+            if rec:
+                return str(rec)
+        return (
+            "Re-run the verify command, inspect the cited metrics and window, then collect "
+            "a narrower profile with NVTX ranges if the evidence is too broad."
+        )
+
+    def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
+        row_count = sum(len(rows) for rows in evidence.values())
+        if diagnosis_row and row_count:
+            return "0.75 (medium-high): at least one root-cause matcher finding is backed by skill output."
+        if row_count:
+            return "0.60 (medium): skill output exists, but no root-cause matcher finding dominated."
+        return "0.20 (low): no skill returned usable evidence."
+
+    def _evidence_lines(self, evidence: dict[str, list[dict]]) -> list[str]:
+        lines: list[str] = []
+        for skill_name, rows in evidence.items():
+            for row in rows[:2]:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("_summary") and len(rows) > 1:
+                    continue
+                metric = self._metric_fragment(row)
+                window = self._window_fragment(row)
+                scope = self._scope_fragment(row)
+                evidence_text = str(row.get("evidence") or row.get("note") or "").strip()
+                suffix = f"; evidence={evidence_text}" if evidence_text else ""
+                lines.append(
+                    f"- source_skill={skill_name}; metric={metric}; "
+                    f"window={window}; scope={scope}{suffix}"
+                )
+                if len(lines) >= 5:
+                    return lines
+        return lines
+
+    def _metric_fragment(self, row: dict) -> str:
+        priority = (
+            "pattern",
+            "label",
+            "name",
+            "kernel_name",
+            "severity",
+            "total_ms",
+            "duration_ms",
+            "gap_ms",
+            "gap_ns",
+            "idle_pct",
+            "total_idle_ms",
+            "overlap_pct",
+            "nccl_only_ms",
+            "compute_only_ms",
+            "count",
+        )
+        parts = []
+        for key in priority:
+            if key in row and row[key] not in (None, ""):
+                parts.append(f"{key}={self._compact_value(row[key])}")
+            if len(parts) >= 3:
+                break
+        return ", ".join(parts) if parts else "row_present=true"
+
+    def _compact_value(self, value) -> str:
+        text = str(value)
+        return text if len(text) <= 120 else text[:117] + "..."
+
+    def _window_fragment(self, row: dict) -> str:
+        start = row.get("start_ns", row.get("gpu_start_ns"))
+        end = row.get("end_ns", row.get("gpu_end_ns"))
+        if start is not None and end is not None:
+            return f"{start}-{end}ns"
+        if row.get("start_ms") is not None and row.get("end_ms") is not None:
+            return f"{row['start_ms']}-{row['end_ms']}ms"
+        trim_start = self._trim_kwargs.get("trim_start_ns")
+        trim_end = self._trim_kwargs.get("trim_end_ns")
+        if trim_start is not None and trim_end is not None:
+            return f"{trim_start}-{trim_end}ns"
+        return "full profile"
+
+    def _scope_fragment(self, row: dict) -> str:
+        parts = []
+        for key in ("gpu_id", "device_id", "device", "rank", "stream_id", "communicator_hex"):
+            if key in row and row[key] not in (None, ""):
+                parts.append(f"{key}={row[key]}")
+        return ", ".join(parts) if parts else "profile"
+
+    def _choose_verify_skill(
+        self,
+        evidence: dict[str, list[dict]],
+        selected_skills: list[str],
+    ) -> str | None:
+        for skill_name in selected_skills:
+            rows = evidence.get(skill_name)
+            if rows:
+                return skill_name
+        for skill_name, rows in evidence.items():
+            if rows:
+                return skill_name
+        return None
+
+    def _verify_command(self, skill_name: str | None) -> str | None:
+        if not skill_name:
+            return None
+        cmd = [
+            "nsys-ai",
+            "skill",
+            "run",
+            skill_name,
+            self.profile_path,
+            "--format",
+            "json",
+        ]
+        trim_start = self._trim_kwargs.get("trim_start_ns")
+        trim_end = self._trim_kwargs.get("trim_end_ns")
+        if trim_start is not None and trim_end is not None:
+            cmd.extend(["--trim", f"{trim_start / 1e9:g}", f"{trim_end / 1e9:g}"])
+        return " ".join(shlex.quote(str(part)) for part in cmd)
 
     def _try_llm_synthesis(self, question: str, evidence: dict[str, list[dict]]) -> str | None:
         """Try to use an LLM to synthesize an answer from structured evidence.
