@@ -28,6 +28,11 @@ __all__ = [
 ]
 
 
+# MFU above the hardware ceiling is not a great result, it is a broken
+# measurement — the FLOPs or the peak do not describe the region being measured.
+_IMPLAUSIBLE_MFU_PCT = 100.0
+
+
 class SolGateError(ValueError):
     """A speed-of-light gate could not be parsed or evaluated.
 
@@ -132,8 +137,19 @@ def evaluate_sol_gates(
     theoretical_flops: float,
     peak_tflops: float | None = None,
     source: str = "nvtx",
+    device_id: int | None = None,
+    occurrence_index: int = 1,
+    num_gpus: int = 1,
 ) -> list[SolGateResult]:
     """Evaluate each gate target against ``conn``, reusing the region_mfu skill.
+
+    Every parameter that changes *what is measured* is passed explicitly rather
+    than left to a default, because each one silently moves the resulting MFU:
+    ``num_gpus`` scales the peak the achieved rate is divided by,
+    ``occurrence_index`` selects which instance of an NVTX region is measured
+    (the first is usually a warmup/compile iteration), and ``device_id``
+    restricts which GPU's kernels count. A gate whose scope is implicit is a
+    gate that can flip for reasons unrelated to the code under test.
 
     Raises :class:`SolGateError` when a region cannot be measured, so an
     unmeasurable target fails the gate instead of passing by omission.
@@ -151,9 +167,13 @@ def evaluate_sol_gates(
             "name": spec.region,
             "source": source,
             "theoretical_flops": theoretical_flops,
+            "occurrence_index": occurrence_index,
+            "num_gpus": num_gpus,
         }
         if peak_tflops is not None:
             kwargs["peak_tflops"] = peak_tflops
+        if device_id is not None:
+            kwargs["device_id"] = device_id
         try:
             rows = skill.execute(conn, **kwargs)
         except Exception as exc:  # noqa: BLE001 — see below
@@ -181,6 +201,20 @@ def evaluate_sol_gates(
                 f"--gate-sol {spec}: region {spec.region!r} produced no MFU value"
             )
         mfu = float(mfu)
+        if mfu > _IMPLAUSIBLE_MFU_PCT:
+            # Exceeding the hardware ceiling means the inputs do not describe
+            # the measured region — almost always step-scoped FLOPs applied to a
+            # sub-region, or the wrong peak. Passing here would be the failure
+            # mode this module exists to prevent: a green gate that never really
+            # ran. (Reported as a gate failure rather than raising, because an
+            # FP8/sparse run can legitimately exceed an auto-detected BF16-dense
+            # peak, and that is a threshold problem the user must resolve.)
+            raise SolGateError(
+                f"--gate-sol {spec}: implausible MFU {mfu:.1f}% for region "
+                f"{spec.region!r} — above the hardware ceiling. Check that "
+                "--theoretical-flops describes this region (not the whole step) "
+                "and that --peak-tflops matches the precision actually used."
+            )
         results.append(
             SolGateResult(
                 region=spec.region,

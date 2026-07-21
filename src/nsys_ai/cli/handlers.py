@@ -773,6 +773,14 @@ def _cmd_diff(args, _profile):
     sol_specs_raw = getattr(args, "gate_sol", None) or []
     if sol_specs_raw:
         try:
+            if len(sol_specs_raw) > 1:
+                # --theoretical-flops describes one region, so a second target
+                # would silently be measured against the first one's FLOPs.
+                raise SolGateError(
+                    "only one --gate-sol target may be given, because "
+                    "--theoretical-flops describes a single region; a second "
+                    "target would be measured against the wrong FLOP count"
+                )
             sol_specs = [parse_sol_gate(s) for s in sol_specs_raw]
             sol_flops = resolve_theoretical_flops(getattr(args, "theoretical_flops", None))
             with _profile.open(args.after) as sol_after:
@@ -783,12 +791,33 @@ def _cmd_diff(args, _profile):
                     theoretical_flops=sol_flops,
                     peak_tflops=getattr(args, "peak_tflops", None),
                     source=getattr(args, "gate_sol_source", "nvtx"),
+                    # Match the relative gate's scope on the same command line.
+                    device_id=getattr(args, "gpu", None),
+                    occurrence_index=getattr(args, "gate_sol_occurrence", 1),
+                    num_gpus=getattr(args, "gate_sol_num_gpus", 1),
                 )
         except SolGateError as exc:
             # Configuration/measurement problems exit 2, distinct from a gate
             # failure (1), so CI can tell "misconfigured" from "regressed".
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(2)
+
+    sol_failed = [r for r in sol_results if not r.passed]
+
+    if decision is not None and sol_failed:
+        # Refuse to persist a decision that the same invocation contradicts. The
+        # record carries no speed-of-light field, so writing "accepted" here
+        # would leave an auditable artefact saying the run was fine next to a
+        # process that exited 1 because it was not.
+        detail = ", ".join(
+            f"{r.region} at {r.mfu_pct:.1f}% (needs {r.threshold_pct:.1f}%)" for r in sol_failed
+        )
+        print(
+            f"Error: refusing to record '{decision}' because a speed-of-light gate "
+            f"failed: {detail}. Re-run without --accept/--reject, or resolve the gate.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if decision is not None and gate_summary is not None:
         try:
@@ -819,9 +848,18 @@ def _cmd_diff(args, _profile):
     # what was actually checked rather than only what broke.
     for r in sol_results:
         headroom = f" headroom={r.headroom_ms:.1f}ms" if r.headroom_ms is not None else ""
+        # Echo the scope the MFU was measured over — occurrence, GPU count and
+        # device each move the number, so a bare percentage is not reviewable.
+        scope = (
+            f" [source={getattr(args, 'gate_sol_source', 'nvtx')}"
+            f" occurrence={getattr(args, 'gate_sol_occurrence', 1)}"
+            f" num_gpus={getattr(args, 'gate_sol_num_gpus', 1)}"
+            + (f" gpu={args.gpu}" if getattr(args, "gpu", None) is not None else "")
+            + "]"
+        )
         print(
             f"SOL gate {'PASS' if r.passed else 'FAIL'}: region={r.region} "
-            f"mfu={r.mfu_pct:.1f}% threshold={r.threshold_pct:.1f}%{headroom}",
+            f"mfu={r.mfu_pct:.1f}% threshold={r.threshold_pct:.1f}%{headroom}{scope}",
             file=sys.stderr,
         )
 
@@ -840,7 +878,6 @@ def _cmd_diff(args, _profile):
             file=sys.stderr,
         )
 
-    sol_failed = [r for r in sol_results if not r.passed]
     if sol_failed:
         detail = ", ".join(
             f"{r.region} at {r.mfu_pct:.1f}% of speed-of-light (needs {r.threshold_pct:.1f}%)"

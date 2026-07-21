@@ -223,3 +223,55 @@ class TestCliWiring:
 
     def test_no_gate_sol_leaves_diff_unaffected(self):
         assert self._run().returncode == 0
+
+
+# ── holistic-review regressions ──────────────────────────────────────
+
+
+class TestMeasurementScope:
+    """The gate's verdict must not move for reasons unrelated to the code under
+    test, so every parameter that changes *what is measured* is explicit."""
+
+    def test_scope_parameters_are_forwarded_not_defaulted(self, monkeypatch):
+        skill = _FakeSkill(_mfu_row(80.0))
+        _patch_skill(monkeypatch, skill)
+        evaluate_sol_gates(
+            None,
+            [parse_sol_gate("attn:60")],
+            theoretical_flops=1e13,
+            device_id=3,
+            occurrence_index=7,
+            num_gpus=8,
+        )
+        call = skill.calls[0]
+        assert call["device_id"] == 3
+        assert call["occurrence_index"] == 7
+        assert call["num_gpus"] == 8
+
+    def test_device_id_omitted_when_not_scoped(self, monkeypatch):
+        skill = _FakeSkill(_mfu_row(80.0))
+        _patch_skill(monkeypatch, skill)
+        evaluate_sol_gates(None, [parse_sol_gate("attn:60")], theoretical_flops=1e13)
+        assert "device_id" not in skill.calls[0]
+
+
+class TestImplausibleMfu:
+    """MFU above the hardware ceiling means the inputs do not describe the
+    region — the one thing this gate must never report as a pass."""
+
+    def test_mfu_above_ceiling_is_an_error_not_a_pass(self, monkeypatch):
+        _patch_skill(monkeypatch, _FakeSkill(_mfu_row(3538.0)))
+        with pytest.raises(SolGateError, match="implausible MFU"):
+            evaluate_sol_gates(None, [parse_sol_gate("attn:60")], theoretical_flops=1e13)
+
+    def test_error_names_the_likely_cause(self, monkeypatch):
+        _patch_skill(monkeypatch, _FakeSkill(_mfu_row(150.0)))
+        with pytest.raises(SolGateError, match="theoretical-flops"):
+            evaluate_sol_gates(None, [parse_sol_gate("attn:60")], theoretical_flops=1e13)
+
+    def test_exactly_at_ceiling_is_still_measurable(self, monkeypatch):
+        _patch_skill(monkeypatch, _FakeSkill(_mfu_row(100.0)))
+        (r,) = evaluate_sol_gates(
+            None, [parse_sol_gate("attn:60")], theoretical_flops=1e13
+        )
+        assert r.passed is True

@@ -454,8 +454,9 @@ def _build_parser():
         metavar="REGION:PCT",
         help="Absolute speed-of-light gate: require REGION to stay at or above PCT "
         "percent of its hardware ceiling in the after profile (e.g. 'attn:60'). "
-        "Repeatable. Unlike --gate this is an absolute target, so it does not drift "
-        "when the baseline is itself slow. Requires --theoretical-flops",
+        "Unlike --gate this is an absolute target, so it does not drift when the "
+        "baseline is itself slow. Requires --theoretical-flops, which describes "
+        "this one region, so only a single target may be given",
     )
     p.add_argument(
         "--gate-sol-source",
@@ -463,6 +464,24 @@ def _build_parser():
         default="nvtx",
         help="Whether --gate-sol REGION names an NVTX range or a kernel "
         "(default: nvtx)",
+    )
+    p.add_argument(
+        "--gate-sol-occurrence",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Which occurrence of an NVTX region --gate-sol measures, 1-based "
+        "(default: 1). Occurrence 1 is often a warmup/compile iteration, so a "
+        "steady-state index usually gives a more representative gate",
+    )
+    p.add_argument(
+        "--gate-sol-num-gpus",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of GPUs the --theoretical-flops figure covers (default: 1). "
+        "Use the world size when passing whole-job FLOPs, or the peak is scaled "
+        "wrongly and the MFU is off by that factor",
     )
     p.add_argument(
         "--theoretical-flops",
