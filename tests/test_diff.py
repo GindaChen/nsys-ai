@@ -1,9 +1,12 @@
 import json
 import os
+import pathlib
 import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
+
+import pytest
 
 
 def _make_db_with_target_info(path: str, gpu_name: str = "NVIDIA A100-SXM4-80GB"):
@@ -2398,7 +2401,7 @@ def test_v01_collect_sanity_warnings_returns_confidence():
     matched = ProfileSummary(
         path="x",
         gpu=0,
-        schema_version="2024.1.1",
+        schema_version="3.24.14",
         total_gpu_ns=100,
         kernel_rows=100,
         kernels=[],
@@ -2416,7 +2419,7 @@ def test_v01_collect_sanity_warnings_returns_confidence():
     other = ProfileSummary(
         path="y",
         gpu=0,
-        schema_version="2025.2.2",
+        schema_version="3.25.0",
         total_gpu_ns=100,
         kernel_rows=100,
         kernels=[],
@@ -2426,6 +2429,69 @@ def test_v01_collect_sanity_warnings_returns_confidence():
     warnings, conf = collect_sanity_warnings(matched, other)
     assert conf == 0.0
     assert any("schema" in w.lower() for w in warnings)
+
+
+def _summary(**over):
+    from nsys_ai.diff import ProfileSummary
+
+    base = dict(
+        path="x", gpu=0, schema_version="3.24.14", total_gpu_ns=100,
+        kernel_rows=100, kernels=[], nvtx=[], overlap={},
+    )
+    return ProfileSummary(**{**base, **over})
+
+
+def test_nsys_build_bump_alone_does_not_zero_comparability():
+    """A different nsys build on the same export schema is still comparable.
+
+    ``ProfileSummary.schema_version`` used to be fed the *product* version, so
+    re-profiling after any toolkit update zeroed the comparability confidence
+    and suppressed the verdict. Real case from the local corpus: 2026.1.1.204
+    and 2026.1.2.63 both export schema 3.24.14.
+    """
+    from nsys_ai.diff import collect_sanity_warnings
+
+    before = _summary(product_version="2026.1.1.204")
+    after = _summary(product_version="2026.1.2.63")
+
+    warnings, conf = collect_sanity_warnings(before, after)
+    assert conf == 1.0, "same export schema must stay fully comparable"
+    assert any("build differs" in w for w in warnings), "the bump is still worth reporting"
+    assert not any("export schema differs" in w for w in warnings)
+
+
+def test_export_schema_mismatch_still_zeros_comparability():
+    """The hard gate must survive: a real schema change is incomparable."""
+    from nsys_ai.diff import collect_sanity_warnings
+
+    warnings, conf = collect_sanity_warnings(
+        _summary(schema_version="3.24.14", product_version="2026.1.1.204"),
+        _summary(schema_version="3.27.0", product_version="2026.1.1.204"),
+    )
+    assert conf == 0.0
+    assert any("export schema differs" in w for w in warnings)
+
+
+def test_build_profile_summary_reads_export_schema_not_product_version():
+    """Guards the assignment itself, end-to-end on a real export.
+
+    The two are trivially told apart by shape — export schema is "3.24.14",
+    the nsys build is "2026.1.1.204" — so this fails loudly if the fields are
+    ever swapped back.
+    """
+    from nsys_ai.diff import build_profile_summary
+    from nsys_ai.profile import Profile
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "mock.sqlite"
+    if not fixture.exists():
+        pytest.skip("mock.sqlite fixture not present")
+
+    with Profile(str(fixture)) as prof:
+        s = build_profile_summary(prof, gpu=None, trim=None)
+
+    assert s.schema_version == prof.schema.schema_version == "3.24.14"
+    assert s.product_version == prof.schema.version
+    assert s.product_version != s.schema_version
 
 
 def test_v01_diff_json_envelope_and_verdict(tmp_path):
@@ -2618,7 +2684,7 @@ def test_v01_confidence_separates_schema_and_gpu_mismatch():
     a = ProfileSummary(
         path="a",
         gpu=0,
-        schema_version="2024.1.1",
+        schema_version="3.24.14",
         total_gpu_ns=100,
         kernel_rows=100,
         kernels=[],
@@ -2628,7 +2694,7 @@ def test_v01_confidence_separates_schema_and_gpu_mismatch():
     b = ProfileSummary(
         path="b",
         gpu=1,  # different GPU id, same schema
-        schema_version="2024.1.1",
+        schema_version="3.24.14",
         total_gpu_ns=100,
         kernel_rows=100,
         kernels=[],
@@ -2650,7 +2716,7 @@ def test_v01_no_signal_propagates_through_pipeline():
     good = ProfileSummary(
         path="b",
         gpu=0,
-        schema_version="2024.1.1",
+        schema_version="3.24.14",
         total_gpu_ns=100,
         kernel_rows=100,
         kernels=[],
@@ -2660,7 +2726,7 @@ def test_v01_no_signal_propagates_through_pipeline():
     bad = ProfileSummary(
         path="a",
         gpu=0,
-        schema_version="2024.1.1",
+        schema_version="3.24.14",
         total_gpu_ns=0,
         kernel_rows=0,
         kernels=[],
