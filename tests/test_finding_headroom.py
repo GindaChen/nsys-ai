@@ -28,6 +28,21 @@ def test_headroom_serializes_when_set():
     assert Finding.from_dict(d).headroom_ms == 12.5
 
 
+def test_headroom_basis_round_trips_with_headroom():
+    """The basis must survive serialization alongside the value it qualifies —
+    a headroom whose span is lost in transit is not comparable."""
+    f = Finding(type="region", label="x", start_ns=0, end_ns=1,
+                headroom_ms=12.5, headroom_basis="capture_total")
+    d = f.to_dict()
+    assert d["headroom_basis"] == "capture_total"
+    assert Finding.from_dict(d).headroom_basis == "capture_total"
+
+
+def test_headroom_basis_dropped_when_absent():
+    d = Finding(type="region", label="x", start_ns=0, end_ns=1).to_dict()
+    assert "headroom_basis" not in d
+
+
 def test_headroom_dropped_when_none():
     d = _f("x").to_dict()
     assert "headroom_ms" not in d  # legacy JSON stays compact

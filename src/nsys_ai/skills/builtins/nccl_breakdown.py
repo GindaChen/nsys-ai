@@ -295,6 +295,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
     for r in rows:
         if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > _VARIABILITY_RATIO_THRESHOLD and r["pct"] >= _VARIABILITY_MIN_PCT:
             ratio = round(r["max_ms"] / r["avg_ms"], 1)
+            variability_headroom_ms = _variability_headroom_ms(r)
             finding_id = f"nccl_high_variability_{r['type']}_stream{r['stream_id']}"
             selection = TraceSelection(
                 id=f"sel_{finding_id}",
@@ -336,8 +337,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 # other headroom producers. (The previous value, one instance's
                 # max - avg, undercounted by a factor of `count` and made a
                 # thousand slow collectives rank below a single idle gap.)
-                headroom_ms=_variability_headroom_ms(r),
-                headroom_basis="capture_total" if _variability_headroom_ms(r) else None,
+                headroom_ms=variability_headroom_ms,
+                headroom_basis="capture_total" if variability_headroom_ms else None,
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_HIGH_VARIABILITY_EXPLANATION,
