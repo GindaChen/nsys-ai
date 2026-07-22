@@ -291,9 +291,11 @@ def test_iteration_timing_headroom_is_aggregated_and_counted_once():
     assert carriers[0].headroom_basis == "capture_total"
 
 
-def test_nccl_variability_headroom_is_capture_scoped():
-    """The recoverable total across the whole capture, not one instance's
-    excess — otherwise 1000 slow collectives rank below a single idle gap."""
+def test_nccl_variability_defers_comm_headroom_to_overlap_breakdown():
+    """The variability finding claims no headroom: the excess it points at lives
+    inside the NCCL kernels, whose recoverable (exposed) portion is the comm
+    bucket overlap_breakdown already owns. Claiming it again would double-count
+    that bucket. The 'if balanced' figure is still reported, as evidence."""
     from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
 
     rows = [{
@@ -303,13 +305,16 @@ def test_nccl_variability_headroom_is_capture_scoped():
     }]
     findings = _to_findings(rows, context={"profile_id": "p"})
     var = next(f for f in findings if "Variability" in f.label)
-    assert var.headroom_ms == 30.0  # count(10) * (avg 5 - min 2)
-    assert var.headroom_basis == "capture_total"
+    assert var.headroom_ms is None, "must not co-rank against the same exposed-comm bucket"
+    assert var.headroom_basis is None
+    # The measurement survives on the evidence row: count(10) * (avg 5 - min 2).
+    assert var.evidence[0].values["recoverable_if_balanced_ms"] == 30.0
+    assert var.evidence[0].units["recoverable_if_balanced_ms"] == "ms"
 
 
-def test_nccl_variability_headroom_absent_when_fields_missing():
-    """Without min_ms the capture-scoped value cannot be computed honestly, so
-    no headroom is claimed rather than a guessed one."""
+def test_nccl_variability_if_balanced_absent_when_fields_missing():
+    """Without min_ms the 'if balanced' figure cannot be computed honestly, so
+    it is None on the evidence row rather than a guessed value."""
     from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
 
     rows = [{
@@ -321,7 +326,7 @@ def test_nccl_variability_headroom_absent_when_fields_missing():
         f for f in _to_findings(rows, context={"profile_id": "p"}) if "Variability" in f.label
     )
     assert var.headroom_ms is None
-    assert var.headroom_basis is None
+    assert var.evidence[0].values["recoverable_if_balanced_ms"] is None
 
 
 # ---------------------------------------------------------------------------

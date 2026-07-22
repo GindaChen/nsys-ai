@@ -135,14 +135,17 @@ def _serialization_confidence(nccl_capture_pct: float, captured_ms: float = 0.0)
         return 0.85
     return 0.70
 
-def _variability_headroom_ms(row: dict) -> float | None:
-    """Capture-scoped recoverable time for a high-variability collective.
+def _recoverable_if_balanced_ms(row: dict) -> float | None:
+    """Aggregate collective time saved if every instance ran at the fastest
+    observed time: ``count * (avg - min)``.
 
-    If every instance ran at the fastest observed time instead of the average,
-    ``count * (avg - min)`` would be saved. An upper bound — some spread is
-    unavoidable — but it spans the whole capture, so it is comparable with the
-    other headroom producers. Returns ``None`` when the row lacks the fields to
-    compute it honestly rather than guessing a value.
+    Reported as a measurement on the evidence row, *not* as ``headroom_ms``.
+    It is not an independent pool of recoverable wall-clock: this excess lives
+    inside the NCCL kernels, whose exposed portion ``overlap_breakdown`` already
+    claims as the comm headroom and whose overlapped portion is hidden and not
+    recoverable at all. Claiming it again would double-count that bucket — see
+    the deferral note at the finding below and ``critical_path``'s matching one.
+    Returns ``None`` when the row lacks the fields to compute it honestly.
     """
     count = row.get("count")
     avg_ms = row.get("avg_ms")
@@ -295,7 +298,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
     for r in rows:
         if r["avg_ms"] > 0 and r["max_ms"] / r["avg_ms"] > _VARIABILITY_RATIO_THRESHOLD and r["pct"] >= _VARIABILITY_MIN_PCT:
             ratio = round(r["max_ms"] / r["avg_ms"], 1)
-            variability_headroom_ms = _variability_headroom_ms(r)
+            recoverable_if_balanced_ms = _recoverable_if_balanced_ms(r)
             finding_id = f"nccl_high_variability_{r['type']}_stream{r['stream_id']}"
             selection = TraceSelection(
                 id=f"sel_{finding_id}",
@@ -314,8 +317,16 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                     "avg_ms": round(r["avg_ms"], 3),
                     "max_ms": round(r["max_ms"], 3),
                     "max_avg_ratio": ratio,
+                    # Reported measurement, not a headroom (see deferral below):
+                    # aggregate time saved if every instance ran at the fastest.
+                    "recoverable_if_balanced_ms": recoverable_if_balanced_ms,
                 },
-                units={"avg_ms": "ms", "max_ms": "ms", "max_avg_ratio": "ratio"},
+                units={
+                    "avg_ms": "ms",
+                    "max_ms": "ms",
+                    "max_avg_ratio": "ratio",
+                    "recoverable_if_balanced_ms": "ms",
+                },
                 selection_id=selection.id,
                 provenance={"row_kind": "high_variability", "collective_type": r["type"], "root_cause": "#8_proxy"},
             )
@@ -330,15 +341,17 @@ def _to_findings(rows: list[dict], *, context: dict | None = None)-> list:
                 id=finding_id,
                 category="communication",
                 confidence=_variability_confidence(ratio, r.get("count", 0)),
-                # Recoverable time across the whole capture if the variability
-                # were eliminated and every instance ran at the fastest observed
-                # time: count x (avg - min). An upper bound — some spread is
-                # unavoidable — but capture-scoped, so it is comparable with the
-                # other headroom producers. (The previous value, one instance's
-                # max - avg, undercounted by a factor of `count` and made a
-                # thousand slow collectives rank below a single idle gap.)
-                headroom_ms=variability_headroom_ms,
-                headroom_basis="capture_total" if variability_headroom_ms else None,
+                # No headroom, by design. The variability excess lives inside
+                # the NCCL kernels: its exposed portion is the same comm bucket
+                # `overlap_breakdown` already claims as headroom, and its
+                # overlapped portion is hidden and not recoverable. Claiming it
+                # here would double-count that bucket — the exact deconfliction
+                # `critical_path` makes for the same reason. Comm still ranks
+                # correctly via `overlap_breakdown`'s exposed-NCCL headroom; this
+                # finding stays as the straggler diagnostic, with the "if
+                # balanced" figure reported on the evidence row above.
+                headroom_ms=None,
+                headroom_basis=None,
                 evidence=[evidence_row],
                 selection=selection,
                 explanation=_HIGH_VARIABILITY_EXPLANATION,
