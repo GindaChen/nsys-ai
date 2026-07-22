@@ -33,10 +33,16 @@ def _to_findings(rows: list[dict]) -> list:
     from nsys_ai.annotation import Finding
 
     findings = []
-    # Only judge variance over real iterations — a loose NVTX marker can match
-    # many sub-ms op ranges whose contaminated median makes every real iteration
-    # look thousands of percent slow.
-    real = [it for it in rows if it.get("is_real_iteration", True)]
+    # Only judge variance over genuine iterations: real (not the sub-ms op ranges
+    # a loose NVTX marker matches, whose contaminated median makes every real
+    # iteration look thousands of percent slow) AND NVTX-marker-based (not the
+    # heuristic gap fallback, which on a non-looping capture emits pauses that are
+    # not iterations, so a "slow iteration" finding over them is phantom — #215).
+    real = [
+        it
+        for it in rows
+        if it.get("is_real_iteration", True) and not it.get("heuristic", False)
+    ]
     if len(real) < 3:
         return findings
 

@@ -545,10 +545,19 @@ def detect_iterations(
             iterations.append(n)
             last_end = n["end"]
 
+    # Whether the iterations came from a matched NVTX marker (a user-declared
+    # boundary) or from the heuristic gap fallback below. Consumers that make
+    # confident claims — an iteration count, a variance verdict, a slow-iteration
+    # finding — trust only the former: with no user marker, the "iterations" are
+    # inferred from inter-kernel pauses and on a non-looping capture are not
+    # iterations at all (issue #215).
+    used_heuristic = False
+
     # --- Heuristic Fallback ---
     # If no NVTX markers match, fall back to detecting iterations by finding
     # large gaps in kernel execution on the primary CPU thread across all streams.
     if not iterations:
+        used_heuristic = True
         rt_all = prof._duckdb_query(
             f"""
             SELECT correlationId, start, [end] FROM {runtime_table}
@@ -651,6 +660,7 @@ def detect_iterations(
             {
                 "iteration": i,
                 "text": it["text"] if "text" in it else "",
+                "heuristic": used_heuristic,
                 "gpu_start_ns": gpu_start,
                 "gpu_end_ns": gpu_end,
                 "gpu_start_s": round(gpu_start / 1e9, 4),

@@ -270,6 +270,35 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     return (mid - half, mid + half)
 
 
+def _summarize_iterations(iter_rows: list[dict]) -> dict:
+    """Iteration count + variance metrics for the manifest, over genuine
+    iterations only.
+
+    A count, a median and a variance verdict are meaningful only over real
+    iterations (not the sub-iteration op ranges a loose NVTX marker matches) that
+    came from a user NVTX marker (not the heuristic gap fallback). On a single
+    inference run the heuristic path synthesises hundreds of inter-kernel pauses
+    whose median/slowest read as a wildly non-uniform loop — a confidently-wrong
+    signal (issue #215). Return an empty summary rather than that.
+    """
+    real = [
+        r
+        for r in iter_rows
+        if r.get("is_real_iteration", True) and not r.get("heuristic", False)
+    ]
+    if not real:
+        return {}
+    # Skip iter 0 (warm-up) when computing variance metrics.
+    steady = real[1:] if len(real) > 1 else real
+    durs = sorted(r.get("duration_ms", 0) for r in steady)
+    mid = len(durs) // 2
+    return {
+        "iteration_count": len(real),
+        "median_iter_ms": round(durs[mid], 1),
+        "slowest_iter_ms": round(max(durs), 1),
+    }
+
+
 def _execute(conn, **kwargs):
     """Build a compact profile health manifest."""
     from ...profile import Profile
@@ -523,15 +552,7 @@ def _execute(conn, **kwargs):
         _log.debug("manifest: aggregate_nvtx_ranges failed: %s", exc)
 
     iter_rows = _safe_skill_run("iteration_timing", conn, device=device, **trim_kwargs)
-    if iter_rows:
-        nvtx_summary["iteration_count"] = len(iter_rows)
-        # Skip iter 0 (warm-up) when computing variance metrics
-        steady = iter_rows[1:] if len(iter_rows) > 1 else iter_rows
-        if steady:
-            durs = sorted(r.get("duration_ms", 0) for r in steady)
-            mid = len(durs) // 2
-            nvtx_summary["median_iter_ms"] = round(durs[mid], 1)
-            nvtx_summary["slowest_iter_ms"] = round(max(durs), 1)
+    nvtx_summary.update(_summarize_iterations(iter_rows))
 
     # ── 7. Root cause findings (count + top severity) ────────────
     # Pass precomputed communicator rows to avoid re-running the expensive

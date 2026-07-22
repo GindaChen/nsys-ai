@@ -108,3 +108,70 @@ def test_findings_empty_when_fewer_than_three_real():
     rows += [_row(0.3, iteration=100 + i) for i in range(50)]
     _flag_real_iterations(rows)
     assert _to_findings(rows) == []
+
+
+# ── Heuristic-fallback phantom iterations (issue #215) ──────────────────────
+# When no user NVTX iteration marker matches, detect_iterations falls back to
+# synthesising segments from inter-kernel gaps. On a non-looping capture those
+# are pauses, not iterations, and must not drive a confident count, variance
+# verdict, or slow-iteration finding.
+
+
+def test_to_findings_ignores_heuristic_iterations():
+    """Heuristic gap-segments produce no findings even when they would survive
+    the compute-noise filter. Uniform compute (so is_real_iteration keeps them
+    all) plus one genuinely-slower segment: the ONLY thing suppressing the
+    finding is the heuristic flag, so this isolates it from the compute filter."""
+    rows = [_row(500.0, iteration=i, compute_ms=480.0, heuristic=True) for i in range(6)]
+    rows.append(_row(1500.0, iteration=99, compute_ms=1450.0, heuristic=True))
+    _flag_real_iterations(rows)
+    assert all(r["is_real_iteration"] for r in rows), "compute filter must keep them"
+    assert _to_findings(rows) == [], "but heuristic detection must yield no findings"
+
+
+def test_to_findings_still_fires_for_nvtx_iterations():
+    """The NVTX-marker path (heuristic absent/False) is unchanged: a genuine
+    slow iteration among uniform ones still yields a finding."""
+    rows = [_row(500.0, iteration=i) for i in range(6)]  # no heuristic key -> False
+    rows.append(_row(1500.0, iteration=99))
+    _flag_real_iterations(rows)
+    finds = _to_findings(rows)
+    assert finds, "a real slow NVTX iteration must still be reported"
+    assert any("Slow Iteration" in f.label for f in finds)
+
+
+def test_manifest_summary_drops_heuristic_iterations():
+    from nsys_ai.skills.builtins.profile_health_manifest import _summarize_iterations
+
+    rows = [_row(2.0, iteration=i, heuristic=True) for i in range(20)]
+    rows.append(_row(5000.0, iteration=99, heuristic=True))
+    _flag_real_iterations(rows)
+    # No count, no median, no slowest -> the variance-spike verdict cannot fire.
+    assert _summarize_iterations(rows) == {}
+
+
+def test_manifest_summary_counts_nvtx_iterations():
+    from nsys_ai.skills.builtins.profile_health_manifest import _summarize_iterations
+
+    rows = [_row(500.0, iteration=i) for i in range(5)]  # NVTX-based (heuristic False)
+    rows.append(_row(900.0, iteration=99))
+    _flag_real_iterations(rows)
+    summary = _summarize_iterations(rows)
+    assert summary["iteration_count"] == 6
+    assert summary["median_iter_ms"] == 500.0  # warm-up (iter 0) skipped
+    assert summary["slowest_iter_ms"] == 900.0
+
+
+def test_detect_iterations_flags_source(minimal_nsys_conn):
+    """detect_iterations tags rows heuristic=False when a user NVTX marker
+    matched, True when it fell back to gap-segments — the flag the consumers
+    above rely on."""
+    from nsys_ai.overlap import detect_iterations
+    from nsys_ai.profile import Profile
+
+    prof = Profile._from_conn(minimal_nsys_conn)
+    matched = detect_iterations(prof, 0, marker="train_step")
+    assert matched and all(r.get("heuristic") is False for r in matched)
+
+    fallback = detect_iterations(prof, 0, marker="zzz_no_such_marker_zzz")
+    assert fallback and all(r.get("heuristic") is True for r in fallback)
