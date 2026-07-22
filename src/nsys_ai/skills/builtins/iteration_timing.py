@@ -112,7 +112,7 @@ def _to_findings(rows: list[dict]) -> list:
 def _format(rows):
     if not rows:
         return "(No iterations detected — NVTX marker not found and no large gaps found)"
-    is_heuristic = any(it.get("text", "").startswith("heuristic") for it in rows)
+    is_heuristic = any(it.get("heuristic", False) for it in rows)
     title = (
         "── Iteration Timings (Heuristic Fallback) ──"
         if is_heuristic
