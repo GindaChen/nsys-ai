@@ -118,17 +118,20 @@ def _sweep_containment(parents, children):
     how the SQL drops a range matching itself (and, as in the SQL, a distinct
     range sharing the child's exact ``[start, end]``).
 
-    An active set keyed on ``end`` — not a stack. eventType-60 (StartEnd) ranges
-    are not guaranteed to nest, so ranges can cross; a stack-pop would evict the
-    wrong range and misattribute a later child. Sorted by start, the active set
-    holds ranges that have opened and not yet ended, so it is bounded by NVTX
-    nesting depth and the sweep is O(n log n + matches).
+    Containment is decided per candidate by the ``pe >= ce`` check, not by the
+    active set's shape — so this does not assume ranges nest. That matters
+    because eventType-60 (StartEnd) ranges can cross, and treating the active
+    set as a nesting stack (crediting whatever is "open" without re-checking
+    end) would misattribute a child to a range that started before it but ended
+    first. The sort-by-start plus ``end >= cs`` eviction is only there to keep
+    the active set to the ranges spanning the current child, so the per-child
+    scan stays O(depth) and the sweep is O(n log n + matches).
 
     ``parents`` is every range in the profile and is held in memory (labels are
-    near-unique per instance, so interning does not shrink it): ~1.25M rows is
-    ~200MB on the largest profile seen. Acceptable — the in-engine SQL this
-    replaces could not process that profile at all — but the reason the input is
-    fetched as plain rows rather than streamed.
+    near-unique per instance, so interning does not shrink it): ~1.25M rows
+    measured ~425MB peak on the largest profile in hand. Acceptable — the
+    in-engine SQL this replaces could not process that profile at all — but the
+    reason the input is fetched as plain rows rather than streamed.
     """
     p_by_tid = defaultdict(list)
     c_by_tid = defaultdict(list)

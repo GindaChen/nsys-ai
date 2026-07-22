@@ -364,6 +364,16 @@ _PARITY_ROWS = [
     ("aten::item_z", 1_000_000, 1_500_000, 4, 59),
     ("alpha_phase", 20_000_000, 30_000_000, 4, 59),
     ("aten::item_a", 21_000_000, 21_500_000, 4, 59),
+    # tid 5: boundary-coincident, non-identity children. p_start shares its start
+    # with the child (start==parent.start, end<parent.end) so containment is by
+    # `parent.start <= child.start`, not `<`; p_end shares its end with the child
+    # (end==parent.end, start>parent.start) so it is by `parent.end >= child.end`,
+    # not `>`. Neither is the identical-coordinate self-match. These pin the two
+    # boundary predicates that a strict `<`/`>` would silently break.
+    ("p_start", 0, 10_000_000, 5, 59),
+    ("aten::item_at_start", 0, 3_000_000, 5, 59),
+    ("p_end", 20_000_000, 30_000_000, 5, 59),
+    ("aten::item_at_end", 27_000_000, 30_000_000, 5, 59),
 ]
 
 
