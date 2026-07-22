@@ -253,7 +253,11 @@ def test_overlap_breakdown_headroom_single_count():
     assert sum(h for h in headrooms if h is not None) == 30.0
 
 
-def test_iteration_timing_headroom_is_slack_over_median():
+def test_iteration_timing_defers_headroom_to_idle_and_comm():
+    """A slow iteration fires as a variance locator but claims no headroom: its
+    excess over the median is wall-clock whose idle/exposed-comm parts are
+    already owned by gpu_idle_gaps and overlap_breakdown, and any remainder is
+    extra compute, not recoverable. Claiming the slack would double-count."""
     from nsys_ai.skills.builtins.iteration_timing import _to_findings
 
     rows = [
@@ -265,15 +269,16 @@ def test_iteration_timing_headroom_is_slack_over_median():
          "gpu_end_ns": 60_000_000, "kernel_count": 5},
     ]
     findings = _to_findings(rows)
-    assert len(findings) == 1  # only iter 3 exceeds 1.5x median
-    assert findings[0].headroom_ms == 30.0  # 40ms - median(10ms)
-    assert findings[0].headroom_basis == "capture_total"
+    assert len(findings) == 1  # only iter 3 exceeds 1.5x median — still located
+    assert findings[0].label.endswith("3")
+    assert findings[0].headroom_ms is None, "slow-iteration slack must not co-rank"
+    assert findings[0].headroom_basis is None
+    assert "median 10" in findings[0].note  # the diagnostic survives
 
 
-def test_iteration_timing_headroom_is_aggregated_and_counted_once():
-    """With several slow iterations the headroom is the total slack across all
-    of them, carried by the worst one only — a per-iteration value would not be
-    comparable with the capture-scoped producers."""
+def test_iteration_timing_slow_findings_never_claim_headroom():
+    """Every slow iteration defers, not just the worst — none co-rank against
+    the idle/comm pools their slack overlaps."""
     from nsys_ai.skills.builtins.iteration_timing import _to_findings
 
     rows = [
@@ -282,13 +287,9 @@ def test_iteration_timing_headroom_is_aggregated_and_counted_once():
         for i, d in enumerate([10.0, 10.0, 10.0, 40.0, 25.0])
     ]
     findings = _to_findings(rows)
-    assert len(findings) == 2  # iterations of 40ms and 25ms exceed 1.5x median(10)
-    carriers = [f for f in findings if f.headroom_ms is not None]
-    assert len(carriers) == 1, "the aggregate must be attributed exactly once"
-    # (40-10) + (25-10) = 45ms total slack, on the worst iteration.
-    assert carriers[0].headroom_ms == 45.0
-    assert carriers[0].label.endswith("3")  # the 40ms iteration
-    assert carriers[0].headroom_basis == "capture_total"
+    assert len(findings) == 2  # 40ms and 25ms both exceed 1.5x median(10)
+    assert all(f.headroom_ms is None for f in findings)
+    assert all(f.headroom_basis is None for f in findings)
 
 
 def test_nccl_variability_defers_comm_headroom_to_overlap_breakdown():
