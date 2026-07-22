@@ -218,9 +218,11 @@ def evaluate_sol_gates(
             # the measured region — almost always step-scoped FLOPs applied to a
             # sub-region, or the wrong peak. Passing here would be the failure
             # mode this module exists to prevent: a green gate that never really
-            # ran. (Reported as a gate failure rather than raising, because an
-            # FP8/sparse run can legitimately exceed an auto-detected BF16-dense
-            # peak, and that is a threshold problem the user must resolve.)
+            # ran. Raised as a configuration error (exit 2), not a gate failure
+            # (exit 1): an implausible MFU means the inputs don't describe this
+            # region — e.g. an FP8/sparse run measured against an auto-detected
+            # BF16-dense peak — which the user must resolve before the gate can
+            # mean anything.
             raise SolGateError(
                 f"--gate-sol {spec}: implausible MFU {mfu:.1f}% for region "
                 f"{spec.region!r} — above the hardware ceiling. Check that "
