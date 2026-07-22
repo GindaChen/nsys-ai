@@ -525,10 +525,10 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
     devices = list(meta.devices or [])
     span_ns = (meta.time_range[1] - meta.time_range[0]) if meta.time_range else 0
 
-    # Schema contract, first — it gates everything below. A future Nsight export
-    # that drops or renames a table/column the analysis layer selects by name
-    # should fail here, naming it, rather than surface as a wrong or empty number
-    # downstream (issue #237).
+    # Schema contract, reported first. A future Nsight export that drops or
+    # renames a table/column the analysis layer selects by name should be named
+    # here — an upfront diagnostic rather than a deep stack trace when a skill's
+    # JOIN later hits the missing column (issue #237).
     schema = getattr(prof, "schema", None)
     if schema is not None:
         sv = schema.schema_version or "unknown"
@@ -541,7 +541,7 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
                     f"export {sv}: missing {', '.join(missing)}",
                     hint=(
                         "This Nsight export lacks tables/columns the analysis "
-                        "layer requires, so results may be wrong or empty. The "
+                        "layer requires; skills that use them will fail. The "
                         "export schema likely changed — please file an issue "
                         "quoting the export schema version above."
                     ),
