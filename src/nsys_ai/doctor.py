@@ -525,6 +525,31 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
     devices = list(meta.devices or [])
     span_ns = (meta.time_range[1] - meta.time_range[0]) if meta.time_range else 0
 
+    # Schema contract, first — it gates everything below. A future Nsight export
+    # that drops or renames a table/column the analysis layer selects by name
+    # should fail here, naming it, rather than surface as a wrong or empty number
+    # downstream (issue #237).
+    schema = getattr(prof, "schema", None)
+    if schema is not None:
+        sv = schema.schema_version or "unknown"
+        missing = schema.missing_required_columns()
+        if missing:
+            checks.append(
+                CheckResult(
+                    "Schema compatibility",
+                    "fail",
+                    f"export {sv}: missing {', '.join(missing)}",
+                    hint=(
+                        "This Nsight export lacks tables/columns the analysis "
+                        "layer requires, so results may be wrong or empty. The "
+                        "export schema likely changed — please file an issue "
+                        "quoting the export schema version above."
+                    ),
+                )
+            )
+        else:
+            checks.append(CheckResult("Schema compatibility", "ok", f"export schema {sv}"))
+
     checks.append(CheckResult("Duration", "ok", f"{span_ns / 1e9:.1f}s"))
     # GPUs — COUNT(DISTINCT deviceId), not the fingerprint heuristic.
     checks.append(CheckResult("GPUs", "ok", str(len(devices))))

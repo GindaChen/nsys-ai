@@ -188,6 +188,64 @@ class NsightSchema:
 
         return None
 
+    # ── Schema contract ────────────────────────────────────────────────
+    # Columns the core analysis path selects by name. Their absence is not a
+    # graceful degradation but a crash or a silently-wrong number, so a future
+    # Nsight export that drops or renames one should fail loudly and by name
+    # rather than surface as a user bug report (issue #237). NVIDIA documents
+    # that the SQLite export schema "can and will change". Optional surface —
+    # NVTX_EVENTS, META_DATA_* — is deliberately excluded: skills degrade around
+    # it, so a --trace=cuda capture with no NVTX must not trip the contract.
+    _REQUIRED_KERNEL_COLUMNS = (
+        "deviceId",
+        "streamId",
+        "start",
+        "end",
+        "shortName",
+        "demangledName",
+        "correlationId",
+    )
+    _REQUIRED_STRINGIDS_COLUMNS = ("id", "value")
+
+    def _resolve_table(self, name: str) -> str | None:
+        """Actual table name matching ``name`` case-insensitively, or None."""
+        lname = name.lower()
+        for t in self.tables:
+            if t.lower() == lname:
+                return t
+        return None
+
+    def _missing_columns(self, table: str, required) -> list[str]:
+        try:
+            present = {str(c).lower() for c in self._adapter.get_table_columns(table)}
+        except DB_ERRORS:
+            return [f"{table} (columns unreadable)"]
+        return [f"{table}.{c}" for c in required if c.lower() not in present]
+
+    def missing_required_columns(self) -> list[str]:
+        """Descriptors of hard-required tables/columns absent from this export.
+
+        Empty when the schema is compatible with the core analysis path. Each
+        entry names exactly what is missing (``CUPTI_ACTIVITY_KIND_KERNEL.start``,
+        or a table name) so a diagnostic points straight at the drift.
+        """
+        missing: list[str] = []
+
+        if not self.kernel_table:
+            missing.append(
+                "kernel activity table (CUPTI_ACTIVITY_KIND_KERNEL or a *KERNEL* table)"
+            )
+        else:
+            missing += self._missing_columns(self.kernel_table, self._REQUIRED_KERNEL_COLUMNS)
+
+        stringids = self._resolve_table("StringIds")
+        if not stringids:
+            missing.append("StringIds")
+        else:
+            missing += self._missing_columns(stringids, self._REQUIRED_STRINGIDS_COLUMNS)
+
+        return missing
+
 
 @dataclass
 class GpuInfo:
