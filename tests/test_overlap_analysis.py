@@ -173,3 +173,90 @@ class TestDiagnostics:
             prof.close()
         assert diag["error"] == "no kernels found"
         assert diag["available_devices"][0] == 5
+
+
+class TestMemoization:
+    """overlap_analysis is memoized per connection (issue #242): a build asks
+    for the same (connection, device, trim) up to seven times and must compute
+    the sweep only once."""
+
+    def _count_computes(self, monkeypatch):
+        import nsys_ai.overlap as ov
+
+        calls = []
+        real = ov._overlap_analysis_uncached
+        monkeypatch.setattr(
+            ov,
+            "_overlap_analysis_uncached",
+            lambda p, d, t: calls.append((d, t)) or real(p, d, t),
+        )
+        return calls
+
+    def test_repeated_calls_compute_once(self, duckdb_conn, monkeypatch):
+        calls = self._count_computes(monkeypatch)
+        prof = Profile._from_conn(duckdb_conn)
+        try:
+            first = overlap_analysis(prof, device=0)
+            for _ in range(6):
+                again = overlap_analysis(prof, device=0)
+            assert len(calls) == 1, "sweep recomputed despite identical args"
+            assert again == first
+        finally:
+            prof.close()
+
+    def test_cache_hit_equals_fresh_compute(self, duckdb_conn):
+        prof = Profile._from_conn(duckdb_conn)
+        try:
+            fresh = _overlap_analysis_python(prof, 0, None)
+            overlap_analysis(prof, device=0)  # populate cache
+            cached = overlap_analysis(prof, device=0)
+            for k, v in fresh.items():
+                assert cached[k] == pytest.approx(v) if isinstance(v, float) else cached[k] == v
+        finally:
+            prof.close()
+
+    def test_caller_mutation_does_not_corrupt_cache(self, duckdb_conn):
+        """overlap_breakdown adds keys like device_id to the result; a shared
+        cached dict would leak that into the next caller. Every returned dict is
+        mutated here — both the miss-path result and a hit-path result — so a
+        missing copy on *either* path corrupts the final read."""
+        prof = Profile._from_conn(duckdb_conn)
+        try:
+            a = overlap_analysis(prof, device=0)  # miss -> compute
+            baseline_idle = a["idle_ms"]
+            a["device_id"] = 999  # mutate the miss-path result
+            a["idle_ms"] = -1
+            b = overlap_analysis(prof, device=0)  # hit
+            b["injected"] = ["x"]  # mutate a hit-path result
+            b["idle_ms"] = -2
+            c = overlap_analysis(prof, device=0)  # hit -> must be pristine
+            assert "device_id" not in c and "injected" not in c
+            assert c["idle_ms"] == baseline_idle
+        finally:
+            prof.close()
+
+    def test_distinct_trim_recomputes(self, duckdb_conn, monkeypatch):
+        calls = self._count_computes(monkeypatch)
+        prof = Profile._from_conn(duckdb_conn)
+        try:
+            overlap_analysis(prof, device=0, trim=None)
+            overlap_analysis(prof, device=0, trim=(1_000_000, 9_000_000))
+            overlap_analysis(prof, device=0, trim=None)  # back to first key -> hit
+            assert len(calls) == 2, "trim must be part of the cache key"
+        finally:
+            prof.close()
+
+    def test_shared_across_profile_wrappers_on_one_conn(self, duckdb_conn, monkeypatch):
+        """gpu_idle_gaps reaches overlap_analysis through a throwaway
+        Profile._from_conn around the same connection; the cache keys on the
+        connection so that call reuses the entry rather than recomputing."""
+        calls = self._count_computes(monkeypatch)
+        p1 = Profile._from_conn(duckdb_conn)
+        p2 = Profile._from_conn(duckdb_conn)  # distinct Profile, same conn
+        try:
+            overlap_analysis(p1, device=0)
+            overlap_analysis(p2, device=0)
+            assert len(calls) == 1, "cache must key on the connection, not the Profile"
+        finally:
+            p1.close()
+            p2.close()

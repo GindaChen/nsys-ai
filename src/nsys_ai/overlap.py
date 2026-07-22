@@ -5,6 +5,7 @@ Quantifies how much GPU compute overlaps with NCCL communication,
 detects training iterations, and breaks down collective operations.
 """
 
+import copy
 import logging
 from collections import defaultdict
 
@@ -47,7 +48,35 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         overlap_ms:       Time both compute and NCCL run concurrently
         idle_ms:          Time no kernels are running
         total_ms:         Wall-clock span
+
+    Memoized per connection: the sweep is pure in ``(connection, device,
+    trim)`` and a single ``EvidenceBuilder.build()`` asks for the same triple
+    seven times (gpu_idle_gaps, overlap_breakdown and critical_path, several
+    re-run inside the manifest). One build over a 3.5GB profile without the
+    DuckDB cache spent ~7s of the ~7 identical calls here. The cache is keyed
+    on the underlying connection — not the ``Profile`` — because gpu_idle_gaps
+    calls in through a throwaway ``Profile._from_conn`` wrapper around the same
+    connection, so a per-Profile cache would miss it.
+
+    A deep copy is handed back on every call: callers (overlap_breakdown)
+    mutate the dict, and the cached entry must stay pristine.
     """
+    from .connection import _PROBE_MISS, _probe_cache_get, _probe_cache_set
+
+    conn = prof.db if prof.db is not None else prof.conn
+    cache_key = f"overlap_analysis:{device}:{trim}"
+    cached = _probe_cache_get(conn, cache_key)
+    if cached is not _PROBE_MISS:
+        return copy.deepcopy(cached)
+
+    result = _overlap_analysis_uncached(prof, device, trim)
+    _probe_cache_set(conn, cache_key, result)
+    return copy.deepcopy(result)
+
+
+def _overlap_analysis_uncached(
+    prof: Profile, device: int, trim: tuple[int, int] | None
+) -> dict:
     if _has_duckdb(prof):
         from .connection import DB_ERRORS
 
