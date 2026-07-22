@@ -230,8 +230,7 @@ class TestDuckDBCompatibilityFixes:
         p = Profile._from_conn(duckdb_conn)
         # Should have successfully detected version and NVTX text ID
         assert p._nvtx_has_text_id is True
-        # DuckDB mocked schema doesn't have META_DATA_EXPORT so version is None,
-        # but the method should have run without crashing on PRAGMA
+        # The method should have run without crashing on PRAGMA / metadata reads.
         assert type(p.meta).__name__ == "ProfileMeta"
 
     def test_memory_transfers_duckdb_error(self, duckdb_conn):
