@@ -331,3 +331,201 @@ class TestHostSyncParentRanges:
         assert s is not None
         assert s.name == "host_sync_parent_ranges"
         assert {p.name for p in s.params} == {"limit", "patterns"}
+
+
+# Rows shaped (label, start, end, tid, eventType). One dataset exercising the
+# cases the sweep must reproduce byte-for-byte against the SQL: multi-ancestor
+# nesting, crossing StartEnd(60) ranges (where a stack-pop would diverge),
+# an identical-coordinate twin (self-exclusion by coords), tid isolation, and
+# a parent-order tie (the deterministic secondary key).
+_PARITY_ROWS = [
+    # tid 1: three-deep nesting — item credits train_step; _local_scalar_dense
+    # credits train_step AND aten::item.
+    ("train_step", 0, 10_000_000, 1, 59),
+    ("aten::item", 1_000_000, 2_000_000, 1, 59),
+    ("aten::_local_scalar_dense", 1_400_000, 1_600_000, 1, 59),
+    # tid 2: two crossing StartEnd ranges. childA is inside both; childB starts
+    # after rangeA has closed, so it credits rangeB only — the case a stack gets
+    # wrong.
+    ("rangeA", 0, 10_000_000, 2, 60),
+    ("rangeB", 5_000_000, 15_000_000, 2, 60),
+    ("cudaStreamSynchronize_a", 6_000_000, 7_000_000, 2, 60),
+    ("cudaStreamSynchronize_b", 11_000_000, 12_000_000, 2, 60),
+    # tid 3: identical-coordinate twin. Two distinct ranges share [0, 5_000_000];
+    # a child at exactly [0, 5_000_000] is excluded from both (coord self-match),
+    # while a strictly-inner child credits both twins.
+    ("twin_one", 0, 5_000_000, 3, 59),
+    ("twin_two", 0, 5_000_000, 3, 59),
+    ("aten::item_exact", 0, 5_000_000, 3, 59),
+    ("aten::item_inner", 1_000_000, 2_000_000, 3, 59),
+    # tid 4: two parents with identical total sync_ns — pins the sync_ns-tie
+    # ordering (deterministic parent_range ASC secondary).
+    ("zeta_phase", 0, 10_000_000, 4, 59),
+    ("aten::item_z", 1_000_000, 1_500_000, 4, 59),
+    ("alpha_phase", 20_000_000, 30_000_000, 4, 59),
+    ("aten::item_a", 21_000_000, 21_500_000, 4, 59),
+]
+
+
+def _build_duckdb(rows):
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute(
+        'CREATE TABLE StringIds (id BIGINT, value VARCHAR); '
+        'CREATE TABLE NVTX_EVENTS (globalTid BIGINT, start BIGINT, "end" BIGINT, '
+        'text VARCHAR, "textId" BIGINT, "eventType" INTEGER);'
+    )
+    for label, start, end_ns, tid, etype in rows:
+        con.execute(
+            'INSERT INTO NVTX_EVENTS (globalTid, start, "end", text, "eventType") '
+            "VALUES (?, ?, ?, ?, ?)",
+            [tid, start, end_ns, label, etype],
+        )
+    return con
+
+
+def _build_sqlite(rows):
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE NVTX_EVENTS (
+            globalTid INTEGER, start INTEGER, end INTEGER,
+            text TEXT, textId INTEGER, eventType INTEGER
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(tid, s, e, label, et) for (label, s, e, tid, et) in rows],
+    )
+    conn.commit()
+    return conn
+
+
+# The original containment CTE, kept here as an independent oracle. Production
+# replaced it with the Python sweep (it hangs on SQLite and crashes DuckDB's
+# sqlite_scanner on real profiles), but on a *native* DuckDB connection with
+# small data it runs fine and defines the exact semantics the sweep must match.
+_ORACLE_SQL = """
+    WITH resolved AS (
+        SELECT COALESCE(n.text, s.value) AS label, n.globalTid AS tid,
+               n.start AS start, n.[end] AS end_ns
+        FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId = s.id
+        WHERE n.[end] > n.start AND n.eventType IN (59, 60) {trim}
+    ),
+    sync_children AS (
+        SELECT label, tid, start, end_ns FROM resolved
+        WHERE ({like}) AND label IS NOT NULL
+    ),
+    matched AS (
+        SELECT parent.label AS parent_range, child.label AS child_label,
+               child.end_ns - child.start AS sync_ns
+        FROM sync_children child JOIN resolved parent
+          ON parent.tid = child.tid
+         AND parent.start <= child.start AND parent.end_ns >= child.end_ns
+         AND (parent.start != child.start OR parent.end_ns != child.end_ns)
+        WHERE parent.label IS NOT NULL
+    ),
+    parent_totals AS (
+        SELECT parent_range, COUNT(*) AS n_syncs, SUM(sync_ns) AS sync_ns
+        FROM matched GROUP BY parent_range
+    ),
+    child_totals AS (
+        SELECT parent_range, child_label, COUNT(*) AS child_n_syncs,
+               SUM(sync_ns) AS child_sync_ns
+        FROM matched GROUP BY parent_range, child_label
+    ),
+    ranked_children AS (
+        SELECT parent_range, child_label, ROW_NUMBER() OVER (
+            PARTITION BY parent_range
+            ORDER BY child_sync_ns DESC, child_n_syncs DESC, child_label ASC
+        ) AS rn FROM child_totals
+    )
+    SELECT pt.parent_range, pt.n_syncs, pt.sync_ns, rc.child_label AS top_child_label
+    FROM parent_totals pt LEFT JOIN ranked_children rc
+      ON rc.parent_range = pt.parent_range AND rc.rn = 1
+    ORDER BY pt.sync_ns DESC, pt.parent_range ASC
+    LIMIT {limit}
+"""
+
+
+def _oracle_rows(duckdb_conn, patterns, limit):
+    from nsys_ai.connection import wrap_connection
+
+    like_parts, like_params = [], []
+    for p in patterns:
+        like_parts.append("LOWER(label) LIKE ?")
+        like_params.append(f"%{p.lower()}%")
+    sql = _ORACLE_SQL.format(trim="", like=" OR ".join(like_parts), limit=int(limit))
+    rows = wrap_connection(duckdb_conn).execute(sql, like_params).fetchall()
+    out = []
+    for parent_range, n_syncs, sync_ns, top_child_label in rows:
+        sync_ns = int(sync_ns or 0)
+        out.append(
+            {
+                "parent_range": parent_range,
+                "n_syncs": n_syncs,
+                "sync_ns": sync_ns,
+                "sync_ms": round(sync_ns / 1e6, 3),
+                "top_child_label": top_child_label,
+            }
+        )
+    return out
+
+
+def test_sweep_matches_the_sql_oracle_exactly():
+    """The sweep must reproduce the original containment SQL byte-for-byte.
+
+    Same synthetic data through the Python sweep and the reference CTE (run on
+    a native DuckDB connection where it still works). If the sweep ever diverges
+    on containment, crossing ranges, twin exclusion, tid isolation, top-child
+    choice, or ordering, this fails.
+    """
+    patterns = ["item", "_local_scalar_dense", "cudastreamsynchronize"]
+    sweep_out = skill_mod._execute(_build_sqlite(_PARITY_ROWS), limit=1000)
+    oracle_out = _oracle_rows(_build_duckdb(_PARITY_ROWS), patterns, 1000)
+
+    assert "error" not in (sweep_out[0] if sweep_out else {})
+    assert sweep_out == oracle_out, "sweep diverged from the SQL oracle"
+    # The crossing case specifically (a stack-pop would get this wrong): rangeA
+    # must NOT be credited with the child that starts after it closed.
+    a_rows = [r for r in sweep_out if r["parent_range"] == "rangeA"]
+    assert a_rows and a_rows[0]["n_syncs"] == 1  # only cudaStreamSynchronize_a
+
+
+def test_sweep_matches_across_engines():
+    """The sweep is engine-agnostic: identical output on SQLite and DuckDB."""
+    duck_out = skill_mod._execute(_build_duckdb(_PARITY_ROWS), limit=1000)
+    lite_out = skill_mod._execute(_build_sqlite(_PARITY_ROWS), limit=1000)
+    assert duck_out == lite_out
+
+
+def test_sweep_matches_oracle_with_trim():
+    """Parity with the oracle must also hold under a trim window."""
+    patterns = ["item", "_local_scalar_dense", "cudastreamsynchronize"]
+    trim = {"trim_start_ns": 0, "trim_end_ns": 12_000_000}
+    sweep_out = skill_mod._execute(_build_sqlite(_PARITY_ROWS), limit=1000, **trim)
+
+    from nsys_ai.connection import wrap_connection
+
+    like_parts = ["LOWER(label) LIKE ?" for _ in patterns]
+    like_params = [f"%{p.lower()}%" for p in patterns]
+    sql = _ORACLE_SQL.format(
+        trim="AND n.start >= 0 AND n.[end] <= 12000000",
+        like=" OR ".join(like_parts),
+        limit=1000,
+    )
+    rows = wrap_connection(_build_duckdb(_PARITY_ROWS)).execute(sql, like_params).fetchall()
+    oracle_out = [
+        {
+            "parent_range": pr,
+            "n_syncs": n,
+            "sync_ns": int(s or 0),
+            "sync_ms": round(int(s or 0) / 1e6, 3),
+            "top_child_label": tc,
+        }
+        for pr, n, s, tc in rows
+    ]
+    assert sweep_out == oracle_out
