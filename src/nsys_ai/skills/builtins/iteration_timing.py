@@ -55,15 +55,6 @@ def _to_findings(rows: list[dict]) -> list:
         return findings
 
     slow = [it for it in real if it.get("duration_ms", 0) > 1.5 * med]
-    # The recoverable opportunity is the total slack across every slow
-    # iteration, which is a capture-scoped quantity comparable with the other
-    # headroom producers. A single iteration's slack is not: ranking it against
-    # a profile-wide idle total silently favours the aggregate. Following the
-    # gpu_idle_gaps convention, the aggregate is carried once — by the worst
-    # iteration, which is where a reader would start — and the remaining
-    # findings carry none, so no millisecond is attributed twice.
-    total_slack_ms = round(sum(it["duration_ms"] - med for it in slow), 3)
-    worst = max(slow, key=lambda it: it["duration_ms"], default=None)
 
     for it in slow:
         pct = 100 * it["duration_ms"] / med
@@ -79,17 +70,11 @@ def _to_findings(rows: list[dict]) -> list:
         else:
             end_ns = int(end_ns)
 
-        carries_headroom = it is worst
         note = (
             f"{it['duration_ms']:.1f}ms "
             f"({pct:.0f}% of median {med:.1f}ms), "
             f"{it.get('kernel_count', 0)} kernels"
         )
-        if carries_headroom and len(slow) > 1:
-            note += (
-                f". Headroom is the total slack across all {len(slow)} slow "
-                "iterations, counted once here."
-            )
 
         findings.append(
             Finding(
@@ -101,9 +86,17 @@ def _to_findings(rows: list[dict]) -> list:
                     "device_id", 0
                 ),  # Assuming device_id is available or defaults to 0
                 severity="warning",
+                # No headroom, by design. A slow iteration's excess over the
+                # median is wall-clock time whose idle and exposed-comm parts are
+                # already claimed in full by gpu_idle_gaps (device idle) and
+                # overlap_breakdown (exposed NCCL); any remainder is extra
+                # compute the iteration genuinely did, not recoverable. Claiming
+                # the slack here would double-count that time — the same
+                # deferral critical_path and nccl_breakdown make. The finding
+                # stays as the variance locator: which iteration to investigate.
+                headroom_ms=None,
+                headroom_basis=None,
                 note=note,
-                headroom_ms=total_slack_ms if carries_headroom else None,
-                headroom_basis="capture_total" if carries_headroom else None,
             )
         )
     return findings
