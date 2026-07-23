@@ -96,12 +96,14 @@ def test_ensure_builds_map_with_demangled_names():
     assert ensure_nvtx_kernel_map(con) is True
 
     rows = con.execute(
-        "SELECT nvtx_text, nvtx_depth, kernel_name, k_dur_ns FROM nvtx_kernel_map "
-        "ORDER BY k_start"
+        "SELECT nvtx_text, nvtx_depth, kernel_name, k_dur_ns, is_tc_eligible, uses_tc "
+        "FROM nvtx_kernel_map ORDER BY k_start"
     ).fetchall()
     assert rows == [
-        ("forward", 1, "void gemm<float>", 5),  # demangled name, not shortName
-        ("train_step", 0, "void add<float>", 10),
+        # demangled name (not shortName); the 9-col schema carries embedded TC —
+        # "gemm" is TC-eligible, "add" is not — so consumers take the map-only path.
+        ("forward", 1, "void gemm<float>", 5, 1, 0),
+        ("train_step", 0, "void add<float>", 10, 0, 0),
     ]
     # path_dict populated and joinable
     paths = dict(
@@ -111,6 +113,39 @@ def test_ensure_builds_map_with_demangled_names():
         ).fetchall()
     )
     assert paths == {"train_step > forward": "forward", "train_step": "train_step"}
+
+
+def test_ensure_orders_nvtx_so_paths_are_correct():
+    """The nvtx fetch must ORDER BY start: the sweep advances a single index over
+    nvtx per thread without re-sorting, so out-of-order rows would build the path
+    inner>outer. Insert the ranges reversed and require the correct outer>inner."""
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute("CREATE TABLE StringIds(id BIGINT, value VARCHAR)")
+    con.execute(
+        'CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(start BIGINT, "end" BIGINT, deviceId INT, '
+        'streamId INT, correlationId BIGINT, shortName BIGINT, demangledName BIGINT)'
+    )
+    con.execute(
+        'CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid BIGINT, correlationId BIGINT, '
+        'start BIGINT, "end" BIGINT)'
+    )
+    con.execute(
+        'CREATE TABLE NVTX_EVENTS(globalTid BIGINT, start BIGINT, "end" BIGINT, text VARCHAR, '
+        "eventType INT, textId BIGINT)"
+    )
+    con.execute("INSERT INTO StringIds VALUES (1,'gemm'),(2,'void gemm<float>')")
+    con.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1000,1005,0,7,101,1,2)")
+    con.execute("INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1,101,15,20)")
+    # inner range inserted BEFORE the outer one — reverse of start order
+    con.execute(
+        "INSERT INTO NVTX_EVENTS VALUES (1,10,50,'forward',59,NULL), (1,0,100,'train_step',59,NULL)"
+    )
+    ensure_nvtx_kernel_map(con)
+    path = con.execute(
+        "SELECT d.nvtx_path FROM nvtx_kernel_map m JOIN nvtx_path_dict d ON m.path_id = d.path_id"
+    ).fetchone()[0]
+    assert path == "train_step > forward"
 
 
 def test_ensure_is_noop_when_map_present():

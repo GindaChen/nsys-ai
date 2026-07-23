@@ -1377,8 +1377,11 @@ def _build_nvtx_kernel_map_python(
 
 def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
     """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` temp tables on a
-    DuckDB connection from sweep ``results`` (the 7-column Python-fallback
-    schema; consumers degrade gracefully without the embedded TC columns)."""
+    DuckDB connection from sweep ``results``. Emits the full 9-column
+    cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
+    so consumers take their map-only fast path (a TC-less map would force
+    nvtx_layer_breakdown into a (start,end) kernels-join that double-counts
+    timestamp-colliding kernels)."""
     import pyarrow as pa
 
     paths = sorted({r["nvtx_path"] for r in results})
@@ -1392,6 +1395,10 @@ def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
             "k_start": pa.array([r["k_start"] for r in results], pa.int64()),
             "k_end": pa.array([r["k_end"] for r in results], pa.int64()),
             "k_dur_ns": pa.array([r["k_dur_ns"] for r in results], pa.int64()),
+            "is_tc_eligible": pa.array(
+                [r.get("is_tc_eligible", 0) for r in results], pa.int32()
+            ),
+            "uses_tc": pa.array([r.get("uses_tc", 0) for r in results], pa.int32()),
         }
     )
     dict_tbl = pa.table(
@@ -1450,13 +1457,20 @@ def ensure_nvtx_kernel_map(conn) -> bool:
         text_expr = "n.text"
         text_join = ""
 
+    # kernel_name and the embedded TC flags resolved exactly as the cache-built
+    # map's TC-enriched ``kernels`` view (_tc_enriched_sql), so the on-demand map
+    # is a byte-for-byte drop-in: name = COALESCE(demangled, short, 'kernel_'||id),
+    # TC eligibility/use by the same name regexes.
+    tc_active = _TC_ACTIVE_PATTERN
+    tc_elig = _TC_ELIGIBLE_PATTERN
+    lname = "lower(COALESCE(sd.value, ss.value, ''))"
     try:
-        # kernel_name resolved as COALESCE(demangled, short) to match the
-        # cache-built map's ``k.name``, so consumers see identical names on the
-        # on-demand path.
         kr_rows = db.execute(
             f'SELECT r.globalTid, r.start, r."end", k.start, k."end", '
-            f"COALESCE(sd.value, ss.value) AS kernel_name "
+            f"COALESCE(sd.value, ss.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name, "
+            f"CAST(CASE WHEN regexp_matches({lname}, {tc_elig}) "
+            f"OR regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS is_tc_eligible, "
+            f"CAST(CASE WHEN regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc "
             f"FROM {kernel_table} k "
             f"JOIN {runtime_table} r ON r.correlationId = k.correlationId "
             f"LEFT JOIN StringIds sd ON k.demangledName = sd.id "
@@ -1475,7 +1489,14 @@ def ensure_nvtx_kernel_map(conn) -> bool:
         log.debug("ensure_nvtx_kernel_map: source fetch failed (%s)", exc)
         return False
 
+    # Per-kernel TC flags (by k_start, k_end, name) to attach after the
+    # name-agnostic sweep, which only reads the first six fields.
+    tc_by_kernel = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr_rows}
     results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
+    for r in results:
+        r["is_tc_eligible"], r["uses_tc"] = tc_by_kernel.get(
+            (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
+        )
     # Materialize even when empty: the existence check then passes and consumers
     # take the (empty) map path rather than re-entering the hanging IEJoin.
     _materialize_nvtx_kernel_map(db, results)
