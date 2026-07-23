@@ -233,6 +233,17 @@ def attribute_kernels_to_nvtx(
         adapter = wrap_connection(conn)
 
         if isinstance(adapter, DuckDBAdapter):
+            # Build nvtx_kernel_map on-demand when absent (issue #257), so the
+            # map-backed path below runs instead of the in-file IEJoin fallback
+            # that hangs sqlite_scanner on a direct-attached profile. Must run
+            # before the cached_nvtx_map_* probes, which memoize per connection.
+            try:
+                from .parquet_cache import ensure_nvtx_kernel_map
+
+                ensure_nvtx_kernel_map(conn)
+            except DB_ERRORS:
+                pass
+
             trim_sql = ""
             params = []
             if trim:

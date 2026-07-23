@@ -1182,6 +1182,73 @@ def _build_nvtx_kernel_map(
         _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
 
 
+def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
+    """Per-thread sort-merge attributing each kernel to its innermost enclosing
+    NVTX range. O(N+M) per thread; the shared containment core used by both the
+    parquet-cache Python fallback and the on-demand builder (issue #257).
+
+    kr_rows: iterable of ``(globalTid, r_start, r_end, k_start, k_end,
+    kernel_name)`` — the kernel name already resolved by the caller (so each can
+    match its own map's convention). nvtx_rows: ``(globalTid, start, end, text)``
+    (PushPop ranges), sorted by ``(globalTid, start)``. Returns rows:
+    ``{nvtx_text, nvtx_depth, nvtx_path, kernel_name, k_start, k_end, k_dur_ns}``.
+    """
+    from collections import defaultdict
+
+    nvtx_by_tid: dict[int, list[tuple]] = defaultdict(list)
+    for n in nvtx_rows:
+        nvtx_by_tid[n[0]].append((n[1], n[2], n[3]))
+
+    kr_by_tid: dict[int, list[tuple]] = defaultdict(list)
+    for r in kr_rows:
+        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
+
+    results: list[dict] = []
+    for tid in kr_by_tid:
+        if tid not in nvtx_by_tid:
+            continue
+
+        nvtx_list = nvtx_by_tid[tid]
+        kr_by_tid[tid].sort(key=lambda x: x[0])
+
+        nvtx_idx = 0
+        open_stack: list[tuple[int, int, str]] = []
+
+        for r_start, r_end, k_start, k_end, kernel_name in kr_by_tid[tid]:
+            while open_stack and open_stack[-1][1] < r_start:
+                open_stack.pop()
+            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
+                if nvtx_list[nvtx_idx][1] >= r_start:
+                    open_stack.append(nvtx_list[nvtx_idx])
+                nvtx_idx += 1
+
+            best_nvtx = None
+            best_idx = -1
+            for i in range(len(open_stack) - 1, -1, -1):
+                ns, ne, nt = open_stack[i]
+                if ns <= r_start and ne >= r_end:
+                    best_nvtx = nt
+                    best_idx = i
+                    break
+
+            if best_nvtx is not None:
+                enclosing = [
+                    e for e in open_stack[: best_idx + 1] if e[0] <= r_start and e[1] >= r_end
+                ]
+                results.append(
+                    {
+                        "nvtx_text": best_nvtx,
+                        "nvtx_depth": len(enclosing) - 1,
+                        "nvtx_path": " > ".join(e[2] for e in enclosing),
+                        "kernel_name": kernel_name,
+                        "k_start": k_start,
+                        "k_end": k_end,
+                        "k_dur_ns": k_end - k_start,
+                    }
+                )
+    return results
+
+
 def _build_nvtx_kernel_map_python(
     db: duckdb.DuckDBPyConnection,
     src_tables: set[str],
@@ -1236,60 +1303,12 @@ def _build_nvtx_kernel_map_python(
         sid_map = dict(sid_rows)
 
     # ── Sort-merge sweep ──────────────────────────────────────────────
-    from collections import defaultdict
-
-    nvtx_by_tid: dict[int, list[tuple]] = defaultdict(list)
-    for n in nvtx_rows:
-        nvtx_by_tid[n[0]].append((n[1], n[2], n[3]))
-
-    kr_by_tid: dict[int, list[tuple]] = defaultdict(list)
-    for r in kr_rows:
-        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
-
-    results: list[dict] = []
-
-    for tid in kr_by_tid:
-        if tid not in nvtx_by_tid:
-            continue
-
-        nvtx_list = nvtx_by_tid[tid]
-        kr_by_tid[tid].sort(key=lambda x: x[0])
-
-        nvtx_idx = 0
-        open_stack: list[tuple[int, int, str]] = []
-
-        for r_start, r_end, k_start, k_end, short_name in kr_by_tid[tid]:
-            while open_stack and open_stack[-1][1] < r_start:
-                open_stack.pop()
-            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
-                if nvtx_list[nvtx_idx][1] >= r_start:
-                    open_stack.append(nvtx_list[nvtx_idx])
-                nvtx_idx += 1
-
-            best_nvtx = None
-            best_idx = -1
-            for i in range(len(open_stack) - 1, -1, -1):
-                ns, ne, nt = open_stack[i]
-                if ns <= r_start and ne >= r_end:
-                    best_nvtx = nt
-                    best_idx = i
-                    break
-
-            if best_nvtx is not None:
-                enclosing = [
-                    e for e in open_stack[: best_idx + 1] if e[0] <= r_start and e[1] >= r_end
-                ]
-                results.append(
-                    {
-                        "nvtx_text": best_nvtx,
-                        "nvtx_depth": len(enclosing) - 1,
-                        "nvtx_path": " > ".join(e[2] for e in enclosing),
-                        "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
-                        "k_start": k_start,
-                        "k_end": k_end,
-                        "k_dur_ns": k_end - k_start,
-                    }
-                )
+    # Resolve the kernel name (shortName here, as this fallback always has) into
+    # the row before the sweep, which is name-agnostic.
+    kr_named = [
+        (r[0], r[1], r[2], r[3], r[4], sid_map.get(r[5], f"kernel_{r[5]}")) for r in kr_rows
+    ]
+    results = _sweep_nvtx_kernel_map(kr_named, nvtx_rows)
 
     if not results:
         return
@@ -1354,6 +1373,134 @@ def _build_nvtx_kernel_map_python(
         db.unregister("_nvtx_path_dict")
         del map_table
         del dict_table
+
+
+def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
+    """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` temp tables on a
+    DuckDB connection from sweep ``results``. Emits the full 9-column
+    cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
+    so consumers take their map-only fast path (a TC-less map would force
+    nvtx_layer_breakdown into a (start,end) kernels-join that double-counts
+    timestamp-colliding kernels)."""
+    import pyarrow as pa
+
+    paths = sorted({r["nvtx_path"] for r in results})
+    path_to_id = {p: i + 1 for i, p in enumerate(paths)}
+    map_tbl = pa.table(
+        {
+            "path_id": pa.array([path_to_id[r["nvtx_path"]] for r in results], pa.int64()),
+            "nvtx_text": pa.array([r["nvtx_text"] for r in results], pa.string()),
+            "nvtx_depth": pa.array([r["nvtx_depth"] for r in results], pa.int32()),
+            "kernel_name": pa.array([r["kernel_name"] for r in results], pa.string()),
+            "k_start": pa.array([r["k_start"] for r in results], pa.int64()),
+            "k_end": pa.array([r["k_end"] for r in results], pa.int64()),
+            "k_dur_ns": pa.array([r["k_dur_ns"] for r in results], pa.int64()),
+            "is_tc_eligible": pa.array(
+                [r.get("is_tc_eligible", 0) for r in results], pa.int32()
+            ),
+            "uses_tc": pa.array([r.get("uses_tc", 0) for r in results], pa.int32()),
+        }
+    )
+    dict_tbl = pa.table(
+        {
+            "path_id": pa.array([path_to_id[p] for p in paths], pa.int64()),
+            "nvtx_path": pa.array(paths, pa.string()),
+        }
+    )
+    db.register("_odm_nkm", map_tbl)
+    db.register("_odm_npd", dict_tbl)
+    try:
+        db.execute("CREATE TEMP TABLE nvtx_kernel_map AS SELECT * FROM _odm_nkm")
+        db.execute("CREATE TEMP TABLE nvtx_path_dict AS SELECT * FROM _odm_npd")
+    finally:
+        db.unregister("_odm_nkm")
+        db.unregister("_odm_npd")
+
+
+def ensure_nvtx_kernel_map(conn) -> bool:
+    """Materialize ``nvtx_kernel_map`` + ``nvtx_path_dict`` as temp tables on a
+    DuckDB connection when they are absent, so NVTX-attribution skills take their
+    fast map-backed path instead of an in-file IEJoin that hangs DuckDB's
+    ``sqlite_scanner`` on a direct-attached profile with no parquet cache (#257).
+
+    Returns True when the map is present afterwards (already there, or just
+    built). Returns False — changing nothing — for a non-DuckDB connection or
+    when the source tables are missing, so the caller keeps its existing path.
+    The build is a flat fetch (fast on every backend) plus the shared Python
+    sort-merge; it never issues the range join that chokes the scanner.
+    """
+    from .connection import DB_ERRORS, DuckDBAdapter, wrap_connection
+
+    adapter = wrap_connection(conn)
+    if not isinstance(adapter, DuckDBAdapter):
+        return False
+
+    db = adapter.raw_conn
+    # Already present — the parquet-cache path, or a prior call on this conn.
+    try:
+        db.execute("SELECT 1 FROM nvtx_kernel_map LIMIT 1")
+        return True
+    except DB_ERRORS:
+        pass
+
+    tables = adapter.resolve_activity_tables()
+    kernel_table = tables.get("kernel")
+    runtime_table = tables.get("runtime")
+    nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+    if not kernel_table or not runtime_table:
+        return False
+
+    if adapter.detect_nvtx_text_id():
+        text_expr = "COALESCE(n.text, s.value)"
+        text_join = "LEFT JOIN StringIds s ON n.textId = s.id"
+    else:
+        text_expr = "n.text"
+        text_join = ""
+
+    # kernel_name and the embedded TC flags resolved exactly as the cache-built
+    # map's TC-enriched ``kernels`` view (_tc_enriched_sql), so the on-demand map
+    # is a byte-for-byte drop-in: name = COALESCE(demangled, short, 'kernel_'||id),
+    # TC eligibility/use by the same name regexes.
+    tc_active = _TC_ACTIVE_PATTERN
+    tc_elig = _TC_ELIGIBLE_PATTERN
+    lname = "lower(COALESCE(sd.value, ss.value, ''))"
+    try:
+        kr_rows = db.execute(
+            f'SELECT r.globalTid, r.start, r."end", k.start, k."end", '
+            f"COALESCE(sd.value, ss.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name, "
+            f"CAST(CASE WHEN regexp_matches({lname}, {tc_elig}) "
+            f"OR regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS is_tc_eligible, "
+            f"CAST(CASE WHEN regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc "
+            f"FROM {kernel_table} k "
+            f"JOIN {runtime_table} r ON r.correlationId = k.correlationId "
+            f"LEFT JOIN StringIds sd ON k.demangledName = sd.id "
+            f"LEFT JOIN StringIds ss ON k.shortName = ss.id "
+            f"ORDER BY r.globalTid, r.start"
+        ).fetchall()
+        # nvtx must arrive sorted by start: the sweep advances a single index
+        # over it per thread without re-sorting (matches _build_nvtx_kernel_map_python).
+        nvtx_rows = db.execute(
+            f'SELECT n.globalTid, n.start, n."end", {text_expr} AS text '
+            f"FROM {nvtx_table} n {text_join} "
+            f'WHERE n.eventType = 59 AND n."end" > n.start '
+            f"ORDER BY n.globalTid, n.start"
+        ).fetchall()
+    except DB_ERRORS as exc:
+        log.debug("ensure_nvtx_kernel_map: source fetch failed (%s)", exc)
+        return False
+
+    # Per-kernel TC flags (by k_start, k_end, name) to attach after the
+    # name-agnostic sweep, which only reads the first six fields.
+    tc_by_kernel = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr_rows}
+    results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
+    for r in results:
+        r["is_tc_eligible"], r["uses_tc"] = tc_by_kernel.get(
+            (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
+        )
+    # Materialize even when empty: the existence check then passes and consumers
+    # take the (empty) map path rather than re-entering the hanging IEJoin.
+    _materialize_nvtx_kernel_map(db, results)
+    return True
 
 
 def _check_cache_size(cache_dir: Path, sqlite_path: str) -> None:

@@ -126,6 +126,16 @@ def _execute(conn, **kwargs):
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
 
+    # Build nvtx_kernel_map on-demand when absent, so the map-backed fast path
+    # below is taken instead of the in-file IEJoin that hangs sqlite_scanner on a
+    # direct-attached profile (issue #257). No-op when the map is already present.
+    try:
+        from ...parquet_cache import ensure_nvtx_kernel_map
+
+        ensure_nvtx_kernel_map(conn)
+    except DB_ERRORS:
+        pass
+
     # Check if nvtx_kernel_map exists or can be built
     adapter = None
     try:
