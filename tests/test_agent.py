@@ -70,3 +70,104 @@ def test_agent_run_skill(minimal_nsys_db_path):
         assert isinstance(result, str)
     finally:
         agent.close()
+
+
+def test_agent_ask_uses_evidence_first_template(minimal_nsys_db_path, monkeypatch):
+    """Targeted answers should be grounded and end with a runnable verify command."""
+    from nsys_ai.agent.loop import Agent
+
+    monkeypatch.setattr("nsys_ai.chat_config._get_model_and_key", lambda: (None, None))
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        answer = agent.ask("why is this slow?")
+    finally:
+        agent.close()
+
+    assert answer.startswith("## Summary")
+    for heading in (
+        "## Primary Diagnosis",
+        "## Evidence",
+        "## Confidence",
+        "## Recommended Action",
+        "## Verify",
+    ):
+        assert heading in answer
+    assert "source_skill=" in answer
+    assert "window=" in answer
+    assert "`nsys-ai skill run" in answer
+    assert answer.strip().splitlines()[-1].startswith("`nsys-ai skill run")
+
+
+def test_agent_ask_includes_llm_synthesis(minimal_nsys_db_path, monkeypatch):
+    """A paid synthesis result should be used as the answer Summary."""
+    from nsys_ai.agent.loop import Agent
+
+    monkeypatch.setattr(
+        "nsys_ai.chat_config._get_model_and_key",
+        lambda: ("test-model", "test-key"),
+    )
+    monkeypatch.setattr(
+        Agent,
+        "_try_llm_triage",
+        lambda self, question, evidence: ["top_kernels"],
+    )
+    synthesis_call = {}
+
+    def fake_synthesis(self, question, evidence, *, summary_only=False):
+        synthesis_call["question"] = question
+        synthesis_call["evidence"] = evidence
+        synthesis_call["summary_only"] = summary_only
+        return "The model synthesized this grounded performance summary."
+
+    monkeypatch.setattr(Agent, "_try_llm_synthesis", fake_synthesis)
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        answer = agent.ask("why is this slow?")
+    finally:
+        agent.close()
+
+    assert answer.startswith(
+        "## Summary\nThe model synthesized this grounded performance summary."
+    )
+    assert synthesis_call["question"] == "why is this slow?"
+    assert synthesis_call["evidence"]
+    assert synthesis_call["summary_only"] is True
+    assert answer.strip().splitlines()[-1].startswith("`nsys-ai skill run")
+
+
+def test_agent_confidence_reflects_root_cause_severity(minimal_nsys_db_path):
+    """Critical, warning, and info findings should not report the same confidence."""
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        confidence = {}
+        for severity in ("critical", "warning", "info"):
+            row = {"pattern": "Test finding", "severity": severity}
+            confidence[severity] = agent._confidence_label(
+                {"root_cause_matcher": [row]},
+                row,
+            )
+    finally:
+        agent.close()
+
+    assert confidence["critical"].startswith("0.90 (high)")
+    assert confidence["warning"].startswith("0.75 (medium-high)")
+    assert confidence["info"].startswith("0.55 (medium)")
+    assert len(set(confidence.values())) == 3
+
+
+def test_agent_verify_fallback_when_no_skill_evidence(minimal_nsys_db_path):
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        answer = agent._format_evidence_first_answer("what happened?", {}, [])
+    finally:
+        agent.close()
+
+    assert "Could not build a runnable verification command" in answer
+    assert "`nsys-ai skill list`" in answer
+    assert answer.strip().splitlines()[-1] == "`nsys-ai skill list`"
