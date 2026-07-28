@@ -98,7 +98,11 @@ You have internalized the Book of Root Causes — common GPU performance problem
 
 # Output Format
 
-Every final answer must use this evidence-first shape:
+For targeted `agent ask` synthesis, return the concise evidence-grounded Summary
+paragraph requested by the caller. The deterministic formatter adds the remaining
+sections and runnable verification command from the skill output.
+
+For full analysis synthesis, use this evidence-first shape:
 
 ## Summary
 One-paragraph executive summary.

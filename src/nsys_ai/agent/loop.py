@@ -222,7 +222,9 @@ class Agent:
         Uses a two-stage process:
         1. Triage: Runs root_cause_matcher to gather baseline signals.
         2. Deep Dive: Uses an LLM to select targeted skills based on the triage signals,
-           executes them, and synthesizes a final response. If no LLM, falls back to keywords.
+           executes them, and synthesizes the Summary. If no LLM, falls back to keywords
+           and a deterministic Summary. The remaining answer sections are always built
+           deterministically from skill evidence.
         """
         # Use shared chat configuration to determine if an LLM is available
         try:
@@ -274,16 +276,17 @@ class Agent:
             except Exception as e:
                 log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
 
-        # Try LLM synthesis with combined structured evidence
-        llm_answer = None
+        # Ask the LLM for the summary that will be placed into the deterministic
+        # evidence-first answer shape below.
+        llm_summary = None
         if has_llm:
-            llm_answer = self._try_llm_synthesis(question, evidence)
+            llm_summary = self._try_llm_synthesis(question, evidence, summary_only=True)
 
         answer = self._format_evidence_first_answer(
             question,
             evidence,
             selected_skills=[triage_skill, *selected],
-            llm_answer=llm_answer,
+            llm_summary=llm_summary,
         )
         return answer
 
@@ -354,7 +357,7 @@ class Agent:
         question: str,
         evidence: dict[str, list[dict]],
         selected_skills: list[str],
-        llm_answer: str | None = None,
+        llm_summary: str | None = None,
     ) -> str:
         """Build the fixed answer shape required by issue #205."""
         selected_skills = list(dict.fromkeys(skill for skill in selected_skills if skill))
@@ -366,24 +369,7 @@ class Agent:
         verify_skill = self._choose_verify_skill(evidence, selected_skills)
         verify_command = self._verify_command(verify_skill)
 
-        if llm_answer:
-            summary = (
-                "Ran targeted skills and generated a grounded answer from their structured "
-                "outputs; model synthesis was available, but the final answer is constrained "
-                "to the evidence-first template."
-            )
-        else:
-            ran = ", ".join(skill for skill in selected_skills if skill)
-            if ran:
-                summary = (
-                    f"Ran {ran} against the profile and summarized the strongest supported "
-                    "signal in a verification-friendly format."
-                )
-            else:
-                summary = (
-                    "No skill returned usable evidence, so the answer is limited to a "
-                    "verification fallback."
-                )
+        summary = self._answer_summary(selected_skills, llm_summary)
 
         lines = [
             "## Summary",
@@ -423,6 +409,39 @@ class Agent:
             lines.append("`nsys-ai skill list`")
         return "\n".join(lines)
 
+    def _answer_summary(
+        self,
+        selected_skills: list[str],
+        llm_summary: str | None,
+    ) -> str:
+        """Return model synthesis when available, otherwise a deterministic summary."""
+        if llm_summary:
+            lines = [line.strip() for line in str(llm_summary).strip().splitlines()]
+            if lines and lines[0].lower().lstrip("#").strip() == "summary":
+                lines = lines[1:]
+
+            summary_lines = []
+            for line in lines:
+                if line.startswith("#"):
+                    break
+                if line:
+                    summary_lines.append(line)
+
+            summary = " ".join(summary_lines)
+            if summary and not summary.startswith("(LLM synthesis failed:"):
+                return summary
+
+        ran = ", ".join(skill for skill in selected_skills if skill)
+        if ran:
+            return (
+                f"Ran {ran} against the profile and summarized the strongest supported "
+                "signal in a verification-friendly format."
+            )
+        return (
+            "No skill returned usable evidence, so the answer is limited to a "
+            "verification fallback."
+        )
+
     def _first_actionable_row(self, rows: list[dict]) -> dict | None:
         for row in rows:
             pattern = str(row.get("pattern", ""))
@@ -461,7 +480,25 @@ class Agent:
     def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
         row_count = sum(len(rows) for rows in evidence.values())
         if diagnosis_row and row_count:
-            return "0.75 (medium-high): at least one root-cause matcher finding is backed by skill output."
+            severity = str(diagnosis_row.get("severity", "")).strip().lower()
+            confidence_by_severity = {
+                "critical": (
+                    "0.90 (high): a critical root-cause matcher finding is backed by skill output."
+                ),
+                "warning": (
+                    "0.75 (medium-high): a warning root-cause matcher finding is backed by "
+                    "skill output."
+                ),
+                "info": (
+                    "0.55 (medium): an informational root-cause matcher finding is backed by "
+                    "skill output."
+                ),
+            }
+            return confidence_by_severity.get(
+                severity,
+                "0.65 (medium): a root-cause matcher finding is backed by skill output, "
+                "but its severity is unknown.",
+            )
         if row_count:
             return "0.60 (medium): skill output exists, but no root-cause matcher finding dominated."
         return "0.20 (low): no skill returned usable evidence."
@@ -569,12 +606,20 @@ class Agent:
             cmd.extend(["--trim", f"{trim_start / 1e9:g}", f"{trim_end / 1e9:g}"])
         return " ".join(shlex.quote(str(part)) for part in cmd)
 
-    def _try_llm_synthesis(self, question: str, evidence: dict[str, list[dict]]) -> str | None:
+    def _try_llm_synthesis(
+        self,
+        question: str,
+        evidence: dict[str, list[dict]],
+        *,
+        summary_only: bool = False,
+    ) -> str | None:
         """Try to use an LLM to synthesize an answer from structured evidence.
 
         Args:
             question: The question to answer.
             evidence: Dict mapping skill names to their JSON-serializable results.
+            summary_only: Return one concise summary paragraph for ``ask()``'s
+                deterministic answer formatter.
 
         Returns None if no LLM available.
         """
@@ -604,10 +649,22 @@ class Agent:
                 return "You are an expert GPU profiling assistant."
 
         evidence_json = json.dumps(evidence, indent=2, default=str)
+        response_instruction = ""
+        max_tokens = 2048
+        if summary_only:
+            response_instruction = (
+                "\n\nReturn only one concise executive-summary paragraph grounded in the "
+                "provided evidence. Do not include a heading or any other answer sections; "
+                "the caller will add the diagnosis, evidence, confidence, action, and verify "
+                "sections deterministically."
+            )
+            max_tokens = 256
+
         user_msg = (
             f"Profile analysis data (structured JSON):\n"
             f"```json\n{evidence_json}\n```\n\n"
             f"Based on this data, answer the following question:\n{question}"
+            f"{response_instruction}"
         )
 
         # Try litellm first (supports Gemini, OpenAI, Anthropic, etc.)
@@ -632,7 +689,7 @@ class Agent:
                         {"role": "system", "content": system},
                         {"role": "user", "content": user_msg},
                     ],
-                    max_tokens=2048,
+                    max_tokens=max_tokens,
                 )
                 return resp.choices[0].message.content
         except ImportError:
@@ -657,7 +714,7 @@ class Agent:
             client = anthropic.Anthropic(api_key=api_key)
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=2048,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
             )
