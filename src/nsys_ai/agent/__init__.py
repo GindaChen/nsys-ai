@@ -6,7 +6,7 @@ This package provides:
     loop.py     — Core analysis loop: profile → skill selection → execution → report
 """
 
-from .loop import Agent
+from .loop import Agent, AgentResult
 from .persona import AGENT_IDENTITY, SYSTEM_PROMPT
 
-__all__ = ["SYSTEM_PROMPT", "AGENT_IDENTITY", "Agent"]
+__all__ = ["SYSTEM_PROMPT", "AGENT_IDENTITY", "Agent", "AgentResult"]

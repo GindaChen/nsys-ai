@@ -146,10 +146,10 @@ def test_agent_confidence_reflects_root_cause_severity(minimal_nsys_db_path):
         confidence = {}
         for severity in ("critical", "warning", "info"):
             row = {"pattern": "Test finding", "severity": severity}
-            confidence[severity] = agent._confidence_label(
+            confidence[severity] = agent._confidence_breakdown(
                 {"root_cause_matcher": [row]},
                 row,
-            )
+            )[1]
     finally:
         agent.close()
 
@@ -164,7 +164,14 @@ def test_agent_verify_fallback_when_no_skill_evidence(minimal_nsys_db_path):
 
     agent = Agent(minimal_nsys_db_path)
     try:
-        answer = agent._format_evidence_first_answer("what happened?", {}, [])
+        diagnostic = agent._build_diagnostic(
+            mode="ask",
+            question="what happened?",
+            evidence={},
+            selected_skills=[],
+            llm_summary=None,
+        )
+        answer = agent._render_answer_text(diagnostic)
     finally:
         agent.close()
 

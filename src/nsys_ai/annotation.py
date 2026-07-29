@@ -253,6 +253,22 @@ def save_findings(report: EvidenceReport, path: str) -> None:
         json.dump(report.to_dict(), f, indent=2)
 
 
+#: Default filename used by the CLI ``--diagnostics`` flag when no path is given.
+DEFAULT_DIAGNOSTICS_FILENAME = "diagnostics.json"
+
+
+def load_diagnostic(path: str) -> "Diagnostic":
+    """Load a ``Diagnostic`` from a JSON file written by :func:`save_diagnostic`."""
+    with open(path) as f:
+        return Diagnostic.from_dict(json.load(f))
+
+
+def save_diagnostic(diagnostic: "Diagnostic", path: str) -> None:
+    """Save a ``Diagnostic`` to a JSON file in the ``Diagnostic.to_dict()`` shape."""
+    with open(path, "w") as f:
+        json.dump(diagnostic.to_dict(), f, indent=2)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # v0.1 evidence schema models
 # ──────────────────────────────────────────────────────────────────────

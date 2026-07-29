@@ -7,15 +7,33 @@ and produces a structured analysis report. Works without LLM by default
 extra installed, can delegate to an LLM for natural language analysis.
 """
 
+import hashlib
 import logging
 import shlex
 import sqlite3
+from dataclasses import dataclass
 
+from ..annotation import Diagnostic
 from ..exceptions import NsysAiError, ProfileNotFoundError
 from ..profile import Profile
 from ..skills.registry import get_skill, run_skill
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentResult:
+    """Structured outcome of an ``ask()`` / ``analyze()`` run.
+
+    ``text`` is the human-readable Markdown answer; ``diagnostic`` is the
+    same conclusion in the v0.1 :class:`~nsys_ai.annotation.Diagnostic`
+    schema. Both are rendered from one structured result — never by parsing
+    the Markdown back — so the terminal output and ``diagnostics.json``
+    cannot drift apart.
+    """
+
+    text: str
+    diagnostic: Diagnostic
 
 
 class Agent:
@@ -117,6 +135,9 @@ class Agent:
         if trim_ns:
             self._trim_kwargs["trim_start_ns"] = trim_ns[0]
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
+        # Lazily resolved by _profile_id(); cached so repeated
+        # ask_result()/analyze_result() calls hash the profile only once.
+        self._cached_profile_id: str | None = None
         try:
             self.profile = Profile(profile_path)
         except ProfileNotFoundError:
@@ -144,6 +165,12 @@ class Agent:
         elif hasattr(self, "conn"):
             self.conn.close()
 
+    #: Fixed question recorded for analyze-mode diagnostics. Kept as a
+    #: constant so the deterministic diagnostic id is stable across runs.
+    _ANALYZE_QUESTION = (
+        "Provide a comprehensive GPU performance analysis based on the profile data."
+    )
+
     def analyze(self) -> str:
         """Run a full auto-analysis of the profile.
 
@@ -165,6 +192,15 @@ class Agent:
 
         Returns:
             Formatted multi-section report with optional AI synthesis.
+        """
+        return self.analyze_result().text
+
+    def analyze_result(self) -> AgentResult:
+        """Run a full auto-analysis and return text plus a structured diagnostic.
+
+        Same skill execution as :meth:`analyze`; the diagnostic is derived
+        from the evidence rows collected here — no skill is re-run and no
+        ``EvidenceBuilder`` pass is needed.
         """
         sections = []
         sections.append("═══ nsys-ai Auto-Analysis Report ═══\n")
@@ -204,17 +240,27 @@ class Agent:
                 log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
                 sections.append(f"({skill_name}: skipped — {e})\n")
 
-        # LLM synthesis with structured JSON evidence
-        llm_answer = self._try_llm_synthesis(
-            "Provide a comprehensive GPU performance analysis based on the profile data.",
+        # Request the same concise summary that is persisted in Diagnostic.
+        # The structured diagnosis block below is the only human rendering of
+        # that synthesis, so terminal and JSON output cannot diverge.
+        llm_summary = self._try_llm_synthesis(
+            self._ANALYZE_QUESTION,
             evidence,
+            summary_only=True,
         )
-        if llm_answer:
-            sections.append("\n── AI Analysis ──")
-            sections.append(llm_answer)
 
+        diagnostic = self._build_diagnostic(
+            mode="analyze",
+            question=self._ANALYZE_QUESTION,
+            evidence=evidence,
+            selected_skills=core_skills,
+            llm_summary=llm_summary,
+        )
+        sections.append("")
+        sections.append("── Structured Diagnosis ──")
+        sections.append(self._render_answer_text(diagnostic))
         sections.append("═══ End of Report ═══")
-        return "\n".join(sections)
+        return AgentResult(text="\n".join(sections), diagnostic=diagnostic)
 
     def ask(self, question: str) -> str:
         """Answer a natural language question about the profile.
@@ -225,6 +271,15 @@ class Agent:
            executes them, and synthesizes the Summary. If no LLM, falls back to keywords
            and a deterministic Summary. The remaining answer sections are always built
            deterministically from skill evidence.
+        """
+        return self.ask_result(question).text
+
+    def ask_result(self, question: str) -> AgentResult:
+        """Answer a question and return the text plus a structured diagnostic.
+
+        The human-readable sections and the ``diagnostics.json`` fields are
+        rendered from the same :class:`Diagnostic` (see
+        :meth:`_build_diagnostic`), so the two outputs always agree.
         """
         # Use shared chat configuration to determine if an LLM is available
         try:
@@ -282,13 +337,17 @@ class Agent:
         if has_llm:
             llm_summary = self._try_llm_synthesis(question, evidence, summary_only=True)
 
-        answer = self._format_evidence_first_answer(
-            question,
-            evidence,
+        diagnostic = self._build_diagnostic(
+            mode="ask",
+            question=question,
+            evidence=evidence,
             selected_skills=[triage_skill, *selected],
             llm_summary=llm_summary,
         )
-        return answer
+        return AgentResult(
+            text=self._render_answer_text(diagnostic),
+            diagnostic=diagnostic,
+        )
 
     def run_skill(self, skill_name: str, **kwargs) -> str:
         """Run a specific skill by name."""
@@ -352,28 +411,80 @@ class Agent:
                 selected.update(skill_names)
         return sorted(selected)
 
-    def _format_evidence_first_answer(
+    #: Fallback verification command used when no skill produced usable
+    #: rows. It is still a runnable ``nsys-ai`` command (the user lists the
+    #: available skills and picks one manually), so the JSON field never
+    #: carries prose.
+    _VERIFY_FALLBACK_COMMAND = "nsys-ai skill list"
+
+    #: Upper bound on findings embedded in ``Diagnostic.primary_findings``.
+    #: Keeps ``diagnostics.json`` focused on the primary evidence even when
+    #: a skill's converter would emit hundreds of findings.
+    _MAX_PRIMARY_FINDINGS = 10
+
+    def _build_diagnostic(
         self,
+        *,
+        mode: str,
         question: str,
         evidence: dict[str, list[dict]],
         selected_skills: list[str],
-        llm_summary: str | None = None,
-    ) -> str:
-        """Build the fixed answer shape required by issue #205."""
+        llm_summary: str | None,
+    ) -> Diagnostic:
+        """Assemble the structured Diagnostic for an ask/analyze run.
+
+        Field mapping (human section → JSON field):
+
+            Summary            → summary
+            Primary Diagnosis  → root_cause_hypotheses[0]
+            Evidence           → primary_findings[*].evidence
+            Confidence         → confidence
+            Recommended Action → recommendation
+            Verify             → verification_command
+
+        ``primary_findings`` are converted from the skill rows this run
+        already collected, via each skill's ``to_findings_fn`` converter —
+        the expensive profile queries are not re-executed.
+        """
         selected_skills = list(dict.fromkeys(skill for skill in selected_skills if skill))
         diagnosis_row = self._first_actionable_row(evidence.get("root_cause_matcher", []))
         diagnosis = self._primary_diagnosis(question, evidence, diagnosis_row)
-        evidence_lines = self._evidence_lines(evidence)
-        confidence = self._confidence_label(evidence, diagnosis_row)
+        confidence, _label = self._confidence_breakdown(evidence, diagnosis_row)
         action = self._recommended_action(diagnosis_row)
         verify_skill = self._choose_verify_skill(evidence, selected_skills)
-        verify_command = self._verify_command(verify_skill)
-
+        verify_command = self._verify_command(verify_skill) or self._VERIFY_FALLBACK_COMMAND
         summary = self._answer_summary(selected_skills, llm_summary)
+        profile_id = self._profile_id()
+        findings = self._evidence_findings(evidence, profile_id)
+        return Diagnostic(
+            id=self._diagnostic_id(profile_id, mode, question),
+            summary=summary,
+            recommendation=action,
+            verification_command=verify_command,
+            confidence=confidence,
+            primary_findings=findings,
+            root_cause_hypotheses=[diagnosis],
+        )
+
+    def _render_answer_text(self, diagnostic: Diagnostic) -> str:
+        """Render the evidence-first Markdown answer from a Diagnostic.
+
+        Every section, including per-row evidence citations and the confidence
+        label, is derived only from fields serialized by ``Diagnostic``. A
+        loaded ``diagnostics.json`` can therefore reproduce this block without
+        the original skill rows.
+        """
+        confidence = self._confidence_text(diagnostic.confidence)
+        evidence_lines = self._diagnostic_evidence_lines(diagnostic)
+        diagnosis = (
+            diagnostic.root_cause_hypotheses[0]
+            if diagnostic.root_cause_hypotheses
+            else "No diagnosis recorded."
+        )
 
         lines = [
             "## Summary",
-            summary,
+            diagnostic.summary,
             "",
             "## Primary Diagnosis",
             diagnosis,
@@ -383,10 +494,7 @@ class Agent:
         if evidence_lines:
             lines.extend(evidence_lines)
         else:
-            lines.append(
-                "- source_skill=none; metric=none; window=full profile; "
-                "scope=profile; evidence=no skill returned usable rows"
-            )
+            lines.append("- No structured EvidenceRow is embedded in primary_findings.")
         lines.extend(
             [
                 "",
@@ -394,20 +502,86 @@ class Agent:
                 confidence,
                 "",
                 "## Recommended Action",
-                action,
+                diagnostic.recommendation,
                 "",
                 "## Verify",
             ]
         )
-        if verify_command:
-            lines.append(f"`{verify_command}`")
-        else:
+        if diagnostic.verification_command == self._VERIFY_FALLBACK_COMMAND:
             lines.append(
-                "Could not build a runnable verification command because no skill "
-                "produced evidence. Inspect available skills with:"
+                "Could not build a runnable verification command from structured "
+                "findings. Inspect available skills with:"
             )
-            lines.append("`nsys-ai skill list`")
+        lines.append(f"`{diagnostic.verification_command}`")
         return "\n".join(lines)
+
+    def _diagnostic_id(self, profile_id: str, mode: str, question: str) -> str:
+        """Deterministic diagnostic id from profile, request, and analysis scope.
+
+        Two runs over the same profile with the same mode, question, and trim
+        scope produce the same id. Scope is included because a full-profile
+        run and a trimmed run can produce different findings and verification
+        commands.
+        """
+        scope = ",".join(
+            f"{key}={value}" for key, value in sorted(self._trim_kwargs.items())
+        ) or "full-profile"
+        digest = hashlib.sha256(
+            f"{profile_id}|{mode}|{question}|{scope}".encode()
+        ).hexdigest()
+        return f"diag_{digest[:16]}"
+
+    def _profile_id(self) -> str:
+        """Resolve (and cache) the content-derived profile id.
+
+        Mirrors ``EvidenceBuilder``: reads the META_DATA / TARGET_INFO
+        tables from the original SQLite connection (``profile.conn``), not
+        the parquet cache, and falls back to a path-derived id when those
+        tables are unreachable. Diagnostics must never crash the answer
+        path, so any failure degrades to the path-derived id.
+        """
+        if self._cached_profile_id is None:
+            from ..fingerprint import get_profile_id
+
+            id_conn = (
+                getattr(self.profile, "conn", None) if self.profile is not None else self.conn
+            )
+            try:
+                self._cached_profile_id = get_profile_id(id_conn, fallback_path=self.profile_path)
+            except Exception:
+                log.debug("profile id resolution failed; using path fallback", exc_info=True)
+                digest = hashlib.sha256(str(self.profile_path).encode("utf-8")).hexdigest()
+                self._cached_profile_id = f"nsys1:path:{digest}"
+        return self._cached_profile_id
+
+    def _evidence_findings(
+        self,
+        evidence: dict[str, list[dict]],
+        profile_id: str,
+    ) -> list:
+        """Convert already-collected skill rows into v0.1 Findings.
+
+        Reuses each skill's ``to_findings_fn`` converter over the rows this
+        run already executed — no profile query is re-run and no
+        ``EvidenceBuilder`` pass is needed. Skills without a converter are
+        skipped. Bounded by ``_MAX_PRIMARY_FINDINGS``; ordering follows
+        evidence insertion order, so the result is deterministic.
+        """
+        from ..evidence_builder import _invoke_to_findings
+
+        context = {"profile_id": profile_id}
+        findings: list = []
+        for skill_name, rows in evidence.items():
+            if not rows:
+                continue
+            skill = get_skill(skill_name)
+            if skill is None or skill.to_findings_fn is None:
+                continue
+            try:
+                findings.extend(_invoke_to_findings(skill.to_findings_fn, rows, context))
+            except Exception as e:
+                log.debug("to_findings_fn for '%s' failed: %s", skill_name, e, exc_info=True)
+        return findings[: self._MAX_PRIMARY_FINDINGS]
 
     def _answer_summary(
         self,
@@ -417,13 +591,13 @@ class Agent:
         """Return model synthesis when available, otherwise a deterministic summary."""
         if llm_summary:
             lines = [line.strip() for line in str(llm_summary).strip().splitlines()]
-            if lines and lines[0].lower().lstrip("#").strip() == "summary":
-                lines = lines[1:]
 
             summary_lines = []
             for line in lines:
                 if line.startswith("#"):
-                    break
+                    if summary_lines:
+                        break
+                    continue
                 if line:
                     summary_lines.append(line)
 
@@ -477,101 +651,96 @@ class Agent:
             "a narrower profile with NVTX ranges if the evidence is too broad."
         )
 
-    def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
+    def _confidence_breakdown(
+        self, evidence: dict[str, list[dict]], diagnosis_row: dict | None
+    ) -> tuple[float, str]:
+        """Return the (numeric confidence, human label) pair for this evidence state.
+
+        ``diagnostics.json`` carries the float (``Diagnostic.confidence``);
+        the Markdown answer carries the label. Both come from this one
+        function so the two can never diverge.
+        """
         row_count = sum(len(rows) for rows in evidence.values())
         if diagnosis_row and row_count:
             severity = str(diagnosis_row.get("severity", "")).strip().lower()
             confidence_by_severity = {
-                "critical": (
-                    "0.90 (high): a critical root-cause matcher finding is backed by skill output."
-                ),
-                "warning": (
-                    "0.75 (medium-high): a warning root-cause matcher finding is backed by "
-                    "skill output."
-                ),
-                "info": (
-                    "0.55 (medium): an informational root-cause matcher finding is backed by "
-                    "skill output."
-                ),
+                "critical": 0.90,
+                "warning": 0.75,
+                "info": 0.55,
             }
-            return confidence_by_severity.get(
-                severity,
-                "0.65 (medium): a root-cause matcher finding is backed by skill output, "
-                "but its severity is unknown.",
-            )
+            if severity in confidence_by_severity:
+                value = confidence_by_severity[severity]
+                return value, self._confidence_text(value)
+            return 0.65, self._confidence_text(0.65)
         if row_count:
-            return "0.60 (medium): skill output exists, but no root-cause matcher finding dominated."
-        return "0.20 (low): no skill returned usable evidence."
+            return 0.60, self._confidence_text(0.60)
+        return 0.20, self._confidence_text(0.20)
 
-    def _evidence_lines(self, evidence: dict[str, list[dict]]) -> list[str]:
+    @staticmethod
+    def _confidence_text(value: float) -> str:
+        """Format a confidence value using only data persisted in Diagnostic."""
+        if value >= 0.85:
+            band = "high"
+        elif value >= 0.70:
+            band = "medium-high"
+        elif value >= 0.50:
+            band = "medium"
+        else:
+            band = "low"
+        return f"{value:.2f} ({band})"
+
+    def _diagnostic_evidence_lines(self, diagnostic: Diagnostic) -> list[str]:
+        """Render every embedded EvidenceRow from ``primary_findings``."""
         lines: list[str] = []
-        for skill_name, rows in evidence.items():
-            for row in rows[:2]:
-                if not isinstance(row, dict):
-                    continue
-                if row.get("_summary") and len(rows) > 1:
-                    continue
-                metric = self._metric_fragment(row)
-                window = self._window_fragment(row)
-                scope = self._scope_fragment(row)
-                evidence_text = str(row.get("evidence") or row.get("note") or "").strip()
-                suffix = f"; evidence={evidence_text}" if evidence_text else ""
+        for finding in diagnostic.primary_findings:
+            for row in finding.evidence or []:
+                metric = self._evidence_values_fragment(row.values, row.units)
+                window = self._finding_window_fragment(finding)
+                scope = self._finding_scope_fragment(finding)
                 lines.append(
-                    f"- source_skill={skill_name}; metric={metric}; "
-                    f"window={window}; scope={scope}{suffix}"
+                    f"- evidence_id={row.id}; source_skill={row.source_skill}; "
+                    f"finding={self._compact_value(finding.label)}; metric={metric}; "
+                    f"window={window}; scope={scope}"
                 )
-                if len(lines) >= 5:
-                    return lines
         return lines
 
-    def _metric_fragment(self, row: dict) -> str:
-        priority = (
-            "pattern",
-            "label",
-            "name",
-            "kernel_name",
-            "severity",
-            "total_ms",
-            "duration_ms",
-            "gap_ms",
-            "gap_ns",
-            "idle_pct",
-            "total_idle_ms",
-            "overlap_pct",
-            "nccl_only_ms",
-            "compute_only_ms",
-            "count",
-        )
-        parts = []
-        for key in priority:
-            if key in row and row[key] not in (None, ""):
-                parts.append(f"{key}={self._compact_value(row[key])}")
-            if len(parts) >= 3:
-                break
+    def _evidence_values_fragment(self, values: dict, units: dict) -> str:
+        parts: list[str] = []
+        for key, value in values.items():
+            unit = units.get(key, "")
+            parts.append(f"{key}={self._compact_value(value)}{unit}")
         return ", ".join(parts) if parts else "row_present=true"
 
     def _compact_value(self, value) -> str:
         text = str(value)
         return text if len(text) <= 120 else text[:117] + "..."
 
-    def _window_fragment(self, row: dict) -> str:
-        start = row.get("start_ns", row.get("gpu_start_ns"))
-        end = row.get("end_ns", row.get("gpu_end_ns"))
+    @staticmethod
+    def _finding_window_fragment(finding) -> str:
+        selection = finding.selection
+        start = selection.start_ns if selection is not None else finding.start_ns
+        end = selection.end_ns if selection is not None else finding.end_ns
         if start is not None and end is not None:
             return f"{start}-{end}ns"
-        if row.get("start_ms") is not None and row.get("end_ms") is not None:
-            return f"{row['start_ms']}-{row['end_ms']}ms"
-        trim_start = self._trim_kwargs.get("trim_start_ns")
-        trim_end = self._trim_kwargs.get("trim_end_ns")
-        if trim_start is not None and trim_end is not None:
-            return f"{trim_start}-{trim_end}ns"
         return "full profile"
 
-    def _scope_fragment(self, row: dict) -> str:
-        parts = []
-        for key in ("gpu_id", "device_id", "device", "rank", "stream_id", "communicator_hex"):
-            if key in row and row[key] not in (None, ""):
-                parts.append(f"{key}={row[key]}")
+    @staticmethod
+    def _finding_scope_fragment(finding) -> str:
+        selection = finding.selection
+        parts: list[str] = []
+        if selection is not None:
+            for key, values in (
+                ("gpu_ids", selection.gpu_ids),
+                ("rank_ids", selection.rank_ids),
+                ("stream_ids", selection.stream_ids),
+                ("nvtx_path", selection.nvtx_path),
+            ):
+                if values:
+                    parts.append(f"{key}={','.join(str(value) for value in values)}")
+        if not parts and finding.gpu_id is not None:
+            parts.append(f"gpu_id={finding.gpu_id}")
+        if not parts and finding.stream is not None:
+            parts.append(f"stream={finding.stream}")
         return ", ".join(parts) if parts else "profile"
 
     def _choose_verify_skill(
@@ -618,8 +787,8 @@ class Agent:
         Args:
             question: The question to answer.
             evidence: Dict mapping skill names to their JSON-serializable results.
-            summary_only: Return one concise summary paragraph for ``ask()``'s
-                deterministic answer formatter.
+            summary_only: Return one concise summary paragraph for the
+                deterministic ask/analyze answer formatter.
 
         Returns None if no LLM available.
         """

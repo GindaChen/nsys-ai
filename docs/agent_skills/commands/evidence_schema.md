@@ -228,7 +228,33 @@ A higher-level summary an agent emits after analyzing a profile or a diff. Pairs
 
 - `verification_command` is a **runnable** `nsys-ai` command, not a description. If no runnable command can be constructed, an agent should say so explicitly rather than narrate one here.
 
-> **Transport note**: at v0.1, `Diagnostic` is a standalone schema type. It is **not** carried inside `EvidenceReport` / `findings.json` — that wrapper only knows about `findings`. A producer emitting a diagnosis should serialize it to its own JSON document (e.g. `diagnostic.json`). Top-level `diagnostic` / `diagnostics` keys added to a `findings.json` payload will be silently dropped by `EvidenceReport.from_dict()`.
+> **Transport note**: at v0.1, `Diagnostic` is a standalone schema type. It is **not** carried inside `EvidenceReport` / `findings.json` — that wrapper only knows about `findings`. A producer emitting a diagnosis should serialize it to its own JSON document (`diagnostics.json`). Top-level `diagnostic` / `diagnostics` keys added to a `findings.json` payload will be silently dropped by `EvidenceReport.from_dict()`.
+
+#### Producing `diagnostics.json` from the CLI
+
+`ask`, `agent ask`, and `agent analyze` can each emit their diagnosis as a structured `diagnostics.json` alongside the human-readable answer:
+
+```bash
+nsys-ai ask profile.sqlite "why is this slow?" --diagnostics            # writes ./diagnostics.json
+nsys-ai agent ask profile.sqlite "why is this slow?" --diagnostics out/diag.json
+nsys-ai agent analyze profile.sqlite --diagnostics
+```
+
+- `--diagnostics` without a value writes `diagnostics.json` in the current directory; omitting the flag preserves the previous behavior. It is independent of `agent analyze --evidence -o findings.json`.
+- `id` is deterministic — derived from the profile id, the mode (`ask` / `analyze`), the question, and the full-profile or trim scope — so re-running the same command reproduces the same artifact id without colliding with a different analysis window.
+- `primary_findings` are converted from the skill rows the run already executed (via each skill's v0.1 `to_findings_fn` converter); no extra profile queries are run to build the JSON.
+- Load it back with `nsys_ai.annotation.load_diagnostic(path)` (writer: `save_diagnostic(diagnostic, path)`).
+
+The printed evidence-first answer and the JSON are rendered from the same structured `Diagnostic`, so the sections always match:
+
+| Human section | JSON field |
+|---------------|------------|
+| Summary | `summary` |
+| Primary Diagnosis | `root_cause_hypotheses[0]` |
+| Evidence | `primary_findings[*].evidence` |
+| Confidence | `confidence` |
+| Recommended Action | `recommendation` |
+| Verify | `verification_command` |
 
 ---
 
