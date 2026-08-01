@@ -149,9 +149,13 @@ def launch_overhead_ms(
         FROM {kernel_table} k
         LEFT JOIN {runtime_table} r ON k.correlationId = r.correlationId
         WHERE {where_sql}
-        -- Total order: the loop below advances a running max and tests
-        -- `ks > prev_end`, so tied starts would change launch_ns.
-        ORDER BY k.start, k.[end], k.correlationId
+        -- Total order. The kernel keys alone are NOT enough: correlationId is
+        -- the join key, and the runtime side fans out (212k correlationIds carry
+        -- several runtime rows on a real H100 capture), so many rows share all
+        -- three kernel keys. The loop reads rs/re from the runtime side, so
+        -- without the runtime columns the computed launch_ns varied by ~20%
+        -- between runs on identical input.
+        ORDER BY k.start, k.[end], k.correlationId, r.start, r.[end]
     """  # noqa: S608 — table names are validated schema identifiers, values are bound
     try:
         rows = prof.adapter.execute(sql, params).fetchall()

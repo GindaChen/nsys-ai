@@ -67,9 +67,30 @@ def test_snapshot_selection_is_total():
 
 def test_launch_overhead_sweep_is_total():
     """The loop advances a running maximum and tests `ks > prev_end`, so tied
-    starts shift a reported millisecond figure."""
+    starts shift a reported millisecond figure.
+
+    The kernel keys alone are not enough. `correlationId` is the join key and
+    the runtime side fans out — on a real H100 capture 212k correlationIds
+    carry several runtime rows — so many joined rows share all three kernel
+    keys while differing in the `rs`/`re` the loop actually reads. Before the
+    runtime columns were added, this returned values spanning ~20% between runs
+    on identical input (712 / 702 / 565 ms). With them the spread is zero.
+    """
     src = _read("overlap.py")
-    assert "ORDER BY k.start, k.[end], k.correlationId" in src
+    assert "ORDER BY k.start, k.[end], k.correlationId, r.start, r.[end]" in src
+
+
+def test_kernel_launch_overhead_orders_the_fanned_out_runtime_side():
+    """Same defect, same cause, in the skill that reports per-launch overhead.
+
+    Its join is on correlationId too, so the runtime columns are required for
+    the order to be total.
+    """
+    skill = (
+        Path(__file__).resolve().parent.parent
+        / "src/nsys_ai/skills/builtins/kernel_launch_overhead.py"
+    ).read_text()
+    assert "r.start ASC, r.[end] ASC" in skill
 
 
 def test_iteration_extraction_prefers_the_enclosing_range():

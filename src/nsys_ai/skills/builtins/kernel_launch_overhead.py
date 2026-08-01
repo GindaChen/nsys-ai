@@ -39,7 +39,7 @@ FROM {runtime_table} r
 JOIN {kernel_table} k ON r.correlationId = k.correlationId
 JOIN StringIds s ON k.shortName = s.id
 WHERE 1=1 {trim_clause}
-ORDER BY overhead_us DESC, k.start ASC, k.correlationId ASC
+ORDER BY overhead_us DESC, k.start ASC, k.correlationId ASC, r.start ASC, r.[end] ASC
 LIMIT {limit}""",
     params=[SkillParam("limit", "Max results", "int", False, 20)],
     format_fn=_format,
