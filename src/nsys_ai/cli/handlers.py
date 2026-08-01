@@ -1693,6 +1693,22 @@ def _cmd_skill(args, _profile):
         sys.exit(1)
 
 
+def _maybe_save_diagnostic(args, result) -> None:
+    """Write ``diagnostics.json`` when ``--diagnostics [PATH]`` was passed.
+
+    Shared by ``ask`` / ``agent ask`` / ``agent analyze``. ``args.diagnostics``
+    is ``None`` when the flag is omitted (previous behavior), or the path
+    argparse resolved (the flag's ``const`` default when no value was given).
+    """
+    out = getattr(args, "diagnostics", None)
+    if out is None:
+        return
+    from nsys_ai.annotation import save_diagnostic
+
+    save_diagnostic(result.diagnostic, out)
+    print(f"Diagnostic: {result.diagnostic.id} → {out}", file=sys.stderr)
+
+
 def _cmd_agent(args, _profile):
     from nsys_ai.agent.loop import Agent
 
@@ -1703,7 +1719,10 @@ def _cmd_agent(args, _profile):
             trim_ns = (int(trim[0] * 1e9), int(trim[1] * 1e9))
         agent = Agent(args.profile, trim_ns=trim_ns)
         try:
-            print(agent.analyze())
+            result = agent.analyze_result()
+            print(result.text)
+            # Diagnostics reuse the same run — no skill is re-executed.
+            _maybe_save_diagnostic(args, result)
             # Optionally produce evidence findings JSON
             if getattr(args, "evidence", False):
                 from nsys_ai.annotation import save_findings
@@ -1721,7 +1740,9 @@ def _cmd_agent(args, _profile):
     elif args.agent_action == "ask":
         agent = Agent(args.profile)
         try:
-            print(agent.ask(args.question))
+            result = agent.ask_result(args.question)
+            print(result.text)
+            _maybe_save_diagnostic(args, result)
         finally:
             agent.close()
     else:
@@ -1735,7 +1756,9 @@ def _cmd_ask(args, _profile):
 
     agent = Agent(args.profile)
     try:
-        print(agent.ask(args.question))
+        result = agent.ask_result(args.question)
+        print(result.text)
+        _maybe_save_diagnostic(args, result)
     finally:
         agent.close()
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import math
 
+from nsys_ai.annotation import DEFAULT_DIAGNOSTICS_FILENAME
 from nsys_ai.cutracer.installer import NVBIT_VERSION
 
 from .handlers import (
@@ -54,6 +55,27 @@ from .handlers import (
 # ---------------------------------------------------------------------------
 # Shared parser registration helpers — used by both main and legacy parsers
 # ---------------------------------------------------------------------------
+
+
+def _add_diagnostics_arg(p) -> None:
+    """Add the shared ``--diagnostics [PATH]`` flag (ask / agent ask / agent analyze).
+
+    ``--diagnostics`` without a value writes ``diagnostics.json`` in the
+    current directory; omitting the flag preserves the previous behavior.
+    Kept separate from analyze's ``--evidence -o findings.json``.
+    """
+    p.add_argument(
+        "--diagnostics",
+        nargs="?",
+        const=DEFAULT_DIAGNOSTICS_FILENAME,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also write the diagnosis as structured diagnostics JSON "
+            f"(default path: {DEFAULT_DIAGNOSTICS_FILENAME}); "
+            "separate from analyze's --evidence findings JSON"
+        ),
+    )
 
 
 def _positive_pct(value: str) -> float:
@@ -364,6 +386,7 @@ def _build_parser():
     p = sub.add_parser("ask", help="Ask AI a backend analysis question")
     p.add_argument("profile", help="Path to .sqlite file")
     p.add_argument("question", help="Natural language question")
+    _add_diagnostics_arg(p)
     p.set_defaults(handler=_cmd_ask)
 
     p = sub.add_parser("agent-guide", help="Print machine-readable guide for AI agents")
@@ -922,9 +945,11 @@ def _register_legacy_commands(sub):
         default=None,
         help="Output path for findings JSON (default: findings.json)",
     )
+    _add_diagnostics_arg(sp_analyze)
     sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
     sp_ask.add_argument("profile", help="Path to .sqlite file")
     sp_ask.add_argument("question", help="Natural language question")
+    _add_diagnostics_arg(sp_ask)
     p.set_defaults(handler=_cmd_agent)
 
     # ── evidence ──────────────────────────────────────────────────

@@ -315,6 +315,14 @@ nsys-ai ask profile.sqlite "is NCCL overlapping with compute?"
 nsys-ai chat profile.sqlite                        # interactive chat TUI
 ```
 
+Add `--diagnostics [PATH]` to `ask`, `agent ask`, or `agent analyze` to also write the
+diagnosis as structured `diagnostics.json` (default path `diagnostics.json`) — the same
+summary, primary diagnosis, evidence, confidence, recommended action, and verification
+command as the printed answer, in the v0.1 `Diagnostic` schema. The file is
+machine-consumable: load it with `nsys_ai.annotation.load_diagnostic`, diff it, or store
+it like any other artifact. See
+[`evidence_schema.md`](docs/agent_skills/commands/evidence_schema.md#diagnostic).
+
 The AI features need a provider API key. Set one of:
 
 ```bash

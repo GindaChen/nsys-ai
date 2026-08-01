@@ -503,3 +503,114 @@ def test_diff_against_unknown_baseline_errors(tmp_path):
     )
     assert result.returncode == 2
     assert "unknown baseline" in result.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# --diagnostics flag (issue #207): ask / agent ask / agent analyze
+# ---------------------------------------------------------------------------
+
+
+def _run_cli_no_llm(args, cwd):
+    """Run the CLI with AI provider keys scrubbed (deterministic no-LLM path)."""
+    import os
+
+    env = dict(os.environ)
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "NSYS_AI_MODEL"):
+        env.pop(key, None)
+    return subprocess.run(
+        [sys.executable, "-m", "nsys_ai", *args],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+
+
+def test_ask_diagnostics_default_path(tmp_path, minimal_nsys_db_path):
+    """`ask --diagnostics` without a value writes ./diagnostics.json."""
+    result = _run_cli_no_llm(
+        ["ask", minimal_nsys_db_path, "why is this slow?", "--diagnostics"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert "## Summary" in result.stdout
+
+    from nsys_ai.annotation import load_diagnostic
+
+    out = tmp_path / "diagnostics.json"
+    assert out.exists()
+    diag = load_diagnostic(str(out))
+    assert diag.id.startswith("diag_")
+    assert diag.summary
+    assert diag.recommendation
+    assert diag.verification_command
+    assert f"Diagnostic: {diag.id} → " in result.stderr
+    assert "Diagnostic:" not in result.stdout
+    assert result.stdout.rstrip().endswith(f"`{diag.verification_command}`")
+
+
+def test_ask_diagnostics_custom_path(tmp_path, minimal_nsys_db_path):
+    """`ask --diagnostics PATH` writes to the given path, not the default."""
+    custom = tmp_path / "custom_diag.json"
+    result = _run_cli_no_llm(
+        ["ask", minimal_nsys_db_path, "why is this slow?", "--diagnostics", str(custom)],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+
+    from nsys_ai.annotation import load_diagnostic
+
+    assert custom.exists()
+    assert not (tmp_path / "diagnostics.json").exists()
+    assert load_diagnostic(str(custom)).id.startswith("diag_")
+
+
+def test_ask_without_diagnostics_writes_nothing(tmp_path, minimal_nsys_db_path):
+    """Omitting --diagnostics preserves current behavior (no JSON artifact)."""
+    result = _run_cli_no_llm(
+        ["ask", minimal_nsys_db_path, "why is this slow?"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert "## Summary" in result.stdout
+    assert not (tmp_path / "diagnostics.json").exists()
+    assert "Diagnostic:" not in result.stdout
+
+
+def test_agent_ask_diagnostics(tmp_path, minimal_nsys_db_path):
+    """Legacy `agent ask` supports --diagnostics with the same default path."""
+    result = _run_cli_no_llm(
+        ["agent", "ask", minimal_nsys_db_path, "why is this slow?", "--diagnostics"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert "## Summary" in result.stdout
+
+    from nsys_ai.annotation import load_diagnostic
+
+    diag = load_diagnostic(str(tmp_path / "diagnostics.json"))
+    assert diag.id.startswith("diag_")
+
+
+def test_agent_analyze_diagnostics(tmp_path, minimal_nsys_db_path):
+    """`agent analyze --diagnostics` writes a diagnostic, separate from findings JSON."""
+    result = _run_cli_no_llm(
+        ["agent", "analyze", minimal_nsys_db_path, "--diagnostics"],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert "═══ nsys-ai Auto-Analysis Report ═══" in result.stdout
+
+    from nsys_ai.annotation import load_diagnostic
+
+    diag = load_diagnostic(str(tmp_path / "diagnostics.json"))
+    assert diag.id.startswith("diag_")
+    assert diag.verification_command.startswith("nsys-ai skill run")
+    assert f"Diagnostic: {diag.id} → " in result.stderr
+    assert "Diagnostic:" not in result.stdout
+    assert f"## Summary\n{diag.summary}" in result.stdout
+    assert f"## Primary Diagnosis\n{diag.root_cause_hypotheses[0]}" in result.stdout
+    assert f"## Recommended Action\n{diag.recommendation}" in result.stdout
+    assert f"`{diag.verification_command}`" in result.stdout
+    # --diagnostics is separate from --evidence: no findings.json is written.
+    assert not (tmp_path / "findings.json").exists()

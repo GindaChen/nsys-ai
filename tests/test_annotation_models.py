@@ -378,6 +378,65 @@ class TestDiagnosticEdgeCases:
         assert restored.verification_command == cmd
 
 
+class TestDiagnosticIO:
+    """save_diagnostic / load_diagnostic round-trip (diagnostics.json, issue #207)."""
+
+    def _diag(self) -> Diagnostic:
+        f = Finding(
+            type="region",
+            label="GPU Idle Gap (18.25ms)",
+            start_ns=10,
+            end_ns=20,
+            severity="warning",
+            id="idle_gap_gpu0_stream7_10",
+            category="idle",
+            confidence=0.85,
+            evidence=[
+                EvidenceRow(
+                    id="ev1",
+                    source_skill="gpu_idle_gaps",
+                    values={"gap_ms": 18.25},
+                    units={"gap_ms": "ms"},
+                )
+            ],
+        )
+        return Diagnostic(
+            id="diag_test",
+            summary="S — unicode ✓",
+            recommendation="Use pinned memory",
+            verification_command="nsys-ai skill run gpu_idle_gaps p.sqlite --format json",
+            confidence=0.75,
+            primary_findings=[f],
+            root_cause_hypotheses=["Pageable Memory in Async Memcpy"],
+        )
+
+    def test_save_load_round_trip(self, tmp_path):
+        from nsys_ai.annotation import load_diagnostic, save_diagnostic
+
+        diag = self._diag()
+        out = tmp_path / "diagnostics.json"
+        save_diagnostic(diag, str(out))
+        assert load_diagnostic(str(out)) == diag
+
+    def test_saved_json_matches_to_dict_shape(self, tmp_path):
+        from nsys_ai.annotation import save_diagnostic
+
+        diag = self._diag()
+        out = tmp_path / "diagnostics.json"
+        save_diagnostic(diag, str(out))
+        raw = json.loads(out.read_text())
+        assert raw == diag.to_dict()
+        # No findings-report envelope keys leak into the diagnostics schema.
+        assert "findings" not in raw
+        assert "schema_version" not in raw
+        assert "profile_path" not in raw
+
+    def test_default_filename_constant(self):
+        from nsys_ai.annotation import DEFAULT_DIAGNOSTICS_FILENAME
+
+        assert DEFAULT_DIAGNOSTICS_FILENAME == "diagnostics.json"
+
+
 class TestEvidenceRowEdgeCases:
     def test_nested_dict_in_values(self):
         row = EvidenceRow(

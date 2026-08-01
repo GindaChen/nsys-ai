@@ -17,7 +17,7 @@ This file serves as your routing guide:
 ### Ask — One-shot question
 
 ```bash
-nsys-ai ask <profile.sqlite> "<question>"
+nsys-ai ask <profile.sqlite> "<question>" [--diagnostics [path]]
 ```
 
 | Example question | What it does |
@@ -26,7 +26,10 @@ nsys-ai ask <profile.sqlite> "<question>"
 | `"what's the MFU of flash_fwd_kernel?"` | Compute region MFU for a specific kernel |
 | `"how many kernels in this profile?"` | SQL query via the profile database |
 
-**Output**: Markdown text on stdout. Parse the answer directly.
+**Output**: Markdown text on stdout. Parse the answer directly. Add `--diagnostics`
+(optionally with a path; default `diagnostics.json`) to also write the diagnosis as
+structured JSON — same summary, diagnosis, evidence, confidence, action, and verify
+command as the printed answer. See [`commands/evidence_schema.md`](commands/evidence_schema.md#diagnostic).
 
 ### Diff — Compare two profiles
 
@@ -90,8 +93,8 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1.0 5.0 -o report.md
 | `nsys-ai timeline-html <profile> [--gpu N] [--trim S E] [-o out.html]`| Generate horizontal timeline HTML | Static trace visualization |
 | `nsys-ai search <profile> -q <query> [--gpu N] [--trim S E] [--parent P] [--type T] [--limit L]` | Search kernels/NVTX by name | Fast exact name discovery |
 | `nsys-ai diff-web <before> <after> [--gpu N] [--trim S E] [--port P]` | Web diff viewer | Visual side-by-side comparison |
-| `nsys-ai agent analyze <profile> [--trim S E] [--evidence] [-o out]`| Full auto-analysis report | CLI auto-analysis (no LLM needed) |
-| `nsys-ai agent ask <profile> "<question>"` | Ask a targeted question | Keyword-based skill selection |
+| `nsys-ai agent analyze <profile> [--trim S E] [--evidence] [-o out] [--diagnostics [path]]`| Full auto-analysis report | CLI auto-analysis (no LLM needed) |
+| `nsys-ai agent ask <profile> "<question>" [--diagnostics [path]]` | Ask a targeted question | Keyword-based skill selection |
 | `nsys-ai skill list [--format F]` | List all builtin analysis skills | Discover available skills |
 | `nsys-ai skill run <name> <profile> [--trim S E] [--format F] [-p K=V]` | Run a skill against a profile | Targeted analysis |
 | `nsys-ai skill add <path.md>`* | Add a custom skill | Extend the skill system |
