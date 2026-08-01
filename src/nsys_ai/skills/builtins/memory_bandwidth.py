@@ -86,7 +86,7 @@ WHERE deviceId = ? AND bytes > 10000000
 """
         + (" AND [end] >= ? AND start <= ? " if trim else "")
         + f"""
-ORDER BY dur_ns DESC, start ASC, copyKind ASC
+ORDER BY dur_ns DESC, start ASC, copyKind ASC, bytes DESC
 LIMIT {limit}"""
     )
 

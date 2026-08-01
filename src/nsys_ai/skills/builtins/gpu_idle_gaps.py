@@ -73,6 +73,7 @@ WITH ordered AS (
     SELECT k.streamId,
            k.deviceId,
            k.start, k.[end],
+           k.correlationId,
            s.value AS kernel_name,
            -- correlationId completes the order: kernels sharing a start would
            -- otherwise make "the previous kernel" engine-dependent, which
@@ -96,7 +97,7 @@ SELECT streamId,
        kernel_name AS after_kernel
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
-ORDER BY gap_ns DESC, start_ns ASC, streamId ASC
+ORDER BY gap_ns DESC, start_ns ASC, streamId ASC, correlationId ASC
 LIMIT ?"""
     try:
         cur = adapter.execute(gap_sql, trim_params + [min_gap_ns, limit])

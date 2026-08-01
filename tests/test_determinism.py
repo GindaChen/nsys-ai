@@ -62,7 +62,14 @@ def _seed(conn):
             corr += 1
         # A second kernel sharing a start timestamp on the same stream: makes
         # "the previous kernel" ambiguous for LAG() unless the order is total.
-        rows.append((1_000, 6_000, device, 7, corr, 2, 0))
+        #
+        # It must differ in `end` AND name from its start-partner, or the tie is
+        # unobservable: LAG would return the same prev_end/prev_kernel whichever
+        # peer it picked, and a test built on it would pass with the tiebreak
+        # removed. The partner at i==0 is (1_000, 6_000, name=alpha); this one
+        # ends later and carries the other name, so which peer wins is visible
+        # in both the computed gap and the reported previous kernel.
+        rows.append((1_000, 8_000, device, 7, corr, 1, 0))
         corr += 1
     conn.executemany(
         "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?,?,?,?)", rows
@@ -112,10 +119,11 @@ def test_busiest_device_query_declares_a_total_order():
     """
     from pathlib import Path
 
-    src = Path("src/nsys_ai/skills/builtins/critical_path.py").read_text()
+    b = Path(__file__).resolve().parent.parent / "src/nsys_ai/skills/builtins"
+    src = (b / "critical_path.py").read_text()
     assert "ORDER BY busy DESC, deviceId ASC" in src
 
-    rcm = Path("src/nsys_ai/skills/builtins/root_cause_matcher.py").read_text()
+    rcm = (b / "root_cause_matcher.py").read_text()
     assert "ORDER BY c DESC, deviceId ASC" in rcm
 
 
@@ -156,12 +164,13 @@ def test_window_functions_declare_a_total_order():
     """
     from pathlib import Path
 
-    b = Path("src/nsys_ai/skills/builtins")
+    b = Path(__file__).resolve().parent.parent / "src/nsys_ai/skills/builtins"
 
     gaps = (b / "gpu_idle_gaps.py").read_text()
     # Both the row query and the aggregate that sums total_gap_ns.
+    # Count, not substring-absence: an earlier version asserted a string that
+    # was absent from the buggy code too, so it passed on what it should reject.
     assert gaps.count("ORDER BY k.start, k.correlationId") == 3
-    assert "PARTITION BY k.deviceId, k.streamId ORDER BY k.start\n" not in gaps
 
     pattern = (b / "kernel_launch_pattern.py").read_text()
     assert pattern.count("ORDER BY k.start, k.correlationId") == 2
@@ -171,6 +180,31 @@ def test_window_functions_declare_a_total_order():
     assert nvtx.count("n_start ASC, nvtx_text ASC") == 4
     assert "ORDER BY n_dur ASC, n_start ASC)" not in nvtx
     assert "ORDER BY n_dur DESC, n_start ASC)" not in nvtx
+
+
+def test_all_three_nvtx_map_builders_agree_on_tie_resolution():
+    """The NVTX label ordering is cloned across three builders — fix all or none.
+
+    `nvtx_layer_breakdown` prefers the *cached* `nvtx_kernel_map`, which is
+    built by `parquet_cache` (or, on a direct-attached profile, by
+    `nvtx_attribution`). Tiebreaking only the inline fallback would leave the
+    production path arbitrary *and* make cached and uncached runs disagree —
+    reintroducing the exact "different answer depending on whether the cache
+    exists" failure this module tests against.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "src/nsys_ai"
+
+    cache = (root / "parquet_cache.py").read_text()
+    assert "n.start ASC, n.text ASC" in cache
+    assert 'FIRST(n.text ORDER BY (n."end" - n.start) ASC, n.start ASC)' not in cache
+
+    attribution = (root / "nvtx_attribution.py").read_text()
+    assert attribution.count("n_start ASC, nvtx_text ASC") == 2
+
+    # The persisted map must not be reused across the change in tie resolution.
+    assert "_CACHE_VERSION = 15" in cache
 
 
 # ── Cross-backend agreement ─────────────────────────────────────────────────

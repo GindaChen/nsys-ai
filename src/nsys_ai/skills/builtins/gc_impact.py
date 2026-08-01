@@ -122,7 +122,10 @@ def _execute(conn, **kwargs):
             pass  # NVTX query is best-effort
 
     # Sort combined results by total_ms descending
-    results.sort(key=lambda x: x.get("total_ms", 0), reverse=True)
+    # Total order: the NVTX branch has no ORDER BY, and a stable sort on
+    # total_ms alone would faithfully preserve whatever arbitrary order the
+    # engine returned for tied rows.
+    results.sort(key=lambda x: (-(x.get("total_ms") or 0), str(x.get("event_name") or "")))
     return results
 
 

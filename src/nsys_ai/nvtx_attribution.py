@@ -346,9 +346,9 @@ def attribute_kernels_to_nvtx(
                 ),
                 grouped AS (
                     SELECT
-                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC, nvtx_text ASC) AS nvtx_text,
                         CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                         kernel_name,
                         k_start,
                         k_end,

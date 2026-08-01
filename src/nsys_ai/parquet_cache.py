@@ -103,7 +103,8 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 14  # bumped: added nvtx_high.parquet (aten::* filtered subset) + ORDER BY on time-keyed exports
+_CACHE_VERSION = 15  # bumped: total-order tiebreak in the nvtx_kernel_map builder — a cache
+# built by version 14 resolved label ties arbitrarily, so it must be rebuilt rather than reused.
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -1117,9 +1118,9 @@ def _build_nvtx_kernel_map(
             JOIN read_parquet('{rps}') r ON r.correlationId = k.correlationId
         )
         SELECT
-            FIRST(n.text ORDER BY (n."end" - n.start) ASC, n.start ASC) AS nvtx_text,
+            FIRST(n.text ORDER BY (n."end" - n.start) ASC, n.start ASC, n.text ASC) AS nvtx_text,
             CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-            string_agg(n.text, ' > ' ORDER BY (n."end" - n.start) DESC, n.start ASC) AS nvtx_path,
+            string_agg(n.text, ' > ' ORDER BY (n."end" - n.start) DESC, n.start ASC, n.text ASC) AS nvtx_path,
             kr.kernel_name,
             kr.k_start,
             kr.k_end,
