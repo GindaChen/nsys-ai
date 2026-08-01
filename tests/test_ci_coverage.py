@@ -25,10 +25,20 @@ REPO = Path(__file__).resolve().parent.parent
 # unattended. Fixture skips are legitimate but *load-bearing* — see the module
 # docstring — so they are named individually rather than matched loosely.
 ACCEPTED_SKIP_REASONS = (
+    # Paid providers; cannot run unattended. Legitimate.
     "No API key configured",
     "GEMINI_API_KEY not set",
+    # Gated on uncommitted profiles. Legitimate but load-bearing — these run on
+    # a developer machine and not in CI, so CI covers strictly less. Each is
+    # named rather than matched loosely so a new one is a deliberate addition.
     "distca example sqlite not found",
     "distca example profile not found",
+    "No test profile",
+    "profile not available locally",
+    # The trajectory suite needs BOTH an API key and a 27MB uncommitted profile,
+    # so it skips locally on the key and in CI on the profile. 130 tests that
+    # run in neither place — see the dedicated test below.
+    "Profile not found: data/nsys-hero",
     "requires duckdb",
     "parquet cache unavailable",
 )
@@ -89,3 +99,33 @@ def test_the_fixture_gated_files_are_named_not_incidental():
         "test_timeline_web_distca_benchmark.py",
         "test_timeline_web_distca_profile.py",
     ], f"the set of fixture-gated test files changed: {gated}"
+
+
+def test_the_trajectory_suite_is_known_to_run_nowhere():
+    """130 tests that no environment satisfies, stated rather than discovered.
+
+    They need an API key *and* a 27MB uncommitted profile. Locally the profile
+    exists so they skip on the key; in CI the key is absent and so is the
+    profile, so they skip on the profile. Two different gates, neither ever
+    met — which is why the count never looked alarming from either side.
+
+    This is not asserting the situation is acceptable. It is asserting that it
+    is known, so the number cannot grow quietly, and so that closing either gate
+    shows up as a failure here prompting the count to be revisited.
+    """
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_trajectories.py", "-q",
+         "--collect-only", "-p", "no:cacheprovider"],
+        cwd=REPO, capture_output=True, text=True,
+    ).stdout
+    collected = next(
+        (int(w) for line in out.splitlines() for w in line.split()
+         if w.isdigit() and "collected" in line),
+        0,
+    )
+    assert collected == 130, (
+        f"the trajectory suite is now {collected} tests, not 130. If it grew, "
+        "more coverage is being written that nothing runs; if it shrank, say why."
+    )
