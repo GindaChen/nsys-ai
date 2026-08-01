@@ -157,6 +157,7 @@ def evaluate_sol_gates(
     Raises :class:`SolGateError` when a region cannot be measured, so an
     unmeasurable target fails the gate instead of passing by omission.
     """
+    from .skills.base import is_abstention_row
     from .skills.builtins.region_mfu import _sol_headroom_ms
     from .skills.registry import get_skill
 
@@ -192,6 +193,15 @@ def evaluate_sol_gates(
                 f"{type(exc).__name__}: {detail}"
             ) from exc
         row = rows[0] if rows else {}
+        if is_abstention_row(row):
+            # A gate cannot pass on a measurement that was never taken. The
+            # skill saying it could not run is a gate error, exactly as a raised
+            # exception is — otherwise an unmeasurable profile would read as
+            # "no regression" and let a real one through.
+            raise SolGateError(
+                f"--gate-sol {spec}: could not measure region {spec.region!r}: "
+                f"{row.get('reason') or 'the skill could not run on this profile'}"
+            )
         if not row or "error" in row:
             err = (row.get("error") or {}) if row else {}
             detail = err.get("message") or "region not found or not measurable"

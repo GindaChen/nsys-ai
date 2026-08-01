@@ -13,7 +13,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, is_abstention_row
 
 _log = logging.getLogger(__name__)
 
@@ -284,11 +284,11 @@ def _summarize_iterations(iter_rows: list[dict]) -> dict:
     real = [
         r
         for r in iter_rows
-        # `not r.get("_abstained")` first: an abstention row carries neither
+        # The abstention check comes first: such a row carries neither
         # of the other keys, so it would take both defaults and be counted as
         # a real 0ms iteration — fabricating a measurement on the very finding
         # that reports there is no NVTX to measure.
-        if not r.get("_abstained")
+        if not is_abstention_row(r)
         and r.get("is_real_iteration", True)
         and not r.get("heuristic", False)
     ]

@@ -36,6 +36,38 @@ def abstain(reason: str, **detail) -> list[dict]:
     return [{"_abstained": True, "reason": reason, **detail}]
 
 
+def is_abstention_row(row) -> bool:
+    """True when a single row is an abstention marker.
+
+    The list-level predicate below is the usual one; this exists for code that
+    iterates rows, which otherwise re-implements the isinstance-and-key check
+    inline and drifts.
+    """
+    return isinstance(row, dict) and row.get("_abstained") is True
+
+
+def requires_nvtx(conn, *, needs: str = "Region attribution") -> list[dict] | None:
+    """Abstain if ``conn`` has no NVTX table, else None so the caller proceeds.
+
+    Six skills need this and each had its own copy of the resolve-and-abstain
+    block. Keeping it in one place also keeps the *resolution* right: an exact
+    name match misses versioned variants such as NVTX_EVENTS_V2 and the parquet
+    backend's views, which is a bug that already shipped once.
+
+    ``needs`` names what the caller cannot do, so the message says something
+    true for that skill rather than a copy of a sibling's wording.
+    """
+    from ..connection import wrap_connection
+
+    if wrap_connection(conn).resolve_activity_tables().get("nvtx"):
+        return None
+    return abstain(
+        f"This profile has no NVTX_EVENTS table, so it carries no NVTX "
+        f"annotation. {needs} needs annotated ranges — re-capture with NVTX "
+        f"enabled, or annotate the workload, to use this skill."
+    )
+
+
 def is_abstention(rows: list[dict] | None) -> bool:
     """True when ``rows`` is a skill saying it could not run.
 
@@ -44,7 +76,7 @@ def is_abstention(rows: list[dict] | None) -> bool:
     ``to_findings_fn`` would mint a finding out of it, and the agent would
     cite it as evidence with no metrics behind it.
     """
-    return bool(rows) and isinstance(rows[0], dict) and rows[0].get("_abstained") is True
+    return bool(rows) and is_abstention_row(rows[0])
 
 
 def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:

@@ -364,3 +364,204 @@ def test_a_missing_table_abstains_even_when_it_is_not_nvtx():
     assert is_abstention(rows)
     assert "COMPOSITE_EVENTS" in rows[0]["reason"]
     assert "sampling" in rows[0]["reason"].lower()
+
+
+# ── Structural guards: the contract must hold without each consumer opting in ──
+#
+# Six leaks happened because `abstain()` was a convention that eight separate
+# consumers each had to remember, checking variously `if rows:`,
+# `"error" in row`, `"bucket" in r`, or `row.get(key, default)`. These tests
+# pin the places where the contract is now enforced centrally instead.
+
+
+def test_to_findings_never_sees_an_abstention_row():
+    """Filtered in the invoker, so no `to_findings_fn` can mint a finding.
+
+    Before, the skills that were safe were safe only through unrelated guards —
+    an early return on a row count, a length check — which a refactor could
+    remove without anyone noticing the connection.
+    """
+    from nsys_ai.evidence_builder import _invoke_to_findings
+
+    def explode(rows, context=None):  # must never be called
+        raise AssertionError(f"to_findings_fn received an abstention: {rows}")
+
+    assert _invoke_to_findings(explode, abstain("no NVTX"), {"profile_id": "p"}) == []
+
+    # Real rows still reach it.
+    seen = {}
+
+    def record(rows, context=None):
+        seen["rows"] = rows
+        return []
+
+    _invoke_to_findings(record, [{"kernel_name": "gemm"}], {"profile_id": "p"})
+    assert seen["rows"] == [{"kernel_name": "gemm"}]
+
+
+def test_the_sol_gate_fails_rather_than_passing_on_an_unmeasured_region():
+    """A gate cannot pass on a measurement that was never taken.
+
+    `sol_gate` reads `rows[0]` to decide CI pass/fail and checked only for an
+    `error` key. An abstention has no such key, so it would have been read as a
+    measurement — an unmeasurable profile reporting "no regression" and letting
+    a real one through.
+    """
+    import nsys_ai.sol_gate as sg
+
+    class _Abstaining:
+        name = "region_mfu"
+
+        def execute(self, conn, **kwargs):
+            return abstain("no NVTX in this profile")
+
+    # Exercised, not grepped: an earlier version asserted a source string,
+    # which passes whether or not the branch is reachable. Substituting an
+    # abstaining skill proves the gate raises rather than reading the row as a
+    # measurement. Note this branch is defensive today — no skill the gate runs
+    # abstains — so the substitution is what makes it testable at all.
+    # get_skill is imported inside the function, so patch it at the registry.
+    import nsys_ai.skills.registry as registry
+
+    original = registry.get_skill
+    registry.get_skill = lambda name: _Abstaining()
+    try:
+        with pytest.raises(sg.SolGateError) as exc:
+            sg.evaluate_sol_gates(
+                sqlite3.connect(":memory:"),
+                [sg.parse_sol_gate("myregion:50")],
+                theoretical_flops=1e12,
+            )
+    finally:
+        registry.get_skill = original
+    assert "no NVTX in this profile" in str(exc.value)
+
+
+def test_the_llm_is_not_handed_abstentions_as_analysis_data():
+    """The one path a type check cannot protect.
+
+    Serialised beside real rows under a header calling it analysis data, a
+    model can reasonably narrate "could not run" as a property of the workload.
+    They are split out and labelled as unavailable instead.
+    """
+    from nsys_ai.agent import loop as agent_loop
+
+    src = Path(agent_loop.__file__).read_text()
+    assert "usable, unavailable = {}, {}" in src
+    assert "json.dumps(usable" in src, "abstentions are still serialised as data"
+    assert "could NOT run" in src
+
+
+@pytest.mark.parametrize(
+    "skill_name,kwargs",
+    [
+        ("code_attribution_candidates", {"start_ns": 0, "end_ns": 10**9}),
+        ("iteration_detail", {"iteration": 0}),
+        ("nccl_payload_breakdown", {}),
+    ],
+)
+def test_the_remaining_skills_abstain_rather_than_raise(skill_name, kwargs):
+    """Contract completeness: `is_abstention()` is now sufficient.
+
+    These three previously raised or returned an error row, so a consumer had
+    to handle three shapes to learn one thing.
+    """
+    from nsys_ai.skills.base import is_abstention
+
+    skill = get_skill(skill_name)
+    conn = sqlite3.connect(FIXTURE)
+    try:
+        rows = skill.execute(conn, **kwargs)
+    finally:
+        conn.close()
+    assert is_abstention(rows), f"{skill_name} did not abstain: {rows[:1]}"
+
+
+JUDGED = Path(__file__).resolve().parent / "fixtures" / "healthy_judged_1pct.sqlite"
+
+
+def test_idle_the_pipeline_actually_sees_is_still_not_called_recoverable():
+    """The sibling fixture tests the judgement, not the filter.
+
+    `healthy_1pct.sqlite` has 10us gaps, below the 1ms floor, so its idle never
+    reaches a threshold — it passes because nothing weighed it. Here the gaps
+    are 2ms, above the floor, so the pipeline sees 19 of them totalling 38ms
+    and must still decline to call 0.99% recoverable.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    conn = sqlite3.connect(JUDGED)
+    try:
+        seen = get_skill("gpu_idle_gaps").execute(conn, device=0)
+    finally:
+        conn.close()
+    summary = next((r for r in seen if r.get("_summary")), {})
+    assert summary.get("gap_count", 0) > 0, "the gaps were filtered out — tests the wrong thing"
+
+    with Profile(str(JUDGED)) as prof:
+        report = EvidenceBuilder(prof, device=0).build()
+
+    # Scoped to idle: an unscoped check passes on a fixture where the idle
+    # logic never ran, which is exactly what the sibling fixture does.
+    idle_claimed = [
+        (f.label, f.headroom_ms)
+        for f in report.findings
+        if f.category == "idle" and f.headroom_ms
+    ]
+    assert idle_claimed == [], f"idle it saw and weighed was called recoverable: {idle_claimed}"
+    assert [f for f in report.findings if f.category == "idle"], (
+        "no idle findings at all — the gaps were filtered, not judged"
+    )
+
+    # Documenting current behaviour rather than blessing it: severity is judged
+    # per gap with no reference to the share of the run, so a healthy profile
+    # still emits warnings. Tracked separately; pinned here so a change is
+    # deliberate rather than accidental.
+    idle_warnings = [
+        f for f in report.findings if f.category == "idle" and f.severity == "warning"
+    ]
+    assert len(idle_warnings) <= 5, f"idle warning noise grew to {len(idle_warnings)}"
+    assert not [f for f in report.findings if f.category == "idle" and f.severity == "critical"]
+
+
+# ── Structure: the marker stays private to the module that defines it ───────
+
+
+def test_the_marker_is_not_re_implemented_across_the_codebase():
+    """`_abstained` is an implementation detail of `skills/base.py`.
+
+    It leaked into eight hand-rolled checks — `isinstance(row, dict) and
+    row.get("_abstained")` repeated in the agent, the gate and the manifest —
+    which is the same "every consumer re-implements the convention" shape that
+    produced the original six leaks. Consumers use the predicates instead, so a
+    change to the representation touches one file.
+    """
+    src_root = Path(__file__).resolve().parent.parent / "src" / "nsys_ai"
+    offenders = []
+    for path in src_root.rglob("*.py"):
+        if path.name == "base.py" and path.parent.name == "skills":
+            continue  # the definition lives here
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or '"""' in stripped:
+                continue
+            if "_abstained" in stripped:
+                offenders.append(f"{path.relative_to(src_root)}:{lineno}: {stripped}")
+    assert not offenders, "raw marker checks outside skills/base.py:\n" + "\n".join(offenders)
+
+
+def test_the_nvtx_guard_is_defined_once():
+    """Six skills needed the same resolve-and-abstain block.
+
+    Each had its own copy, and one copy shipped with an exact name match that
+    missed `NVTX_EVENTS_V2` — the kind of divergence duplication guarantees.
+    """
+    src_root = Path(__file__).resolve().parent.parent / "src" / "nsys_ai"
+    copies = [
+        p.relative_to(src_root)
+        for p in (src_root / "skills" / "builtins").rglob("*.py")
+        if 'resolve_activity_tables().get("nvtx")' in p.read_text()
+    ]
+    assert copies == [], f"the NVTX guard was re-inlined in: {copies}"

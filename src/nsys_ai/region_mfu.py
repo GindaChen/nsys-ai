@@ -642,6 +642,17 @@ def compute_region_mfu_from_conn(
     # Branch: source="nvtx" (default) — NVTX range → kernel attribution
     # ---------------------------------------------------------------
     else:
+        # Only this branch needs annotation; source="kernel" above works fine on
+        # an unannotated profile, so the guard sits here rather than at entry.
+        from .connection import wrap_connection
+
+        if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
+            return _error(
+                "NO_NVTX",
+                "This profile has no NVTX_EVENTS table, so it carries no NVTX "
+                "annotation. Re-capture with NVTX enabled, or pass "
+                "source='kernel' to match kernels by name instead.",
+            )
         matches = find_nvtx_ranges(conn, name, match_mode=match_mode)
         chosen = select_nvtx_occurrence(matches, occurrence_index)
         if "error" in chosen:

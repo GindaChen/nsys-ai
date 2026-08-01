@@ -7,10 +7,14 @@ a slow iteration.
 
 import statistics
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, requires_nvtx
 
 
 def _execute(conn, **kwargs):
+
+    guard = requires_nvtx(conn, needs="Per-iteration breakdown")
+    if guard:
+        return guard
     from ...overlap import detect_iterations
     from ...profile import Profile
 
