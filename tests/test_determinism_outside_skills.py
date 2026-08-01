@@ -109,7 +109,33 @@ def test_region_occurrence_selection_is_total():
     """`occurrence_index` indexes into these rows, so a tie selects a different
     region and reports a different MFU percentage."""
     src = _read("region_mfu.py")
-    assert 'base_sql += "ORDER BY start_ns, end_ns, text, global_tid"' in src
+    assert 'base_sql += "ORDER BY start_ns, end_ns DESC, text, global_tid"' in src
+
+
+def test_enclosing_range_wins_a_start_tie_everywhere():
+    """One rule for parent/child ties, applied consistently.
+
+    Three places resolve "two NVTX ranges share a start": iteration extraction,
+    the NVTX tree's nesting stack, and region-MFU occurrence selection. All
+    must prefer the *enclosing* range, or the same profile yields a parent in
+    one view and its child in another. An earlier version had region-MFU
+    ascending, i.e. resolving to the nested range — the opposite rule.
+    """
+    assert "ORDER BY n.start, n.[end] DESC, text" in _read("overlap.py")
+    assert "ORDER BY n.start, n.[end] DESC, text" in _read("nvtx_tree.py")
+    assert "ORDER BY start, [end] DESC, text" in _read("nvtx_tree.py")
+    assert "ORDER BY start_ns, end_ns DESC, text, global_tid" in _read("region_mfu.py")
+
+
+def test_cutracer_kernel_list_ordered_on_both_branches():
+    """The SQLite fallback is the branch the `cutracer` CLI actually takes.
+
+    `cli/handlers.py` passes `prof.conn`, a raw SQLite connection, so ordering
+    only the parquet branch would have made the two paths disagree — turning an
+    arbitrary choice into a deterministically *different* one per backend.
+    """
+    src = _read("cutracer/correlator.py")
+    assert src.count("ORDER BY name") == 2
 
 
 def test_nsys_kernel_list_is_ordered():

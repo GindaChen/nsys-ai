@@ -542,7 +542,7 @@ def detect_iterations(
             -- top-level filter below keeps the first range at a given start,
             -- and on a tie the longer range is the enclosing one. Ordering
             -- the shorter one first would let a nested range mask its parent.
-            ORDER BY n.start, n.[end] DESC
+            ORDER BY n.start, n.[end] DESC, text
         """,
         (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
     )

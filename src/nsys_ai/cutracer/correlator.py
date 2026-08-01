@@ -148,11 +148,14 @@ def build_nsys_kernel_list(conn) -> list[str]:
     # Parquet cache path — kernels table has a 'name' column
     if "kernels" in tables:
         try:
+            # Ordered because `cutracer_analysis` builds its reverse map behind a
+            # first-wins guard: when several nsys kernels match one cutracer
+            # kernel, the first in this list wins and decides SASS attachment.
+            # (Not the LCS tie — that loop iterates the cutracer side, which the
+            # histogram parser already builds from a sorted glob.)
             rows = adapter.execute(
-                    # Ordered: the caller resolves an LCS tie by first-seen,
-                    # so an unordered DISTINCT can attach SASS to the wrong kernel.
-                    "SELECT DISTINCT name FROM kernels WHERE name IS NOT NULL ORDER BY name"
-                ).fetchall()
+                "SELECT DISTINCT name FROM kernels WHERE name IS NOT NULL ORDER BY name"
+            ).fetchall()
             return [r[0] for r in rows if r[0]]
         except Exception:
             pass
@@ -168,6 +171,7 @@ def build_nsys_kernel_list(conn) -> list[str]:
             LEFT JOIN StringIds s ON k.shortName = s.id
             LEFT JOIN StringIds d ON k.demangledName = d.id
             WHERE COALESCE(d.value, s.value) IS NOT NULL
+            ORDER BY name
             """
         ).fetchall()
         return [r[0] for r in rows if r[0]]

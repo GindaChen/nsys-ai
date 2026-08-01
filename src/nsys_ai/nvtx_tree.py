@@ -87,7 +87,10 @@ def _build_single_thread_tree(
             WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
               AND n.globalTid = ?
               AND n.[end] >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC so an enclosing range precedes one that shares its
+            -- start: the nesting stack below depends on this order, and the
+            -- reverse would make a child appear to contain its parent.
+            ORDER BY n.start, n.[end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
@@ -99,7 +102,7 @@ def _build_single_thread_tree(
             WHERE text IS NOT NULL AND [end] > start
               AND globalTid = ?
               AND [end] >= ? AND start <= ?
-            ORDER BY start
+            ORDER BY start, [end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
