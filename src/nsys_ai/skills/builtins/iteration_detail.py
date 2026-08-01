@@ -7,23 +7,14 @@ a slow iteration.
 
 import statistics
 
-from ..base import Skill, SkillParam, abstain
+from ..base import Skill, SkillParam, requires_nvtx
 
 
 def _execute(conn, **kwargs):
 
-    # A profile captured without NVTX ranges cannot be attributed to regions.
-    # Say so rather than raising: callers catch and log, so an exception here
-    # removes the skill from the output with no trace that it was even asked.
-    from ...connection import wrap_connection
-
-    if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
-        return abstain(
-            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
-            "annotation. Per-iteration breakdown needs annotated iteration "
-            "boundaries — re-capture with NVTX enabled, or annotate the training "
-            "step, to use this skill."
-        )
+    guard = requires_nvtx(conn, needs="Per-iteration breakdown")
+    if guard:
+        return guard
     from ...overlap import detect_iterations
     from ...profile import Profile
 

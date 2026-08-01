@@ -5,25 +5,18 @@ via a top-level NVTX marker and report per-iteration GPU timing and kernel count
 This is a Python-level skill (execute_fn).
 """
 
-from ..base import Skill, SkillParam, abstain
+from ..base import Skill, SkillParam, requires_nvtx
 
 
 def _execute(conn, **kwargs):
     # A profile captured without NVTX ranges cannot be attributed to regions.
     # Say so rather than raising: callers catch and log, so an exception here
     # removes the skill from the output with no trace that it was even asked.
-    from ...connection import wrap_connection
     from ...overlap import detect_iterations
 
-    # resolve_activity_tables, not an exact name match: Nsight ships versioned
-    # variants such as NVTX_EVENTS_V2, and the parquet backend registers views
-    # by filename. An exact match told users with NVTX to re-capture with NVTX.
-    if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
-        return abstain(
-            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
-            "annotation. Region attribution needs annotated ranges — re-capture "
-            "with NVTX enabled, or annotate the workload, to use this skill."
-        )
+    guard = requires_nvtx(conn, needs="Iteration detection")
+    if guard:
+        return guard
 
     from ...profile import Profile
 

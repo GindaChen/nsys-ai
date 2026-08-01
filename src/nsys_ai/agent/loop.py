@@ -13,6 +13,7 @@ import sqlite3
 
 from ..exceptions import NsysAiError, ProfileNotFoundError
 from ..profile import Profile
+from ..skills.base import is_abstention_row
 from ..skills.registry import get_skill, run_skill
 
 log = logging.getLogger(__name__)
@@ -462,7 +463,7 @@ class Agent:
         for skill_name, rows in evidence.items():
             if rows:
                 row = rows[0]
-                if isinstance(row, dict) and row.get("_abstained"):
+                if is_abstention_row(row):
                     # abstain() takes arbitrary detail kwargs, so one call
                     # passing name= would otherwise make "could not run" the
                     # headline diagnosis.
@@ -487,7 +488,7 @@ class Agent:
         # and counting it lifted confidence from 0.20 (no usable evidence) to
         # 0.60 (skill output exists) on a profile where nothing had run.
         row_count = sum(
-            len([r for r in rows if not (isinstance(r, dict) and r.get("_abstained"))])
+            len([r for r in rows if not is_abstention_row(r)])
             for rows in evidence.values()
         )
         if diagnosis_row and row_count:
@@ -522,7 +523,7 @@ class Agent:
                     continue
                 if row.get("_summary") and len(rows) > 1:
                     continue
-                if row.get("_abstained"):
+                if is_abstention_row(row):
                     # A skill that could not run is not evidence for anything.
                     # Rendering it through the metric path produced
                     # "metric=row_present=true", which dresses an absence up as
@@ -605,9 +606,7 @@ class Agent:
         def _usable(rows) -> bool:
             # An abstaining skill is truthy but has nothing to verify — a
             # verify command pointing at it would verify nothing.
-            return bool(rows) and not (
-                isinstance(rows[0], dict) and rows[0].get("_abstained")
-            )
+            return bool(rows) and not is_abstention_row(rows[0])
 
         for skill_name in selected_skills:
             if _usable(evidence.get(skill_name)):
@@ -684,7 +683,7 @@ class Agent:
         # to avoid, arriving through the one path a type check cannot fix.
         usable, unavailable = {}, {}
         for skill_name, rows in evidence.items():
-            if rows and isinstance(rows[0], dict) and rows[0].get("_abstained"):
+            if rows and is_abstention_row(rows[0]):
                 unavailable[skill_name] = rows[0].get("reason") or "could not run"
             else:
                 usable[skill_name] = rows

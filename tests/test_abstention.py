@@ -524,3 +524,44 @@ def test_idle_the_pipeline_actually_sees_is_still_not_called_recoverable():
     ]
     assert len(idle_warnings) <= 5, f"idle warning noise grew to {len(idle_warnings)}"
     assert not [f for f in report.findings if f.category == "idle" and f.severity == "critical"]
+
+
+# ── Structure: the marker stays private to the module that defines it ───────
+
+
+def test_the_marker_is_not_re_implemented_across_the_codebase():
+    """`_abstained` is an implementation detail of `skills/base.py`.
+
+    It leaked into eight hand-rolled checks — `isinstance(row, dict) and
+    row.get("_abstained")` repeated in the agent, the gate and the manifest —
+    which is the same "every consumer re-implements the convention" shape that
+    produced the original six leaks. Consumers use the predicates instead, so a
+    change to the representation touches one file.
+    """
+    src_root = Path(__file__).resolve().parent.parent / "src" / "nsys_ai"
+    offenders = []
+    for path in src_root.rglob("*.py"):
+        if path.name == "base.py" and path.parent.name == "skills":
+            continue  # the definition lives here
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or '"""' in stripped:
+                continue
+            if "_abstained" in stripped:
+                offenders.append(f"{path.relative_to(src_root)}:{lineno}: {stripped}")
+    assert not offenders, "raw marker checks outside skills/base.py:\n" + "\n".join(offenders)
+
+
+def test_the_nvtx_guard_is_defined_once():
+    """Six skills needed the same resolve-and-abstain block.
+
+    Each had its own copy, and one copy shipped with an exact name match that
+    missed `NVTX_EVENTS_V2` — the kind of divergence duplication guarantees.
+    """
+    src_root = Path(__file__).resolve().parent.parent / "src" / "nsys_ai"
+    copies = [
+        p.relative_to(src_root)
+        for p in (src_root / "skills" / "builtins").rglob("*.py")
+        if 'resolve_activity_tables().get("nvtx")' in p.read_text()
+    ]
+    assert copies == [], f"the NVTX guard was re-inlined in: {copies}"

@@ -7,7 +7,7 @@ model/training regions, without claiming exact source-line attribution.
 
 from collections import Counter, defaultdict
 
-from ..base import Skill, SkillParam, abstain
+from ..base import Skill, SkillParam, requires_nvtx
 
 _LIMITATIONS = [
     "NVTX attribution is temporal context, not exact source-line attribution",
@@ -164,17 +164,9 @@ def _top_kernels(kernels: list[dict], limit: int = 3) -> list[dict]:
 
 def _execute(conn, **kwargs):
 
-    # A profile captured without NVTX ranges cannot be attributed to regions.
-    # Say so rather than raising: callers catch and log, so an exception here
-    # removes the skill from the output with no trace that it was even asked.
-    from ...connection import wrap_connection
-
-    if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
-        return abstain(
-            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
-            "annotation. Region attribution needs annotated ranges — re-capture "
-            "with NVTX enabled, or annotate the workload, to use this skill."
-        )
+    guard = requires_nvtx(conn, needs="Code attribution")
+    if guard:
+        return guard
 
     start_ns = int(kwargs["start_ns"])
     end_ns = int(kwargs["end_ns"])
@@ -187,6 +179,8 @@ def _execute(conn, **kwargs):
     if limit < 1:
         return [{"error": "limit must be >= 1"}]
     min_overlap_pct = float(kwargs.get("min_overlap_pct", 0.0))
+
+    from ...connection import wrap_connection
 
     adapter = wrap_connection(conn)
     selection_duration = end_ns - start_ns
