@@ -61,6 +61,46 @@ def test_moderate_overlap_balanced_profile_reports_its_exposed_nccl():
     assert f.provenance["row_kind"] == "exposed_communication"
 
 
+def test_real_capture_window_that_previously_reported_nothing():
+    """Numbers taken from a real capture, not invented.
+
+    `mfu_h1002_nsys.sqlite` device 1, a 1.34s window: 30.8% overlap with
+    compute vastly exceeding NCCL. It clears the low-overlap threshold by
+    0.8 points and is nowhere near communication-dominated, so before this
+    change 31.19ms of recoverable time was claimed by nobody.
+
+    Scanning that capture and its postfix counterpart at two window sizes
+    turned up 37 windows in this regime, so it is the normal shape of a
+    well-overlapped training step rather than a contrived corner.
+    """
+    row = _row(
+        overlap_pct=30.8,
+        compute_only_ms=1251.17,
+        nccl_only_ms=31.19,
+        overlap_ms=13.9,
+        total_ms=1341.3,
+    )
+    findings = _to_findings([row], context={"profile_id": "real"})
+    assert _comm_headroom(findings) == [31.19]
+
+
+def test_improving_overlap_does_not_silence_the_report():
+    """Crossing the 30% threshold must not make recoverable time vanish.
+
+    The same capture has windows at 24-27% overlap that fire `low_overlap`
+    and report their exposed NCCL. If improving overlap past 30% dropped the
+    report to nothing, the tool would answer an optimisation by going quiet —
+    and a before/after diff would read the improvement as headroom disappearing
+    rather than shrinking.
+    """
+    below = _row(overlap_pct=26.6, compute_only_ms=1251.17, nccl_only_ms=31.19,
+                 overlap_ms=13.9, total_ms=1341.3)
+    above = _row(overlap_pct=30.8, compute_only_ms=1251.17, nccl_only_ms=31.19,
+                 overlap_ms=13.9, total_ms=1341.3)
+    assert _comm_headroom(_to_findings([below], context={"profile_id": "p"})) == [31.19]
+    assert _comm_headroom(_to_findings([above], context={"profile_id": "p"})) == [31.19]
+
+
 # ── Single-count discipline: exactly one finding may claim the ms ──────────
 
 
