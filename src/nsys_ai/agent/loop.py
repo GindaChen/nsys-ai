@@ -511,6 +511,18 @@ class Agent:
                     continue
                 if row.get("_summary") and len(rows) > 1:
                     continue
+                if row.get("_abstained"):
+                    # A skill that could not run is not evidence for anything.
+                    # Rendering it through the metric path produced
+                    # "metric=row_present=true", which dresses an absence up as
+                    # a measurement — the ungrounded-claim failure the answer
+                    # contract exists to prevent. Say plainly that the skill
+                    # was unavailable, and why.
+                    reason = str(row.get("reason") or "no reason given").strip()
+                    lines.append(f"- source_skill={skill_name}; unavailable: {reason}")
+                    if len(lines) >= 5:
+                        return lines
+                    continue
                 metric = self._metric_fragment(row)
                 window = self._window_fragment(row)
                 scope = self._scope_fragment(row)

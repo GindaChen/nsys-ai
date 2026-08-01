@@ -149,3 +149,71 @@ def test_the_healthy_fixture_really_is_healthy():
     idle_share = 1.0 - busy / (hi - lo)
     assert n == 400
     assert 0.005 < idle_share < 0.015, f"fixture idle share drifted to {idle_share:.2%}"
+
+
+# ── Consumers must not render an abstention as data ────────────────────────
+#
+# The original version of this change had a green suite and a broken CLI:
+# nothing exercised the formatters or the agent's evidence path, so an
+# abstention row reached code that indexes data columns.
+
+
+@pytest.mark.parametrize("skill_name", NVTX_DEPENDENT)
+def test_formatting_an_abstention_does_not_crash(skill_name):
+    """`skill run <name> <no-nvtx-profile>` must print the reason, not traceback.
+
+    Each skill's own `format_fn` indexes its data columns, so this is handled
+    once in `Skill.format_rows` rather than in four formatters that could each
+    forget.
+    """
+    skill = get_skill(skill_name)
+    conn = sqlite3.connect(FIXTURE)
+    try:
+        text = skill.run(conn)  # execute + format, the CLI's path
+    finally:
+        conn.close()
+
+    assert "not applicable to this profile" in text
+    assert "NVTX" in text
+    # The actionable half of the reason has to survive to the user.
+    assert "re-capture" in text.lower() or "annotate" in text.lower()
+
+
+def test_agent_does_not_cite_an_abstention_as_a_measurement():
+    """An unavailable skill is not evidence for anything.
+
+    Routing it through the metric path produced
+    `metric=row_present=true`, dressing an absence up as a measurement —
+    precisely the ungrounded claim the answer contract exists to prevent.
+    """
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(str(FIXTURE))
+    try:
+        lines = agent._evidence_lines(
+            {
+                "nvtx_kernel_map": [{"_abstained": True, "reason": "no NVTX here"}],
+                "top_kernels": [{"kernel_name": "gemm", "total_ms": 12.3}],
+            }
+        )
+    finally:
+        agent.close()
+
+    abstained = [ln for ln in lines if "nvtx_kernel_map" in ln]
+    assert abstained, "the unavailable skill vanished instead of being reported"
+    assert "unavailable:" in abstained[0]
+    assert "no NVTX here" in abstained[0]
+    assert "metric=" not in abstained[0], "an absence was rendered as a measurement"
+
+    # Real evidence is unaffected.
+    real = [ln for ln in lines if "top_kernels" in ln]
+    assert real and "metric=" in real[0]
+
+
+def test_is_abstention_helper():
+    from nsys_ai.skills.base import is_abstention
+
+    assert is_abstention(abstain("x")) is True
+    assert is_abstention([]) is False
+    assert is_abstention(None) is False
+    assert is_abstention([{"kernel_name": "gemm"}]) is False

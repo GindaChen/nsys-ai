@@ -36,6 +36,17 @@ def abstain(reason: str, **detail) -> list[dict]:
     return [{"_abstained": True, "reason": reason, **detail}]
 
 
+def is_abstention(rows: list[dict] | None) -> bool:
+    """True when ``rows`` is a skill saying it could not run.
+
+    Every consumer that would otherwise treat the row as data needs this:
+    formatters index data columns that an abstention row does not have,
+    ``to_findings_fn`` would mint a finding out of it, and the agent would
+    cite it as evidence with no metrics behind it.
+    """
+    return bool(rows) and isinstance(rows[0], dict) and rows[0].get("_abstained") is True
+
+
 def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
     """Computes the total non-overlapping duration of a list of [start, end] intervals."""
     if not intervals:
@@ -298,7 +309,15 @@ class Skill:
             raise SkillExecutionError(f"SQL failed: {exc}", skill_name=self.name) from exc
 
     def format_rows(self, rows: list[dict]) -> str:
-        """Format pre-computed rows as text (no re-execution)."""
+        """Format pre-computed rows as text (no re-execution).
+
+        Abstention is rendered here rather than in each ``format_fn``. The
+        contract is defined in this module, so honouring it belongs here too —
+        and a per-skill formatter that forgot would crash on the missing data
+        columns instead of printing the reason.
+        """
+        if is_abstention(rows):
+            return f"{self.title}: not applicable to this profile.\n\n{rows[0]['reason']}"
         if self.format_fn:
             return self.format_fn(rows)
         return _default_format(self, rows)
