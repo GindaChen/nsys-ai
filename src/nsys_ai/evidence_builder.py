@@ -26,7 +26,19 @@ def _invoke_to_findings(fn: Callable, rows: list[dict], context: dict) -> list[F
 
     Legacy skills with the single-argument signature ``(rows)`` are
     invoked unchanged for backward compatibility.
+
+    Abstention rows never reach ``fn``. A skill that could not run has nothing
+    to turn into a finding, and filtering here rather than in each
+    ``to_findings_fn`` makes that true by construction: the skills that are
+    safe today are safe only through unrelated guards (an early return on a
+    row count, a length check), which a refactor could remove without anyone
+    noticing.
     """
+    from .skills.base import is_abstention
+
+    if is_abstention(rows):
+        return []
+
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):

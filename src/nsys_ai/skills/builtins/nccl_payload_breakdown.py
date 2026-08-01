@@ -33,7 +33,7 @@ from collections import defaultdict
 
 from nsys_ai.connection import DB_ERRORS, wrap_connection
 
-from ..base import Skill
+from ..base import Skill, abstain
 
 _log = logging.getLogger(__name__)
 
@@ -182,7 +182,11 @@ def _execute(conn, **kwargs) -> list[dict]:
     adapter = wrap_connection(conn)
     schemas = _load_schemas(adapter)
     if not schemas:
-        return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
+        return abstain(
+            "This profile has no NVTX payload schemas, so NCCL typed payloads "
+            "were not captured. Re-capture with NCCL payload tracing enabled to "
+            "use this skill."
+        )
 
     # Probe for the two "no data" cases:
     #   (a) capture-time misconfiguration: schemas declared but binaryData

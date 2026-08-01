@@ -364,3 +364,131 @@ def test_a_missing_table_abstains_even_when_it_is_not_nvtx():
     assert is_abstention(rows)
     assert "COMPOSITE_EVENTS" in rows[0]["reason"]
     assert "sampling" in rows[0]["reason"].lower()
+
+
+# ── Structural guards: the contract must hold without each consumer opting in ──
+#
+# Six leaks happened because `abstain()` was a convention that eight separate
+# consumers each had to remember, checking variously `if rows:`,
+# `"error" in row`, `"bucket" in r`, or `row.get(key, default)`. These tests
+# pin the places where the contract is now enforced centrally instead.
+
+
+def test_to_findings_never_sees_an_abstention_row():
+    """Filtered in the invoker, so no `to_findings_fn` can mint a finding.
+
+    Before, the skills that were safe were safe only through unrelated guards —
+    an early return on a row count, a length check — which a refactor could
+    remove without anyone noticing the connection.
+    """
+    from nsys_ai.evidence_builder import _invoke_to_findings
+
+    def explode(rows, context=None):  # must never be called
+        raise AssertionError(f"to_findings_fn received an abstention: {rows}")
+
+    assert _invoke_to_findings(explode, abstain("no NVTX"), {"profile_id": "p"}) == []
+
+    # Real rows still reach it.
+    seen = {}
+
+    def record(rows, context=None):
+        seen["rows"] = rows
+        return []
+
+    _invoke_to_findings(record, [{"kernel_name": "gemm"}], {"profile_id": "p"})
+    assert seen["rows"] == [{"kernel_name": "gemm"}]
+
+
+def test_the_sol_gate_fails_rather_than_passing_on_an_unmeasured_region():
+    """A gate cannot pass on a measurement that was never taken.
+
+    `sol_gate` reads `rows[0]` to decide CI pass/fail and checked only for an
+    `error` key. An abstention has no such key, so it would have been read as a
+    measurement — an unmeasurable profile reporting "no regression" and letting
+    a real one through.
+    """
+    import nsys_ai.sol_gate as sg
+
+    assert 'row.get("_abstained")' in Path(sg.__file__).read_text(), (
+        "the gate no longer distinguishes an abstention from a measurement"
+    )
+
+
+def test_the_llm_is_not_handed_abstentions_as_analysis_data():
+    """The one path a type check cannot protect.
+
+    Serialised beside real rows under a header calling it analysis data, a
+    model can reasonably narrate "could not run" as a property of the workload.
+    They are split out and labelled as unavailable instead.
+    """
+    from nsys_ai.agent import loop as agent_loop
+
+    src = Path(agent_loop.__file__).read_text()
+    assert "usable, unavailable = {}, {}" in src
+    assert "json.dumps(usable" in src, "abstentions are still serialised as data"
+    assert "could NOT run" in src
+
+
+@pytest.mark.parametrize(
+    "skill_name,kwargs",
+    [
+        ("code_attribution_candidates", {"start_ns": 0, "end_ns": 10**9}),
+        ("iteration_detail", {"iteration": 0}),
+        ("nccl_payload_breakdown", {}),
+    ],
+)
+def test_the_remaining_skills_abstain_rather_than_raise(skill_name, kwargs):
+    """Contract completeness: `is_abstention()` is now sufficient.
+
+    These three previously raised or returned an error row, so a consumer had
+    to handle three shapes to learn one thing.
+    """
+    from nsys_ai.skills.base import is_abstention
+
+    skill = get_skill(skill_name)
+    conn = sqlite3.connect(FIXTURE)
+    try:
+        rows = skill.execute(conn, **kwargs)
+    finally:
+        conn.close()
+    assert is_abstention(rows), f"{skill_name} did not abstain: {rows[:1]}"
+
+
+JUDGED = Path(__file__).resolve().parent / "fixtures" / "healthy_judged_1pct.sqlite"
+
+
+def test_idle_the_pipeline_actually_sees_is_still_not_called_recoverable():
+    """The sibling fixture tests the judgement, not the filter.
+
+    `healthy_1pct.sqlite` has 10us gaps, below the 1ms floor, so its idle never
+    reaches a threshold — it passes because nothing weighed it. Here the gaps
+    are 2ms, above the floor, so the pipeline sees 19 of them totalling 38ms
+    and must still decline to call 0.99% recoverable.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    conn = sqlite3.connect(JUDGED)
+    try:
+        seen = get_skill("gpu_idle_gaps").execute(conn, device=0)
+    finally:
+        conn.close()
+    summary = next((r for r in seen if r.get("_summary")), {})
+    assert summary.get("gap_count", 0) > 0, "the gaps were filtered out — tests the wrong thing"
+
+    with Profile(str(JUDGED)) as prof:
+        report = EvidenceBuilder(prof, device=0).build()
+
+    claimed = [(f.label, f.headroom_ms) for f in report.findings if f.headroom_ms]
+    assert claimed == [], f"idle it saw and weighed was called recoverable: {claimed}"
+
+    # Documenting current behaviour rather than blessing it: severity is judged
+    # per gap with no reference to the share of the run, so a healthy profile
+    # still emits warnings. Tracked separately; pinned here so a change is
+    # deliberate rather than accidental.
+    idle_warnings = [
+        f for f in report.findings if f.category == "idle" and f.severity == "warning"
+    ]
+    assert len(idle_warnings) <= 5, f"idle warning noise grew to {len(idle_warnings)}"
+    assert not [f for f in report.findings if f.category == "idle" and f.severity == "critical"]

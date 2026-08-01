@@ -194,12 +194,20 @@ def test_skill_aggregates_per_schema_correctly():
     assert "Peer rank" in p2p["field_set"]
 
 
-def test_skill_returns_error_when_no_payload_schemas():
-    """If the profile has no NVTX_PAYLOAD_SCHEMAS table, return a clear error."""
+def test_skill_abstains_when_no_payload_schemas():
+    """A profile without NVTX_PAYLOAD_SCHEMAS cannot be analysed by this skill.
+
+    This used to return an error row. It is not an error — the profile is fine,
+    it simply was not captured with payload tracing — so it now abstains, which
+    is what consumers check for. The distinction matters because an error row
+    reads as "something went wrong" while an abstention reads as "this does not
+    apply", and only the latter is true.
+    """
     conn = sqlite3.connect(":memory:")
     rows = SKILL.execute_fn(conn)
-    assert "error" in rows[0]
-    assert "NVTX_PAYLOAD" in rows[0]["error"]
+    assert rows[0].get("_abstained") is True
+    assert "payload" in rows[0]["reason"].lower()
+    assert "re-capture" in rows[0]["reason"].lower()
 
 
 def test_skill_distinguishes_blob_read_failure_from_empty_data():

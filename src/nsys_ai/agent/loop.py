@@ -672,7 +672,27 @@ class Agent:
                 log.debug("Failed to load persona prompt", exc_info=True)
                 return "You are an expert GPU profiling assistant."
 
-        evidence_json = json.dumps(evidence, indent=2, default=str)
+        # Abstentions are separated out rather than serialised alongside real
+        # rows. Handed a row under a header that calls it analysis data, a model
+        # can reasonably narrate "could not run" as a property of the workload —
+        # the ungrounded claim the deterministic paths already had to be taught
+        # to avoid, arriving through the one path a type check cannot fix.
+        usable, unavailable = {}, {}
+        for skill_name, rows in evidence.items():
+            if rows and isinstance(rows[0], dict) and rows[0].get("_abstained"):
+                unavailable[skill_name] = rows[0].get("reason") or "could not run"
+            else:
+                usable[skill_name] = rows
+        evidence_json = json.dumps(usable, indent=2, default=str)
+        unavailable_note = ""
+        if unavailable:
+            listed = "\n".join(f"- {k}: {v}" for k, v in unavailable.items())
+            unavailable_note = (
+                "\n\nThese skills could NOT run on this profile. They are not "
+                "measurements and say nothing about the workload — do not draw "
+                "conclusions from them, though you may mention that the data is "
+                f"unavailable and why:\n{listed}"
+            )
         response_instruction = ""
         max_tokens = 2048
         if summary_only:
@@ -687,6 +707,7 @@ class Agent:
         user_msg = (
             f"Profile analysis data (structured JSON):\n"
             f"```json\n{evidence_json}\n```\n\n"
+            f"{unavailable_note}\n\n"
             f"Based on this data, answer the following question:\n{question}"
             f"{response_instruction}"
         )
