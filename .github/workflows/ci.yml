@@ -41,5 +41,33 @@ jobs:
         run: pytest tests/test_tui_tree_app.py tests/test_tui_timeline_app.py -v --tb=short
 
       # Tier 3: all other tests
+      # -rs lists every skipped test and its reason. A green badge previously
+      # meant "the tests CI could run passed", which is a weaker claim than it
+      # looked, and nothing in the log distinguished the two.
       - name: Full test suite
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -rs
+
+      # A skip nobody reads is a test that does not exist. This fails when
+      # something starts skipping for a reason not already known and accepted,
+      # which is how a whole file can quietly stop running in CI.
+      - name: No unexpected skips
+        run: pytest tests/test_ci_coverage.py -v --tb=short
+
+      # The last several defects were green in pytest and broken at the command
+      # line: a formatter raising KeyError, an agent citing an absence as a
+      # measurement, a fixture whose kernels were invisible to the analysis.
+      # Each was found by running the tool by hand. This runs it in CI instead.
+      - name: CLI smoke — the user-facing surface
+        run: |
+          set -e
+          P=tests/fixtures/mock.sqlite
+          H=tests/fixtures/healthy_1pct.sqlite
+          python -m nsys_ai skill list > /dev/null
+          # A skill that cannot run must print its reason and exit 0, not traceback.
+          python -m nsys_ai skill run nvtx_kernel_map "$P" | grep -q "not applicable"
+          python -m nsys_ai skill run top_kernels "$P" --format json | python -c "import json,sys; json.load(sys.stdin)"
+          python -m nsys_ai analyze "$P" --gpu 0 --format json | python -c "import json,sys; json.load(sys.stdin)"
+          # No API key here, so this exercises the deterministic answer contract.
+          python -m nsys_ai agent ask "$P" "why is this slow?" | grep -q "## Verify"
+          python -m nsys_ai diff "$H" "$H" --format json | python -c "import json,sys; json.load(sys.stdin)"
+          echo "CLI smoke passed"
