@@ -216,7 +216,13 @@ def find_nvtx_ranges(
         base_sql += f"AND {text_expr} LIKE ? ESCAPE '\\' "
         params.append(f"%{_escape_like(nvtx_name)}%")
 
-    base_sql += "ORDER BY start_ns"
+    # Total order: `occurrence_index` indexes into these rows, so a tie on
+    # start_ns would select a different region and report a different MFU.
+    # end_ns DESC, matching the rule used for iteration extraction and the NVTX
+    # tree: when a parent and child share a start, the enclosing range is the
+    # one an occurrence index should resolve to. Ascending would report MFU for
+    # the sub-region instead.
+    base_sql += "ORDER BY start_ns, end_ns DESC, text, global_tid"
 
     cur = adapter.execute(base_sql, params)
     rows: list[RowDict] = []

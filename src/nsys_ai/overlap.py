@@ -149,7 +149,13 @@ def launch_overhead_ms(
         FROM {kernel_table} k
         LEFT JOIN {runtime_table} r ON k.correlationId = r.correlationId
         WHERE {where_sql}
-        ORDER BY k.start
+        -- Total order. The kernel keys alone are NOT enough: correlationId is
+        -- the join key, and the runtime side fans out (212k correlationIds carry
+        -- several runtime rows on a real H100 capture), so many rows share all
+        -- three kernel keys. The loop reads rs/re from the runtime side, so
+        -- without the runtime columns the computed launch_ns varied by ~20%
+        -- between runs on identical input.
+        ORDER BY k.start, k.[end], k.correlationId, r.start, r.[end]
     """  # noqa: S608 — table names are validated schema identifiers, values are bound
     try:
         rows = prof.adapter.execute(sql, params).fetchall()
@@ -532,7 +538,11 @@ def detect_iterations(
             {text_join}
             WHERE {text_expr} LIKE ? AND n.[end] > n.start AND n.globalTid = ?
               AND n.start >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC is semantic, not just deterministic: the greedy
+            -- top-level filter below keeps the first range at a given start,
+            -- and on a tie the longer range is the enclosing one. Ordering
+            -- the shorter one first would let a nested range mask its parent.
+            ORDER BY n.start, n.[end] DESC, text
         """,
         (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
     )

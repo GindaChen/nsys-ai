@@ -28,7 +28,10 @@ def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int
             FROM CUPTI_ACTIVITY_KIND_RUNTIME r
             JOIN {profile.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
-            GROUP BY r.globalTid ORDER BY cnt DESC
+            -- globalTid breaks the tie: _find_primary_thread takes rows[0], so equal
+            -- launch counts (routine for symmetric launcher threads) would
+            -- otherwise retarget the whole tree and the iteration analysis.
+            GROUP BY r.globalTid ORDER BY cnt DESC, r.globalTid ASC
         """,
         (device,),
     )
@@ -53,7 +56,9 @@ def _get_thread_name(profile, tid: int) -> str:
                 SELECT s.value FROM ThreadNames t
                 JOIN StringIds s ON t.nameId = s.id
                 WHERE t.globalTid = ?
-                ORDER BY t.priority DESC LIMIT 1
+                -- A thread may carry several names at equal priority; without
+                -- a tiebreak the displayed one is whichever row comes first.
+                ORDER BY t.priority DESC, s.value ASC LIMIT 1
             """,
             (tid,),
         )
@@ -82,7 +87,10 @@ def _build_single_thread_tree(
             WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
               AND n.globalTid = ?
               AND n.[end] >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC so an enclosing range precedes one that shares its
+            -- start: the nesting stack below depends on this order, and the
+            -- reverse would make a child appear to contain its parent.
+            ORDER BY n.start, n.[end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
@@ -94,7 +102,7 @@ def _build_single_thread_tree(
             WHERE text IS NOT NULL AND [end] > start
               AND globalTid = ?
               AND [end] >= ? AND start <= ?
-            ORDER BY start
+            ORDER BY start, [end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
