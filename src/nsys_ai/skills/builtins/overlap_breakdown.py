@@ -214,6 +214,24 @@ def _overlap_confidence(overlap_pct: float, nccl_ms: float, total_ms: float) -> 
     return round(min(0.95, 0.55 + 0.25 * overlap_signal + 0.15 * nccl_share), 3)
 
 
+# Exposed NCCL below this share of the span is left unreported: on an otherwise
+# healthy profile a sliver of unhidden collective is noise, and manufacturing a
+# finding for it is the "call a 1% cost a bottleneck" failure mode.
+_MIN_EXPOSED_SHARE = 0.02
+
+# The fallback finding reports recoverable time without diagnosing a cause, so
+# it is not asserted as strongly as the threshold findings.
+_MODERATE_OVERLAP_CONFIDENCE = 0.6
+
+_EXPOSED_COMM_EXPLANATION = (
+    "Communication that runs while the GPU has no compute to do is exposed: it "
+    "adds to step time instead of hiding behind work. This finding reports how "
+    "much of that time exists without claiming a specific cause — overlap is "
+    "neither low enough nor communication dominant enough to name one. Treat it "
+    "as an upper bound on what better overlap could recover."
+)
+
+
 def _ratio_confidence(ratio: float) -> float:
     """Heuristic confidence for communication-dominated findings."""
     if ratio < 0.25:
@@ -399,6 +417,76 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                     provenance={
                         "skill": "overlap_breakdown",
                         "row_kind": "communication_dominated",
+                    },
+                )
+            )
+            headroom_claimed = True
+
+    # Coverage fallback for the moderate-overlap, balanced-compute regime.
+    #
+    # The two findings above are threshold-shaped: one fires below 30% overlap,
+    # the other below a 0.5 compute/NCCL ratio. A profile sitting between them —
+    # say 40% overlap with compute and NCCL roughly balanced — trips neither, so
+    # nothing carried the exposed-NCCL headroom even though that time is just as
+    # recoverable. This skill owns the communication bucket (nccl_breakdown and
+    # critical_path defer their comm headroom here), so a gap here means the time
+    # is reported by nobody and drops out of the ROI ranking entirely.
+    #
+    # This is deliberately not a third diagnosis: it makes no claim about *why*
+    # overlap is imperfect, only that exposed NCCL exists and is worth this many
+    # ms. Severity stays "info" for that reason.
+    if not headroom_claimed and exposed_nccl_ms is not None:
+        exposed = float(exposed_nccl_ms)
+        # Material relative to the span, so a sliver of exposed NCCL on an
+        # otherwise healthy profile does not manufacture a finding.
+        if exposed > 0 and total_ms > 0 and (exposed / total_ms) >= _MIN_EXPOSED_SHARE:
+            finding_id = f"overlap_exposed_comm_gpu{device}_{start_ns}"
+            selection = TraceSelection(
+                id=f"sel_{finding_id}",
+                profile_id=profile_id,
+                source="skill:overlap_breakdown",
+                start_ns=start_ns,
+                end_ns=end_ns,
+                gpu_ids=[device],
+                label=f"Exposed Communication ({exposed:.1f}ms)",
+            )
+            ev_values, ev_units = _common_evidence_values(r, nccl_ms=nccl_ms)
+            evidence_row = EvidenceRow(
+                id=f"ev_{finding_id}",
+                source_skill="overlap_breakdown",
+                values=ev_values,
+                units=ev_units,
+                selection_id=selection.id,
+                provenance={"row_kind": "exposed_communication", "device": device},
+            )
+            findings.append(
+                Finding(
+                    type="region",
+                    label=f"Exposed Communication ({exposed:.1f}ms)",
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    gpu_id=device,
+                    severity="info",
+                    note=(
+                        f"{exposed:.1f}ms of NCCL runs with no compute to hide it "
+                        f"({exposed / total_ms * 100:.1f}% of the {total_ms:.1f}ms span), "
+                        f"at {overlap_pct}% overlap. Neither the low-overlap nor the "
+                        f"communication-dominated threshold fired, so this reports the "
+                        f"recoverable time without diagnosing a cause."
+                    ),
+                    id=finding_id,
+                    category="communication",
+                    confidence=_MODERATE_OVERLAP_CONFIDENCE,
+                    headroom_ms=exposed,
+                    headroom_basis="capture_total",
+                    evidence=[evidence_row],
+                    selection=selection,
+                    explanation=_EXPOSED_COMM_EXPLANATION,
+                    suggested_actions=list(_SUGGESTED_ACTIONS),
+                    false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                    provenance={
+                        "skill": "overlap_breakdown",
+                        "row_kind": "exposed_communication",
                     },
                 )
             )
