@@ -409,9 +409,32 @@ def test_the_sol_gate_fails_rather_than_passing_on_an_unmeasured_region():
     """
     import nsys_ai.sol_gate as sg
 
-    assert 'row.get("_abstained")' in Path(sg.__file__).read_text(), (
-        "the gate no longer distinguishes an abstention from a measurement"
-    )
+    class _Abstaining:
+        name = "region_mfu"
+
+        def execute(self, conn, **kwargs):
+            return abstain("no NVTX in this profile")
+
+    # Exercised, not grepped: an earlier version asserted a source string,
+    # which passes whether or not the branch is reachable. Substituting an
+    # abstaining skill proves the gate raises rather than reading the row as a
+    # measurement. Note this branch is defensive today — no skill the gate runs
+    # abstains — so the substitution is what makes it testable at all.
+    # get_skill is imported inside the function, so patch it at the registry.
+    import nsys_ai.skills.registry as registry
+
+    original = registry.get_skill
+    registry.get_skill = lambda name: _Abstaining()
+    try:
+        with pytest.raises(sg.SolGateError) as exc:
+            sg.evaluate_sol_gates(
+                sqlite3.connect(":memory:"),
+                [sg.parse_sol_gate("myregion:50")],
+                theoretical_flops=1e12,
+            )
+    finally:
+        registry.get_skill = original
+    assert "no NVTX in this profile" in str(exc.value)
 
 
 def test_the_llm_is_not_handed_abstentions_as_analysis_data():
@@ -480,8 +503,17 @@ def test_idle_the_pipeline_actually_sees_is_still_not_called_recoverable():
     with Profile(str(JUDGED)) as prof:
         report = EvidenceBuilder(prof, device=0).build()
 
-    claimed = [(f.label, f.headroom_ms) for f in report.findings if f.headroom_ms]
-    assert claimed == [], f"idle it saw and weighed was called recoverable: {claimed}"
+    # Scoped to idle: an unscoped check passes on a fixture where the idle
+    # logic never ran, which is exactly what the sibling fixture does.
+    idle_claimed = [
+        (f.label, f.headroom_ms)
+        for f in report.findings
+        if f.category == "idle" and f.headroom_ms
+    ]
+    assert idle_claimed == [], f"idle it saw and weighed was called recoverable: {idle_claimed}"
+    assert [f for f in report.findings if f.category == "idle"], (
+        "no idle findings at all — the gaps were filtered, not judged"
+    )
 
     # Documenting current behaviour rather than blessing it: severity is judged
     # per gap with no reference to the share of the run, so a healthy profile

@@ -20,8 +20,9 @@ def _execute(conn, **kwargs):
     if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
         return abstain(
             "This profile has no NVTX_EVENTS table, so it carries no NVTX "
-            "annotation. Region attribution needs annotated ranges — re-capture "
-            "with NVTX enabled, or annotate the workload, to use this skill."
+            "annotation. Per-iteration breakdown needs annotated iteration "
+            "boundaries — re-capture with NVTX enabled, or annotate the training "
+            "step, to use this skill."
         )
     from ...overlap import detect_iterations
     from ...profile import Profile

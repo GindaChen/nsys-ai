@@ -462,6 +462,11 @@ class Agent:
         for skill_name, rows in evidence.items():
             if rows:
                 row = rows[0]
+                if isinstance(row, dict) and row.get("_abstained"):
+                    # abstain() takes arbitrary detail kwargs, so one call
+                    # passing name= would otherwise make "could not run" the
+                    # headline diagnosis.
+                    continue
                 label = row.get("label") or row.get("name") or row.get("kernel_name")
                 if label:
                     return f"{label} ({skill_name})"
@@ -684,6 +689,15 @@ class Agent:
             else:
                 usable[skill_name] = rows
         evidence_json = json.dumps(usable, indent=2, default=str)
+        if not usable:
+            # Every skill abstained. Serialising `{}` under a header that calls
+            # it analysis data invites the model to answer anyway from priors —
+            # the ungrounded claim this split exists to prevent, merely moved.
+            evidence_json = (
+                "{}\n\nNO ANALYSIS DATA WAS PRODUCED. Do not diagnose. State "
+                "that this profile could not be analysed and why, using the "
+                "list below."
+            )
         unavailable_note = ""
         if unavailable:
             listed = "\n".join(f"- {k}: {v}" for k, v in unavailable.items())

@@ -175,7 +175,6 @@ def _execute(conn, **kwargs):
             "annotation. Region attribution needs annotated ranges — re-capture "
             "with NVTX enabled, or annotate the workload, to use this skill."
         )
-    from ...connection import wrap_connection
 
     start_ns = int(kwargs["start_ns"])
     end_ns = int(kwargs["end_ns"])
