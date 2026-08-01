@@ -33,6 +33,11 @@ NVTX_DEPENDENT = [
     "nvtx_layer_breakdown",
 ]
 
+# Not NVTX, same contract: a missing table means the skill cannot run. This one
+# had the identical guard shape returning a bare `[]`, which read as "ran, every
+# thread idle" rather than "CPU sampling was never captured".
+CANNOT_RUN_ON_FIXTURE = [*NVTX_DEPENDENT, "thread_utilization"]
+
 
 def test_the_fixture_really_has_no_nvtx():
     """Guard the premise: if NVTX_EVENTS ever appears here, these tests are vacuous."""
@@ -158,7 +163,7 @@ def test_the_healthy_fixture_really_is_healthy():
 # abstention row reached code that indexes data columns.
 
 
-@pytest.mark.parametrize("skill_name", NVTX_DEPENDENT)
+@pytest.mark.parametrize("skill_name", CANNOT_RUN_ON_FIXTURE)
 def test_formatting_an_abstention_does_not_crash(skill_name):
     """`skill run <name> <no-nvtx-profile>` must print the reason, not traceback.
 
@@ -174,7 +179,9 @@ def test_formatting_an_abstention_does_not_crash(skill_name):
         conn.close()
 
     assert "not applicable to this profile" in text
-    assert "NVTX" in text
+    # The reason must name the table that is missing, so the user can tell
+    # which capture option to turn on rather than guessing.
+    assert "NVTX_EVENTS" in text or "COMPOSITE_EVENTS" in text
     # The actionable half of the reason has to survive to the user.
     assert "re-capture" in text.lower() or "annotate" in text.lower()
 
@@ -328,3 +335,23 @@ def test_guard_uses_the_table_resolver_not_an_exact_name():
     finally:
         conn.close()
     assert not is_abstention(rows), "told a profile that HAS NVTX to re-capture with NVTX"
+
+
+def test_a_missing_table_abstains_even_when_it_is_not_nvtx():
+    """The contract is "cannot run", not "no NVTX".
+
+    `thread_utilization` guards on COMPOSITE_EVENTS and previously returned a
+    bare `[]`, which reads as "ran, every thread idle" — a claim about the
+    workload rather than about the capture.
+    """
+    from nsys_ai.skills.base import is_abstention
+
+    conn = sqlite3.connect(FIXTURE)
+    try:
+        rows = get_skill("thread_utilization").execute(conn)
+    finally:
+        conn.close()
+
+    assert is_abstention(rows)
+    assert "COMPOSITE_EVENTS" in rows[0]["reason"]
+    assert "sampling" in rows[0]["reason"].lower()

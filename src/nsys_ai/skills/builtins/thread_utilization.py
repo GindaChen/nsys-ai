@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain
 
 
 def _execute(conn: Any, *, limit: int = 10, **_kwargs):
@@ -16,7 +16,13 @@ def _execute(conn: Any, *, limit: int = 10, **_kwargs):
     tables = adapter.get_table_names()
 
     if "COMPOSITE_EVENTS" not in tables:
-        return []
+        # Missing table means this skill cannot run, which is not the same as
+        # running and finding every thread idle. Returning [] conflated the two.
+        return abstain(
+            "This profile has no COMPOSITE_EVENTS table, so CPU sampling was "
+            "not captured. Thread utilization needs sampled CPU activity — "
+            "re-capture with CPU sampling enabled to use this skill."
+        )
 
     sql = f"""\
 SELECT ce.globalTid % 0x1000000 AS tid,
