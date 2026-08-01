@@ -904,7 +904,13 @@ def _query_launch_config(
         params.extend([int(trim[0]), int(trim[1])])
     if group_parts:
         sql += " GROUP BY " + ", ".join(group_parts) + ", matched_name"
+    # rows[0] becomes the reported dominant launch config, and the caller turns
+    # that into a causal claim ("grid A->B; likely lower occupancy" vs "config
+    # unchanged"). Neither total_ns nor sample_count is a group key, so without
+    # the group keys appended a tie decides the verdict.
     sql += " ORDER BY total_ns DESC, sample_count DESC"
+    if group_parts:
+        sql += ", " + ", ".join(f"{g} ASC" for g in group_parts) + ", matched_name ASC"
 
     rows = prof._duckdb_query(sql, params)
     if not rows:

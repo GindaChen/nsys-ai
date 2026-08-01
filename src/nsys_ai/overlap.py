@@ -149,7 +149,9 @@ def launch_overhead_ms(
         FROM {kernel_table} k
         LEFT JOIN {runtime_table} r ON k.correlationId = r.correlationId
         WHERE {where_sql}
-        ORDER BY k.start
+        -- Total order: the loop below advances a running max and tests
+        -- `ks > prev_end`, so tied starts would change launch_ns.
+        ORDER BY k.start, k.[end], k.correlationId
     """  # noqa: S608 — table names are validated schema identifiers, values are bound
     try:
         rows = prof.adapter.execute(sql, params).fetchall()
@@ -532,7 +534,11 @@ def detect_iterations(
             {text_join}
             WHERE {text_expr} LIKE ? AND n.[end] > n.start AND n.globalTid = ?
               AND n.start >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC is semantic, not just deterministic: the greedy
+            -- top-level filter below keeps the first range at a given start,
+            -- and on a tie the longer range is the enclosing one. Ordering
+            -- the shorter one first would let a nested range mask its parent.
+            ORDER BY n.start, n.[end] DESC
         """,
         (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
     )

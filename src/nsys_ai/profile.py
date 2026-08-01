@@ -536,7 +536,9 @@ class Profile:
             sql += " AND k.start >= ? AND k.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY s.value, d.value"
-        sql += " ORDER BY total_ns DESC"
+        # Group keys complete the order: paired with LIMIT, a tie at the
+        # cut-off changes which rows survive, not merely their order.
+        sql += " ORDER BY total_ns DESC, name ASC, demangled ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -588,7 +590,7 @@ class Profile:
             sql += " AND n.start >= ? AND n.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY COALESCE(n.text, s.value)" if self._nvtx_has_text_id else " GROUP BY text"
-        sql += " ORDER BY total_ns DESC"
+        sql += " ORDER BY total_ns DESC, text ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -645,7 +647,7 @@ class Profile:
             sql += " AND n.start >= ? AND n.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY COALESCE(n.text, s.value)" if self._nvtx_has_text_id else " GROUP BY text"
-        sql += " ORDER BY total_ns DESC"
+        sql += " ORDER BY total_ns DESC, text ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))

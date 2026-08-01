@@ -129,7 +129,9 @@ def detect_h100_replay_preset() -> dict[str, str] | None:
     snapshots = [p for p in base.iterdir() if p.is_dir()]
     if not snapshots:
         return None
-    snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # Name breaks the tie: co-extracted snapshots share an mtime, and this
+    # choice decides which pair of profiles gets diffed.
+    snapshots.sort(key=lambda p: (-p.stat().st_mtime, p.name))
     for snap in snapshots:
         before = snap / "profiles" / H100_BEFORE_FILE
         after = snap / "profiles" / H100_AFTER_FILE

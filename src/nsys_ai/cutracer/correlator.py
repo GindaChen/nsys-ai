@@ -148,7 +148,11 @@ def build_nsys_kernel_list(conn) -> list[str]:
     # Parquet cache path — kernels table has a 'name' column
     if "kernels" in tables:
         try:
-            rows = adapter.execute("SELECT DISTINCT name FROM kernels WHERE name IS NOT NULL").fetchall()
+            rows = adapter.execute(
+                    # Ordered: the caller resolves an LCS tie by first-seen,
+                    # so an unordered DISTINCT can attach SASS to the wrong kernel.
+                    "SELECT DISTINCT name FROM kernels WHERE name IS NOT NULL ORDER BY name"
+                ).fetchall()
             return [r[0] for r in rows if r[0]]
         except Exception:
             pass
