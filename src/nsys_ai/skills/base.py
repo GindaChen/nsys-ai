@@ -14,6 +14,39 @@ from ..connection import DB_ERRORS
 _log = logging.getLogger(__name__)
 
 
+def abstain(reason: str, **detail) -> list[dict]:
+    """Return the row a skill emits when it *cannot run*, with the reason why.
+
+    An empty list is ambiguous: it reads identically whether the skill ran and
+    found nothing worth reporting, or could not run at all because the profile
+    lacks a table it needs. Raising is worse — callers such as
+    ``EvidenceBuilder`` catch and log, so the skill simply vanishes from the
+    findings with no trace in the output.
+
+    Both cases matter for grounding. "This profile has no NVTX annotation, so
+    layer attribution is unavailable" is a useful answer; silence is not, and
+    silence that looks like a clean bill of health is actively misleading.
+
+    Callers distinguish the three states by the ``_abstained`` marker:
+
+    * ``[]``                      -> ran, nothing to report
+    * ``[{"_abstained": True}]``  -> could not run, ``reason`` says why
+    * anything else               -> ran, here are the rows
+    """
+    return [{"_abstained": True, "reason": reason, **detail}]
+
+
+def is_abstention(rows: list[dict] | None) -> bool:
+    """True when ``rows`` is a skill saying it could not run.
+
+    Every consumer that would otherwise treat the row as data needs this:
+    formatters index data columns that an abstention row does not have,
+    ``to_findings_fn`` would mint a finding out of it, and the agent would
+    cite it as evidence with no metrics behind it.
+    """
+    return bool(rows) and isinstance(rows[0], dict) and rows[0].get("_abstained") is True
+
+
 def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
     """Computes the total non-overlapping duration of a list of [start, end] intervals."""
     if not intervals:
@@ -276,7 +309,15 @@ class Skill:
             raise SkillExecutionError(f"SQL failed: {exc}", skill_name=self.name) from exc
 
     def format_rows(self, rows: list[dict]) -> str:
-        """Format pre-computed rows as text (no re-execution)."""
+        """Format pre-computed rows as text (no re-execution).
+
+        Abstention is rendered here rather than in each ``format_fn``. The
+        contract is defined in this module, so honouring it belongs here too —
+        and a per-skill formatter that forgot would crash on the missing data
+        columns instead of printing the reason.
+        """
+        if is_abstention(rows):
+            return f"{self.title}: not applicable to this profile.\n\n{rows[0]['reason']}"
         if self.format_fn:
             return self.format_fn(rows)
         return _default_format(self, rows)

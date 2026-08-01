@@ -284,7 +284,13 @@ def _summarize_iterations(iter_rows: list[dict]) -> dict:
     real = [
         r
         for r in iter_rows
-        if r.get("is_real_iteration", True) and not r.get("heuristic", False)
+        # `not r.get("_abstained")` first: an abstention row carries neither
+        # of the other keys, so it would take both defaults and be counted as
+        # a real 0ms iteration — fabricating a measurement on the very finding
+        # that reports there is no NVTX to measure.
+        if not r.get("_abstained")
+        and r.get("is_real_iteration", True)
+        and not r.get("heuristic", False)
     ]
     if not real:
         return {}

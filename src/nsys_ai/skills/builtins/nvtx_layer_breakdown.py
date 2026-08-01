@@ -22,7 +22,7 @@ from nsys_ai.connection import (
     cached_nvtx_map_uses_path_id,
 )
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain
 
 
 def _pick_nvtx_view(conn, fallback: str) -> str:
@@ -94,6 +94,19 @@ def _execute(conn, **kwargs):
     report, report_err = coerce_report_param(kwargs.get("report"))
     if report_err:
         return [{"error": report_err}]
+
+    # A profile captured without NVTX ranges cannot be attributed to layers.
+    # Say so rather than raising: callers catch and log, so an exception here
+    # removes the skill from the output with no trace that it was even asked.
+    # resolve_activity_tables, not an exact name match: Nsight ships versioned
+    # variants such as NVTX_EVENTS_V2, and the parquet backend registers views
+    # by filename. An exact match told users with NVTX to re-capture with NVTX.
+    if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
+        return abstain(
+            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
+            "annotation. Layer attribution needs annotated ranges — re-capture "
+            "with NVTX enabled, or annotate the workload, to use this skill."
+        )
 
     wrapped = wrap_connection(conn)
 
