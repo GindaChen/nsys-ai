@@ -98,7 +98,10 @@ def _execute(conn, **kwargs):
     # A profile captured without NVTX ranges cannot be attributed to layers.
     # Say so rather than raising: callers catch and log, so an exception here
     # removes the skill from the output with no trace that it was even asked.
-    if "NVTX_EVENTS" not in wrap_connection(conn).get_table_names():
+    # resolve_activity_tables, not an exact name match: Nsight ships versioned
+    # variants such as NVTX_EVENTS_V2, and the parquet backend registers views
+    # by filename. An exact match told users with NVTX to re-capture with NVTX.
+    if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
         return abstain(
             "This profile has no NVTX_EVENTS table, so it carries no NVTX "
             "annotation. Layer attribution needs annotated ranges — re-capture "

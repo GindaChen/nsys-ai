@@ -217,3 +217,114 @@ def test_is_abstention_helper():
     assert is_abstention([]) is False
     assert is_abstention(None) is False
     assert is_abstention([{"kernel_name": "gemm"}]) is False
+
+
+# ── Abstention must not become a number, a confidence, or a verify target ──
+#
+# Each of these was a real leak: the row is truthy and dict-shaped, so code
+# that checks `if rows:` or `row.get(key, default)` treats it as data.
+
+
+def test_manifest_does_not_invent_an_iteration_from_an_abstention():
+    """The sharpest instance: a fabricated measurement on the finding that
+    exists to report there is nothing to measure.
+
+    `_summarize_iterations` filtered on `is_real_iteration` and `heuristic`.
+    An abstention row has neither, so it took both defaults and was counted as
+    one genuine 0ms iteration — leaving the manifest asserting
+    `has_nvtx: false` and `iteration_count: 1` in the same object.
+    """
+    skill = get_skill("profile_health_manifest")
+    conn = sqlite3.connect(FIXTURE)
+    try:
+        rows = skill.execute(conn)
+    finally:
+        conn.close()
+
+    nvtx = rows[0].get("nvtx") or {}
+    assert nvtx.get("has_nvtx") is False
+    assert "iteration_count" not in nvtx, f"fabricated iteration data: {nvtx}"
+    assert "median_iter_ms" not in nvtx
+
+
+def test_an_unavailable_skill_does_not_raise_the_answers_confidence():
+    """A tool that sells grounding cannot let a skill that could not run
+    improve its own stated confidence."""
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(str(FIXTURE))
+    try:
+        only_abstentions = agent._confidence_label(
+            {"nvtx_kernel_map": [{"_abstained": True, "reason": "x"}]}, None
+        )
+        real = agent._confidence_label({"top_kernels": [{"kernel_name": "g"}]}, None)
+    finally:
+        agent.close()
+
+    assert only_abstentions.startswith("0.20"), only_abstentions
+    assert "no skill returned usable evidence" in only_abstentions
+    # Real evidence still scores higher, so the guard is not a blanket downgrade.
+    assert real.startswith("0.60")
+
+
+def test_verify_command_never_points_at_an_unavailable_skill():
+    """`## Verify` must be runnable and actually verify something."""
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(str(FIXTURE))
+    try:
+        picked = agent._choose_verify_skill(
+            {
+                "nvtx_kernel_map": [{"_abstained": True, "reason": "x"}],
+                "top_kernels": [{"kernel_name": "g"}],
+            },
+            ["nvtx_kernel_map", "top_kernels"],
+        )
+        none_usable = agent._choose_verify_skill(
+            {"nvtx_kernel_map": [{"_abstained": True}]}, ["nvtx_kernel_map"]
+        )
+    finally:
+        agent.close()
+
+    assert picked == "top_kernels"
+    assert none_usable is None
+
+
+def test_guard_uses_the_table_resolver_not_an_exact_name():
+    """Nsight ships versioned variants such as NVTX_EVENTS_V2, and the parquet
+    backend registers views by filename.
+
+    An exact-name check told users holding an annotated profile to "re-capture
+    with NVTX enabled" — a functional regression carrying a false message.
+    """
+    import tempfile
+
+    path = Path(tempfile.mkdtemp()) / "v2.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE StringIds(id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(start INTEGER,"end" INTEGER,
+          deviceId INTEGER, streamId INTEGER, correlationId INTEGER,
+          shortName INTEGER, demangledName INTEGER);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INTEGER,
+          correlationId INTEGER, start INTEGER,"end" INTEGER, nameId INTEGER);
+        CREATE TABLE NVTX_EVENTS_V2(globalTid INTEGER, start INTEGER,"end" INTEGER,
+          text TEXT, eventType INTEGER, textId INTEGER);
+        """
+    )
+    conn.execute("INSERT INTO StringIds VALUES (1,'gemm_nn_128x128')")
+    conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1000,5000,0,7,10,1,1)")
+    conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (1,10,500,900,1)")
+    conn.execute("INSERT INTO NVTX_EVENTS_V2 VALUES (1,0,9000,'my_layer',59,NULL)")
+    conn.commit()
+    conn.close()
+
+    from nsys_ai.skills.base import is_abstention
+
+    conn = sqlite3.connect(path)
+    try:
+        rows = get_skill("nvtx_kernel_map").execute(conn)
+    finally:
+        conn.close()
+    assert not is_abstention(rows), "told a profile that HAS NVTX to re-capture with NVTX"

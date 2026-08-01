@@ -478,7 +478,13 @@ class Agent:
         )
 
     def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
-        row_count = sum(len(rows) for rows in evidence.values())
+        # Abstentions are excluded: a skill that could not run is not evidence,
+        # and counting it lifted confidence from 0.20 (no usable evidence) to
+        # 0.60 (skill output exists) on a profile where nothing had run.
+        row_count = sum(
+            len([r for r in rows if not (isinstance(r, dict) and r.get("_abstained"))])
+            for rows in evidence.values()
+        )
         if diagnosis_row and row_count:
             severity = str(diagnosis_row.get("severity", "")).strip().lower()
             confidence_by_severity = {
@@ -591,12 +597,18 @@ class Agent:
         evidence: dict[str, list[dict]],
         selected_skills: list[str],
     ) -> str | None:
+        def _usable(rows) -> bool:
+            # An abstaining skill is truthy but has nothing to verify — a
+            # verify command pointing at it would verify nothing.
+            return bool(rows) and not (
+                isinstance(rows[0], dict) and rows[0].get("_abstained")
+            )
+
         for skill_name in selected_skills:
-            rows = evidence.get(skill_name)
-            if rows:
+            if _usable(evidence.get(skill_name)):
                 return skill_name
         for skill_name, rows in evidence.items():
-            if rows:
+            if _usable(rows):
                 return skill_name
         return None
 
