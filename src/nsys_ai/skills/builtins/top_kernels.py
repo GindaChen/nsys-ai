@@ -63,7 +63,7 @@ def _execute(conn, **kwargs):
             FROM kernels
             WHERE 1=1 {trim_clause}
             GROUP BY name
-            ORDER BY total_ms DESC
+            ORDER BY total_ms DESC, name ASC
             LIMIT {limit}
         """
         rows = conn.execute(sql, params).fetchall()
@@ -108,7 +108,7 @@ def _execute(conn, **kwargs):
             LEFT JOIN StringIds d ON k.demangledName = d.id
             WHERE 1=1 {trim_clause}
             GROUP BY COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR))
-            ORDER BY total_ms DESC
+            ORDER BY total_ms DESC, kernel_name ASC
             LIMIT {limit}
         """
         rows = conn.execute(sql, params).fetchall()

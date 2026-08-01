@@ -58,7 +58,7 @@ def _execute(conn, **kwargs):
            OR s.value LIKE '%cuModuleGetLoadingMode%')
           {trim_clause}
         GROUP BY s.value
-        ORDER BY total_ms DESC
+        ORDER BY total_ms DESC, api_name ASC
     """
     rows = conn.execute(sql, params).fetchall()
     cols = ["api_name", "occurrences", "total_ms", "max_ms", "avg_ms"]

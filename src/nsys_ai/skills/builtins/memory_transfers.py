@@ -38,7 +38,7 @@ SELECT k.copyKind,
 FROM {memcpy_table} k
 WHERE 1=1 {trim_clause}
 GROUP BY k.copyKind
-ORDER BY total_ms DESC""",
+ORDER BY total_ms DESC, copyKind ASC""",
     format_fn=_format,
     tags=["memory", "transfer", "H2D", "D2H", "copy", "bandwidth"],
 )

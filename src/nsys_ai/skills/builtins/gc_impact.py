@@ -59,7 +59,7 @@ def _execute(conn, **kwargs):
            OR s.value LIKE '%cuMemAlloc%')
           {trim_clause_r}
         GROUP BY s.value
-        ORDER BY total_ms DESC
+        ORDER BY total_ms DESC, event_name ASC
     """
     rows_runtime = adapter.execute(sql_runtime, params_r).fetchall()
     cols = ["event_name", "occurrences", "total_ms", "max_ms", "avg_ms"]

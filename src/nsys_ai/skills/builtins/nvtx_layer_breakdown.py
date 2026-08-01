@@ -203,9 +203,9 @@ def _execute(conn, **kwargs):
                 ),
                 mapped AS (
                     SELECT
-                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC, nvtx_text ASC) AS nvtx_text,
                         CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                         kernel_name, k_start, k_end, (k_end - k_start) AS k_dur_ns
                     FROM enclosing
                     GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
@@ -744,7 +744,7 @@ def _execute(conn, **kwargs):
                         ),
                         mapped AS (
                             SELECT
-                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                                 kernel_name,
                                 k_start,
                                 k_end,
@@ -803,7 +803,7 @@ def _execute(conn, **kwargs):
                         ),
                         mapped AS (
                             SELECT
-                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                                 kernel_name,
                                 k_start,
                                 k_end,

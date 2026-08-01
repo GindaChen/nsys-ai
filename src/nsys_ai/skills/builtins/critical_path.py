@@ -99,7 +99,9 @@ def _busiest_device(adapter, kernel_table: str) -> int | None:
     try:
         cur = adapter.execute(
             f"SELECT deviceId, SUM([end] - start) AS busy "  # noqa: S608 — validated identifier
-            f"FROM {kernel_table} GROUP BY deviceId ORDER BY busy DESC LIMIT 1"
+            # deviceId breaks the tie: equally-busy devices must not depend on
+            # engine row order, or the whole analysis silently retargets.
+            f"FROM {kernel_table} GROUP BY deviceId ORDER BY busy DESC, deviceId ASC LIMIT 1"
         )
         row = cur.fetchone()
     except DB_ERRORS:

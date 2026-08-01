@@ -22,14 +22,18 @@ def _execute(conn: Any, *, limit: int = 10, **_kwargs):
 SELECT ce.globalTid % 0x1000000 AS tid,
        (SELECT s.value FROM StringIds s
         WHERE s.id = (SELECT tn.nameId FROM ThreadNames tn
-                      WHERE tn.globalTid = ce.globalTid LIMIT 1)
+                      WHERE tn.globalTid = ce.globalTid
+                      -- A thread may carry several names; without an order the
+                      -- displayed one is whichever row the engine reaches first.
+                      ORDER BY tn.nameId ASC LIMIT 1)
        ) AS thread_name,
        ROUND(100.0 * SUM(ce.cpuCycles) / (
            SELECT MAX(1, SUM(cpuCycles)) FROM COMPOSITE_EVENTS
        ), 2) AS cpu_pct
 FROM COMPOSITE_EVENTS ce
 GROUP BY ce.globalTid
-ORDER BY cpu_pct DESC
+-- globalTid, not the masked tid: the mask can collide across processes.
+ORDER BY cpu_pct DESC, ce.globalTid ASC
 LIMIT {int(limit)}"""
 
     cursor = adapter.execute(sql)

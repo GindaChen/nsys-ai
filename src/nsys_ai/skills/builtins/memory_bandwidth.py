@@ -67,7 +67,7 @@ SELECT r.copyKind, COUNT(*) AS op_count,
        COALESCE(ROUND(MAX(CASE WHEN r.dur_ns > 0 THEN r.bytes / (r.dur_ns / 1e9) / 1e9 END), 2), 0) AS peak_bandwidth_gbps
 FROM ranked r
 GROUP BY r.copyKind
-ORDER BY total_mb DESC"""
+ORDER BY total_mb DESC, r.copyKind ASC"""
 
     try:
         rows = prof._duckdb_query(agg_sql, [device] + trim_params)
@@ -86,7 +86,7 @@ WHERE deviceId = ? AND bytes > 10000000
 """
         + (" AND [end] >= ? AND start <= ? " if trim else "")
         + f"""
-ORDER BY dur_ns DESC
+ORDER BY dur_ns DESC, start ASC, copyKind ASC
 LIMIT {limit}"""
     )
 

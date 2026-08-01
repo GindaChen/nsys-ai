@@ -33,7 +33,7 @@ def _execute(conn, **kwargs):
         FROM kernels
         WHERE is_tc_eligible = 1 {trim_clause}
         GROUP BY name
-        ORDER BY total_ns DESC
+        ORDER BY total_ns DESC, name ASC
         LIMIT {limit}
     """
     try:

@@ -48,7 +48,7 @@ def _execute(conn, **kwargs):
         JOIN StringIds d ON k.demangledName = d.id
         WHERE k.deviceId = ?
           {where_extra}
-        ORDER BY (k.[end] - k.start) DESC
+        ORDER BY (k.[end] - k.start) DESC, k.start ASC, k.correlationId ASC
         LIMIT ?
     """
     return prof._duckdb_query(sql, params)

@@ -74,8 +74,15 @@ WITH ordered AS (
            k.deviceId,
            k.start, k.[end],
            s.value AS kernel_name,
-           LAG(k.[end]) OVER (PARTITION BY k.deviceId, k.streamId ORDER BY k.start) AS prev_end,
-           LAG(s.value) OVER (PARTITION BY k.deviceId, k.streamId ORDER BY k.start) AS prev_kernel
+           -- correlationId completes the order: kernels sharing a start would
+           -- otherwise make "the previous kernel" engine-dependent, which
+           -- changes the computed gap, not merely the row order.
+           LAG(k.[end]) OVER (
+               PARTITION BY k.deviceId, k.streamId ORDER BY k.start, k.correlationId
+           ) AS prev_end,
+           LAG(s.value) OVER (
+               PARTITION BY k.deviceId, k.streamId ORDER BY k.start, k.correlationId
+           ) AS prev_kernel
     FROM {kernel_tbl} k
     JOIN StringIds s ON k.shortName = s.id
     WHERE k.deviceId = ? {trim_clause}
@@ -89,7 +96,7 @@ SELECT streamId,
        kernel_name AS after_kernel
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?
-ORDER BY gap_ns DESC
+ORDER BY gap_ns DESC, start_ns ASC, streamId ASC
 LIMIT ?"""
     try:
         cur = adapter.execute(gap_sql, trim_params + [min_gap_ns, limit])
@@ -121,7 +128,11 @@ LIMIT ?"""
 WITH ordered AS (
     SELECT k.streamId,
            k.start, k.[end],
-           LAG(k.[end]) OVER (PARTITION BY k.deviceId, k.streamId ORDER BY k.start) AS prev_end
+           -- Same total order as the gap query above: this sums the gaps, so a
+           -- tie here shifts total_gap_ns, not just an ordering.
+           LAG(k.[end]) OVER (
+               PARTITION BY k.deviceId, k.streamId ORDER BY k.start, k.correlationId
+           ) AS prev_end
     FROM {kernel_tbl} k
     WHERE k.deviceId = ? {trim_clause}
 )
@@ -229,7 +240,7 @@ FROM {runtime_tbl} r
 JOIN StringIds s ON r.nameId = s.id
 WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
-ORDER BY total_ns DESC
+ORDER BY total_ns DESC, api_name ASC
 LIMIT 5""",
                     (gap_end, gap_start),
                 )
