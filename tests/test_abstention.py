@@ -155,6 +155,15 @@ def test_the_healthy_fixture_really_is_healthy():
     assert n == 400
     assert 0.005 < idle_share < 0.015, f"fixture idle share drifted to {idle_share:.2%}"
 
+    # The kernels must be VISIBLE to the analysis, not merely present in the
+    # table. Profile.kernels() inner-joins demangledName to StringIds, so a
+    # dangling id silently yields an empty profile — and the "claims no
+    # headroom" assertion would then pass because nothing was analysed at all.
+    from nsys_ai.profile import Profile
+
+    with Profile(str(HEALTHY)) as prof:
+        assert len(prof.kernels(0)) == 400, "the analysis surface cannot see the kernels"
+
 
 # ── Consumers must not render an abstention as data ────────────────────────
 #
