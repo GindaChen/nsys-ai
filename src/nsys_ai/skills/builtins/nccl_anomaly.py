@@ -107,7 +107,7 @@ def _execute(conn, **kwargs):
 
     # Slowest first; a deterministic secondary key keeps ties reproducible
     # (the SQL left tie order unspecified).
-    out.sort(key=lambda r: (-r["dur_ns"], r["start"]))
+    out.sort(key=lambda r: (-r["dur_ns"], r["start"], r.get("streamId") or 0, r.get("name") or ""))
     return out[:limit]
 
 

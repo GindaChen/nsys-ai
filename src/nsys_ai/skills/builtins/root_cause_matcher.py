@@ -58,7 +58,9 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
             active_devs = adapter.execute(
                 f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
                 f"WHERE 1=1{trim_sql} "
-                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
+                # Symmetric data-parallel runs launch identical kernel counts on
+                # every device, so this tie is the normal case, not an edge case.
+                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC, deviceId ASC LIMIT 1",
                 trim_params,
             ).fetchall()
             if active_devs and active_devs[0][0] != current_device:
