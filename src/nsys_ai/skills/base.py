@@ -14,6 +14,28 @@ from ..connection import DB_ERRORS
 _log = logging.getLogger(__name__)
 
 
+def abstain(reason: str, **detail) -> list[dict]:
+    """Return the row a skill emits when it *cannot run*, with the reason why.
+
+    An empty list is ambiguous: it reads identically whether the skill ran and
+    found nothing worth reporting, or could not run at all because the profile
+    lacks a table it needs. Raising is worse — callers such as
+    ``EvidenceBuilder`` catch and log, so the skill simply vanishes from the
+    findings with no trace in the output.
+
+    Both cases matter for grounding. "This profile has no NVTX annotation, so
+    layer attribution is unavailable" is a useful answer; silence is not, and
+    silence that looks like a clean bill of health is actively misleading.
+
+    Callers distinguish the three states by the ``_abstained`` marker:
+
+    * ``[]``                      -> ran, nothing to report
+    * ``[{"_abstained": True}]``  -> could not run, ``reason`` says why
+    * anything else               -> ran, here are the rows
+    """
+    return [{"_abstained": True, "reason": reason, **detail}]
+
+
 def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
     """Computes the total non-overlapping duration of a list of [start, end] intervals."""
     if not intervals:

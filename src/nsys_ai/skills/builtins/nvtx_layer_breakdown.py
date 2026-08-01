@@ -22,7 +22,7 @@ from nsys_ai.connection import (
     cached_nvtx_map_uses_path_id,
 )
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain
 
 
 def _pick_nvtx_view(conn, fallback: str) -> str:
@@ -94,6 +94,16 @@ def _execute(conn, **kwargs):
     report, report_err = coerce_report_param(kwargs.get("report"))
     if report_err:
         return [{"error": report_err}]
+
+    # A profile captured without NVTX ranges cannot be attributed to layers.
+    # Say so rather than raising: callers catch and log, so an exception here
+    # removes the skill from the output with no trace that it was even asked.
+    if "NVTX_EVENTS" not in wrap_connection(conn).get_table_names():
+        return abstain(
+            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
+            "annotation. Layer attribution needs annotated ranges — re-capture "
+            "with NVTX enabled, or annotate the workload, to use this skill."
+        )
 
     wrapped = wrap_connection(conn)
 

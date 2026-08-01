@@ -5,11 +5,23 @@ via a top-level NVTX marker and report per-iteration GPU timing and kernel count
 This is a Python-level skill (execute_fn).
 """
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain
 
 
 def _execute(conn, **kwargs):
+    # A profile captured without NVTX ranges cannot be attributed to regions.
+    # Say so rather than raising: callers catch and log, so an exception here
+    # removes the skill from the output with no trace that it was even asked.
+    from ...connection import wrap_connection
     from ...overlap import detect_iterations
+
+    if "NVTX_EVENTS" not in wrap_connection(conn).get_table_names():
+        return abstain(
+            "This profile has no NVTX_EVENTS table, so it carries no NVTX "
+            "annotation. Region attribution needs annotated ranges — re-capture "
+            "with NVTX enabled, or annotate the workload, to use this skill."
+        )
+
     from ...profile import Profile
 
     prof = Profile._from_conn(conn)
