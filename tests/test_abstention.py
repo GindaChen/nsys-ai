@@ -110,3 +110,42 @@ def test_evidence_builder_no_longer_loses_these_skills_to_an_exception():
                 )
     finally:
         conn.close()
+
+
+# ── The other half of #262: a healthy profile must stay quiet ───────────────
+
+
+HEALTHY = Path(__file__).resolve().parent / "fixtures" / "healthy_1pct.sqlite"
+
+
+def test_a_one_percent_overhead_profile_claims_no_recoverable_time():
+    """Calling ~1% dispatch cost a bottleneck is the credibility-ending failure.
+
+    The fixture is 400 back-to-back kernels separated by 10us gaps: 4.0ms of
+    idle across a 404ms span. Describing the run is fine — which kernel
+    dominates, what the bound class is. Claiming time back is not.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    with Profile(str(HEALTHY)) as prof:
+        report = EvidenceBuilder(prof, device=0).build()
+
+    claimed = [(f.label, f.headroom_ms) for f in report.findings if f.headroom_ms]
+    assert claimed == [], f"a healthy profile was told it had recoverable time: {claimed}"
+
+
+def test_the_healthy_fixture_really_is_healthy():
+    """Guard the premise, so the assertion above cannot go vacuous."""
+    conn = sqlite3.connect(HEALTHY)
+    try:
+        rows = conn.execute(
+            "SELECT MIN(start), MAX([end]), COUNT(*), SUM([end]-start) "
+            "FROM CUPTI_ACTIVITY_KIND_KERNEL"
+        ).fetchone()
+    finally:
+        conn.close()
+    lo, hi, n, busy = rows
+    idle_share = 1.0 - busy / (hi - lo)
+    assert n == 400
+    assert 0.005 < idle_share < 0.015, f"fixture idle share drifted to {idle_share:.2%}"

@@ -1,0 +1,32 @@
+{
+  "id": "eval-healthy-1pct-001",
+  "profile": "tests/fixtures/healthy_1pct.sqlite",
+  "device": 0,
+  "description": "Adversarial NEGATIVE fixture (#262): a healthy pipeline whose only inefficiency is ~1% dispatch idle. 400 back-to-back kernels of 1ms each separated by 10us gaps — 4.0ms idle across a 404ms span, i.e. 0.99%. The correct analysis is that there is nothing material to recover. Findings describing the shape of the run (which kernel dominates, what the bound class is) are fine; a claim of recoverable time is not.",
+  "source": "Generated synthetically so the idle share is exact and stable. Committed because the eval harness resolves profiles from the repo, and at 57KB it costs nothing.",
+  "why_this_matters": "The golden loop test proves the pipeline RUNS. It does not prove the diagnosis stays ACCURATE. Nothing previously failed when a skill began calling a non-problem a bottleneck. A single viral screenshot of nsys-ai calling ~1% overhead a bottleneck would cost a verify-first tool the only thing it sells.",
+  "expect": [
+    {
+      "category": "compute",
+      "required": false,
+      "note": "The run is compute-bound and the critical path should say so. Not gated: the exact label wording is allowed to drift."
+    }
+  ],
+  "must_not": [
+    {
+      "category": "communication",
+      "note": "No NCCL activity exists in this fixture; any communication finding is a false positive."
+    },
+    {
+      "category": "idle",
+      "min_severity": "warning",
+      "note": "0.99% idle is normal dispatch cost. A warning-or-worse idle finding here means a threshold has drifted low enough to call healthy pipelines broken."
+    }
+  ],
+  "known_gaps": [
+    {
+      "observation": "This fixture has no NVTX annotation, so the NVTX-dependent skills abstain. That abstention is asserted directly in tests/test_abstention.py rather than here, because the eval harness matches on findings and an abstaining skill correctly produces none.",
+      "ref": "#262"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ data/nsys-hero/
 
 *.sqlite
 !tests/fixtures/mock.sqlite
+!tests/fixtures/healthy_1pct.sqlite
 *.nsys-rep
 *.nsys-cache/
 *.nsys-cache.build.lock
