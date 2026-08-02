@@ -23,6 +23,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Job-level, not step-level: the skip check runs the suite in a subprocess
+    # and must see the same profile, or it reports the integration tests as
+    # skipping for a reason the main run no longer produces.
+    env:
+      NSYS_TEST_PROFILE: tests/fixtures/h100_2gpu_1s.sqlite
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12']
@@ -55,8 +60,6 @@ jobs:
       # they need NVTX, several streams and more than one device, none of which
       # a hand-written fixture provides.
       - name: Test suite
-        env:
-          NSYS_TEST_PROFILE: tests/fixtures/h100_2gpu_1s.sqlite
         run: pytest tests/ -v --tb=short -rs
 
       # A skip nobody reads is a test that does not exist. This fails when
