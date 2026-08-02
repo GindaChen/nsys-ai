@@ -420,9 +420,10 @@ class Profile:
             if mx is not None:
                 max_end = mx if max_end is None else max(max_end, mx)
 
+        _meta_nvtx = self.adapter.resolve_activity_tables().get("nvtx")
         nc = (
-            self.adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
-            if "NVTX_EVENTS" in tables
+            self.adapter.execute(f"SELECT COUNT(*) FROM {_meta_nvtx}").fetchone()[0]  # noqa: S608
+            if _meta_nvtx
             else 0
         )
 
@@ -558,29 +559,35 @@ class Profile:
         Returns rows sorted by total_ns descending:
           {text, total_ns, count, avg_ns}
         """
-        if "NVTX_EVENTS" not in self.schema.tables:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports, and it is absent entirely from a capture taken without
+        # NVTX. Both cases used to reach the query and fail with a raw SQL error
+        # naming the table. A profile with no annotation is valid, and the
+        # truthful answer at this layer is that there are no ranges.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table:
             return []
 
         if self._nvtx_has_text_id:
-            sql = """
+            sql = f"""
                 SELECT
                     COALESCE(n.text, s.value) AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count,
                     AVG(n.[end] - n.start) AS avg_ns
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
             """
         else:
-            sql = """
+            sql = f"""
                 SELECT
                     n.text AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count,
                     AVG(n.[end] - n.start) AS avg_ns
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 WHERE n.text IS NOT NULL
                   AND n.[end] > n.start
             """
@@ -610,7 +617,13 @@ class Profile:
         pattern: substring to match; for LIKE we wrap with %; for GLOB pass a full pattern.
         Returns rows: {text, total_ns, count} sorted by total_ns descending.
         """
-        if "NVTX_EVENTS" not in self.schema.tables:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports, and it is absent entirely from a capture taken without
+        # NVTX. Both cases used to reach the query and fail with a raw SQL error
+        # naming the table. A profile with no annotation is valid, and the
+        # truthful answer at this layer is that there are no ranges.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table:
             return []
         match_val = (
             pattern
@@ -620,12 +633,12 @@ class Profile:
             else f"*{pattern}*"
         )
         if self._nvtx_has_text_id:
-            sql = """
+            sql = f"""
                 SELECT
                     COALESCE(n.text, s.value) AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
@@ -633,12 +646,12 @@ class Profile:
             sql += "GLOB ?" if use_glob else "LIKE ?"
             params: list = [match_val]
         else:
-            sql = """
+            sql = f"""
                 SELECT
                     n.text AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 WHERE n.text IS NOT NULL AND n.[end] > n.start
                   AND n.text """
             sql += "GLOB ?" if use_glob else "LIKE ?"
@@ -747,7 +760,13 @@ class Profile:
           - Legacy: NVTX_EVENTS.text holds the annotation string inline.
           - Newer:  NVTX_EVENTS.textId references StringIds; text may be NULL.
         """
-        if "NVTX_EVENTS" not in self.schema.tables or not threads:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports, and it is absent entirely from a capture taken without
+        # NVTX. Both cases used to reach the query and fail with a raw SQL error
+        # naming the table. A profile with no annotation is valid, and the
+        # truthful answer at this layer is that there are no ranges.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table or not threads:
             return []
         tids = ",".join(map(str, threads))
         if self._nvtx_has_text_id:
@@ -755,7 +774,7 @@ class Profile:
                 f"""
                 SELECT COALESCE(n.text, s.value) AS text,
                        n.globalTid, n.start, n.[end]
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
@@ -768,7 +787,7 @@ class Profile:
         else:
             return self._duckdb_query(
                 f"""
-                SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
+                SELECT text, globalTid, start, [end] FROM {nvtx_table}
                 WHERE text IS NOT NULL AND [end] > start
                   AND start >= ? AND start <= ?
                   AND globalTid IN ({tids})
