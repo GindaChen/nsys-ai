@@ -277,8 +277,10 @@ def _load_nccl_payload_events(
     # here today. Resolving anyway: the alias is a property of how the profile
     # was opened, not something this reader is entitled to assume, and line 461
     # of this module already resolves for the same reason.
+    from .connection import is_safe_identifier
+
     nvtx_table = prof.adapter.resolve_activity_tables().get("nvtx")
-    if not nvtx_table:
+    if not nvtx_table or not is_safe_identifier(nvtx_table):
         return [], ["Profile has no NVTX_EVENTS table, so it carries no NCCL payloads."]
 
     try:
@@ -408,10 +410,10 @@ def _load_nvtx_payload_rows_sqlite(
         # unversioned name. On an export that suffixes the table _V2 / _V3 a
         # literal fails outright, and the failure surfaces only as a diagnostic
         # string — the caller reports no NCCL payloads on a profile that has them.
-        from .connection import wrap_connection
+        from .connection import is_safe_identifier, wrap_connection
 
         nvtx_table = wrap_connection(conn).resolve_activity_tables().get("nvtx")
-        if not nvtx_table:
+        if not nvtx_table or not is_safe_identifier(nvtx_table):
             conn.close()
             diagnostics.append("SQLite fallback: profile has no NVTX_EVENTS table.")
             return [], diagnostics
