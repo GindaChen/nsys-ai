@@ -179,9 +179,23 @@ def find_nvtx_ranges(
     if not nvtx_name:
         return []
 
-    from .connection import wrap_connection
+    from .connection import is_safe_identifier, wrap_connection
 
     adapter = wrap_connection(conn)
+
+    # Newer Nsight exports suffix the table NVTX_EVENTS_V2 / _V3. This reader is
+    # handed a plain connection, so nothing upstream aliases the unversioned name
+    # for it, and a literal here finds no ranges on such an export — an MFU
+    # region that silently cannot be located.
+    #
+    # The absent-table case is the caller's to report, not this function's:
+    # `region_mfu` checks for the table and returns a NO_NVTX error before
+    # calling here, so the `[]` below is a guard for direct callers rather than
+    # an abstention. Returning it does not mean "this profile has no NVTX".
+    nvtx_table = adapter.resolve_activity_tables().get("nvtx")
+    if not nvtx_table or not is_safe_identifier(nvtx_table):
+        return []
+
     has_text_id = adapter.detect_nvtx_text_id()
     if match_mode not in ("contains", "exact"):
         match_mode = "contains"
@@ -190,7 +204,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT COALESCE(n.text, s.value) AS text, "
             "n.start AS start_ns, n.[end] AS end_ns, n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "LEFT JOIN StringIds s ON n.textId = s.id "
             "WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) "
             "AND n.[end] > n.start "
@@ -199,7 +213,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT n.text AS text, n.start AS start_ns, n.[end] AS end_ns, "
             "n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "WHERE n.text IS NOT NULL AND n.[end] > n.start "
         )
 

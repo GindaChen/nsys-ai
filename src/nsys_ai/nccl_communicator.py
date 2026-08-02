@@ -272,6 +272,17 @@ def _load_nccl_payload_events(
         trim_clause = "AND n.[end] >= ? AND n.start <= ?"
         params.extend([int(trim[0]), int(trim[1])])
 
+    # parquet_cache aliases the unversioned name over whatever versioned table it
+    # finds, in cached and direct mode alike, so the literal answers correctly
+    # here today. Resolving anyway: the alias is a property of how the profile
+    # was opened, not something this reader is entitled to assume, and line 461
+    # of this module already resolves for the same reason.
+    from .connection import is_safe_identifier
+
+    nvtx_table = prof.adapter.resolve_activity_tables().get("nvtx")
+    if not nvtx_table or not is_safe_identifier(nvtx_table):
+        return [], ["Profile has no NVTX_EVENTS table, so it carries no NCCL payloads."]
+
     try:
         rows = prof._duckdb_query(
             f"""
@@ -283,7 +294,7 @@ def _load_nccl_payload_events(
                 n.globalTid,
                 n.domainId,
                 n.binaryData
-            FROM NVTX_EVENTS n
+            FROM {nvtx_table} n
             LEFT JOIN StringIds s ON n.textId = s.id
             WHERE n.binaryData IS NOT NULL
               AND n.eventType = {_NVTX_RANGE_EVENT}
@@ -393,6 +404,20 @@ def _load_nvtx_payload_rows_sqlite(
     try:
         conn = sqlite3.connect(sqlite_path)
         conn.row_factory = sqlite3.Row
+
+        # This side-connection is opened here rather than taken from the Profile,
+        # so it gets none of the alias views parquet_cache creates for the
+        # unversioned name. On an export that suffixes the table _V2 / _V3 a
+        # literal fails outright, and the failure surfaces only as a diagnostic
+        # string — the caller reports no NCCL payloads on a profile that has them.
+        from .connection import is_safe_identifier, wrap_connection
+
+        nvtx_table = wrap_connection(conn).resolve_activity_tables().get("nvtx")
+        if not nvtx_table or not is_safe_identifier(nvtx_table):
+            conn.close()
+            diagnostics.append("SQLite fallback: profile has no NVTX_EVENTS table.")
+            return [], diagnostics
+
         cur = conn.cursor()
         result = [
             dict(row)
@@ -406,7 +431,7 @@ def _load_nvtx_payload_rows_sqlite(
                     n.globalTid,
                     n.domainId,
                     n.binaryData
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE n.binaryData IS NOT NULL
                   AND n.eventType = {_NVTX_RANGE_EVENT}
