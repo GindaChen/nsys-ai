@@ -129,3 +129,28 @@ def test_the_trajectory_suite_is_known_to_run_nowhere():
         f"the trajectory suite is now {collected} tests, not 130. If it grew, "
         "more coverage is being written that nothing runs; if it shrank, say why."
     )
+
+
+def test_ci_does_not_run_the_same_tests_twice():
+    """The previous layout named four files as "tiers" and then ran the whole
+    suite, executing those 70 tests a second time.
+
+    Layering pays when a cheap stage can fail the build before an expensive one
+    starts. These finished in six seconds against four minutes for the suite, so
+    the ordering bought nothing and cost a duplicate run. If tiers return they
+    should exclude what they cover, and this test should be updated to say so
+    deliberately.
+    """
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    runs = [
+        line.strip()
+        for line in ci.splitlines()
+        if line.strip().startswith("run: pytest") or line.strip().startswith("run: python -m pytest")
+    ]
+    whole_suite = [r for r in runs if "pytest tests/ " in r or r.endswith("pytest tests/")]
+    named_files = [r for r in runs if "tests/test_" in r and "test_ci_coverage" not in r]
+    assert whole_suite, "the full suite is no longer run in CI"
+    assert not named_files, (
+        "CI names individual test files alongside a full-suite run, so those "
+        f"tests execute twice: {named_files}"
+    )

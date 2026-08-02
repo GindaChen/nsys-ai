@@ -1,5 +1,13 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # Airflow's canary pattern: per-PR runs stay cheap, and a scheduled full run
+  # backstops what they skip. Without the backstop, tiering is just a slower
+  # way to lose coverage — which is how 130 trajectory tests came to run in no
+  # environment at all.
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   lint:
@@ -32,19 +40,17 @@ jobs:
       - name: CLI smoke test
         run: python -m nsys_ai --help
 
-      # Tier 1: pure logic tests (no display needed)
-      - name: Logic unit tests
-        run: pytest tests/test_tree_logic.py tests/test_timeline_logic.py -v --tb=short
-
-      # Tier 2: Pilot headless app tests (no display needed)
-      - name: Headless app tests
-        run: pytest tests/test_tui_tree_app.py tests/test_tui_timeline_app.py -v --tb=short
-
-      # Tier 3: all other tests
+      # One run, not three. The previous "tiers" named four files as tier 1 and
+      # 2 and then ran `pytest tests/`, which executed those same files again —
+      # 70 tests twice, for the appearance of layering rather than any of its
+      # benefit. Layering only pays when a cheap stage can fail the build before
+      # an expensive one starts; these finished in six seconds against four
+      # minutes for the whole suite, so the ordering bought nothing.
+      #
       # -rs lists every skipped test and its reason. A green badge previously
       # meant "the tests CI could run passed", which is a weaker claim than it
       # looked, and nothing in the log distinguished the two.
-      - name: Full test suite
+      - name: Test suite
         run: pytest tests/ -v --tb=short -rs
 
       # A skip nobody reads is a test that does not exist. This fails when
@@ -53,10 +59,6 @@ jobs:
       - name: No unexpected skips
         run: pytest tests/test_ci_coverage.py -v --tb=short
 
-      # The last several defects were green in pytest and broken at the command
-      # line: a formatter raising KeyError, an agent citing an absence as a
-      # measurement, a fixture whose kernels were invisible to the analysis.
-      # Each was found by running the tool by hand. This runs it in CI instead.
       - name: CLI smoke — the user-facing surface
         run: |
           set -e
@@ -71,3 +73,35 @@ jobs:
           python -m nsys_ai agent ask "$P" "why is this slow?" | grep -q "## Verify"
           python -m nsys_ai diff "$H" "$H" --format json | python -c "import json,sys; json.load(sys.stdin)"
           echo "CLI smoke passed"
+
+  # Tests that call paid providers. Not run per-PR — every pull request making
+  # billed API calls is wasteful and flaky — but not abandoned either, which is
+  # the state they were already in: 130 trajectory tests skipped locally for a
+  # missing key and in CI for a missing profile, so no environment ever ran
+  # them. A nightly run and a run on merge to main gives them somewhere to
+  # execute.
+  credentialed:
+    runs-on: ubuntu-latest
+    # Never on pull_request: forks cannot read secrets, so it would fail for
+    # every external contributor rather than skip.
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    continue-on-error: true  # provider outages must not redden main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[all,dev]'
+      - name: Provider-backed tests
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY$OPENAI_API_KEY$GEMINI_API_KEY" ]; then
+            echo "No provider secrets configured — these tests still run nowhere."
+            echo "Set at least one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY."
+            exit 1
+          fi
+          pytest tests/test_chat_gemini.py tests/test_chat_two_requests_backend.py \
+                 tests/test_trajectories.py -v --tb=short -rs
