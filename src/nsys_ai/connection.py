@@ -37,9 +37,17 @@ _PROBE_MISS = object()
 _duck_probe_bags: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
 # sqlite3.Connection is not weak-referenceable, so we key by the connection
 # object itself (identity hash).  This keeps a strong reference for the
-# lifetime of the process, which is acceptable in a short-lived CLI.  Using
-# the object directly avoids the id()-reuse hazard (id() can be recycled
-# after a connection is closed and GC'd, giving false cache hits).
+# lifetime of the process.  Using the object directly avoids the id()-reuse
+# hazard (id() can be recycled after a connection is closed and GC'd, giving
+# false cache hits).
+#
+# Size note, since this bag now holds more than probe booleans: memoized skill
+# rows live here too, measured at ~570KB for one connection after a full
+# EvidenceBuilder build (one nvtx_layer_breakdown entry is ~477KB of it), and
+# they are not released on close().  That is bounded per connection rather than
+# growing: the CLI is short-lived, and the web server holds a single Profile for
+# the server's lifetime rather than opening one per request.  Caching across a
+# connection's life is safe because a profile is an immutable capture.
 _sqlite_probe_bags: dict[sqlite3.Connection, dict[str, Any]] = {}
 
 
@@ -63,6 +71,23 @@ def _probe_cache_set(conn, key: str, value) -> None:
         _duck_probe_bags.setdefault(conn, {})[key] = value
     except TypeError:
         pass
+
+
+SKILL_CACHE_MISS = _PROBE_MISS
+
+
+def cached_skill_rows(conn, key: str):
+    """Rows a skill already produced for ``key`` on ``conn``, or SKILL_CACHE_MISS.
+
+    Reuses the probe bag above rather than adding a second cache, so both share
+    its connection-object keying — deliberately not ``id()``, which is recycled
+    after a connection is closed and would give false hits across profiles.
+    """
+    return _probe_cache_get(conn, key)
+
+
+def set_cached_skill_rows(conn, key: str, rows) -> None:
+    _probe_cache_set(conn, key, rows)
 
 
 def cached_nvtx_map_uses_path_id(conn) -> bool:
