@@ -50,7 +50,13 @@ jobs:
       # -rs lists every skipped test and its reason. A green badge previously
       # meant "the tests CI could run passed", which is a weaker claim than it
       # looked, and nothing in the log distinguished the two.
+      # A real two-GPU capture, sliced to one second by
+      # scripts/derive_test_fixture.py. Without it the integration tests skip:
+      # they need NVTX, several streams and more than one device, none of which
+      # a hand-written fixture provides.
       - name: Test suite
+        env:
+          NSYS_TEST_PROFILE: tests/fixtures/h100_2gpu_1s.sqlite
         run: pytest tests/ -v --tb=short -rs
 
       # A skip nobody reads is a test that does not exist. This fails when

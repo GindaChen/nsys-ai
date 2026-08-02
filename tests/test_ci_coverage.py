@@ -31,9 +31,8 @@ ACCEPTED_SKIP_REASONS = (
     # Gated on uncommitted profiles. Legitimate but load-bearing — these run on
     # a developer machine and not in CI, so CI covers strictly less. Each is
     # named rather than matched loosely so a new one is a deliberate addition.
-    "distca example sqlite not found",
+    "distca example sqlite not found",  # the 46MB capture, still uncommitted
     "distca example profile not found",
-    "No test profile",
     "profile not available locally",
     # The trajectory suite needs BOTH an API key and a 27MB uncommitted profile,
     # so it skips locally on the key and in CI on the profile. 130 tests that
@@ -99,6 +98,16 @@ def test_the_fixture_gated_files_are_named_not_incidental():
         "test_timeline_web_distca_benchmark.py",
         "test_timeline_web_distca_profile.py",
     ], f"the set of fixture-gated test files changed: {gated}"
+
+
+def test_the_integration_tests_are_no_longer_gated_out_of_ci():
+    """They were six of the eleven profile-backed tests that CI never ran.
+
+    A committed two-GPU capture now satisfies them, so "No test profile" is
+    gone from the accepted reasons. If it comes back the build fails rather
+    than quietly returning to the old state.
+    """
+    assert "No test profile" not in ACCEPTED_SKIP_REASONS
 
 
 def test_the_trajectory_suite_is_known_to_run_nowhere():
