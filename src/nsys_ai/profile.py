@@ -560,10 +560,10 @@ class Profile:
           {text, total_ns, count, avg_ns}
         """
         # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
-        # newer exports, and it is absent entirely from a capture taken without
-        # NVTX. Both cases used to reach the query and fail with a raw SQL error
-        # naming the table. A profile with no annotation is valid, and the
-        # truthful answer at this layer is that there are no ranges.
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
         nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
         if not nvtx_table:
             return []
@@ -618,10 +618,10 @@ class Profile:
         Returns rows: {text, total_ns, count} sorted by total_ns descending.
         """
         # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
-        # newer exports, and it is absent entirely from a capture taken without
-        # NVTX. Both cases used to reach the query and fail with a raw SQL error
-        # naming the table. A profile with no annotation is valid, and the
-        # truthful answer at this layer is that there are no ranges.
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
         nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
         if not nvtx_table:
             return []
@@ -761,10 +761,10 @@ class Profile:
           - Newer:  NVTX_EVENTS.textId references StringIds; text may be NULL.
         """
         # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
-        # newer exports, and it is absent entirely from a capture taken without
-        # NVTX. Both cases used to reach the query and fail with a raw SQL error
-        # naming the table. A profile with no annotation is valid, and the
-        # truthful answer at this layer is that there are no ranges.
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
         nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
         if not nvtx_table or not threads:
             return []
