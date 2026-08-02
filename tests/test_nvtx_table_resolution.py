@@ -90,13 +90,20 @@ def test_renamed_copy_has_only_the_versioned_table(versioned_profile):
 
 
 def _sample_range_name(path: Path) -> str:
-    """A range name that really occurs, so a miss means resolution, not a typo."""
+    """A range name that really occurs, so a miss means resolution, not a typo.
+
+    Ordered because LIMIT without ORDER BY picks whatever row the scan reaches
+    first, which is stable on this fixture today and guaranteed by nothing. A
+    test that quietly changes what it searches for is one that stops testing
+    what it claims to.
+    """
     conn = sqlite3.connect(path)
     try:
         row = conn.execute(
-            "SELECT COALESCE(n.text, s.value) FROM NVTX_EVENTS n "
+            "SELECT COALESCE(n.text, s.value) AS t FROM NVTX_EVENTS n "
             "LEFT JOIN StringIds s ON n.textId = s.id "
-            "WHERE COALESCE(n.text, s.value) IS NOT NULL AND n.[end] > n.start LIMIT 1"
+            "WHERE COALESCE(n.text, s.value) IS NOT NULL AND n.[end] > n.start "
+            "ORDER BY n.start, n.globalTid, t LIMIT 1"
         ).fetchone()
     finally:
         conn.close()
