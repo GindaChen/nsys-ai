@@ -182,6 +182,15 @@ def find_nvtx_ranges(
     from .connection import wrap_connection
 
     adapter = wrap_connection(conn)
+
+    # Newer Nsight exports suffix the table NVTX_EVENTS_V2 / _V3. This reader is
+    # handed a plain connection, so nothing upstream aliases the unversioned name
+    # for it, and a literal here returns no ranges on such an export rather than
+    # raising — an MFU region that silently cannot be found.
+    nvtx_table = adapter.resolve_activity_tables().get("nvtx")
+    if not nvtx_table:
+        return []
+
     has_text_id = adapter.detect_nvtx_text_id()
     if match_mode not in ("contains", "exact"):
         match_mode = "contains"
@@ -190,7 +199,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT COALESCE(n.text, s.value) AS text, "
             "n.start AS start_ns, n.[end] AS end_ns, n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "LEFT JOIN StringIds s ON n.textId = s.id "
             "WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) "
             "AND n.[end] > n.start "
@@ -199,7 +208,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT n.text AS text, n.start AS start_ns, n.[end] AS end_ns, "
             "n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "WHERE n.text IS NOT NULL AND n.[end] > n.start "
         )
 
