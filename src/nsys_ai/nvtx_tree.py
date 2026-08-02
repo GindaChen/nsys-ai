@@ -78,11 +78,15 @@ def _build_single_thread_tree(
     """
     # Load NVTX for this thread only.
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
+    # The table is resolved, not named: newer exports suffix it _V2/_V3, and a
+    # hardcoded name here raised "no such table" on an annotated profile — the
+    # very symptom this change set out to remove, from the file it edited.
+    nvtx_table = profile.adapter.resolve_activity_tables().get("nvtx", "NVTX_EVENTS")
     if profile._nvtx_has_text_id:
         nvtx_rows = profile._duckdb_query(
-            """
+            f"""
             SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
-            FROM NVTX_EVENTS n
+            FROM {nvtx_table} n
             LEFT JOIN StringIds s ON n.textId = s.id
             WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
               AND n.globalTid = ?
@@ -96,9 +100,9 @@ def _build_single_thread_tree(
         )
     else:
         nvtx_rows = profile._duckdb_query(
-            """
+            f"""
             SELECT text, start, [end]
-            FROM NVTX_EVENTS
+            FROM {nvtx_table}
             WHERE text IS NOT NULL AND [end] > start
               AND globalTid = ?
               AND [end] >= ? AND start <= ?
@@ -221,6 +225,14 @@ def build_nvtx_tree(profile, device: int, trim: tuple[int, int], pad: int = int(
 
     Each node: {name, start, end, type: "nvtx"|"kernel", stream?, children: [...]}
     """
+    # A capture taken without NVTX has no table to read. Both callers — the
+    # analyze report's hierarchy summary and export-csv's per-kernel NVTX path —
+    # previously reached the query and died with a raw SQL error naming the
+    # table, on a profile that is perfectly valid. There is simply no hierarchy
+    # to build.
+    if not profile.adapter.resolve_activity_tables().get("nvtx"):
+        return []
+
     kmap = profile.kernel_map(device)
     if not kmap:
         return []

@@ -513,6 +513,7 @@ def detect_iterations(
             if t.startswith("NVTX_EVENTS"):
                 nvtx_table = t
                 break
+    has_nvtx = nvtx_table in tables
 
     runtime_table = "CUPTI_ACTIVITY_KIND_RUNTIME"
     if runtime_table not in tables:
@@ -532,7 +533,10 @@ def detect_iterations(
         text_expr = "n.text"
         text_join = ""
 
-    pri_nvtx = prof._duckdb_query(
+    # Without the table there is nothing to match, but the gap-based heuristic
+    # below needs no annotation — returning early here withheld a result the
+    # profile can genuinely support.
+    pri_nvtx = [] if not has_nvtx else prof._duckdb_query(
         f"""
             SELECT {text_expr} AS text, n.start, n.[end] FROM {nvtx_table} n
             {text_join}
