@@ -328,6 +328,107 @@ class TestBuildAndOpen:
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
 
 
+class TestUnrecognisedKernelTable:
+    """A kernel table the builder cannot address must abort the build, not
+    publish a cache without kernels.parquet that keeps on validating."""
+
+    def test_unrecognised_kernel_table_falls_back_instead_of_poisoning_cache(
+        self, minimal_nsys_db_path
+    ):
+        """A non-`_V` kernel suffix must leave no cache and open via sqlite3."""
+        from nsys_ai.profile import Profile
+
+        conn = sqlite3.connect(minimal_nsys_db_path)
+        conn.execute(
+            "ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL RENAME TO CUPTI_ACTIVITY_KIND_KERNEL_X1"
+        )
+        conn.commit()
+        conn.close()
+
+        # Twice: the second open proves the first left nothing poisoned behind.
+        for _ in range(2):
+            prof = Profile(minimal_nsys_db_path, cache_mode="auto")
+            try:
+                assert prof.db is None  # sqlite3 fallback engaged
+                assert prof.schema.kernel_table == "CUPTI_ACTIVITY_KIND_KERNEL_X1"
+                assert prof.meta.kernel_count > 0
+            finally:
+                prof.close()
+
+        # Assert on the cache dir + validity, not on a listing of the parent:
+        # `_build_lock` leaves a <name>.nsys-cache.build.lock file behind on
+        # every path, which is pre-existing and does not affect validity.
+        cache_dir = Path(minimal_nsys_db_path).with_suffix(".nsys-cache")
+        assert not cache_dir.exists()
+        assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is False
+
+    def test_unrecognised_kernel_table_raises_runtimeerror_not_schemaerror(
+        self, minimal_nsys_db_path
+    ):
+        """The exception type is load-bearing and must stay a RuntimeError.
+
+        Every caller that falls back to direct SQLite keys on
+        ``(duckdb.Error, RuntimeError, OSError)`` — ``Profile.__init__`` and the
+        skill-run handler both do. ``SchemaError`` does not inherit from
+        ``RuntimeError``, so raising one here would turn a working degraded read
+        into a hard "Error [SCHEMA_ERROR]" for the user. The Profile-level test
+        above cannot see this: ``Profile.__init__`` catches bare ``Exception``
+        around the cache attempt, so it falls back either way.
+        """
+        from nsys_ai.exceptions import SchemaError
+
+        conn = sqlite3.connect(minimal_nsys_db_path)
+        conn.execute(
+            "ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL RENAME TO CUPTI_ACTIVITY_KIND_KERNEL_X1"
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            parquet_cache.build_cache(minimal_nsys_db_path)
+        assert "CUPTI_ACTIVITY_KIND_KERNEL_X1" in str(excinfo.value)
+        # Stated explicitly: SchemaError descends from Exception, not from
+        # RuntimeError, so it would slip past every fallback except-clause.
+        assert not issubclass(SchemaError, RuntimeError)
+
+    def test_profile_without_any_kernel_table_still_caches(self, minimal_nsys_db_path):
+        """Guard must not fire on a capture that simply has no kernel data.
+
+        Nsight creates tables lazily, so "no kernel table at all" is a legitimate
+        state that must keep its existing behaviour (cache builds, SchemaError
+        surfaces from NsightSchema).
+
+        The ENUM_ table is not decoration. Every real capture carries
+        ``ENUM_CUDA_KERNEL_LAUNCH_TYPE`` — h100_2gpu_1s.sqlite and
+        mfu_2gpu_before.sqlite both do — and its name contains "KERNEL". Without
+        the ``ENUM_`` exclusion in ``_kernel_like_tables`` the guard would fire on
+        it and strip the cache from every genuinely kernel-less real profile. The
+        minimal conftest schema has no ENUM_ table, so this test creates one.
+        """
+        conn = sqlite3.connect(minimal_nsys_db_path)
+        conn.execute("CREATE TABLE ENUM_CUDA_KERNEL_LAUNCH_TYPE (id INTEGER, label TEXT)")
+        conn.execute("DROP TABLE CUPTI_ACTIVITY_KIND_KERNEL")
+        conn.commit()
+        conn.close()
+
+        cache_dir = parquet_cache.build_cache(minimal_nsys_db_path)
+        assert cache_dir.exists()
+        assert not (cache_dir / "kernels.parquet").exists()
+        assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
+
+    def test_enum_tables_are_not_kernel_activity_tables(self):
+        """Unit-level companion: `_kernel_like_tables` must skip ENUM_ tables.
+
+        Mirrors ``NsightSchema._detect_kernel_table``, which applies the same
+        exclusion. Pinned separately from the build-level test so the intent
+        survives even if the fixture schema changes.
+        """
+        assert parquet_cache._kernel_like_tables({"ENUM_CUDA_KERNEL_LAUNCH_TYPE"}) == []
+        assert parquet_cache._kernel_like_tables(
+            {"ENUM_CUDA_KERNEL_LAUNCH_TYPE", "CUPTI_ACTIVITY_KIND_KERNEL_X1"}
+        ) == ["CUPTI_ACTIVITY_KIND_KERNEL_X1"]
+
+
 class TestConcurrentBuild:
     """Regression: two terminals opening the same profile concurrently
     must NOT both run the full ETL.
