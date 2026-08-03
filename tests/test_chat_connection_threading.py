@@ -1,4 +1,4 @@
-"""The chat path's DuckDB handle belongs to the thread that drives the generator.
+"""The chat path's profile connection belongs to the thread that drives the generator.
 
 `Profile.query_conn()` exists because a shared DuckDB handle serves concurrent
 queries wrong rows with nothing raised. The chat path does not use it and does

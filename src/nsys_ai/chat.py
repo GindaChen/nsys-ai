@@ -348,10 +348,9 @@ def _prepare_session(
     private in-memory database, so concurrent sessions do not even contend on
     DuckDB's per-database query lock — and, when that cache cannot be opened,
     a read-only ``sqlite3.connect(..., uri=True)`` fallback. ``query_conn()``
-    solves a
-    different problem: the analysis path must share one database because of
-    ``CREATE TEMP TABLE`` scratch tables and the memoized skill bag, and hands
-    out per-thread cursors so that sharing stays correct.
+    solves a different problem: the analysis path must share one database
+    because of ``CREATE TEMP TABLE`` scratch tables and the memoized skill bag,
+    and hands out per-thread cursors so that sharing stays correct.
 
     The affinity is real, not incidental: this runs *inside* the
     ``stream_agent_loop`` generator body (and inside the synchronous
@@ -581,9 +580,9 @@ def stream_agent_loop(
     remains responsive during DB queries and LLM streaming.
 
     Build and drain the generator on the same thread. No connection or cursor
-    is shared between invocations — the only module-level state this path
-    touches is ``profile_db_tool._schema_cache``, which is lock-guarded and
-    holds strings — so two turns may overlap freely, and they do:
+    is shared between invocations — the only mutable module-level state this
+    path touches is ``profile_db_tool._schema_cache``, which is lock-guarded
+    and holds strings — so two turns may overlap freely, and they do:
     ``@work(thread=True, exclusive=True)`` cancels the asyncio task, not the OS
     thread, so a cancelled chat turn keeps running alongside its replacement
     (Textual's own docs: thread workers cannot be interrupted, only asked to
