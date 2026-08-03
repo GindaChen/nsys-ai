@@ -3,15 +3,19 @@
 `Profile.query_conn()` exists because a shared DuckDB handle serves concurrent
 queries wrong rows with nothing raised. The chat path does not use it and does
 not need to: `_prepare_session` calls `open_profile_readonly`, which returns a
-fresh `duckdb.connect()` — a private in-memory database, not a cursor on a
-shared one — and `_prepare_session` runs inside the `stream_agent_loop`
+fresh connection per call — `duckdb.connect()` on the Parquet-cache path (a
+private in-memory database, not a cursor on a shared one), `sqlite3.connect()`
+on the fallback — and `_prepare_session` runs inside the `stream_agent_loop`
 generator body, so the connection is created on whichever thread advances the
 generator and closed in that generator's `finally`.
 
-Two ways a future change could break that, both of which these tests catch:
-memoizing `open_profile_readonly` per path (one handle shared by every session),
-or hoisting the session setup out of the generator (the connection then belongs
-to the thread that *built* the generator, not the one that drains it).
+Two ways a future change could break that, for two different reasons, both of
+which these tests catch. Memoizing `open_profile_readonly` per path collapses
+the private databases into one handle shared by every session. Hoisting the
+session setup out of the generator shares nothing — each call still opens its
+own connection — but binds it to the thread that *built* the generator rather
+than the one that drains it; benign-looking on DuckDB, a hard
+`sqlite3.ProgrammingError` on the fallback, which the third test pins.
 
 Neither is hypothetical protection against an imaginary caller. A cancelled
 Textual `@work(thread=True, exclusive=True)` worker keeps running — cancellation
@@ -20,6 +24,7 @@ overlap, and only the per-invocation connection makes that harmless.
 """
 
 import shutil
+import sqlite3
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -168,3 +173,44 @@ def test_connection_opens_on_the_thread_that_iterates(profile_copy, fake_litellm
     assert not thread.is_alive()
     assert opened_on == drained_on
     assert opened_on[0] != threading.get_ident()
+
+
+def test_sqlite_fallback_connection_is_thread_affine(profile_copy, monkeypatch):
+    """When the Parquet cache cannot open, the fallback handle is bound to its thread.
+
+    The two tests above only exercise the DuckDB path, where a
+    build-here/drain-there mismatch is unenforced. On the fallback it is a hard
+    error, and that is what makes "open it inside the generator" a rule rather
+    than a preference. This pins that ``open_profile_readonly`` leaves
+    ``check_same_thread`` at its default: passing ``False`` would silence the
+    error without making concurrent use of one ``sqlite3.Connection`` safe.
+    """
+    from nsys_ai import parquet_cache
+
+    def no_cache(_path):
+        raise RuntimeError("forced fallback")
+
+    monkeypatch.setattr(parquet_cache, "open_cached_db", no_cache)
+
+    conn = chat_mod.open_profile_readonly(profile_copy)
+    try:
+        assert isinstance(conn, sqlite3.Connection)
+        # Usable from the thread that created it.
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] > 0
+
+        failure = []
+
+        def query_elsewhere():
+            try:
+                conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            except sqlite3.ProgrammingError as e:
+                failure.append(str(e))
+
+        t = threading.Thread(target=query_elsewhere)
+        t.start()
+        t.join(timeout=60)
+        assert not t.is_alive()
+        assert failure, "fallback connection was usable from a foreign thread"
+        assert "same thread" in failure[0]
+    finally:
+        conn.close()
