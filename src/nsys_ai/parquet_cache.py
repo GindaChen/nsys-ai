@@ -1277,6 +1277,7 @@ def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> 
         del map_table
         del dict_table
 
+
 def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
     """Per-thread sort-merge attributing each kernel to its innermost enclosing
     NVTX range. O(N+M) per thread; the shared containment core used by both the
