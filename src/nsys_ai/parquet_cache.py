@@ -534,7 +534,36 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # TRY_CAST guards against the `sqlite_all_varchar=true` attach
         # fallback, which would otherwise give lexicographic ordering.
         kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
-        if kernel_table:
+        if kernel_table is None:
+            # The source may carry kernel activity under a name this builder
+            # cannot address. kernels.parquet would then be missing while the
+            # stamp still claimed a complete cache — and every later open would
+            # revalidate that poisoned cache and fail in NsightSchema. Raise
+            # instead: build_cache discards the temp dir on any exception, so
+            # nothing is published and the caller's except-clause falls back to
+            # direct SQLite. That fallback is degraded, not at parity — it loses
+            # the tensor-core flags and the demangled kernel names the cache
+            # precomputes — but it reads the profile.
+            #
+            # RuntimeError, not SchemaError: callers that fall back catch
+            # (duckdb.Error, RuntimeError, OSError), and SchemaError descends
+            # from Exception, not from RuntimeError.
+            #
+            # This guard only stops a *new* poisoned cache from being published.
+            # build_cache's is_cache_valid fast-path returns before we get here,
+            # so an already-poisoned cache dir is never repaired. _CACHE_VERSION
+            # is deliberately not bumped for that: poisoning requires a kernel
+            # table name outside the exact/`_V` forms _find_table matches, which
+            # no shipped Nsight export uses, so no cache in the field can be in
+            # that state. Deleting the .nsys-cache directory recovers one.
+            unrecognised = _kernel_like_tables(src_tables)
+            if unrecognised:
+                raise RuntimeError(
+                    "cache build aborted: the profile carries a kernel activity table "
+                    f"({', '.join(unrecognised)}) that this build does not recognise, "
+                    "so kernels.parquet cannot be produced"
+                )
+        else:
             _progress("kernels.parquet")
             db.execute(f"""
                 COPY (
@@ -718,6 +747,18 @@ def _find_table(tables: set[str], prefix: str) -> str | None:
         return prefix
     candidates = sorted(t for t in tables if t.startswith(prefix + "_V"))
     return candidates[0] if candidates else None
+
+
+def _kernel_like_tables(tables: set[str]) -> list[str]:
+    """Source tables ``NsightSchema`` would accept as the kernel activity table.
+
+    Mirrors ``NsightSchema._detect_kernel_table``: any non-``ENUM_`` table with
+    ``KERNEL`` in its name. Used to tell "this profile has no kernel data at all"
+    (a legitimate state — Nsight creates tables lazily) from "this profile has
+    kernel data under a name ``_find_table`` did not match", which must not be
+    cached.
+    """
+    return sorted(t for t in tables if "KERNEL" in t.upper() and not t.upper().startswith("ENUM_"))
 
 
 def _table_has_column(db: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
