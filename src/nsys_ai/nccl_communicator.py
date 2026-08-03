@@ -738,7 +738,7 @@ def _estimate_peak_bandwidth_gbps(prof: Profile) -> tuple[float | None, str | No
         except Exception:
             pass
 
-    gpu_name = get_first_gpu_name(prof.conn if prof.db is None else prof.db)
+    gpu_name = get_first_gpu_name(prof.query_conn())
     normalized = (gpu_name or "").upper()
     for key, gbps in sorted(_NVLINK_PEAK_GBPS.items(), key=lambda item: len(item[0]), reverse=True):
         if key in normalized:

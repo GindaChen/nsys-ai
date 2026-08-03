@@ -63,7 +63,7 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
     """
     from .connection import _PROBE_MISS, _probe_cache_get, _probe_cache_set
 
-    conn = prof.db if prof.db is not None else prof.conn
+    conn = prof.query_conn()
     cache_key = f"overlap_analysis:{device}:{trim}"
     cached = _probe_cache_get(conn, cache_key)
     if cached is not _PROBE_MISS:
@@ -183,6 +183,10 @@ def launch_overhead_ms(
 def _has_duckdb(prof: Profile) -> bool:
     from .connection import DuckDBAdapter, wrap_connection
 
+    # Asks the engine question of ``prof.db`` rather than ``query_conn()``:
+    # this is a type check, and going through the accessor would materialise a
+    # thread-local cursor as a side effect of answering it. Both handles are on
+    # the same database, so the answer is identical either way.
     conn = prof.db if prof.db is not None else prof.conn
     return isinstance(wrap_connection(conn), DuckDBAdapter)
 
