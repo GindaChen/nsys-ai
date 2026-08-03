@@ -73,6 +73,20 @@ def is_abstention_row(row) -> bool:
     return isinstance(row, dict) and row.get("_abstained") is True
 
 
+def resolve_nvtx_table(conn) -> str | None:
+    """The profile's NVTX table name, or None when it has none.
+
+    Companion to :func:`requires_nvtx` for the skills that need the *name* and
+    not only the guard — the payload decoders query the table directly. Both
+    resolve through here so ``skills/builtins`` never re-inlines the lookup,
+    which is what ``test_the_nvtx_guard_is_defined_once`` enforces: an earlier
+    inlined copy used an exact name match and missed ``NVTX_EVENTS_V2``.
+    """
+    from ..connection import wrap_connection
+
+    return wrap_connection(conn).resolve_activity_tables().get("nvtx")
+
+
 def requires_nvtx(conn, *, needs: str = "Region attribution") -> list[dict] | None:
     """Abstain if ``conn`` has no NVTX table, else None so the caller proceeds.
 
@@ -84,9 +98,7 @@ def requires_nvtx(conn, *, needs: str = "Region attribution") -> list[dict] | No
     ``needs`` names what the caller cannot do, so the message says something
     true for that skill rather than a copy of a sibling's wording.
     """
-    from ..connection import wrap_connection
-
-    if wrap_connection(conn).resolve_activity_tables().get("nvtx"):
+    if resolve_nvtx_table(conn):
         return None
     return abstain(
         f"This profile has no NVTX_EVENTS table, so it carries no NVTX "

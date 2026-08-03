@@ -15,6 +15,17 @@ import logging
 _log = logging.getLogger(__name__)
 
 
+def _runtime_table(profile) -> str | None:
+    """Resolve the CUDA runtime table, which newer exports suffix _V2 / _V3.
+
+    The NVTX table beside it is already resolved at every use, and so is the
+    kernel table; the runtime table was the one left literal. Returns None when
+    the profile has no runtime activity at all, which callers treat as "no
+    launches to attribute" rather than an error.
+    """
+    return profile.adapter.resolve_activity_tables().get("runtime")
+
+
 def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int]:
     """Find CPU threads that are significant kernel launchers on this device.
 
@@ -22,10 +33,13 @@ def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int
     count.  This filters out cross-GPU NCCL threads that launch a few
     collectives on this device but bring unrelated NVTX context.
     """
+    runtime_table = _runtime_table(profile)
+    if not runtime_table:
+        return []
     rows = profile._duckdb_query(
         f"""
             SELECT r.globalTid, COUNT(*) as cnt
-            FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+            FROM {runtime_table} r
             JOIN {profile.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
             -- globalTid breaks the tie: _find_primary_thread takes rows[0], so equal
@@ -78,10 +92,17 @@ def _build_single_thread_tree(
     """
     # Load NVTX for this thread only.
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
-    # The table is resolved, not named: newer exports suffix it _V2/_V3, and a
-    # hardcoded name here raised "no such table" on an annotated profile — the
+    # The tables are resolved, not named: newer exports suffix them _V2/_V3, and
+    # a hardcoded name here raised "no such table" on an annotated profile — the
     # very symptom this change set out to remove, from the file it edited.
-    nvtx_table = profile.adapter.resolve_activity_tables().get("nvtx", "NVTX_EVENTS")
+    #
+    # Resolved once, for both names. resolve_activity_tables() is not memoised
+    # and rescans the schema on every call — 1.6 ms against the DuckDB adapter,
+    # measured — and this function runs per thread, so a second call here would
+    # double a cost the tree build already pays N times.
+    _tables = profile.adapter.resolve_activity_tables()
+    nvtx_table = _tables.get("nvtx", "NVTX_EVENTS")
+    runtime_table = _tables.get("runtime")
     if profile._nvtx_has_text_id:
         nvtx_rows = profile._duckdb_query(
             f"""
@@ -116,11 +137,13 @@ def _build_single_thread_tree(
     # Load runtime calls for this thread covering the discovered NVTX span set.
     # Using NVTX-derived bounds keeps GPU projection (start/end/depth/path)
     # stable across adjacent timeline tiles near boundaries.
+    if not runtime_table:
+        return []
     rt_lo = min(int(n["start"]) for n in nvtx_rows)
     rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
     rt_rows = profile._duckdb_query(
-        """
-            SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+        f"""
+            SELECT start, [end], correlationId FROM {runtime_table}
             WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
         """,
         (tid, rt_lo, rt_hi),

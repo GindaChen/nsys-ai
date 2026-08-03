@@ -403,6 +403,15 @@ def get_region_kernels(
 
     kernel_table = schema.kernel_table
 
+    # The kernel table was already resolved; the runtime table beside it in the
+    # same query was not. This reader takes a plain connection, so there is no
+    # alias view to cover a literal — on a _V2 / _V3 export it raised.
+    from .connection import is_safe_identifier, wrap_connection
+
+    runtime_table = wrap_connection(conn).resolve_activity_tables().get("runtime")
+    if not runtime_table or not is_safe_identifier(runtime_table):
+        return []
+
     where_clauses = ["r.start >= ?", "r.[end] <= ?"]
     params: list[Any] = [int(nvtx_start_ns), int(nvtx_end_ns)]
 
@@ -422,7 +431,7 @@ def get_region_kernels(
         "k.start AS start_ns, k.[end] AS end_ns, "
         "(k.[end] - k.start) AS duration_ns, "
         "s.value AS kernel_name "
-        "FROM CUPTI_ACTIVITY_KIND_RUNTIME r "
+        f"FROM {runtime_table} r "
         f"JOIN {kernel_table} k ON r.correlationId = k.correlationId "
         "LEFT JOIN StringIds s ON k.shortName = s.id "
         "WHERE " + " AND ".join(where_clauses) + f" {dev_filter} "

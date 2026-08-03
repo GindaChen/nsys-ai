@@ -187,13 +187,14 @@ def build_timeline_gpu_data(
                     }
                 )
 
-            if "CUPTI_ACTIVITY_KIND_MEMCPY" in prof.schema.tables:
-                memcpy_sql = """
+            memcpy_table = prof.adapter.resolve_activity_tables().get("memcpy")
+            if memcpy_table:
+                memcpy_sql = f"""
                     SELECT m.start AS start_ns,
                            m.[end] AS end_ns,
                            m.streamId AS stream,
                            m.copyKind AS copy_kind
-                    FROM CUPTI_ACTIVITY_KIND_MEMCPY m
+                    FROM {memcpy_table} m
                     WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
                     ORDER BY m.start
                 """
@@ -216,12 +217,13 @@ def build_timeline_gpu_data(
                         }
                     )
 
-            if "CUPTI_ACTIVITY_KIND_MEMSET" in prof.schema.tables:
-                memset_sql = """
+            memset_table = prof.adapter.resolve_activity_tables().get("memset")
+            if memset_table:
+                memset_sql = f"""
                     SELECT m.start AS start_ns,
                            m.[end] AS end_ns,
                            m.streamId AS stream
-                    FROM CUPTI_ACTIVITY_KIND_MEMSET m
+                    FROM {memset_table} m
                     WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
                     ORDER BY m.start
                 """
