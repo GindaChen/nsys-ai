@@ -1117,8 +1117,10 @@ def test_diff_decision_dict_path_matches_summary_path(tmp_path):
     )
 
     assert cli_path.read_bytes() == gui_path.read_bytes()
-    # The stored dict must not be mutated by the writer.
-    assert "decision" not in stored_dict
+    # The stored dict must not be mutated by the writer. The key is now always
+    # present and `null` until decided, so "undecided" is `is None` rather than
+    # absent — the writer leaving it None is the same guarantee as before.
+    assert stored_dict["decision"] is None
 
 
 def test_compute_verdict_custom_regression_pct():

@@ -564,6 +564,10 @@ def to_diff_dict(data: ProfileDiffSummary) -> dict:
     # Keep this relatively stable; tests can snapshot it.
     return {
         "schema_version": SCHEMA_VERSION,
+        # Always present, null until decided. The decided record is this same
+        # object plus a populated `decision`, so omitting the key here forced
+        # every consumer to .get() and made one artifact look like two shapes.
+        "decision": None,
         "producer": PRODUCER,
         "producer_version": _producer_version(),
         "diff_id": data.diff_id,
