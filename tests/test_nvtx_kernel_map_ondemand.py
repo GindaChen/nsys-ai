@@ -161,3 +161,29 @@ def test_ensure_is_noop_when_map_present():
 def test_ensure_returns_false_for_sqlite_connection():
     # Non-DuckDB connection: unchanged, caller keeps its own path.
     assert ensure_nvtx_kernel_map(sqlite3.connect(":memory:")) is False
+
+
+def test_the_map_is_visible_to_a_thread_local_cursor():
+    """The on-demand map must not be a TEMP table.
+
+    DuckDB requires each thread to work through its own ``.cursor()`` handle —
+    a shared connection serves concurrent queries wrong results, silently. A
+    TEMP table is visible only to the connection that created it, so building
+    the map as one left every worker thread unable to see it and quietly
+    falling back to the slower on-the-fly attribution. The fallback returns
+    rows, so nothing raised and nothing looked broken; only the source of the
+    numbers changed.
+
+    This bites specifically on the direct-attach path a large profile takes,
+    where there is no ``nvtx_kernel_map.parquet`` to expose as a view.
+    """
+    con = _duckdb_profile()
+    assert ensure_nvtx_kernel_map(con) is True
+    expected = con.execute("SELECT COUNT(*) FROM nvtx_kernel_map").fetchone()[0]
+
+    for name in ("nvtx_kernel_map", "nvtx_path_dict"):
+        cur = con.cursor()
+        got = cur.execute(f"SELECT COUNT(*) FROM {name}").fetchone()
+        assert got is not None, f"{name} is invisible to a cursor — is it TEMP again?"
+
+    assert con.cursor().execute("SELECT COUNT(*) FROM nvtx_kernel_map").fetchone()[0] == expected

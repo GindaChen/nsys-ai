@@ -1377,7 +1377,7 @@ def _build_nvtx_kernel_map_python(
 
 
 def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
-    """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` temp tables on a
+    """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` tables on a
     DuckDB connection from sweep ``results``. Emits the full 9-column
     cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
     so consumers take their map-only fast path (a TC-less map would force
@@ -1411,16 +1411,23 @@ def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
     db.register("_odm_nkm", map_tbl)
     db.register("_odm_npd", dict_tbl)
     try:
-        db.execute("CREATE TEMP TABLE nvtx_kernel_map AS SELECT * FROM _odm_nkm")
-        db.execute("CREATE TEMP TABLE nvtx_path_dict AS SELECT * FROM _odm_npd")
+        # Deliberately not TEMP. A temp table is visible only to the connection
+        # that created it, and DuckDB requires each thread to work through its
+        # own ``.cursor()`` handle — so a temp table here leaves every worker
+        # thread unable to see the map and silently falling back to the slower
+        # on-the-fly attribution. These two are the shared artifacts other code
+        # reads; the scratch tables above stay TEMP because they never escape
+        # the function that builds them.
+        db.execute("CREATE TABLE nvtx_kernel_map AS SELECT * FROM _odm_nkm")
+        db.execute("CREATE TABLE nvtx_path_dict AS SELECT * FROM _odm_npd")
     finally:
         db.unregister("_odm_nkm")
         db.unregister("_odm_npd")
 
 
 def ensure_nvtx_kernel_map(conn) -> bool:
-    """Materialize ``nvtx_kernel_map`` + ``nvtx_path_dict`` as temp tables on a
-    DuckDB connection when they are absent, so NVTX-attribution skills take their
+    """Materialize ``nvtx_kernel_map`` + ``nvtx_path_dict`` as ordinary tables on
+    a DuckDB connection when they are absent, so NVTX-attribution skills take their
     fast map-backed path instead of an in-file IEJoin that hangs DuckDB's
     ``sqlite_scanner`` on a direct-attached profile with no parquet cache (#257).
 
