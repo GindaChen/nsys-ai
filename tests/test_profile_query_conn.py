@@ -116,3 +116,91 @@ def test_the_accessor_works_during_construction():
     with Profile(str(FIXTURE)) as prof:
         assert prof.meta is not None
         assert prof.query_conn() is not None
+
+
+def test_worker_threads_share_the_owning_connection_s_cache():
+    """A second handle must not mean a second cache.
+
+    The per-connection bag backs both the probe cache and the skill memo from
+    #295. Keyed on the handle, every worker thread starts empty and re-executes
+    work the owner already did — measured as four extra executions across four
+    threads. Keyed on the owning connection, the handle a thread happens to hold
+    stops mattering.
+
+    Sharing is safe because the bag stores results, not handles: one skill with
+    one set of resolved parameters over an immutable capture has one answer.
+    """
+    skill = get_skill("top_kernels")
+    executions: list[int] = []
+    original = skill.execute_fn
+
+    def counting(conn, **kwargs):
+        executions.append(threading.get_ident())
+        return original(conn, **kwargs)
+
+    skill.execute_fn = counting
+    try:
+        with Profile(str(FIXTURE)) as prof:
+            if prof.db is None:  # pragma: no cover
+                pytest.skip("DuckDB not in use")
+            skill.execute(prof.query_conn(), limit=5)  # owner populates
+            after_owner = len(executions)
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futures = [
+                    ex.submit(lambda: skill.execute(prof.query_conn(), limit=5)) for _ in range(8)
+                ]
+                for f in futures:
+                    f.result(timeout=60)
+    finally:
+        skill.execute_fn = original
+
+    assert after_owner == 1
+    assert len(executions) == after_owner, (
+        f"worker threads re-executed {len(executions) - after_owner} times — "
+        "the cache is keyed on the handle again, not the owning connection"
+    )
+
+
+def test_close_drops_the_per_thread_handles():
+    """Cursors are handles on the connection being closed.
+
+    Left in the thread-local, a worker thread outliving the profile would be
+    handed a dead cursor rather than an error or a fresh one.
+    """
+    prof = Profile(str(FIXTURE))
+    if prof.db is None:  # pragma: no cover
+        prof.close()
+        pytest.skip("DuckDB not in use")
+
+    def touch():
+        prof.query_conn()
+
+    worker = threading.Thread(target=touch)
+    worker.start()
+    worker.join()
+
+    prof.close()
+    assert getattr(prof._thread_handles, "conn", None) is None, (
+        "close() left a cursor in the thread-local"
+    )
+
+
+def test_a_type_check_does_not_materialise_a_cursor():
+    """`_has_duckdb` asks which engine is in use; answering it should not
+    allocate a handle as a side effect."""
+    from nsys_ai.overlap import _has_duckdb
+
+    with Profile(str(FIXTURE)) as prof:
+        if prof.db is None:  # pragma: no cover
+            pytest.skip("DuckDB not in use")
+        seen = {}
+
+        def probe():
+            _has_duckdb(prof)
+            seen["handle"] = getattr(prof._thread_handles, "conn", None)
+
+        worker = threading.Thread(target=probe)
+        worker.start()
+        worker.join()
+
+    assert seen["handle"] is None, "a type check created a thread-local cursor"

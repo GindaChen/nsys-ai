@@ -183,7 +183,11 @@ def launch_overhead_ms(
 def _has_duckdb(prof: Profile) -> bool:
     from .connection import DuckDBAdapter, wrap_connection
 
-    conn = prof.query_conn()
+    # Asks the engine question of ``prof.db`` rather than ``query_conn()``:
+    # this is a type check, and going through the accessor would materialise a
+    # thread-local cursor as a side effect of answering it. Both handles are on
+    # the same database, so the answer is identical either way.
+    conn = prof.db if prof.db is not None else prof.conn
     return isinstance(wrap_connection(conn), DuckDBAdapter)
 
 

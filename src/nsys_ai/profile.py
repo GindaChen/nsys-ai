@@ -479,6 +479,12 @@ class Profile:
         handle = getattr(self._thread_handles, "conn", None)
         if handle is None:
             handle = self._thread_handles.conn = self.db.cursor()
+            # Point the per-connection caches at the owning connection's bag.
+            # Without this each worker thread starts with an empty bag and
+            # re-executes every memoized skill once per thread.
+            from .connection import register_derived_handle
+
+            register_derived_handle(handle, self.db)
         return handle
 
     def _gpu_info(self, devices, streams, tables, kcounts) -> dict[int, GpuInfo]:
@@ -878,6 +884,15 @@ class Profile:
                 return [dict(r) for r in cur.fetchall()]
 
     def close(self):
+        # Drop the per-thread cursors first. They are handles on self.db, so
+        # after it closes they raise "Connection already closed" — and being
+        # held in a thread-local, a worker thread that outlives the profile
+        # would be handed the dead one instead of an error or a fresh handle.
+        # Replacing the container clears every thread's slot, not just this
+        # thread's, which is the point: the owner is usually the one closing.
+        if getattr(self, "_thread_handles", None) is not None:
+            self._thread_handles = threading.local()
+
         # Close the primary connection only if we own it.
         if getattr(self, "_owns_conn", True):
             try:

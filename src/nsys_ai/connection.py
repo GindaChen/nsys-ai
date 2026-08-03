@@ -50,6 +50,40 @@ _duck_probe_bags: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakK
 # connection's life is safe because a profile is an immutable capture.
 _sqlite_probe_bags: dict[sqlite3.Connection, dict[str, Any]] = {}
 
+# A DuckDB cursor is a second handle on the same database, and a thread that
+# queries through one must not lose the cache the owning connection filled.
+# Keying the bag on the handle would give each worker thread its own empty bag
+# and re-execute every memoized skill once per thread -- measured as four extra
+# executions across four threads for a skill the owner had already run.
+#
+# Sharing the bag is safe because it stores *results*, not handles: the same
+# skill with the same resolved parameters over the same immutable capture has
+# one answer whichever handle asks. Two threads can still both miss and both
+# compute, which costs duplicate work and never correctness.
+#
+# DuckDB exposes no parent pointer on a cursor, and duckdb_databases() names
+# every in-memory database "memory", so neither can identify the owner. The
+# registry is populated where cursors are created, in Profile.query_conn().
+_handle_owner: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+
+
+def register_derived_handle(handle, owner) -> None:
+    """Record that ``handle`` is a second handle on ``owner``'s database.
+
+    Both are held weakly, so neither outlives its natural lifetime.
+    """
+    if handle is owner:
+        return
+    try:
+        _handle_owner[handle] = owner
+    except TypeError:  # not weak-referenceable; fall back to a private bag
+        pass
+
+
+def _cache_owner(conn):
+    """The object whose bag ``conn`` should read and write."""
+    return _handle_owner.get(conn, conn)
+
 
 def _probe_cache_get(conn, key: str):
     if isinstance(conn, sqlite3.Connection):
@@ -57,7 +91,7 @@ def _probe_cache_get(conn, key: str):
         if bag is None:
             return _PROBE_MISS
         return bag.get(key, _PROBE_MISS)
-    bag = _duck_probe_bags.get(conn)
+    bag = _duck_probe_bags.get(_cache_owner(conn))
     if bag is None:
         return _PROBE_MISS
     return bag.get(key, _PROBE_MISS)
@@ -68,7 +102,7 @@ def _probe_cache_set(conn, key: str, value) -> None:
         _sqlite_probe_bags.setdefault(conn, {})[key] = value
         return
     try:
-        _duck_probe_bags.setdefault(conn, {})[key] = value
+        _duck_probe_bags.setdefault(_cache_owner(conn), {})[key] = value
     except TypeError:
         pass
 
