@@ -103,8 +103,10 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 15  # bumped: total-order tiebreak in the nvtx_kernel_map builder — a cache
-# built by version 14 resolved label ties arbitrarily, so it must be rebuilt rather than reused.
+_CACHE_VERSION = 16  # bumped: nvtx_kernel_map is now built by the stack sweep. A cache from
+# version 15 holds the same rows for the SQL path, but one written by the old Python path carries
+# seven columns instead of nine (no is_tc_eligible/uses_tc), and reusing that silently reports
+# every kernel as non-Tensor-Core.
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -1091,97 +1093,123 @@ def _build_nvtx_kernel_map(
 
     # nvtx.parquet already stores resolved text (export path); no StringIds join.
 
-    # Pure SQL approach: DuckDB will use IEJoin for the range predicate.
+    # Attribution is a stack sweep, not a general inequality join.
     #
-    # Strategy:
-    #   1. Pre-materialise NVTX ranges into a temp table (filter once, avoid
-    #      repeated Parquet scans and per-row CAST overhead in the join).
-    #   2. Join kernels.parquet ↔ runtime.parquet via correlationId (hash join).
-    #   3. IEJoin runtime ↔ _nvtx_ranges via globalTid + range containment
-    #      (n.start <= r.start AND n."end" >= r."end").
-    #      GROUP BY is folded directly into the same step to avoid materialising
-    #      the 1 M-row intermediate "enclosing" result — roughly 2× faster.
-    #      - string_agg(... ORDER BY dur DESC) builds "outer > middle > inner" path
-    #      - FIRST(... ORDER BY dur ASC) picks the innermost NVTX text
-    #      - COUNT(*) - 1 gives the nesting depth
-    #   4. Assign dense ``path_id`` (ORDER BY nvtx_path for stability) and write
-    #      ``nvtx_path_dict.parquet`` so downstream ``GROUP BY`` uses BIGINT keys.
-    grouped_sql = f"""
-        WITH kr AS (
-            SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
-                   k.start AS k_start, k."end" AS k_end,
-                   k.name AS kernel_name,
-                   COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0) AS is_tc_eligible,
-                   COALESCE(CAST(k.uses_tc AS INTEGER), 0) AS uses_tc,
-                   r.correlationId
+    # NVIDIA documents eventType 59 as a Push/Pop range maintaining an
+    # nvtxRange stack per thread, so the ranges on a thread are strictly nested
+    # by construction. A containment IEJoin cannot know that and pays the
+    # general-case cost: on a 3.5 GB capture (2.19 M kernels, 15.9 M ranges) it
+    # ran over twenty minutes, saturating twelve cores, to produce a 3.0 M-row
+    # result. The sweep below does the same work in 19 s, and its output was
+    # compared row-for-row against the IEJoin's on that capture --
+    # 3,042,699 rows, zero differences in either direction.
+    #
+    # The equality key is why the join had so little to work with: globalTid had
+    # five distinct values, so IEJoin partitioned into five buckets and range-
+    # joined millions against millions inside each.
+    #
+    # Sources stay Parquet-only, as before, so the heavy read never touches the
+    # attached SQLite.
+    try:
+        kr_rows = db.execute(
+            f"""
+            SELECT r.globalTid, r.start, r."end", k.start, k."end", k.name,
+                   COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0),
+                   COALESCE(CAST(k.uses_tc AS INTEGER), 0)
             FROM read_parquet('{kps}') k
             JOIN read_parquet('{rps}') r ON r.correlationId = k.correlationId
-        )
-        SELECT
-            FIRST(n.text ORDER BY (n."end" - n.start) ASC, n.start ASC, n.text ASC) AS nvtx_text,
-            CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-            string_agg(n.text, ' > ' ORDER BY (n."end" - n.start) DESC, n.start ASC, n.text ASC) AS nvtx_path,
-            kr.kernel_name,
-            kr.k_start,
-            kr.k_end,
-            (kr.k_end - kr.k_start) AS k_dur_ns,
-            MAX(kr.is_tc_eligible) AS is_tc_eligible,
-            MAX(kr.uses_tc) AS uses_tc
-        FROM kr
-        JOIN _nvtx_ranges n
-          ON n.globalTid = kr.globalTid
-          AND n.start <= kr.r_start
-          AND n."end" >= kr.r_end
-        GROUP BY kr.k_start, kr.k_end, kr.globalTid, kr.kernel_name, kr.correlationId
-    """
-    map_path = _safe_path(cache_dir / "nvtx_kernel_map.parquet")
-    dict_path = _safe_path(cache_dir / "nvtx_path_dict.parquet")
-
-    try:
-        # Pre-materialise NVTX ranges once (avoids repeated Parquet scans +
-        # per-row CAST in the join; also lets DuckDB plan the IEJoin against
-        # an in-memory table rather than a lazy Parquet scan).
-        db.execute(f"""
-            CREATE OR REPLACE TEMP TABLE _nvtx_ranges AS
-            SELECT globalTid, start, "end", CAST(text AS VARCHAR) AS text
+            ORDER BY r.globalTid, r.start
+            """
+        ).fetchall()
+        # The sweep advances one index per thread, so this must arrive sorted.
+        nvtx_rows = db.execute(
+            f"""
+            SELECT globalTid, start, "end", CAST(text AS VARCHAR)
             FROM read_parquet('{nps}')
             WHERE eventType = 59 AND "end" > start AND text IS NOT NULL
-        """)
-        db.execute(f"CREATE OR REPLACE TEMP TABLE _nkm_grouped AS {grouped_sql}")
-        has_rows = bool(
-            db.execute("SELECT EXISTS (SELECT 1 FROM _nkm_grouped)").fetchone()[0]
+            ORDER BY globalTid, start
+            """
+        ).fetchall()
+    except duckdb.Error as e:
+        log.warning("nvtx_kernel_map: source read failed (%s); skipping map", e)
+        return
+
+    if not kr_rows or not nvtx_rows:
+        log.info("nvtx_kernel_map: no kernel/NVTX overlap to attribute; skipping")
+        return
+
+    results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
+    if not results:
+        log.info("nvtx_kernel_map produced no NVTX/kernel attribution; skipping map creation")
+        return
+
+    # Tensor Core flags are attached after the name-agnostic sweep, the same way
+    # ensure_nvtx_kernel_map does it. Keying on (k_start, k_end, kernel_name) is
+    # not unique, but both flags are derived by regex from the kernel name, so
+    # rows that collide on that key carry identical values.
+    tc_by_kernel = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr_rows}
+    for r in results:
+        r["is_tc_eligible"], r["uses_tc"] = tc_by_kernel.get(
+            (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
         )
-        if not has_rows:
-            log.info(
-                "nvtx_kernel_map pure SQL produced no NVTX/kernel attribution; "
-                "skipping parquet map creation"
-            )
-            return
-        db.execute("""
-            CREATE OR REPLACE TEMP TABLE _nkm_path_dict AS
-            SELECT nvtx_path, ROW_NUMBER() OVER (ORDER BY nvtx_path)::BIGINT AS path_id
-            FROM (SELECT DISTINCT nvtx_path FROM _nkm_grouped)
-        """)
+
+    _write_nvtx_kernel_map_parquet(db, results, cache_dir)
+    log.info("nvtx_kernel_map built via stack sweep (parquet-only, path_id)")
+
+
+def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> None:
+    """Write sweep ``results`` to nvtx_kernel_map.parquet + nvtx_path_dict.parquet.
+
+    The single writer for the cache build, so the file layout cannot drift by
+    which code path produced the rows. It emits all nine columns; the Python
+    path used to write seven, omitting ``is_tc_eligible``/``uses_tc``, which made
+    a cache built that way silently different from one built by the SQL path.
+    Rows arriving without the flags default to 0 rather than failing.
+    """
+    import pyarrow as pa
+
+    distinct_paths = sorted({r["nvtx_path"] for r in results})
+    path_to_id = {path: i + 1 for i, path in enumerate(distinct_paths)}
+
+    map_table = pa.table(
+        {
+            "path_id": pa.array([path_to_id[r["nvtx_path"]] for r in results], pa.int64()),
+            "nvtx_text": pa.array([r["nvtx_text"] for r in results], pa.string()),
+            "nvtx_depth": pa.array([r["nvtx_depth"] for r in results], pa.int32()),
+            "kernel_name": pa.array([r["kernel_name"] for r in results], pa.string()),
+            "k_start": pa.array([r["k_start"] for r in results], pa.int64()),
+            "k_end": pa.array([r["k_end"] for r in results], pa.int64()),
+            "k_dur_ns": pa.array([r["k_dur_ns"] for r in results], pa.int64()),
+            "is_tc_eligible": pa.array([r.get("is_tc_eligible", 0) for r in results], pa.int32()),
+            "uses_tc": pa.array([r.get("uses_tc", 0) for r in results], pa.int32()),
+        }
+    )
+    dict_table = pa.table(
+        {
+            "path_id": pa.array([path_to_id[p] for p in distinct_paths], pa.int64()),
+            "nvtx_path": pa.array(list(distinct_paths), pa.string()),
+        }
+    )
+
+    try:
+        db.register("_nvtx_kernel_map", map_table)
+        db.register("_nvtx_path_dict", dict_table)
         db.execute(
-            f"COPY (SELECT path_id, nvtx_path FROM _nkm_path_dict) "
-            f"TO '{dict_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"COPY _nvtx_path_dict TO '{_safe_path(cache_dir / 'nvtx_path_dict.parquet')}' "
+            f"(FORMAT PARQUET, COMPRESSION ZSTD)"
         )
         db.execute(
             f"""
-            COPY (
-                SELECT d.path_id, g.nvtx_text, g.nvtx_depth, g.kernel_name,
-                       g.k_start, g.k_end, g.k_dur_ns, g.is_tc_eligible, g.uses_tc
-                FROM _nkm_grouped g
-                JOIN _nkm_path_dict d USING (nvtx_path)
-                ORDER BY g.k_start, g.k_end, g.kernel_name
-            ) TO '{map_path}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
+            COPY (SELECT * FROM _nvtx_kernel_map ORDER BY k_start, k_end, kernel_name)
+            TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
+            (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
             """
         )
-        log.info("nvtx_kernel_map built via pure SQL (IEJoin, parquet-only, path_id)")
-    except duckdb.Error as e:
-        log.warning("Pure-SQL nvtx_kernel_map failed (%s), falling back to Python sort-merge", e)
-        _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
-
+    finally:
+        db.unregister("_nvtx_kernel_map")
+        db.unregister("_nvtx_path_dict")
+        del map_table
+        del dict_table
 
 def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
     """Per-thread sort-merge attributing each kernel to its innermost enclosing
@@ -1236,11 +1264,26 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
                 enclosing = [
                     e for e in open_stack[: best_idx + 1] if e[0] <= r_start and e[1] >= r_end
                 ]
+                # Total order, matching nvtx_attribution's
+                # ``ORDER BY n_dur ASC, n_start ASC, nvtx_text ASC``. Stack
+                # position alone is not enough: two ranges with an identical
+                # span are both innermost, and which one the stack yields
+                # depends on the order they arrived in, so the answer followed
+                # the input rather than the data. That is the divergence
+                # tests/test_determinism.py exists to prevent.
+                # Most kernels sit inside a single range, and sorting a
+                # one-element list twice cost 36% of the build on a 3.5GB
+                # capture (60.6s -> 82.4s) for no reordering at all.
+                if len(enclosing) == 1:
+                    by_inner = by_outer = enclosing
+                else:
+                    by_inner = sorted(enclosing, key=lambda e: (e[1] - e[0], e[0], e[2]))
+                    by_outer = sorted(enclosing, key=lambda e: (-(e[1] - e[0]), e[0], e[2]))
                 results.append(
                     {
-                        "nvtx_text": best_nvtx,
+                        "nvtx_text": by_inner[0][2],
                         "nvtx_depth": len(enclosing) - 1,
-                        "nvtx_path": " > ".join(e[2] for e in enclosing),
+                        "nvtx_path": " > ".join(e[2] for e in by_outer),
                         "kernel_name": kernel_name,
                         "k_start": k_start,
                         "k_end": k_end,
@@ -1314,66 +1357,7 @@ def _build_nvtx_kernel_map_python(
     if not results:
         return
 
-    # ── Surrogate path_id + dictionary (matches SQL cache layout with path_id) ──
-    distinct_paths = sorted({r["nvtx_path"] for r in results})
-    path_to_id = {p: i + 1 for i, p in enumerate(distinct_paths)}
-
-    # ── Write to Parquet via DuckDB ───────────────────────────────────
-    import pyarrow as pa
-
-    map_schema = pa.schema(
-        [
-            ("path_id", pa.int64()),
-            ("nvtx_text", pa.string()),
-            ("nvtx_depth", pa.int32()),
-            ("kernel_name", pa.string()),
-            ("k_start", pa.int64()),
-            ("k_end", pa.int64()),
-            ("k_dur_ns", pa.int64()),
-        ]
-    )
-    map_arrays = [
-        pa.array([path_to_id[r["nvtx_path"]] for r in results], type=pa.int64()),
-        pa.array([r["nvtx_text"] for r in results], type=pa.string()),
-        pa.array([r["nvtx_depth"] for r in results], type=pa.int32()),
-        pa.array([r["kernel_name"] for r in results], type=pa.string()),
-        pa.array([r["k_start"] for r in results], type=pa.int64()),
-        pa.array([r["k_end"] for r in results], type=pa.int64()),
-        pa.array([r["k_dur_ns"] for r in results], type=pa.int64()),
-    ]
-    map_table = pa.table(map_arrays, schema=map_schema)
-
-    dict_schema = pa.schema(
-        [
-            ("path_id", pa.int64()),
-            ("nvtx_path", pa.string()),
-        ]
-    )
-    dict_arrays = [
-        pa.array([path_to_id[p] for p in distinct_paths], type=pa.int64()),
-        pa.array(list(distinct_paths), type=pa.string()),
-    ]
-    dict_table = pa.table(dict_arrays, schema=dict_schema)
-
-    try:
-        db.register("_nvtx_kernel_map", map_table)
-        db.register("_nvtx_path_dict", dict_table)
-        db.execute(
-            f"COPY _nvtx_path_dict TO '{_safe_path(cache_dir / 'nvtx_path_dict.parquet')}' "
-            f"(FORMAT PARQUET, COMPRESSION ZSTD)"
-        )
-        db.execute(
-            f"""
-            COPY (SELECT * FROM _nvtx_kernel_map ORDER BY k_start, k_end, kernel_name)
-            TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
-            (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
-            """
-        )
-    finally:
-        db.unregister("_nvtx_kernel_map")
-        db.unregister("_nvtx_path_dict")
-        del map_table
-        del dict_table
+    _write_nvtx_kernel_map_parquet(db, results, cache_dir)
 
 
 def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:

@@ -182,29 +182,50 @@ def test_window_functions_declare_a_total_order():
     assert "ORDER BY n_dur DESC, n_start ASC)" not in nvtx
 
 
-def test_all_three_nvtx_map_builders_agree_on_tie_resolution():
-    """The NVTX label ordering is cloned across three builders — fix all or none.
+def test_the_sweep_resolves_label_ties_by_data_not_by_input_order():
+    """Two enclosing ranges with an identical span are both innermost.
 
-    `nvtx_layer_breakdown` prefers the *cached* `nvtx_kernel_map`, which is
-    built by `parquet_cache` (or, on a direct-attached profile, by
-    `nvtx_attribution`). Tiebreaking only the inline fallback would leave the
-    production path arbitrary *and* make cached and uncached runs disagree —
-    reintroducing the exact "different answer depending on whether the cache
-    exists" failure this module tests against.
+    The sweep used to take whichever the stack yielded, so the answer followed
+    the order the rows arrived in rather than the data: feeding the same two
+    ranges as (zzz, aaa) chose `aaa` and as (aaa, zzz) chose `zzz`. That is the
+    "different answer for the same profile" failure this module exists to catch,
+    and it does not show up on real captures because exact-span ties are rare
+    there -- a full 3.5GB comparison found none.
+
+    Asserted on behaviour rather than on the source text. The previous version
+    of this test grepped parquet_cache.py for a fragment of the IEJoin SQL, and
+    went red the moment that query was replaced by the sweep even though the
+    property it cared about was intact.
     """
+    from nsys_ai.parquet_cache import _sweep_nvtx_kernel_map
+
+    kr = [(1, 100, 200, 100, 200, "k1")]
+    answers = set()
+    for order in (("zzz", "aaa"), ("aaa", "zzz")):
+        nvtx = sorted(((1, 0, 300, text) for text in order), key=lambda r: (r[0], r[1]))
+        rows = _sweep_nvtx_kernel_map(kr, nvtx)
+        assert rows, "the sweep attributed nothing"
+        answers.add((rows[0]["nvtx_text"], rows[0]["nvtx_path"]))
+
+    assert len(answers) == 1, f"input order changed the answer: {answers}"
+    # The order is the one nvtx_attribution uses: innermost by
+    # (duration ASC, start ASC, text ASC); path outermost-first.
+    assert answers == {("aaa", "aaa > zzz")}
+
+
+def test_the_direct_attach_builder_keeps_the_same_total_order():
+    """`nvtx_attribution` builds the map on a direct-attached profile, where
+    there is no parquet cache. Its ordering must match the sweep's, or cached
+    and uncached runs disagree."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent / "src/nsys_ai"
-
-    cache = (root / "parquet_cache.py").read_text()
-    assert "n.start ASC, n.text ASC" in cache
-    assert 'FIRST(n.text ORDER BY (n."end" - n.start) ASC, n.start ASC)' not in cache
-
     attribution = (root / "nvtx_attribution.py").read_text()
     assert attribution.count("n_start ASC, nvtx_text ASC") == 2
 
-    # The persisted map must not be reused across the change in tie resolution.
-    assert "_CACHE_VERSION = 15" in cache
+    cache = (root / "parquet_cache.py").read_text()
+    # The persisted map must not be reused across a change in how it is built.
+    assert "_CACHE_VERSION = 16" in cache
 
 
 # ── Cross-backend agreement ─────────────────────────────────────────────────
