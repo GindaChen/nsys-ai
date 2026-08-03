@@ -27,7 +27,13 @@ NO_NVTX = REPO / "tests" / "fixtures" / "healthy_1pct.sqlite"
 
 @pytest.fixture
 def conn():
-    c = sqlite3.connect(NO_NVTX)
+    """Read-only, so the run cannot modify the checked-in fixture.
+
+    `Skill.execute` calls `ensure_performance_indexes`, which writes `_nsysai_*`
+    indexes into whatever profile it is handed. Against a committed fixture that
+    leaves the working tree dirty and changes the file for every later run.
+    """
+    c = sqlite3.connect(f"file:{NO_NVTX}?mode=ro", uri=True)
     try:
         yield c
     finally:
@@ -61,6 +67,21 @@ def test_safe_execute_does_not_pass_abstention_through(conn):
         f"_safe_execute returned an abstention row as if it were data; every "
         f"consumer guards with `if rows:` and a non-empty list passes that: {rows}"
     )
+
+
+def test_safe_execute_still_returns_real_rows(conn):
+    """The other half of the contract: a skill that ran must pass its data through.
+
+    The change restructured the return, so guard the path it moved: without this
+    a `return rows` lost in the edit would only surface as some unrelated
+    matcher test going quiet.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _safe_execute
+
+    rows = _safe_execute("top_kernels", conn, limit=5)
+
+    assert rows, "top_kernels ran against a profile with kernels and returned nothing"
+    assert "kernel_name" in rows[0], f"rows came back reshaped: {rows[0]}"
 
 
 def test_matcher_reports_no_layer_findings_without_annotation(conn):
