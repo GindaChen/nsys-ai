@@ -159,7 +159,7 @@ def _producer_version() -> str:
 
 def _skill_conn(prof: Any) -> Any:
     """The connection a skill should run against (DuckDB cache if present)."""
-    return prof.db if getattr(prof, "db", None) is not None else prof.conn
+    return prof.query_conn()
 
 
 # ---------------------------------------------------------------------------

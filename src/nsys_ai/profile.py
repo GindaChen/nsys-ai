@@ -351,6 +351,8 @@ class Profile:
         )
         self.meta = self._discover()
         self._nvtx_has_text_id = self.adapter.detect_nvtx_text_id()
+        self._owner_thread = threading.get_ident()
+        self._thread_handles = threading.local()
 
     @classmethod
     def _from_conn(cls, conn: sqlite3.Connection) -> "Profile":
@@ -376,6 +378,8 @@ class Profile:
         obj.schema = NsightSchema(conn)
         obj.meta = obj._discover()
         obj._nvtx_has_text_id = obj.adapter.detect_nvtx_text_id()
+        obj._owner_thread = threading.get_ident()
+        obj._thread_handles = threading.local()
         return obj
 
     def _discover(self) -> ProfileMeta:
@@ -436,6 +440,46 @@ class Profile:
             tables=tables,
             gpu_info=self._gpu_info(devices, streams, tables, kcounts),
         )
+
+    def query_conn(self):
+        """The connection this thread should run queries through.
+
+        Two things in one accessor, because they are the same decision.
+
+        Which connection: DuckDB when a cache or direct attach is in use, the
+        SQLite connection when it is not. That choice was spelled out in eleven
+        places across eight modules, in three different spellings including an
+        inverted one, while ``__init__`` had already made it.
+
+        Which handle: DuckDB keeps the pending result set on the connection, so
+        ``execute`` and ``fetch`` are individually atomic but not atomic as a
+        pair. Two threads sharing one handle therefore clobber each other and
+        return wrong rows with nothing raised — measured wrong in 6 of 6 trials
+        against a plain DuckDB connection. The documented remedy is one
+        ``.cursor()`` per thread, so worker threads get a thread-local cursor,
+        reused across calls rather than created per query.
+
+        The thread that opened the profile keeps the connection object itself.
+        That leaves every existing single-threaded caller on exactly the path it
+        was on, and confines the new behaviour to threads that did not exist
+        before. It also matters for correctness: scratch tables created with
+        ``CREATE TEMP TABLE`` are visible only to the handle that made them.
+
+        SQLite needs none of this — the connection is opened with
+        ``check_same_thread=False`` and serialises internally.
+        """
+        if self.db is None:
+            return self.conn
+        # During __init__ the owner is not recorded yet, and _discover() queries
+        # through here. Construction is single-threaded, so the raw handle is
+        # the right answer and there is nothing to guard.
+        owner = getattr(self, "_owner_thread", None)
+        if owner is None or threading.get_ident() == owner:
+            return self.db
+        handle = getattr(self._thread_handles, "conn", None)
+        if handle is None:
+            handle = self._thread_handles.conn = self.db.cursor()
+        return handle
 
     def _gpu_info(self, devices, streams, tables, kcounts) -> dict[int, GpuInfo]:
         """Build per-GPU metadata. Per-device kernel counts come from the

@@ -148,7 +148,7 @@ class EvidenceBuilder:
                     kwargs["trim_end_ns"] = self.trim[1]
 
                 # Use DuckDB if available, fallback to SQLite
-                conn = self.prof.db if self.prof.db is not None else self.prof.conn
+                conn = self.prof.query_conn()
                 rows = skill.execute(conn, **kwargs)
                 if skill.to_findings_fn:
                     findings.extend(_invoke_to_findings(skill.to_findings_fn, rows, context))

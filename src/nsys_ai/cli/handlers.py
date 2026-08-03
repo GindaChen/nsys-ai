@@ -784,7 +784,7 @@ def _cmd_diff(args, _profile):
             sol_specs = [parse_sol_gate(s) for s in sol_specs_raw]
             sol_flops = resolve_theoretical_flops(getattr(args, "theoretical_flops", None))
             with _profile.open(args.after) as sol_after:
-                sol_conn = sol_after.db if sol_after.db is not None else sol_after.conn
+                sol_conn = sol_after.query_conn()
                 sol_results = evaluate_sol_gates(
                     sol_conn,
                     sol_specs,

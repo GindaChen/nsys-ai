@@ -137,7 +137,7 @@ class Agent:
             self.conn = _sqlite3.connect(profile_path, check_same_thread=False)
             self.conn.row_factory = _sqlite3.Row
             return
-        self.conn = self.profile.db if self.profile.db is not None else self.profile.conn
+        self.conn = self.profile.query_conn()
 
     def close(self):
         if self.profile is not None:
