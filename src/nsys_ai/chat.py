@@ -341,6 +341,28 @@ def _prepare_session(
 
     Returns (conn, sqlite_path, system_prompt, query_runner).
     Raises RuntimeError on profile path resolution errors.
+
+    Thread affinity — why this does not use ``Profile.query_conn()``.
+    ``open_profile_readonly`` returns a fresh ``duckdb.connect()``: a private
+    in-memory database per call, not a cursor on a shared one. So each chat
+    session is isolated by construction, and concurrent sessions do not even
+    contend on DuckDB's per-database query lock. ``query_conn()`` solves a
+    different problem — the analysis path must share one database because of
+    ``CREATE TEMP TABLE`` scratch tables and the memoized skill bag, and hands
+    out per-thread cursors so that sharing stays correct.
+
+    The affinity is real, not incidental: this runs *inside* the
+    ``stream_agent_loop`` generator body (and inside the synchronous
+    ``chat_completion``), so the connection belongs to whichever thread
+    advances the generator, and it is closed on that same thread. Every caller
+    builds and drains the generator on one thread — ``tui_textual.py``'s
+    ``@work(thread=True)`` worker, ``tree/chat.py``'s stream worker,
+    ``cli/handlers.py``, and ``web.py``'s per-request handler thread.
+
+    Do not memoize this per path and do not hoist it out of the generator:
+    either turns a private database into a shared handle, which serves
+    concurrent queries wrong rows with nothing raised. Pinned by
+    ``tests/test_chat_connection_threading.py``.
     """
     from .profile import resolve_profile_path
 
@@ -545,6 +567,14 @@ def stream_agent_loop(
     generator and closed in the ``finally`` block.  Call this from a background
     thread (e.g. Textual ``@work(thread=True)``) so the main thread's UI
     remains responsive during DB queries and LLM streaming.
+
+    Build and drain the generator on the same thread. Nothing here is shared
+    between invocations, so two turns may overlap freely — and they do:
+    ``@work(thread=True, exclusive=True)`` cancels the asyncio task, not the OS
+    thread, so a cancelled chat turn keeps running alongside its replacement
+    (Textual's own docs: thread workers cannot be interrupted, only asked to
+    check ``is_cancelled``). That overlap is harmless only because each
+    invocation holds its own connection; see ``_prepare_session``.
 
     *skill_names* — optional list of skill file paths relative to the
     ``docs/agent_skills/`` directory (e.g. ``["skills/mfu.md"]``). When
