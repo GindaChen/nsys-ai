@@ -77,16 +77,21 @@ SKILL_CACHE_MISS = _PROBE_MISS
 
 # Key under which both adapters memoize resolve_activity_tables().
 #
-# Safe because the catalog is fixed by the time a caller can query it: every
-# DuckDB connection is built by open_cached_db / open_parquetdir_db /
-# open_direct_sqlite_db, each of which creates its parquet views and its alias
-# views *before* returning the connection.  Nothing afterwards creates or drops
-# a table matching these prefixes — ensure_performance_indexes writes indexes,
-# not tables — and a profile is an immutable capture besides.
+# What makes this safe is *not* that the catalog stops changing — it does not.
+# ensure_nvtx_kernel_map materializes nvtx_kernel_map and nvtx_path_dict onto a
+# connection well after it is handed out.  The invariant is narrower: the names
+# these prefixes match are all created before the connection is returned, and
+# nothing afterwards adds or drops one.
 #
-# The distinction matters on DuckDB specifically, where SHOW TABLES lists views
-# too: caching a pre-alias catalog would pin the versioned name (or, on direct
-# mode, nothing at all) for the connection's life.
+# Two halves to that.  Every DuckDB connection comes from open_cached_db /
+# open_parquetdir_db / open_direct_sqlite, each of which creates its parquet
+# views and its alias views before returning — this matters on DuckDB
+# specifically, where SHOW TABLES lists views too, so caching a pre-alias
+# catalog would pin the versioned name (or, in direct mode where the real tables
+# live under src., pin nothing at all).  And the DDL that does run later names
+# lowercase helper tables, which no CUPTI_ACTIVITY_KIND_* / NVTX_EVENTS prefix
+# matches.  Both halves are asserted in tests/test_activity_table_memoization.py;
+# a new post-open table that did collide would break the second one.
 _ACTIVITY_TABLES_KEY = "activity_tables"
 
 

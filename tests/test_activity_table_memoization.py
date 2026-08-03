@@ -129,23 +129,78 @@ def test_two_connections_do_not_share_an_answer(tmp_path):
         versioned.close()
 
 
+class _FailsOnceSQLite(sqlite3.Connection):
+    """A profile connection whose first catalog scan raises, then recovers."""
+
+    fail_next = True
+
+    def execute(self, sql, *args):  # noqa: D102
+        if "sqlite_master" in sql and type(self).fail_next:
+            type(self).fail_next = False
+            raise sqlite3.OperationalError("simulated catalog failure")
+        return super().execute(sql, *args)
+
+
 def test_a_failed_scan_is_not_cached():
-    """A closed or broken connection must not pin `{}` for good.
+    """A failure must not pin `{}` on *that same connection* for good.
 
-    Caching the failure would turn a transient error into a profile that has no
-    activity tables for the rest of its life, which reads as an empty profile
+    Caching it would turn one transient error into a profile that has no activity
+    tables for the rest of its life — which reads downstream as an empty profile
     rather than as an error.
+
+    The recovery has to be observed on the connection that failed. Checking a
+    fresh connection instead would prove nothing: the cache is keyed per
+    connection, so a second one would miss the cache whether or not the failure
+    was stored.
     """
-    conn = sqlite3.connect(f"file:{ANNOTATED}?mode=ro", uri=True)
-    conn.close()
-
-    assert wrap_connection(conn).resolve_activity_tables() == {}
-
-    revived = sqlite3.connect(f"file:{ANNOTATED}?mode=ro", uri=True)
+    _FailsOnceSQLite.fail_next = True
+    conn = sqlite3.connect(
+        f"file:{ANNOTATED}?mode=ro", uri=True, factory=_FailsOnceSQLite
+    )
     try:
-        assert wrap_connection(revived).resolve_activity_tables().get("kernel")
+        assert wrap_connection(conn).resolve_activity_tables() == {}, (
+            "premise: the first scan must fail"
+        )
+        recovered = wrap_connection(conn).resolve_activity_tables()
+        assert recovered.get("kernel"), (
+            "the same connection still resolves nothing — the failure was cached"
+        )
     finally:
-        revived.close()
+        conn.close()
+
+
+def test_post_open_ddl_does_not_change_the_answer():
+    """The catalog is *not* frozen after open, so the invariant is tested directly.
+
+    ``ensure_nvtx_kernel_map`` materializes ``nvtx_kernel_map`` and
+    ``nvtx_path_dict`` onto a live connection. That is real post-open DDL, and it
+    is exactly the shape of change that would invalidate a cached catalog — it
+    happens not to, because no ``CUPTI_ACTIVITY_KIND_*`` / ``NVTX_EVENTS`` prefix
+    matches a lowercase helper table.
+
+    Asserted against the *uncached* truth rather than against the earlier cached
+    value, so this fails if a future helper table ever does collide, rather than
+    agreeing with a stale answer.
+    """
+    duckdb = pytest.importorskip("duckdb")  # noqa: F841
+    from nsys_ai.connection import _find_activity_tables
+    from nsys_ai.parquet_cache import ensure_nvtx_kernel_map
+    from nsys_ai.profile import Profile
+
+    with Profile(str(ANNOTATED)) as prof:
+        adapter = prof.adapter
+        if not hasattr(adapter.raw_conn, "sql"):
+            pytest.skip("profile did not open on the DuckDB path")
+
+        cached_before = adapter.resolve_activity_tables()
+        assert cached_before.get("kernel"), "premise: the fixture must resolve"
+
+        ensure_nvtx_kernel_map(adapter.raw_conn)
+
+        catalog = {row[0] for row in adapter.raw_conn.execute("SHOW TABLES").fetchall()}
+        assert "nvtx_kernel_map" in catalog, "premise: the DDL must have run"
+
+        assert adapter.resolve_activity_tables() == _find_activity_tables(catalog)
 
 
 def test_every_duckdb_opener_creates_its_views_before_returning():
