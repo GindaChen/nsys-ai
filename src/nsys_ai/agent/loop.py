@@ -134,16 +134,32 @@ class Agent:
             # Fallback: open as a raw SQLite connection so the agent can still
             # run generic SQL queries even if schema detection fails.
             self.profile = None  # type: ignore[assignment]
-            self.conn = _sqlite3.connect(profile_path, check_same_thread=False)
-            self.conn.row_factory = _sqlite3.Row
+            self._fallback_conn = _sqlite3.connect(profile_path, check_same_thread=False)
+            self._fallback_conn.row_factory = _sqlite3.Row
             return
-        self.conn = self.profile.query_conn()
+        self._fallback_conn = None
+
+    @property
+    def conn(self):
+        """Resolved per access, never cached on the instance.
+
+        ``Profile.query_conn()`` hands a worker thread its own DuckDB cursor,
+        which only works if it is asked at the point of use. Caching the result
+        in ``__init__`` pins whichever handle the constructing thread got, so an
+        Agent built on one thread and run on another would share a handle and
+        silently return wrong rows — the very failure the accessor exists to
+        prevent. That is not hypothetical here: the chat TUI runs the agent from
+        a ``@work(thread=True)`` worker.
+        """
+        if self.profile is not None:
+            return self.profile.query_conn()
+        return self._fallback_conn
 
     def close(self):
         if self.profile is not None:
             self.profile.close()
-        elif hasattr(self, "conn"):
-            self.conn.close()
+        elif self._fallback_conn is not None:
+            self._fallback_conn.close()
 
     def analyze(self) -> str:
         """Run a full auto-analysis of the profile.
