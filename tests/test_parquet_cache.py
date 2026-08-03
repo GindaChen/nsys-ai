@@ -480,3 +480,72 @@ class TestTensorCorePatterns:
         name = "ampere_sgemm_128x128_nn"
         assert re.search(elig, name.lower())
         assert not re.search(active, name.lower())
+
+
+def test_the_map_is_built_by_the_sweep_and_carries_all_nine_columns(tmp_path):
+    """NVTX attribution is a stack sweep, not a general inequality join.
+
+    NVIDIA documents eventType 59 as a Push/Pop range maintaining an nvtxRange
+    stack per thread, so ranges on a thread are strictly nested by construction.
+    A containment IEJoin cannot exploit that: on a 3.5 GB capture it ran over
+    twenty minutes at 1170% CPU to produce a three-million-row result, where the
+    sweep takes 19 s. The whole cache build for that capture went from
+    twenty-plus minutes to 60.6 s.
+
+    Output was compared row-for-row against the IEJoin's on that capture:
+    3,042,699 rows, zero differences either direction, all nine columns.
+
+    Nine columns is the other half. The Python builder used to write seven,
+    omitting is_tc_eligible/uses_tc, so a cache built by that path was silently
+    different from one built by the SQL path. Both now go through one writer.
+    """
+    import shutil
+
+    src = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(src, profile)
+
+    from nsys_ai.profile import Profile
+
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        assert prof.db is not None, "cache build did not produce a DuckDB connection"
+        cols = [c[0] for c in prof.db.execute("DESCRIBE SELECT * FROM nvtx_kernel_map").fetchall()]
+        rows, tc_eligible, tc_used = prof.db.execute(
+            "SELECT count(*), sum(is_tc_eligible), sum(uses_tc) FROM nvtx_kernel_map"
+        ).fetchone()
+
+    assert cols == [
+        "path_id",
+        "nvtx_text",
+        "nvtx_depth",
+        "kernel_name",
+        "k_start",
+        "k_end",
+        "k_dur_ns",
+        "is_tc_eligible",
+        "uses_tc",
+    ], f"map schema drifted: {cols}"
+    assert rows > 0, "the sweep attributed nothing"
+    # Guards the seven-column regression: a map without TC flags reads as all
+    # zeroes and pushes nvtx_layer_breakdown onto a path that double-counts.
+    assert tc_eligible > 0, "is_tc_eligible is all zero — the TC flags were dropped"
+    assert tc_used > 0, "uses_tc is all zero — the TC flags were dropped"
+
+
+def test_the_path_dictionary_matches_the_map(tmp_path):
+    """Every path_id in the map must resolve, or attribution silently vanishes
+    on the join downstream."""
+    import shutil
+
+    src = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(src, profile)
+
+    from nsys_ai.profile import Profile
+
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        orphans = prof.db.execute(
+            "SELECT count(*) FROM nvtx_kernel_map m "
+            "LEFT JOIN nvtx_path_dict d USING (path_id) WHERE d.nvtx_path IS NULL"
+        ).fetchone()[0]
+    assert orphans == 0, f"{orphans} rows carry a path_id with no dictionary entry"
