@@ -48,6 +48,7 @@ from pathlib import Path
 
 import duckdb
 
+from nsys_ai.connection import resolve_table_variant
 from nsys_ai.exceptions import ProfileNotFoundError
 
 # fcntl is POSIX-only. On Windows we degrade to no-locking — concurrent
@@ -742,11 +743,16 @@ def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
 
 
 def _find_table(tables: set[str], prefix: str) -> str | None:
-    """Find the actual table name, handling versioned variants (e.g., _V2)."""
-    if prefix in tables:
-        return prefix
-    candidates = sorted(t for t in tables if t.startswith(prefix + "_V"))
-    return candidates[0] if candidates else None
+    """Find the actual table name, handling versioned variants (e.g., _V2).
+
+    Shares ``resolve_table_variant``'s ordering with the query-side resolver in
+    ``connection.py`` so the cached and uncached engines cannot pick different
+    source tables on a profile that carries several variants. Unlike that
+    resolver this one stays strict about ``_V<n>``: it decides which table the
+    ETL *copies*, and a looser match would let an unrelated activity kind
+    (``CUPTI_ACTIVITY_KIND_MEMCPY2``) be cached as the memcpy table.
+    """
+    return resolve_table_variant(tables, prefix)
 
 
 def _kernel_like_tables(tables: set[str]) -> list[str]:

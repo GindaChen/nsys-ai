@@ -12,9 +12,11 @@ Three things keep that dual path honest, and none of them was enforced:
    call is fine, adding one carrying ``[end]`` or a hex literal is not.
 
 2. The Parquet cache creates an alias view for *every* known variant of a table
-   (base, _V2, _V3), so any table-resolution strategy lands on the same data.
-   That is the reason a second, differently-ordered resolver in
-   ``sync_cost_analysis`` has never produced a wrong answer.
+   (base, _V2, _V3), so a caller that asks for the unversioned name on a
+   versioned capture still lands on the data. Table resolution itself now goes
+   through a single shared rule (``connection.resolve_table_variant``, used by
+   both the query side and the cache builder); the alias views remain the safety
+   net for callers that never resolve at all.
 
 3. A profile whose tables carry an unknown future suffix must still analyse.
 
@@ -123,34 +125,6 @@ def test_every_known_table_variant_is_reachable_on_the_cached_path():
     assert not unreachable, (
         f"alias views absent, so resolution is no longer variant-safe: {unreachable}"
     )
-
-
-def test_the_two_table_resolvers_agree_wherever_only_one_variant_exists():
-    """A second resolver lives in ``sync_cost_analysis`` and orders variants the
-    opposite way (``ORDER BY name DESC`` vs ``sorted()[0]``).
-
-    On a real capture only one variant is present — verified across every
-    committed fixture and a 3.7GB production capture — so the two agree. They
-    diverge only when variants coexist, which happens exclusively on the cached
-    path where all variants alias the same data. This test states the condition
-    under which the duplication is harmless, so that if it stops holding the
-    reason is on record.
-    """
-    from nsys_ai.connection import wrap_connection
-    from nsys_ai.skills.builtins.sync_cost_analysis import _resolve_table_name
-
-    conn = sqlite3.connect(FIXTURE)
-    try:
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        variants = sorted(t for t in tables if t.startswith("CUPTI_ACTIVITY_KIND_KERNEL"))
-        assert len(variants) == 1, f"fixture premise broke; found {variants}"
-
-        official = wrap_connection(conn).resolve_activity_tables().get("kernel")
-        local = _resolve_table_name(conn, "CUPTI_ACTIVITY_KIND_KERNEL")
-    finally:
-        conn.close()
-
-    assert official == local == variants[0]
 
 
 def test_an_unknown_future_table_suffix_still_analyses(tmp_path):
