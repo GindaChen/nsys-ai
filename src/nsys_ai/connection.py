@@ -75,6 +75,25 @@ def _probe_cache_set(conn, key: str, value) -> None:
 
 SKILL_CACHE_MISS = _PROBE_MISS
 
+# Key under which both adapters memoize resolve_activity_tables().
+#
+# What makes this safe is *not* that the catalog stops changing — it does not.
+# ensure_nvtx_kernel_map materializes nvtx_kernel_map and nvtx_path_dict onto a
+# connection well after it is handed out.  The invariant is narrower: the names
+# these prefixes match are all created before the connection is returned, and
+# nothing afterwards adds or drops one.
+#
+# Two halves to that.  Every DuckDB connection comes from open_cached_db /
+# open_parquetdir_db / open_direct_sqlite, each of which creates its parquet
+# views and its alias views before returning — this matters on DuckDB
+# specifically, where SHOW TABLES lists views too, so caching a pre-alias
+# catalog would pin the versioned name (or, in direct mode where the real tables
+# live under src., pin nothing at all).  And the DDL that does run later names
+# lowercase helper tables, which no CUPTI_ACTIVITY_KIND_* / NVTX_EVENTS prefix
+# matches.  Both halves are asserted in tests/test_activity_table_memoization.py;
+# a new post-open table that did collide would break the second one.
+_ACTIVITY_TABLES_KEY = "activity_tables"
+
 
 def cached_skill_rows(conn, key: str):
     """Rows a skill already produced for ``key`` on ``conn``, or SKILL_CACHE_MISS.
@@ -149,13 +168,20 @@ class SQLiteAdapter:
         return self.conn.execute(sql, parameters)
 
     def resolve_activity_tables(self) -> dict[str, str]:
+        cached = _probe_cache_get(self.conn, _ACTIVITY_TABLES_KEY)
+        if cached is not _PROBE_MISS:
+            return dict(cached)
         try:
             cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {row[0] for row in cur.fetchall()}
         except sqlite3.Error as exc:
             _log.debug("Failed to resolve activity tables (sqlite): %s", exc, exc_info=True)
+            # Deliberately not cached: a failure here should not pin an empty
+            # answer for the rest of the connection's life.
             return {}
-        return _find_activity_tables(tables)
+        resolved = _find_activity_tables(tables)
+        _probe_cache_set(self.conn, _ACTIVITY_TABLES_KEY, resolved)
+        return dict(resolved)
 
     def detect_nvtx_text_id(self) -> bool:
         try:
@@ -196,12 +222,19 @@ class DuckDBAdapter:
         return self.conn.execute(rewritten_sql, list(parameters) if parameters else [])
 
     def resolve_activity_tables(self) -> dict[str, str]:
+        cached = _probe_cache_get(self.conn, _ACTIVITY_TABLES_KEY)
+        if cached is not _PROBE_MISS:
+            return dict(cached)
         try:
             tables = {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
         except DB_ERRORS as exc:
             _log.debug("Failed to resolve activity tables (duckdb): %s", exc, exc_info=True)
+            # Deliberately not cached: a failure here should not pin an empty
+            # answer for the rest of the connection's life.
             return {}
-        return _find_activity_tables(tables)
+        resolved = _find_activity_tables(tables)
+        _probe_cache_set(self.conn, _ACTIVITY_TABLES_KEY, resolved)
+        return dict(resolved)
 
     def detect_nvtx_text_id(self) -> bool:
         try:
