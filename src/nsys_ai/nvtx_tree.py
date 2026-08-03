@@ -92,10 +92,17 @@ def _build_single_thread_tree(
     """
     # Load NVTX for this thread only.
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
-    # The table is resolved, not named: newer exports suffix it _V2/_V3, and a
-    # hardcoded name here raised "no such table" on an annotated profile — the
+    # The tables are resolved, not named: newer exports suffix them _V2/_V3, and
+    # a hardcoded name here raised "no such table" on an annotated profile — the
     # very symptom this change set out to remove, from the file it edited.
-    nvtx_table = profile.adapter.resolve_activity_tables().get("nvtx", "NVTX_EVENTS")
+    #
+    # Resolved once, for both names. resolve_activity_tables() is not memoised
+    # and rescans the schema on every call — 1.6 ms against the DuckDB adapter,
+    # measured — and this function runs per thread, so a second call here would
+    # double a cost the tree build already pays N times.
+    _tables = profile.adapter.resolve_activity_tables()
+    nvtx_table = _tables.get("nvtx", "NVTX_EVENTS")
+    runtime_table = _tables.get("runtime")
     if profile._nvtx_has_text_id:
         nvtx_rows = profile._duckdb_query(
             f"""
@@ -130,11 +137,10 @@ def _build_single_thread_tree(
     # Load runtime calls for this thread covering the discovered NVTX span set.
     # Using NVTX-derived bounds keeps GPU projection (start/end/depth/path)
     # stable across adjacent timeline tiles near boundaries.
-    rt_lo = min(int(n["start"]) for n in nvtx_rows)
-    rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
-    runtime_table = _runtime_table(profile)
     if not runtime_table:
         return []
+    rt_lo = min(int(n["start"]) for n in nvtx_rows)
+    rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
     rt_rows = profile._duckdb_query(
         f"""
             SELECT start, [end], correlationId FROM {runtime_table}

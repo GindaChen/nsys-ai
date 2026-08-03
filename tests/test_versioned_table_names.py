@@ -188,7 +188,14 @@ def test_no_query_names_a_versioned_table_literally():
 
 
 def test_the_check_can_actually_fail():
-    """Guard the guard: a regex that matches nothing would pass silently."""
+    """Guard the guard: a regex that matches nothing would pass silently.
+
+    Known limit: the scan is line-by-line, so `FROM` at the end of one line with
+    the table on the next would slip through. No query in the package is written
+    that way, and widening it to multi-line would cost more false positives than
+    the case is worth — but a literal that reappears in that shape will not be
+    caught here.
+    """
     probe = "            FROM CUPTI_ACTIVITY_KIND_RUNTIME r\n"
     assert _LITERAL_IN_SQL.search(probe), "the detector stopped detecting"
     assert not _LITERAL_IN_SQL.search("FROM {runtime_table} r")
