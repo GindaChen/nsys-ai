@@ -1110,34 +1110,26 @@ def _build_nvtx_kernel_map(
     #
     # Sources stay Parquet-only, as before, so the heavy read never touches the
     # attached SQLite.
+    tc_by_kernel: dict[tuple, tuple[int, int]] = {}
     try:
-        kr_rows = db.execute(
-            f"""
-            SELECT r.globalTid, r.start, r."end", k.start, k."end", k.name,
-                   COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0),
-                   COALESCE(CAST(k.uses_tc AS INTEGER), 0)
-            FROM read_parquet('{kps}') k
-            JOIN read_parquet('{rps}') r ON r.correlationId = k.correlationId
-            ORDER BY r.globalTid, r.start
-            """
-        ).fetchall()
+        kr_rows = _stream_kernel_runtime(db, kps, rps, tc_by_kernel)
         # The sweep advances one index per thread, so this must arrive sorted.
-        nvtx_rows = db.execute(
-            f"""
-            SELECT globalTid, start, "end", CAST(text AS VARCHAR)
-            FROM read_parquet('{nps}')
-            WHERE eventType = 59 AND "end" > start AND text IS NOT NULL
-            ORDER BY globalTid, start
-            """
-        ).fetchall()
+        #
+        # Streamed rather than fetchall()'d, and the label strings interned. The
+        # ranges outnumber the kernels five to one here (15.9M vs 3.1M on a
+        # 3.5GB capture), so they dominate: fetchall built 15.9M tuples that the
+        # sweep then copied into 15.9M more, and every label was a separate str
+        # object even though NVTX text repeats heavily. Feeding a generator
+        # drops the first copy, and interning collapses the labels onto one
+        # object per distinct string.
+        nvtx_rows = _stream_nvtx_ranges(db, nps)
     except duckdb.Error as e:
         log.warning("nvtx_kernel_map: source read failed (%s); skipping map", e)
         return
 
-    if not kr_rows or not nvtx_rows:
-        log.info("nvtx_kernel_map: no kernel/NVTX overlap to attribute; skipping")
-        return
-
+    # Both inputs are generators, so neither can be tested for emptiness here --
+    # an exhausted-but-truthy generator would silently produce nothing. The
+    # sweep returning no rows covers "no kernels", "no ranges" and "no overlap".
     results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
     if not results:
         log.info("nvtx_kernel_map produced no NVTX/kernel attribution; skipping map creation")
@@ -1146,8 +1138,8 @@ def _build_nvtx_kernel_map(
     # Tensor Core flags are attached after the name-agnostic sweep, the same way
     # ensure_nvtx_kernel_map does it. Keying on (k_start, k_end, kernel_name) is
     # not unique, but both flags are derived by regex from the kernel name, so
-    # rows that collide on that key carry identical values.
-    tc_by_kernel = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr_rows}
+    # rows that collide on that key carry identical values. The table was filled
+    # while streaming, because the rows cannot be walked a second time.
     for r in results:
         r["is_tc_eligible"], r["uses_tc"] = tc_by_kernel.get(
             (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
@@ -1155,6 +1147,80 @@ def _build_nvtx_kernel_map(
 
     _write_nvtx_kernel_map_parquet(db, results, cache_dir)
     log.info("nvtx_kernel_map built via stack sweep (parquet-only, path_id)")
+
+
+def _stream_kernel_runtime(db, kernels_parquet: str, runtime_parquet: str, tc_out: dict):
+    """Yield ``(globalTid, r_start, r_end, k_start, k_end, kernel_name)``, sorted.
+
+    Streamed and interned for the same reason as the NVTX ranges, and the effect
+    is larger here: a 3.5GB capture has 3,077,650 of these rows carrying only
+    109 distinct kernel names, averaging 253 characters -- CUDA mangled names
+    repeat about 28,000 times each. As separate str objects that is ~0.9GB;
+    interned it is a few kilobytes, and the same objects are then shared by
+    every result row.
+
+    ``tc_out`` is filled as a side effect. The Tensor Core flags are needed
+    after the sweep, and a generator cannot be walked twice.
+    """
+    result = db.execute(
+        f"""
+        SELECT r.globalTid, r.start, r."end", k.start, k."end", k.name,
+               COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0) AS is_tc_eligible,
+               COALESCE(CAST(k.uses_tc AS INTEGER), 0) AS uses_tc
+        FROM read_parquet('{kernels_parquet}') k
+        JOIN read_parquet('{runtime_parquet}') r ON r.correlationId = k.correlationId
+        ORDER BY r.globalTid, r.start
+        """
+    )
+    make_reader = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
+    reader = make_reader()
+
+    pool: dict[str, str] = {}
+    for batch in reader:
+        cols = [batch.column(i).to_pylist() for i in range(8)]
+        tids, r_starts, r_ends, k_starts, k_ends, names, elig, used = cols
+        for i, name in enumerate(names):
+            shared = pool.get(name)
+            if shared is None:
+                shared = pool[name] = name
+            k_start = k_starts[i]
+            k_end = k_ends[i]
+            tc_out[(k_start, k_end, shared)] = (elig[i], used[i])
+            yield tids[i], r_starts[i], r_ends[i], k_start, k_end, shared
+
+
+def _stream_nvtx_ranges(db, nvtx_parquet: str):
+    """Yield ``(globalTid, start, end, text)`` for PushPop ranges, sorted.
+
+    Batched through Arrow so the whole result never exists as one list of
+    tuples, and labels interned so repeated NVTX text costs one string object
+    rather than one per row.
+    """
+    result = db.execute(
+        f"""
+        SELECT globalTid, start, "end", CAST(text AS VARCHAR) AS text
+        FROM read_parquet('{nvtx_parquet}')
+        WHERE eventType = 59 AND "end" > start AND text IS NOT NULL
+        ORDER BY globalTid, start
+        """
+    )
+    # to_arrow_reader is the current name; fetch_record_batch is its deprecated
+    # alias and the only one present on the duckdb>=1.0 floor this package
+    # declares.
+    make_reader = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
+    reader = make_reader()
+
+    pool: dict[str, str] = {}
+    for batch in reader:
+        tids = batch.column(0).to_pylist()
+        starts = batch.column(1).to_pylist()
+        ends = batch.column(2).to_pylist()
+        texts = batch.column(3).to_pylist()
+        for i, text in enumerate(texts):
+            shared = pool.get(text)
+            if shared is None:
+                shared = pool[text] = text
+            yield tids[i], starts[i], ends[i], shared
 
 
 def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> None:
