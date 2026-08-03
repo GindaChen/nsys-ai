@@ -2,14 +2,7 @@ import sqlite3
 
 import pytest
 
-from nsys_ai.skills.builtins.sync_cost_analysis import _sync_result_cache
 from nsys_ai.skills.registry import get_skill
-
-
-@pytest.fixture(autouse=True)
-def _clear_sync_cache():
-    """Prevent id(conn) reuse of in-memory connections from poisoning results."""
-    _sync_result_cache.clear()
 
 
 @pytest.fixture
@@ -191,23 +184,19 @@ def test_sync_analysis_invalid_device_param(sync_skill):
     assert "device" in rows[0]["error"].lower()
 
 
-def test_sync_analysis_cache_key_normalizes_device_type(sync_skill):
-    """Regression: `device=1` and `device='1'` must share a cache entry.
-    _impl coerces both to int, so if the wrapper keyed the cache on the raw
-    kwarg, the string call would miss and re-run the query — defeating the
-    cross-skill cache reuse."""
+def test_sync_analysis_device_accepts_int_or_numeric_string(sync_skill):
+    """`device=1` and `device='1'` must produce the same answer.
+
+    The skill coerces the parameter with ``int()``, so a numeric string is a
+    legal spelling of the same request. (This replaces a test that asserted the
+    two calls shared an entry in a module-level result cache; that cache is
+    gone, and ``Skill.execute``'s per-connection memo keys on the JSON dump of
+    the resolved params, so the two spellings are now two memo entries and the
+    query simply runs twice. Same answer, no correctness change.)"""
     conn = sqlite3.connect(":memory:")
     _seed_multi_device(conn)
 
-    sync_skill.execute(conn, device=1)
-    size_after_int = len(_sync_result_cache)
-    sync_skill.execute(conn, device="1")
-    size_after_str = len(_sync_result_cache)
-
-    assert size_after_str == size_after_int, (
-        "device=1 and device='1' must share the cache entry "
-        f"(size grew {size_after_int} → {size_after_str})"
-    )
+    assert sync_skill.execute(conn, device=1) == sync_skill.execute(conn, device="1")
 
 
 def test_sync_analysis_device_filter_on_missing_tables_reports_not_found(sync_skill):

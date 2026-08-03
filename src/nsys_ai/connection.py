@@ -296,12 +296,54 @@ class DuckDBAdapter:
             return set()
 
 
+_VERSION_SUFFIX_RE = re.compile(r"_V(\d+)")
+
+
+def resolve_table_variant(
+    tables: set[str] | frozenset[str],
+    prefix: str,
+    *,
+    allow_other_suffixes: bool = False,
+) -> str | None:
+    """Pick which of ``prefix``'s name variants a profile actually carries.
+
+    Nsight Systems documents only unversioned ``CUPTI_ACTIVITY_KIND_*`` names,
+    but exports in the wild have carried ``_V2``/``_V3`` suffixes, so the choice
+    has to be made somewhere. The order is:
+
+    1. the exact ``prefix``, when present — an unversioned table is the name the
+       exporter documents, so it wins outright;
+    2. otherwise the highest ``_V<n>``, compared as an *integer* so ``_V10``
+       beats ``_V3`` (lexicographic order gets that backwards);
+    3. otherwise, only when ``allow_other_suffixes``, the alphabetically first
+       remaining name that starts with ``prefix``, so an unforeseen future
+       suffix still resolves to something rather than to nothing.
+
+    The ``_V<n>`` match is anchored (``fullmatch``) rather than a bare
+    ``startswith``: ``CUPTI_ACTIVITY_KIND_MEMCPY2`` is a real CUPTI activity
+    kind (peer-to-peer memcpy) and must never be mistaken for a newer variant
+    of ``CUPTI_ACTIVITY_KIND_MEMCPY``.
+    """
+    if prefix in tables:
+        return prefix
+    versioned: list[tuple[int, str]] = []
+    others: list[str] = []
+    for name in tables:
+        if not name.startswith(prefix):
+            continue
+        match = _VERSION_SUFFIX_RE.fullmatch(name[len(prefix) :])
+        if match:
+            versioned.append((int(match.group(1)), name))
+        elif allow_other_suffixes:
+            others.append(name)
+    if versioned:
+        return max(versioned)[1]
+    return sorted(others)[0] if others else None
+
+
 def _find_activity_tables(tables: set[str]) -> dict[str, str]:
     def _find_by_prefix(prefix: str) -> str | None:
-        if prefix in tables:
-            return prefix
-        candidates = sorted(t for t in tables if t.startswith(prefix))
-        return candidates[0] if candidates else None
+        return resolve_table_variant(tables, prefix, allow_other_suffixes=True)
 
     resolved: dict[str, str] = {}
 
@@ -327,6 +369,14 @@ def _find_activity_tables(tables: set[str]) -> dict[str, str]:
         nvtx_table = _find_by_prefix("NVTX_EVENTS")
     if nvtx_table:
         resolved["nvtx"] = nvtx_table
+
+    sync_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+    if sync_table:
+        resolved["sync"] = sync_table
+
+    sync_type_table = _find_by_prefix("ENUM_CUPTI_SYNC_TYPE")
+    if sync_type_table:
+        resolved["sync_type"] = sync_type_table
 
     return resolved
 
