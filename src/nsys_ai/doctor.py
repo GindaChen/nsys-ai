@@ -29,7 +29,11 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = "0.1"
+# The doctor report's own envelope version. Deliberately NOT
+# annotation.SCHEMA_VERSION: that versions the evidence/diff envelope, and these
+# are independent formats that merely happen to share a value today. Merging
+# them would make a breaking change to one falsely bump the other.
+DOCTOR_SCHEMA_VERSION = "0.1"
 
 # Profiler-overhead thresholds (percent of profile span).
 _OVERHEAD_WARN_PCT = 10.0
@@ -699,7 +703,7 @@ def run_doctor(
                         pass
 
     return DoctorReport(
-        schema_version=SCHEMA_VERSION,
+        schema_version=DOCTOR_SCHEMA_VERSION,
         producer="nsys-ai",
         producer_version=_producer_version(),
         profile_path=profile_path,
