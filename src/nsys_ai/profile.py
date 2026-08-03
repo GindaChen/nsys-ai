@@ -677,11 +677,12 @@ class Profile:
         Returns {h2d_ns, d2h_ns, d2d_ns, total_ns}; 0 when table or window empty.
         """
         out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
-        if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
+        memcpy_table = self.adapter.resolve_activity_tables().get("memcpy")
+        if not memcpy_table:
             return out
-        sql = """
+        sql = f"""
             SELECT copyKind, SUM([end] - start) AS total_ns
-            FROM CUPTI_ACTIVITY_KIND_MEMCPY
+            FROM {memcpy_table}
             WHERE start >= ? AND [end] <= ?
         """
         params: list = [trim[0], trim[1]]
@@ -727,12 +728,15 @@ class Profile:
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
+        runtime_table = self.adapter.resolve_activity_tables().get("runtime")
+        if not runtime_table:
+            return set()
         return {
             r["globalTid"]
             for r in self._duckdb_query(
                 f"""
             SELECT DISTINCT r.globalTid
-            FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+            FROM {runtime_table} r
             JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
         """,
@@ -742,11 +746,14 @@ class Profile:
 
     def runtime_index(self, threads: set[int], window: tuple[int, int]) -> dict[int, list]:
         """Load CUDA runtime calls for threads, indexed by globalTid."""
+        runtime_table = self.adapter.resolve_activity_tables().get("runtime")
+        if not runtime_table:
+            return {}
         idx = {}
         for tid in threads:
             idx[tid] = self._duckdb_query(
-                """
-                SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+                f"""
+                SELECT start, [end], correlationId FROM {runtime_table}
                 WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
             """,
                 [tid, window[0], window[1]],

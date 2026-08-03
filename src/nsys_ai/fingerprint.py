@@ -193,10 +193,11 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
     # (observed on some PyTorch versions where NCCL skips the typed-payload
     # path). Multi-device kernel activity is a robust signal for single-node
     # multi-rank training.
-    if not distributed and "CUPTI_ACTIVITY_KIND_KERNEL" in tables:
+    kernel_table = adapter.resolve_activity_tables().get("kernel")
+    if not distributed and kernel_table:
         try:
             cur = adapter.execute(
-                "SELECT COUNT(DISTINCT deviceId) FROM CUPTI_ACTIVITY_KIND_KERNEL"
+                f"SELECT COUNT(DISTINCT deviceId) FROM {kernel_table}"  # noqa: S608
             )
             row = cur.fetchone()
             if row and row[0] is not None and int(row[0]) > 1:
@@ -415,6 +416,11 @@ def get_profile_id(
                 "ORDER BY globalPid NULLS LAST"
             ),
         ),
+        # literal-table-ok: this is a hash input, not a reader. Resolving the
+        # name would make a _V2 / _V3 export hash differently than it does
+        # today, and get_profile_id is a stable content identifier — that is an
+        # algorithm change, which the _PROFILE_ID_ALGO tag exists to version.
+        # Tracked separately; do not "fix" this without bumping the tag.
         ("kernel_count", _scalar("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")),
     ]
 
