@@ -341,6 +341,39 @@ def _prepare_session(
 
     Returns (conn, sqlite_path, system_prompt, query_runner).
     Raises RuntimeError on profile path resolution errors.
+
+    Thread affinity — why this does not use ``Profile.query_conn()``.
+    ``open_profile_readonly`` returns a fresh connection per call, never a
+    cursor on a shared one: ``duckdb.connect()`` on the Parquet-cache path — a
+    private in-memory database, so concurrent sessions do not even contend on
+    DuckDB's per-database query lock — and, when that cache cannot be opened,
+    a read-only ``sqlite3.connect(..., uri=True)`` fallback. ``query_conn()``
+    solves a different problem: the analysis path must share one database
+    because of ``CREATE TEMP TABLE`` scratch tables and the memoized skill bag,
+    and hands out per-thread cursors so that sharing stays correct.
+
+    The affinity is real, not incidental: this runs *inside* the
+    ``stream_agent_loop`` generator body (and inside the synchronous
+    ``chat_completion``), so the connection belongs to whichever thread
+    advances the generator, and it is closed on that same thread. Every caller
+    builds and drains the generator on one thread — ``tui_textual.py``'s
+    ``@work(thread=True)`` worker, ``tree/chat.py``'s stream worker,
+    ``cli/handlers.py``, and ``web.py``'s per-request handler thread. This is
+    the same rule ``open_profile_readonly_for_worker`` states for callers that
+    open a connection themselves; the difference is only that here the opening
+    is implicit in when the generator is first advanced.
+
+    Two changes would break it, for two *different* reasons — do not conflate
+    them. **Memoizing per path** collapses the private databases into one
+    shared handle, which serves concurrent queries wrong rows with nothing
+    raised. **Hoisting the setup out of the generator** shares nothing (each
+    call still opens its own connection) but creates it on the thread that
+    builds the generator and closes it on the thread that drains it. On DuckDB
+    that mismatch is merely unenforced; on the SQLite fallback it raises
+    ``sqlite3.ProgrammingError`` — ``open_profile_readonly`` leaves
+    ``check_same_thread`` at its default, so the handle is usable and closable
+    only from its creating thread. Both are pinned by
+    ``tests/test_chat_connection_threading.py``.
     """
     from .profile import resolve_profile_path
 
@@ -545,6 +578,21 @@ def stream_agent_loop(
     generator and closed in the ``finally`` block.  Call this from a background
     thread (e.g. Textual ``@work(thread=True)``) so the main thread's UI
     remains responsive during DB queries and LLM streaming.
+
+    Build and drain the generator on the same thread. No connection or cursor
+    is shared between invocations — the only mutable module-level state this
+    path touches is ``profile_db_tool._schema_cache``, which is lock-guarded
+    and holds strings — so two turns may overlap freely, and they do:
+    ``@work(thread=True, exclusive=True)`` cancels the asyncio task, not the OS
+    thread, so a cancelled chat turn keeps running alongside its replacement
+    (Textual's own docs: thread workers cannot be interrupted, only asked to
+    check ``is_cancelled``). That overlap is harmless only because each
+    invocation holds its own connection; see ``_prepare_session``. The
+    *diff_context* path holds no connection of its own — its ``ToolDispatcher``
+    is built with ``conn=None``, as is the one in ``diff_tools.run_diff_tool``
+    — but its ``DiffContext`` (and the two ``Profile`` objects inside it) is
+    caller-owned, so it inherits its owner's thread; today's only caller is the
+    single-threaded ``nsys-ai diff --chat`` REPL.
 
     *skill_names* — optional list of skill file paths relative to the
     ``docs/agent_skills/`` directory (e.g. ``["skills/mfu.md"]``). When
