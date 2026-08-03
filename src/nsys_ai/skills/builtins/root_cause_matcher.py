@@ -970,8 +970,22 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
 
 def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
-    """Execute a skill, returning [] on DB or skill execution errors."""
+    """Execute a skill, returning [] on DB errors, skill errors, or abstention.
+
+    Abstention collapses to [] here rather than at each call site. A skill that
+    could not run is not evidence for any pattern, and every consumer below
+    guards with ``if <rows>:`` — which a one-row abstention passes, because it
+    is a non-empty list.
+
+    Nothing currently misreads one, and the reason is an accident rather than a
+    design: the only sub-skill that can abstain is ``nvtx_layer_breakdown``, and
+    the analysers it feeds sit behind ``len(layer_data) >= 2`` while abstention
+    is exactly one row. Adding a second abstaining skill to a ``len >= 1`` path
+    would end that silently. ``evidence_builder`` filters at its own boundary
+    for the same reason.
+    """
     from ...exceptions import SkillExecutionError
+    from ...skills.base import is_abstention
     from ...skills.registry import get_skill
 
     _safe_errors = DB_ERRORS + (SkillExecutionError,)
@@ -980,10 +994,19 @@ def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
         skill = get_skill(skill_name)
         if skill is None:
             return []
-        return skill.execute(conn, **kwargs)
+        rows = skill.execute(conn, **kwargs)
     except _safe_errors as e:
         _log.debug("root_cause_matcher (%s): %s", skill_name, e, exc_info=True)
         return []
+
+    if is_abstention(rows):
+        _log.debug(
+            "root_cause_matcher (%s): abstained — %s",
+            skill_name,
+            rows[0].get("reason", ""),
+        )
+        return []
+    return rows
 
 
 def _format(rows):
