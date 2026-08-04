@@ -12,6 +12,9 @@ from ..base import Skill, SkillParam, requires_nvtx
 
 def _execute(conn, **kwargs):
 
+    # Plain requires_nvtx, NOT requires_pushpop_nvtx, on purpose: detect_iterations
+    # reads NVTX rows as bare intervals and never filters eventType, so it works
+    # unchanged on a Start/End-only profile. See requires_pushpop_nvtx.
     guard = requires_nvtx(conn, needs="Per-iteration breakdown")
     if guard:
         return guard

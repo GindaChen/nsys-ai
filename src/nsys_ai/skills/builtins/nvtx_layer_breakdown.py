@@ -22,7 +22,7 @@ from nsys_ai.connection import (
     cached_nvtx_map_uses_path_id,
 )
 
-from ..base import Skill, SkillParam, requires_nvtx
+from ..base import Skill, SkillParam, requires_pushpop_nvtx
 
 
 def _pick_nvtx_view(conn, fallback: str) -> str:
@@ -95,7 +95,7 @@ def _execute(conn, **kwargs):
     if report_err:
         return [{"error": report_err}]
 
-    guard = requires_nvtx(conn, needs="Layer attribution")
+    guard = requires_pushpop_nvtx(conn, needs="Layer attribution")
     if guard:
         return guard
 

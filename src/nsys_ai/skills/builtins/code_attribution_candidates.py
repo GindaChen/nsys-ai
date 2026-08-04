@@ -7,7 +7,7 @@ model/training regions, without claiming exact source-line attribution.
 
 from collections import Counter, defaultdict
 
-from ..base import Skill, SkillParam, requires_nvtx
+from ..base import Skill, SkillParam, requires_pushpop_nvtx
 
 _LIMITATIONS = [
     "NVTX attribution is temporal context, not exact source-line attribution",
@@ -164,7 +164,7 @@ def _top_kernels(kernels: list[dict], limit: int = 3) -> list[dict]:
 
 def _execute(conn, **kwargs):
 
-    guard = requires_nvtx(conn, needs="Code attribution")
+    guard = requires_pushpop_nvtx(conn, needs="Code attribution")
     if guard:
         return guard
 

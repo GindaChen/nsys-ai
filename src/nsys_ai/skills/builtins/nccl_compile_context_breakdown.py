@@ -15,7 +15,7 @@ Classifies by **leaf** label, not ancestor-path containment. See
 containment).
 """
 
-from ..base import Skill, requires_nvtx
+from ..base import Skill, requires_pushpop_nvtx
 
 _INDUCTOR_LEAF_MARKERS = ("## Call CompiledFxGraph",)
 _EAGER_LEAF_PREFIXES = ("c10d::", "nccl")
@@ -41,7 +41,7 @@ def _execute(conn, **kwargs):
     # removes the skill from the output with no trace that it was even asked.
     from ...nvtx_attribution import attribute_kernels_to_nvtx
 
-    guard = requires_nvtx(conn, needs="Call-mode classification")
+    guard = requires_pushpop_nvtx(conn, needs="Call-mode classification")
     if guard:
         return guard
 

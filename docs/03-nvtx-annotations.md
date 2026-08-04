@@ -142,3 +142,46 @@ This is the recommended way to profile specific training iterations.
 | 34 | Mark (instant) |
 | 59 | Push/Pop range |
 | 60 | Start/End range |
+| 70 | Push/Pop range imported from NVTXT |
+| 71 | Start/End range imported from NVTXT |
+| 75 | Domain creation |
+
+A profile that exports these lists them in its own `ENUM_NSYS_EVENT_TYPE`
+table, which is the authoritative source for the export you are holding.
+
+## What nsys-ai attributes
+
+Mapping a GPU kernel to the annotation it ran under uses **Push/Pop ranges
+(eventType 59) only**.
+
+Nsight keeps a push/pop range stack per CPU thread, so a thread's push/pop
+ranges are strictly nested by construction. That is what makes kernel
+attribution a single ordered sweep: walk one thread's ranges in start order,
+keep the open ones on a stack, and the innermost still-open range at a
+kernel's launch is that kernel's label.
+
+Start/End ranges carry no such guarantee. NVIDIA documents that they "expose
+arbitrary concurrency (not just nesting)" and that "the start of a range can
+occur on a different thread than the end" — Nsight records that as one row
+whose `globalTid` and `endGlobalTid` differ. Handing those to a nesting stack
+would produce confident, wrong parents, so nsys-ai does not attribute them.
+The same applies to the NVTXT-imported variants (70 and 71).
+
+On a profile with no push/pop ranges at all, the skills that depend on
+attribution — `nvtx_kernel_map`, `nvtx_layer_breakdown`,
+`code_attribution_candidates`, `nccl_compile_context_breakdown` — abstain and
+say why, rather than returning an empty result that reads as "this profile has
+no annotation". An entirely Start/End profile gets a reason naming that; any
+other case, including an NVTXT import, gets a reason listing the eventTypes
+actually present, read from the profile's own `ENUM_NSYS_EVENT_TYPE`. To get
+attribution, annotate with `nvtxRangePush` / `nvtxRangePop`
+(`torch.cuda.nvtx.range_push` / `range_pop`, or the `torch.cuda.nvtx.range`
+context manager). PyTorch's own annotations already use push/pop.
+
+Region *listing* is unaffected and does see Start/End ranges: the NVTX tree,
+`region_mfu`, iteration detection, `host_sync_parent_ranges` and `gc_impact`
+all read NVTX rows as plain intervals.
+
+One limitation worth stating: on a profile that mixes both kinds, the
+attribution skills run on the push/pop ranges and the Start/End ranges are
+silently left out.
