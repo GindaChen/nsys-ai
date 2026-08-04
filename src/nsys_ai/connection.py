@@ -85,6 +85,48 @@ def _cache_owner(conn):
     return _handle_owner.get(conn, conn)
 
 
+# Key under which a DuckDB connection remembers the Parquet cache directory it
+# was opened over.  Stored in the probe bag rather than in a second registry so
+# it inherits the ``_cache_owner`` indirection for free: a worker thread holding
+# a ``.cursor()`` handle resolves to the owning connection's entry and finds the
+# same directory, which is what lets the on-demand nvtx_kernel_map build persist
+# from any thread instead of only from the thread that opened the profile.
+_CACHE_DIR_KEY = "parquet_cache_dir"
+
+
+def register_cache_dir(conn, cache_dir) -> None:
+    """Record the Parquet cache directory ``conn`` serves its views from.
+
+    Only ``open_cached_db`` calls this.  A connection with no entry (direct
+    SQLite attach, ``parquetdir`` export, a bare ``duckdb.connect()`` in a test)
+    has nowhere to persist derived artifacts, and callers must degrade to
+    building them in memory rather than guessing a directory.
+    """
+    _probe_cache_set(conn, _CACHE_DIR_KEY, str(cache_dir))
+
+
+def cache_dir_for_connection(conn) -> str | None:
+    """The Parquet cache directory behind ``conn``, or None when there is none."""
+    value = _probe_cache_get(conn, _CACHE_DIR_KEY)
+    return None if value is _PROBE_MISS else value
+
+
+def forget_nvtx_map_probes(conn) -> None:
+    """Drop the memoized ``nvtx_kernel_map`` shape probes for ``conn``.
+
+    Both probes below answer "no" when the map is absent and then cache that
+    answer for the connection's life.  Since the map is now built lazily, an
+    answer taken before the build would outlive the thing it described and route
+    every NVTX skill onto the wrong aggregate.  The build calls this so the next
+    probe re-reads the catalog.
+    """
+    bag = _duck_probe_bags.get(_cache_owner(conn))
+    if bag is None:
+        return
+    bag.pop("nvtx_path_id", None)
+    bag.pop("nvtx_embedded_tc", None)
+
+
 def _probe_cache_get(conn, key: str):
     if isinstance(conn, sqlite3.Connection):
         bag = _sqlite_probe_bags.get(conn)
@@ -126,6 +168,13 @@ SKILL_CACHE_MISS = _PROBE_MISS
 # lowercase helper tables, which no CUPTI_ACTIVITY_KIND_* / NVTX_EVENTS prefix
 # matches.  Both halves are asserted in tests/test_activity_table_memoization.py;
 # a new post-open table that did collide would break the second one.
+#
+# The lazy nvtx_kernel_map build stretches this further without breaking it: on
+# a cache-backed connection it creates nvtx_kernel_map and nvtx_path_dict as
+# *views* over newly-published Parquet, and on DuckDB SHOW TABLES lists views.
+# Those two names are still lowercase helpers that no CUPTI_ACTIVITY_KIND_* /
+# NVTX_EVENTS prefix matches, so the second half of the invariant holds for
+# views exactly as it does for tables.
 _ACTIVITY_TABLES_KEY = "activity_tables"
 
 
@@ -144,7 +193,16 @@ def set_cached_skill_rows(conn, key: str, rows) -> None:
 
 
 def cached_nvtx_map_uses_path_id(conn) -> bool:
-    """True when ``nvtx_kernel_map`` + ``nvtx_path_dict`` expose ``path_id``."""
+    """True when ``nvtx_kernel_map`` + ``nvtx_path_dict`` expose ``path_id``.
+
+    Ordering is load-bearing and no longer incidental.  The map is built lazily
+    (see ``parquet_cache.materialize_cached_nvtx_kernel_map``), so a caller that
+    probes *before* triggering that build pins False for the connection's whole
+    life and silently routes every NVTX skill onto the wrong aggregate.  Both
+    call sites run ``ensure_nvtx_kernel_map`` first, and that function calls
+    ``forget_nvtx_map_probes`` after a successful build so an early probe is
+    recoverable rather than permanent.
+    """
     cached = _probe_cache_get(conn, "nvtx_path_id")
     if cached is not _PROBE_MISS:
         return cached

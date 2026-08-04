@@ -7,16 +7,20 @@ first measurement pays for lazily-imported skill modules and DuckDB, and later
 ones do not, which was measured as 36.35 / 4.88 / 4.84 MB for three identical
 in-process repetitions.
 
-**Two windows, not one.** The peak is reported separately for opening the
-profile and for running the skills, because they are not the same measurement
-and an earlier single-number version of this probe silently conflated them.
-Measured on ``h100_2gpu_1s.sqlite``: with ``SKILLS`` emptied the single number
-was 4.99 MB against 5.00 MB with all three skills — 100% of it was the Parquet
-cache ETL inside ``Profile.__init__``, and a skill-layer memory regression was
-invisible under it. Split, and with the one-time costs below taken out, the same
-run reports 4.85 MB for the open and 0.27 MB for the skills on
-``cache_mode="auto"``, and 0.06 / 6.62 MB on ``cache_mode="direct"``. Each of the
-four has a mutation that moves it — see the test module.
+**Three windows, not one.** The peak is reported separately for opening the
+profile, for running the skills cold, and for re-running attribution once the
+nvtx_kernel_map build has been paid — because they are not the same measurement
+and an earlier single-number version of this probe silently conflated the first
+two. Measured on ``h100_2gpu_1s.sqlite``: with ``SKILLS`` emptied the single
+number was 4.99 MB against 5.00 MB with all three skills — 100% of it was the
+Parquet cache ETL inside ``Profile.__init__``, and a skill-layer memory
+regression was invisible under it. Split, and with the one-time costs below
+taken out, the same run reports 0.06 / 4.93 / 0.27 MB on ``cache_mode="auto"``
+and 0.06 / 6.62 / 0.27 MB on ``cache_mode="direct"``. Each has a mutation that
+moves it — see the test module.
+
+The third window was added when the second stopped bounding what it used to; the
+comment at that window says why, and it is not optional bookkeeping.
 
 The workdir is supplied by the parent rather than made here. The parent kills
 this process on timeout, and a killed process does not run its ``finally``, so
@@ -34,18 +38,23 @@ from pathlib import Path
 
 # Three skills with different shapes: top_kernels aggregates, gpu_idle_gaps
 # sweeps the kernel timeline, and nvtx_kernel_map attributes kernels to NVTX
-# ranges. The last is the expensive one and it is expensive in two different
-# places depending on the cache mode, which is why both modes are measured:
+# ranges. The last is the expensive one, and both cache modes now pay for it in
+# the *skills* window — but by different routes, which is why both are measured:
 #
-#   cache_mode="auto"   — parquet_cache._build_nvtx_kernel_map already ran
-#                         during Profile.__init__, streaming the NVTX ranges;
-#                         the skill then reads a precomputed map. The streaming
-#                         is in the *open* window.
-#   cache_mode="direct" — nothing was precomputed, so the skill's first call
-#                         reaches parquet_cache.ensure_nvtx_kernel_map, which
-#                         fetchall()s the whole NVTX and kernel/runtime join
-#                         into Python. That is in the *skills* window, and it is
+#   cache_mode="auto"   — the map is deferred out of Profile.__init__, so the
+#                         skill's first call reaches
+#                         parquet_cache.materialize_cached_nvtx_kernel_map. That
+#                         streams its NVTX ranges out of the cached Parquet and
+#                         writes the result back into the cache, so it is paid
+#                         once per profile rather than once per process.
+#   cache_mode="direct" — there is no cache directory to write into, so the same
+#                         call falls through to ensure_nvtx_kernel_map's
+#                         in-memory build, which fetchall()s the whole NVTX table
+#                         and the kernel/runtime join into Python tuples. That is
 #                         the largest single allocation this repo makes.
+#
+# The gap between the two — 4.93 MB against 6.62 MB on this fixture — is the
+# streaming build measured against the materialising one, on identical output.
 SKILLS = ("top_kernels", "gpu_idle_gaps", "nvtx_kernel_map")
 
 
@@ -62,6 +71,7 @@ def main() -> int:
     shutil.copy(source, warm)
     shutil.copy(source, work)
 
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
     from nsys_ai.profile import Profile
     from nsys_ai.skills.base import is_abstention
     from nsys_ai.skills.registry import get_skill
@@ -128,6 +138,27 @@ def main() -> int:
             out = skill.execute(prof.query_conn(), **kwargs)
             rows[name] = -1 if is_abstention(out) else len(out)
         _, skills_peak = tracemalloc.get_traced_memory()
+
+        # Third window: attribution against a map that already exists.
+        #
+        # It exists because the second window stopped bounding what it used to.
+        # Both cache modes now build nvtx_kernel_map inside the skills window
+        # — "auto" since the build was deferred out of Profile.__init__ — and
+        # that build's peak (4.93 MB cached, 6.62 MB direct) sits so far above
+        # the attribution query's that the query's own regression vanished
+        # underneath it. Measured, on this fixture: dropping the LIMIT push-down
+        # in attribute_kernels_to_nvtx takes auto/skills from 0.27 to 1.53 MB
+        # before the deferral and moves it 0.00 MB after.
+        #
+        # ``attribute_kernels_to_nvtx`` directly, not the skill a second time.
+        # Skills memoize their rows per connection and resolved parameters
+        # (#295), so re-executing one measures a dict lookup — the first draft of
+        # this window did exactly that and reported 0.28 MB whether the push-down
+        # was there or not, which is the same "guard that guards nothing" this
+        # file was written to avoid.
+        tracemalloc.reset_peak()
+        attrib_rows = len(attribute_kernels_to_nvtx(prof.query_conn(), limit=50))
+        _, attrib_peak = tracemalloc.get_traced_memory()
     finally:
         prof.close()
     elapsed = time.perf_counter() - started
@@ -141,7 +172,9 @@ def main() -> int:
                 "input_mb": round(source.stat().st_size / 1e6, 3),
                 "open_peak_mb": round(open_peak / 1e6, 2),
                 "skills_peak_mb": round(skills_peak / 1e6, 2),
+                "attrib_peak_mb": round(attrib_peak / 1e6, 2),
                 "rows": rows,
+                "attrib_rows": attrib_rows,
                 "open_s": round(open_s, 2),
                 "workload_s": round(elapsed, 2),
             }

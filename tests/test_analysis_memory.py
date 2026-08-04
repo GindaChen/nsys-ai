@@ -8,45 +8,80 @@ notes, so a change that doubled it would have gone through CI green.
 What is measured, and what each number actually covers
 -----------------------------------------------------
 
-Four numbers, from two child processes. The split matters: an earlier version of
+Six numbers, from two child processes. The split matters: an earlier version of
 this file reported one peak for "open plus three skills" and claimed it bounded
 both. It did not. Re-run with the skill list emptied, that single number was
 4.99 MB against 5.00 MB with all three skills — every measurable byte of it was
 the Parquet-cache ETL inside ``Profile.__init__``, and a skill-layer regression
-was invisible underneath it. Each window now carries its own ceiling and its own
+was invisible underneath it. Each window carries its own ceiling and its own
 mutation:
 
 ===============  ========  =======  ==================================================
 window           baseline  ceiling  mutation that moves it (all measured here)
 ===============  ========  =======  ==================================================
-auto / open       4.85 MB   5.5 MB  ``list(_stream_nvtx_ranges(...))`` -> 6.09 MB
-auto / skills     0.27 MB   0.8 MB  drop the ``LIMIT`` push-down in
-                                    ``nvtx_attribution`` -> 1.53 MB
-direct / open     0.06 MB   1.0 MB  route ``cache_mode="direct"`` through
+auto / open       0.07 MB   1.0 MB  build nvtx_kernel_map during ``build_cache``
+                                    again (``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1``)
+                                    -> 4.84 MB
+auto / skills     4.93 MB   5.5 MB  ``list(_stream_nvtx_ranges(...))`` -> 6.15 MB
+auto / attrib     0.30 MB   0.8 MB  drop the ``LIMIT`` push-down in
+                                    ``nvtx_attribution`` -> 1.57 MB
+direct / open     0.05 MB   1.0 MB  route ``cache_mode="direct"`` through
                                     ``open_cached_db`` -> 4.85 MB
 direct / skills   6.62 MB   7.4 MB  dict instead of tuple buckets in
                                     ``_sweep_nvtx_kernel_map`` -> 8.06 MB
+direct / attrib   0.44 MB   0.9 MB  drop the ``LIMIT`` push-down -> 1.70 MB
 ===============  ========  =======  ==================================================
 
 ``cache_mode="direct"`` is the second case because it is the path a real
 tens-of-GB capture takes: ``Profile.__init__`` sends anything over 50 MB to
-``open_direct_sqlite``, which does no ETL at all. The two cases are near
-mirror images, and the shape is worth stating plainly because it is where the
-scale risk lives:
+``open_direct_sqlite``, which does no ETL at all.
 
-* the cached path spends its memory *opening* (4.85 MB) and almost none running
-  skills (0.27 MB), because ``_build_nvtx_kernel_map`` streams and the skills
-  then read a precomputed map;
-* the direct path spends almost nothing opening (0.06 MB — the zero-ETL promise
-  of that path, in a number) and 6.62 MB running skills, because the first
-  NVTX-attribution call reaches ``ensure_nvtx_kernel_map``, which ``fetchall()``s
-  the entire NVTX table and the whole kernel/runtime join into Python tuples.
+The two cases used to be mirror images — the cached path spent its memory
+opening and almost none running skills, the direct path the reverse. They are
+not mirror images any more, and that is the change these numbers now record.
+``nvtx_kernel_map`` is no longer built during ``build_cache``: it is the single
+most expensive artifact in the cache and only four skills read it, so it is
+built on first use and written back into the cache. Both modes therefore open
+for nothing (0.07 / 0.05 MB) and pay for the map in the skills window, if they
+ever reach it at all.
 
-So the path taken by the largest captures is the one that materialises most, at
-2.9x the input against the cached path's 2.1x. That is not asserted as good; it
-is pinned so it does not get worse silently, and so that fixing it (streaming
-the on-demand build the way the cache build already streams) shows up as a
-deliberate change to a stated number.
+What the two modes still do differently is *how* they build it, and that is the
+one number worth reading as a comparison rather than a bound:
+
+* ``auto`` reaches ``materialize_cached_nvtx_kernel_map``, which streams its
+  sources out of the cached Parquet — 4.93 MB;
+* ``direct`` has no cache directory to write into and falls through to
+  ``ensure_nvtx_kernel_map``'s in-memory build, which ``fetchall()``s the entire
+  NVTX table and the whole kernel/runtime join into Python tuples — 6.62 MB.
+
+Identical output, 26% less Python heap for the streaming one. That gap is why
+the deferral had to land with a persisting builder rather than by flipping a
+default: deferring onto the ``fetchall`` path would have made the common case
+cheaper to open and more expensive to run.
+
+The direct path stays the one that materialises most, at 2.9x the input against
+the cached path's 2.2x. That is not asserted as good; it is pinned so it does not
+get worse silently, and so that fixing it (streaming the in-memory build the way
+the cached one already streams) shows up as a deliberate change to a stated
+number.
+
+Why there is a third window
+---------------------------
+
+Because the second stopped bounding what it used to, and noticing that was not
+optional. Before the deferral, ``auto``'s skills window held only the attribution
+query, so dropping the ``LIMIT`` push-down in ``attribute_kernels_to_nvtx`` took
+it from 0.27 MB to 1.53 MB and the ceiling caught it. After the deferral that
+window is dominated by the 4.93 MB map build, and the same mutation moves it by
+0.00 MB — the push-down would have lost its only guard while the suite stayed
+green. The third window runs attribution once more with the build already paid,
+which is what the second window used to measure, and the mutation moves it 0.30
+-> 1.57 MB again.
+
+It calls ``attribute_kernels_to_nvtx`` directly rather than re-running the skill.
+Skills memoize their rows per connection and resolved parameters, so a second
+``execute`` is a dict lookup: the first draft of this window did that and
+reported 0.28 MB with the push-down and 0.28 MB without it.
 
 Why tracemalloc and not peak RSS
 --------------------------------
@@ -118,7 +153,8 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
 # pyarrow 22.0.0 / pandas 2.3.3 against the 2.269 MB fixture. Each ceiling sits
 # above its baseline and below the mutation named in the module docstring.
 #
-#   cache_mode -> (open ceiling MB, skills ceiling MB, measured open, measured skills)
+#   cache_mode -> (open ceiling, skills ceiling, attrib ceiling,
+#                  measured open, measured skills, measured attrib)  -- all MB
 #
 # The measured pair is carried so the failure message can say how far the number
 # moved, not just that it is over. Only one interpreter was available where this
@@ -132,8 +168,8 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
 # 9% under its mutation; if that one ever flakes on another interpreter it is the
 # first to re-derive, and the honest fix is a bigger gap, not a bigger ceiling.
 CASES = {
-    "auto": (5.5, 0.8, 4.85, 0.27),
-    "direct": (1.0, 7.4, 0.06, 6.62),
+    "auto": (1.0, 5.5, 0.8, 0.07, 4.93, 0.30),
+    "direct": (1.0, 7.4, 0.9, 0.05, 6.62, 0.44),
 }
 
 PROBE_TIMEOUT_S = 120
@@ -222,17 +258,17 @@ def test_the_measured_workload_actually_ran(measured, request):
 def test_opening_a_profile_stays_under_the_python_heap_ceiling(measured, request):
     """Peak Python heap for ``Profile(...)`` alone, from a cold start.
 
-    On ``cache_mode="auto"`` this is the Parquet-cache ETL, and it is the number
-    that catches a streamed scan being turned back into a materialised list:
-    reverting the NVTX generator in ``parquet_cache._build_nvtx_kernel_map``
-    takes it from 4.85 MB to 6.09 MB. That change leaves every other assertion in
-    the suite passing, because the answers are identical — only the memory
-    differs, and nothing else looks at memory.
+    On ``cache_mode="auto"`` this is the Parquet-cache ETL minus the artifact
+    that used to dominate it. ``nvtx_kernel_map`` is deferred to first use, and
+    the 0.07 MB here against 4.84 MB with ``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1``
+    is what that deferral is worth on the Python heap — the same shape as the
+    wall-clock and RSS wins it was made for, on a fixture small enough to assert.
+    Anything that puts a per-row cost back into the open window shows up here.
 
     On ``cache_mode="direct"`` this is the zero-ETL claim stated as a number:
-    0.06 MB, against 4.85 MB if the mode is ever routed through the cache build.
+    0.05 MB, against 4.85 MB if the mode is ever routed through the cache build.
     """
-    open_ceiling, _, want_open, _ = measured["ceilings"]
+    open_ceiling, _, _, want_open, _, _ = measured["ceilings"]
     peak = measured["open_peak_mb"]
     _emit(
         request,
@@ -252,21 +288,27 @@ def test_opening_a_profile_stays_under_the_python_heap_ceiling(measured, request
 
 
 def test_running_skills_stays_under_the_python_heap_ceiling(measured, request):
-    """Peak Python heap for three skills on an already-open profile.
+    """Peak Python heap for three skills on an already-open profile, cold.
 
-    Separate from the open window because on the cached path the open dominates
-    so completely that this was invisible: with the skills removed entirely the
-    combined number moved by 0.01 MB. Measured alone it is 0.27 MB, and dropping
-    the ``LIMIT`` push-down in ``nvtx_attribution.attribute_kernels_to_nvtx`` —
-    the optimisation its own docstring describes as keeping unrelated kernels
-    out of Python — takes it to 1.53 MB.
+    Both cache modes now build ``nvtx_kernel_map`` inside this window, and it
+    dominates: whichever builder runs, it is the largest single Python
+    allocation this repo makes.
 
-    On ``cache_mode="direct"`` this window also contains the on-demand
-    ``ensure_nvtx_kernel_map`` build, which is the largest single Python
-    allocation in the codebase at 6.62 MB for a 2.27 MB capture. Turning that
-    sweep's per-thread buckets from tuples into dicts takes it to 8.06 MB.
+    ``auto`` streams its sources out of the cached Parquet and lands at 4.93 MB;
+    materialising the NVTX generator with ``list(_stream_nvtx_ranges(...))``
+    takes it to 6.15 MB, and that change leaves every other assertion in the
+    suite passing, because the answers are identical — only the memory differs,
+    and nothing else looks at memory.
+
+    ``direct`` has no cache to write into and takes the ``fetchall`` build
+    instead, at 6.62 MB. Turning that sweep's per-thread buckets from tuples
+    into dicts takes it to 8.06 MB.
+
+    The ``LIMIT`` push-down used to be bounded here and no longer can be — see
+    ``test_attributing_against_a_built_map_stays_under_the_python_heap_ceiling``,
+    which exists for exactly that reason.
     """
-    _, skills_ceiling, _, want_skills = measured["ceilings"]
+    _, skills_ceiling, _, _, want_skills, _ = measured["ceilings"]
     peak = measured["skills_peak_mb"]
     _emit(
         request,
@@ -278,6 +320,46 @@ def test_running_skills_stays_under_the_python_heap_ceiling(measured, request):
         f"running skills with cache_mode={measured['cache_mode']!r} peaked at "
         f"{peak:.2f} MB of Python heap against a {want_skills:.2f} MB baseline, "
         f"over the {skills_ceiling:.1f} MB ceiling. Something a skill reads now "
-        "lands in Python objects that did not before — check the LIMIT push-downs "
-        "and the on-demand nvtx_kernel_map build before raising this."
+        "lands in Python objects that did not before — check the nvtx_kernel_map "
+        "build's streaming before raising this."
+    )
+
+
+def test_attributing_against_a_built_map_stays_under_the_python_heap_ceiling(
+    measured, request
+):
+    """Peak Python heap for one ``attribute_kernels_to_nvtx`` call, map already built.
+
+    This is what the skills window measured before ``nvtx_kernel_map`` was
+    deferred out of ``Profile.__init__``, and it is here because the deferral
+    took that coverage away without failing anything. Dropping the ``LIMIT``
+    push-down in ``attribute_kernels_to_nvtx`` — the optimisation its own
+    docstring describes as keeping unrelated kernels out of Python — used to move
+    the auto/skills number from 0.27 MB to 1.53 MB; underneath the 4.93 MB build
+    it moves that number by 0.00 MB. Measured here it is 0.30 -> 1.57 MB on
+    ``auto`` and 0.44 -> 1.70 MB on ``direct``, so the push-down keeps a guard.
+
+    The two baselines differ because the map is a Parquet-backed view on ``auto``
+    and an in-memory DuckDB table on ``direct``; the rows arriving in Python are
+    the same 50 either way.
+    """
+    _, _, attrib_ceiling, _, _, want_attrib = measured["ceilings"]
+    peak = measured["attrib_peak_mb"]
+    _emit(
+        request,
+        f"[memory:{measured['cache_mode']}] attrib {peak:.2f} MB "
+        f"(ceiling {attrib_ceiling:.1f}, measured {want_attrib:.2f}, "
+        f"rows {measured['attrib_rows']})",
+    )
+    assert measured["attrib_rows"] == 50, (
+        f"attribution returned {measured['attrib_rows']} rows, not the 50 asked "
+        "for — the LIMIT push-down this window exists to bound is not being "
+        "applied, so the ceiling below bounds nothing"
+    )
+    assert peak < attrib_ceiling, (
+        f"attribution with cache_mode={measured['cache_mode']!r} peaked at "
+        f"{peak:.2f} MB of Python heap against a {want_attrib:.2f} MB baseline, "
+        f"over the {attrib_ceiling:.1f} MB ceiling. The usual cause is a "
+        "push-down (LIMIT, trim, kernel_name_substring) no longer reaching the "
+        "SQL, so the whole map lands in Python and is filtered afterwards."
     )

@@ -5,27 +5,45 @@ original SQLite export into Parquet files (ZSTD-compressed), then serving
 queries via DuckDB views over those Parquet files.
 
 Flow:
-  1. First open: ``build_cache()`` attaches the SQLite DB via DuckDB,
+  1. First open: ``build_cache()`` attaches the SQLite DB via DuckDB and
      exports tables into a sibling cache directory named
      ``<profile_basename>.nsys-cache`` (e.g., ``profile.nsys-cache``) as
-     Parquet, and runs the Tier 2 sort-merge to produce
-     ``nvtx_kernel_map.parquet`` + ``nvtx_path_dict.parquet`` (for very large SQLite files this step may be
-     deferred — see env vars below).
+     Parquet.
   2. Subsequent opens: ``open_cached_db()`` creates a DuckDB connection
      with views pointing at the cached Parquet files in that
      ``<profile_basename>.nsys-cache`` directory — sub-second startup.
+  3. First NVTX-attribution query: ``ensure_nvtx_kernel_map()`` runs the
+     Tier 2 stack sweep to produce ``nvtx_kernel_map.parquet`` +
+     ``nvtx_path_dict.parquet`` *into the existing cache*, then creates views
+     over them. Every later open picks them up from the ``*.parquet`` glob in
+     step 2, so the sweep runs once per profile, not once per process.
 
-Cache invalidation uses mtime comparison + a version stamp file.
+Why the map is not built in step 1: it is the single most expensive artifact in
+the cache and most runs never read it. Measured on this project's reference
+captures, ``nvtx_kernel_map`` is 11.6s of an 19.8s build (881 MB profile) and
+59.9s of a 93.2s build (3.5 GB profile), while only four skills consume it. An
+``overlap_breakdown`` run on the 881 MB capture went 19.9s → 8.8s end to end by
+deferring it, and peak RSS on the 3.5 GB capture fell from 7.01 GB to 5.97 GB.
+The 13 base tables are the opposite case — 8.6s of that 93.2s, wanted by nearly
+every skill — so they stay eager and are deliberately not split up.
+
+Cache invalidation uses mtime comparison + a version stamp file. A cache with
+the map and one without are both legal, complete caches: every consumer probes
+for the map rather than assuming it, which is why deferring it does not need a
+``_CACHE_VERSION`` bump. "Not built yet" and "built wrong" stay distinct on
+disk — the map is published by ``os.replace`` from a staging directory, so a
+half-written one is never visible, and a cache that cannot be built at all is
+still discarded whole by ``build_cache`` rather than published partial.
 
 Environment (large profiles / DuckDB tuning):
-  By default ``nvtx_kernel_map`` is always built during cache build so NVTX skills
-  stay fast on large traces (bigger files benefit most from the precomputed map).
-
-  ``NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=<float>`` — opt-in: skip map build on first
-  cache when SQLite size ≥ N MB (faster ``cache ready``, slower NVTX until rebuilt).
+  By default ``nvtx_kernel_map`` is deferred to first use, as described above.
 
   ``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1`` / ``NSYS_AI_DEFER_NVTX_KERNEL_MAP=0`` —
-  force never defer.
+  build the map during ``build_cache`` instead, so ``cache ready`` means every
+  artifact is on disk (useful for a warm-the-cache batch job).
+
+  ``NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=<float>`` — defer only when the SQLite file
+  is ≥ N MB; below the threshold the map is built eagerly. Overrides the default.
 
   ``NSYS_AI_DUCKDB_THREADS`` — optional ``SET threads = N`` for analytical sessions.
 
@@ -41,6 +59,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from hashlib import sha256
@@ -52,7 +71,7 @@ import duckdb
 if TYPE_CHECKING:  # pyarrow is imported lazily at the one call site that needs it
     import pyarrow as pa
 
-from nsys_ai.connection import resolve_table_variant
+from nsys_ai.connection import cache_dir_for_connection, register_cache_dir, resolve_table_variant
 from nsys_ai.exceptions import ProfileNotFoundError
 
 # fcntl is POSIX-only. On Windows we degrade to no-locking — concurrent
@@ -387,12 +406,37 @@ def _configure_duckdb_analytics_session(db: duckdb.DuckDBPyConnection) -> None:
 def _should_defer_nvtx_kernel_map(sqlite_path: str) -> bool:
     """Return True when nvtx_kernel_map should be skipped on first cache build.
 
-    Default is **never defer**: large profiles are exactly where the precomputed
-    map pays off for NVTX skills; deferring trades first-open seconds for much
-    slower on-demand SQL (``string_agg`` paths, etc.).
+    Default is **defer**. The map is the most expensive artifact in the cache
+    and the least widely read (see module docstring for the measurements), and
+    deferring it no longer costs anything on the NVTX side: the on-demand build
+    now writes the same Parquet into the same cache directory, so the sweep runs
+    once per profile either way. What changes is *when* — and a run that never
+    touches NVTX attribution never pays for it.
 
-    Opt-in defer is for profiles where the one-time map build is prohibitively
-    expensive (see module docstring for env vars).
+    What it does cost is *discoverability*, for as long as the map is unbuilt.
+    Before this, ``build_cache`` wrote nvtx_kernel_map.parquet and
+    ``open_cached_db``'s glob turned it into a view, so the map was in the
+    catalog from the moment a connection was handed out. Now, on a cache whose
+    map has not been built yet, ``SHOW TABLES`` and ``information_schema`` list
+    neither name and a ``SELECT`` against either raises a Catalog Error
+    (measured on tests/fixtures/h100_2gpu_1s.sqlite, both before and after).
+    The skill system does not notice — both consumers call
+    ``ensure_nvtx_kernel_map`` before they probe — but the text-to-SQL surface
+    does: ``ai/backend/profile_db_tool.py`` rewrites ``sqlite_master`` to
+    ``SHOW TABLES`` and hands the result to the model, and the
+    ``schema_inspect`` skill reads ``information_schema.columns``. On a cold
+    cache the model therefore sees no map and writes raw nvtx/kernels/runtime
+    joins instead of using it — slower, not wrong, and nothing in the prompt
+    names the map. Once anything builds it the views appear on that connection,
+    and every later process opening that cache sees them at open.
+    ``test_the_map_is_absent_from_schema_discovery_until_it_is_built`` pins
+    both ends of that window.
+
+    ``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1`` (or ``NSYS_AI_DEFER_NVTX_KERNEL_MAP=0``)
+    restores the eager build for callers that want ``cache ready`` to mean every
+    artifact is present. ``NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB`` makes the choice
+    size-dependent, so small profiles — where the sweep is a fraction of a
+    second — can stay eager.
     """
     env_always = os.environ.get("NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP", "").strip().lower()
     if env_always in ("1", "true", "yes", "on"):
@@ -401,21 +445,20 @@ def _should_defer_nvtx_kernel_map(sqlite_path: str) -> bool:
     if env_defer in ("0", "false", "no", "off"):
         return False
 
-    try:
-        size_mb = os.path.getsize(sqlite_path) / 1e6
-    except OSError:
-        return False
-
     raw_mb = os.environ.get("NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB", "").strip()
     if raw_mb:
         try:
             threshold_mb = float(raw_mb)
         except ValueError:
             log.warning("Ignoring invalid NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=%r", raw_mb)
-            return False
+            return True
+        try:
+            size_mb = os.path.getsize(sqlite_path) / 1e6
+        except OSError:
+            return True
         return size_mb >= threshold_mb
 
-    return False
+    return True
 
 
 def _order_clause_for(
@@ -645,7 +688,14 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             _progress("nvtx_kernel_map.parquet")
             _build_nvtx_kernel_map(db, src_tables, cache_dir)
         elif defer_nvtx_map:
-            log.info("Deferring nvtx_kernel_map build for large profile (on-demand NVTX SQL enabled)")
+            # Not a degraded cache: the first NVTX-attribution query calls
+            # ensure_nvtx_kernel_map, which builds the same two Parquets into
+            # this same directory and publishes them atomically. Every other
+            # skill skips a build step it would never have read.
+            log.info(
+                "Deferring nvtx_kernel_map to first NVTX query "
+                "(set NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1 to build it now)"
+            )
 
         # Clear progress line
         elapsed = time.monotonic() - t0
@@ -712,6 +762,12 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         db.execute(f"CREATE VIEW \"{view_name}\" AS SELECT * FROM '{safe_fpath}'")
 
     _create_existing_alias_views(db)
+
+    # Tell the connection where its cache lives, so a later
+    # ``ensure_nvtx_kernel_map`` can publish the map into it rather than
+    # rebuilding it in memory once per process. Only this opener registers a
+    # directory: direct-attach and parquetdir connections have nowhere to write.
+    register_cache_dir(db, cache_dir)
 
     return db
 
@@ -1132,6 +1188,32 @@ def _build_nvtx_kernel_map(
         log.info("Skipping nvtx_kernel_map: missing required tables")
         return
 
+    _build_nvtx_kernel_map_from_parquet(db, cache_dir)
+
+
+def _build_nvtx_kernel_map_from_parquet(
+    db: duckdb.DuckDBPyConnection,
+    cache_dir: Path,
+    out_dir: Path | None = None,
+) -> bool:
+    """The sweep itself, reading only Parquet already in ``cache_dir``.
+
+    Split out from :func:`_build_nvtx_kernel_map` so the on-demand build can
+    reach it: that caller has a published cache and *no* attached SQLite, so it
+    has no ``src_tables`` set to probe. The probe was never load-bearing here
+    anyway — the three source names it resolved were used for nothing but the
+    ``is_file()`` checks repeated below.
+
+    ``out_dir`` defaults to ``cache_dir``; the on-demand caller points it at a
+    staging directory so the two Parquets can be published with ``os.replace``
+    instead of appearing half-written under a concurrent reader's glob.
+
+    Returns True when a map was written. False means the sweep found nothing to
+    attribute or a source was missing — both are logged skips, and neither is an
+    error. An *unreadable* source is a different thing and still propagates; see
+    the caller's docstring.
+    """
+    out_dir = cache_dir if out_dir is None else out_dir
     kp = cache_dir / "kernels.parquet"
     rp = cache_dir / "runtime.parquet"
     np = cache_dir / "nvtx.parquet"
@@ -1152,7 +1234,7 @@ def _build_nvtx_kernel_map(
     # duckdb.Error out of read_parquet.
     if not (kp.is_file() and rp.is_file() and np.is_file()):
         log.warning("nvtx_kernel_map: parquet sources missing; skipping map")
-        return
+        return False
 
     kps = _safe_path(kp)
     rps = _safe_path(rp)
@@ -1208,7 +1290,7 @@ def _build_nvtx_kernel_map(
     results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
     if not results:
         log.info("nvtx_kernel_map produced no NVTX/kernel attribution; skipping map creation")
-        return
+        return False
 
     # Tensor Core flags are attached after the name-agnostic sweep, the same way
     # ensure_nvtx_kernel_map does it. Keying on (k_start, k_end, kernel_name) is
@@ -1220,8 +1302,9 @@ def _build_nvtx_kernel_map(
             (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
         )
 
-    _write_nvtx_kernel_map_parquet(db, results, cache_dir)
+    _write_nvtx_kernel_map_parquet(db, results, out_dir)
     log.info("nvtx_kernel_map built via stack sweep (parquet-only, path_id)")
+    return True
 
 
 def _stream_kernel_runtime(db, kernels_parquet: str, runtime_parquet: str, tc_out: dict):
@@ -1344,11 +1427,13 @@ def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
     return map_table, dict_table
 
 
-def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> None:
+def _write_nvtx_kernel_map_parquet(db, results: list[dict], out_dir: Path) -> None:
     """Write sweep ``results`` to nvtx_kernel_map.parquet + nvtx_path_dict.parquet.
 
-    The single writer for the cache build, so the file layout cannot drift by
-    which code path produced the rows.
+    The single writer for both builds — the eager one during ``build_cache`` and
+    the on-demand one afterwards — so the file layout cannot drift by which code
+    path produced the rows. ``out_dir`` is the cache directory for the eager
+    build and a staging directory for the on-demand one.
     """
     map_table, dict_table = _nvtx_map_arrow_tables(results)
 
@@ -1356,13 +1441,13 @@ def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> 
         db.register("_nvtx_kernel_map", map_table)
         db.register("_nvtx_path_dict", dict_table)
         db.execute(
-            f"COPY _nvtx_path_dict TO '{_safe_path(cache_dir / 'nvtx_path_dict.parquet')}' "
+            f"COPY _nvtx_path_dict TO '{_safe_path(out_dir / 'nvtx_path_dict.parquet')}' "
             f"(FORMAT PARQUET, COMPRESSION ZSTD)"
         )
         db.execute(
             f"""
             COPY (SELECT * FROM _nvtx_kernel_map ORDER BY k_start, k_end, kernel_name)
-            TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
+            TO '{_safe_path(out_dir / "nvtx_kernel_map.parquet")}'
             (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 65536)
             """
         )
@@ -1485,17 +1570,246 @@ def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
         db.unregister("_odm_npd")
 
 
+# Catalog DDL on a DuckDB database is not safe to race. Two threads issuing
+# ``CREATE VIEW nvtx_kernel_map`` through their own ``.cursor()`` handles get a
+# "Catalog write-write conflict on create" TransactionException from all but the
+# winner — and ``CREATE VIEW IF NOT EXISTS`` does *not* help, because the
+# conflict is raised by the transaction manager before the existence check
+# matters. Measured: with four threads, three lost. So the DDL is serialized
+# here in Python, and the loser of any residual race re-probes rather than
+# raising.
+_CATALOG_DDL_LOCK = threading.Lock()
+
+# One process-wide lock around the map build, so N threads that all want the map
+# do the sweep once rather than N times.
+#
+# Process-wide rather than per-database on purpose. Keying it per database needs
+# a way to tell that two handles are the same database, and for a bare
+# ``.cursor()`` there is none: DuckDB exposes no parent pointer, and
+# ``duckdb_databases()`` names every in-memory database "memory" (see the note
+# in connection.py). A registry of cursors exists — ``register_derived_handle``,
+# populated by ``Profile.query_conn`` — but relying on it would leave any thread
+# that made its own cursor building a private copy, which is what a per-database
+# version of this lock was measured doing: four threads, four sweeps.
+#
+# The cost of the coarser lock is that two *different* profiles building their
+# maps concurrently in one process queue up instead of overlapping. That is
+# latency on a rare path, never a wrong answer, and it buys a guarantee that
+# does not depend on how the caller obtained its handle.
+#
+# This is the in-process half. The cross-process half is ``_build_lock``'s
+# flock, taken inside ``materialize_cached_nvtx_kernel_map``. Lock order is
+# always this one first, then flock, so the two cannot deadlock against
+# each other.
+_MAP_BUILD_LOCK = threading.Lock()
+
+
+def _nvtx_map_present(db) -> bool:
+    """True when both map relations are queryable on ``db``."""
+    try:
+        db.execute("SELECT 1 FROM nvtx_kernel_map LIMIT 0")
+        db.execute("SELECT 1 FROM nvtx_path_dict LIMIT 0")
+        return True
+    except duckdb.Error:
+        return False
+
+
+def _create_nvtx_map_views(db, cache_dir: Path) -> bool:
+    """Point ``nvtx_kernel_map``/``nvtx_path_dict`` views at the cached Parquet.
+
+    Returns True when both are queryable afterwards. Views, not tables: the rows
+    stay on disk, so a connection that only needs a slice of the map does not
+    pay to load all of it, and a view created on any handle is visible to every
+    ``.cursor()`` of the same database — which is what makes this work under the
+    per-thread cursors #301 introduced.
+    """
+    map_path = cache_dir / "nvtx_kernel_map.parquet"
+    dict_path = cache_dir / "nvtx_path_dict.parquet"
+    if not (map_path.is_file() and dict_path.is_file()):
+        return False
+    with _CATALOG_DDL_LOCK:
+        for view_name, parquet_path in (
+            ("nvtx_path_dict", dict_path),
+            ("nvtx_kernel_map", map_path),
+        ):
+            try:
+                db.execute(
+                    f'CREATE VIEW "{view_name}" AS '
+                    f"SELECT * FROM '{_safe_path(parquet_path)}'"
+                )
+            except duckdb.Error:
+                # Already created — by open_cached_db's glob, by an earlier call
+                # on this database, or by a thread that beat us to the lock.
+                # Whether that is true is decided by the probe below, not here.
+                pass
+    return _nvtx_map_present(db)
+
+
+def _publish_stamp_map_ready(cache_dir: Path) -> None:
+    """Record in ``.cache_version`` that the map is now on disk.
+
+    Informational — nothing reads these two keys to decide behaviour, and
+    ``is_cache_valid`` does not consult them — but leaving them saying
+    "deferred" after the map exists would make the stamp lie to anyone
+    debugging. Written temp-file + ``os.replace`` because a torn stamp fails the
+    JSON parse in ``is_cache_valid`` and costs a full rebuild.
+
+    A failure here is not a build failure: the Parquet is already published and
+    the next open finds it by glob regardless.
+    """
+    stamp = cache_dir / ".cache_version"
+    try:
+        meta = json.loads(stamp.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    meta["nvtx_kernel_map_ready"] = True
+    meta["deferred_nvtx_kernel_map"] = False
+    tmp = cache_dir / ".cache_version.tmp"
+    try:
+        tmp.write_text(json.dumps(meta))
+        os.replace(tmp, stamp)
+    except OSError as exc:
+        log.debug("could not refresh cache stamp after lazy map build (%s)", exc)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+    # The oversized-map warning used to fire only from _build_cache_into, which
+    # no longer builds the map — so without this it would never fire again. The
+    # stamp is the only record of which profile this cache belongs to; the
+    # connection does not carry the path.
+    source = meta.get("source")
+    if source:
+        _check_cache_size(cache_dir, str(cache_dir.parent / source))
+
+
+def materialize_cached_nvtx_kernel_map(conn) -> bool:
+    """Build ``nvtx_kernel_map`` into ``conn``'s Parquet cache, then view it.
+
+    The persisted half of the deferred-map design. ``build_cache`` no longer
+    runs the stack sweep (see :func:`_should_defer_nvtx_kernel_map`); this does,
+    on the first query that actually needs the map, and it writes the result
+    into the cache directory so the next process finds it by glob at open time
+    instead of repeating the sweep. Without that persistence, deferring would
+    merely move the cost — and onto the more expensive in-memory path, which
+    ``fetchall``s where this streams.
+
+    Returns False, changing nothing, when there is no cache directory behind
+    ``conn`` (direct SQLite attach, ``parquetdir`` export, a bare test
+    connection) or when the directory cannot be written (read-only mount). The
+    caller then falls back to the in-memory build, which is exactly the
+    behaviour those backends had before.
+
+    Never call this from inside ``build_cache``: that holds ``_build_lock`` for
+    the same cache directory, and flock is not reentrant across the fds involved
+    — the process would wedge. The only callers are query-time.
+    """
+    from .connection import DuckDBAdapter, forget_nvtx_map_probes, wrap_connection
+
+    adapter = wrap_connection(conn)
+    if not isinstance(adapter, DuckDBAdapter):
+        return False
+    db = adapter.raw_conn
+
+    registered = cache_dir_for_connection(db)
+    if registered is None:
+        return False
+    cache_dir = Path(registered)
+    if not cache_dir.is_dir():
+        return False
+
+    # Cheap path first: a previous process already published the map, and this
+    # connection just has not created the views yet. No lock, no write — which
+    # is also what makes a read-only cache directory work.
+    if _create_nvtx_map_views(db, cache_dir):
+        forget_nvtx_map_probes(db)
+        return True
+
+    import shutil
+    import tempfile
+
+    try:
+        with _build_lock(cache_dir):
+            # Another process may have published while we waited.
+            if _create_nvtx_map_views(db, cache_dir):
+                forget_nvtx_map_probes(db)
+                return True
+
+            # Staged inside the cache directory so the os.replace below is a
+            # rename within one filesystem rather than a copy. A process killed
+            # between here and the rmtree leaves a `.nvtx_map_build_*`
+            # directory behind and nothing prunes it. That is inert rather than
+            # corrupting: open_cached_db's `cache_dir.glob("*.parquet")` is
+            # non-recursive so a half-written file never becomes a view,
+            # build_cache's size report counts `is_file()` entries only, and
+            # the next build stages into a fresh mkdtemp. It costs disk until
+            # the cache directory is removed.
+            staging = Path(
+                tempfile.mkdtemp(prefix=".nvtx_map_build_", dir=cache_dir)
+            )
+            try:
+                built = _build_nvtx_kernel_map_from_parquet(db, cache_dir, staging)
+                if not built:
+                    return False
+                # Publish the dictionary first. A concurrent opener globbing
+                # mid-publish then sees a dict with no map and falls back, which
+                # is correct; the reverse order would give it a map whose
+                # path_id join resolves to nothing.
+                os.replace(
+                    staging / "nvtx_path_dict.parquet",
+                    cache_dir / "nvtx_path_dict.parquet",
+                )
+                os.replace(
+                    staging / "nvtx_kernel_map.parquet",
+                    cache_dir / "nvtx_kernel_map.parquet",
+                )
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+            _publish_stamp_map_ready(cache_dir)
+    except OSError as exc:
+        # Read-only cache directory: no lock file, no staging dir. Degrade to
+        # the in-memory build rather than failing the query.
+        log.info("cannot persist nvtx_kernel_map into %s (%s)", cache_dir, exc)
+        return False
+
+    ok = _create_nvtx_map_views(db, cache_dir)
+    if ok:
+        forget_nvtx_map_probes(db)
+    return ok
+
+
 def ensure_nvtx_kernel_map(conn) -> bool:
-    """Materialize ``nvtx_kernel_map`` + ``nvtx_path_dict`` as ordinary tables on
-    a DuckDB connection when they are absent, so NVTX-attribution skills take their
-    fast map-backed path instead of an in-file IEJoin that hangs DuckDB's
+    """Make ``nvtx_kernel_map`` + ``nvtx_path_dict`` queryable on a DuckDB
+    connection when they are absent, so NVTX-attribution skills take their fast
+    map-backed path instead of an in-file IEJoin that hangs DuckDB's
     ``sqlite_scanner`` on a direct-attached profile with no parquet cache (#257).
+
+    Two builds sit behind this, and they leave different objects in the catalog.
+    On a Parquet-cache connection the map is built *into the cache* by
+    :func:`materialize_cached_nvtx_kernel_map` and exposed as **views** over the
+    published Parquet, so it survives the process. On every other backend —
+    direct SQLite attach, ``parquetdir``, a bare test connection — there is
+    nowhere to persist it, so it is built as ordinary **tables** in memory as
+    before, once per connection. Either way a ``SELECT`` against the two names
+    works afterwards, and DuckDB's ``SHOW TABLES`` lists both shapes (it lists
+    views too); the difference matters only to code that inspects object types.
 
     Returns True when the map is present afterwards (already there, or just
     built). Returns False — changing nothing — for a non-DuckDB connection or
     when the source tables are missing, so the caller keeps its existing path.
-    The build is a flat fetch (fast on every backend) plus the shared Python
-    sort-merge; it never issues the range join that chokes the scanner.
+    The in-memory build is a flat fetch (fast on every backend) plus the shared
+    Python sort-merge; it never issues the range join that chokes the scanner.
+
+    Concurrency: serialized **process-wide** by ``_MAP_BUILD_LOCK``, not per
+    database — two different profiles building their maps in one process queue
+    up instead of overlapping, which is a deliberate trade (see the note at the
+    lock's definition: a bare ``.cursor()`` cannot be traced back to its
+    database, and a per-database key was measured letting all four threads
+    through). Before that lock existed, four threads on their own ``.cursor()``
+    handles each ran the whole fetch-and-sweep and then three of them lost the
+    ``CREATE TABLE`` to a catalog write-write conflict — four times the work and
+    four times the memory to produce one table. Both call sites swallowed the
+    exception under ``except DB_ERRORS``, so it was invisible.
     """
     from .connection import DB_ERRORS, DuckDBAdapter, wrap_connection
 
@@ -1510,6 +1824,30 @@ def ensure_nvtx_kernel_map(conn) -> bool:
         return True
     except DB_ERRORS:
         pass
+
+    with _MAP_BUILD_LOCK:
+        # Re-check under the lock: a thread that was building while we waited
+        # has published by now, and repeating its work would be pure waste.
+        if _nvtx_map_present(db):
+            return True
+        # Persisted build, when this connection has a cache to write into.
+        if materialize_cached_nvtx_kernel_map(db):
+            return True
+        return _ensure_nvtx_kernel_map_in_memory(adapter, db)
+
+
+def _ensure_nvtx_kernel_map_in_memory(adapter, db) -> bool:
+    """Build the map as ordinary tables on ``db``, for backends with no cache.
+
+    Kept for direct-attach and ``parquetdir`` connections, which have no
+    directory to publish Parquet into. It ``fetchall``s both sources where the
+    cached builder streams them, so it costs more memory — that is the reason
+    the cached path exists and is tried first, not a defect here.
+
+    The caller holds ``_MAP_BUILD_LOCK``, which is process-wide rather than
+    per-database.
+    """
+    from .connection import DB_ERRORS
 
     tables = adapter.resolve_activity_tables()
     kernel_table = tables.get("kernel")
@@ -1568,7 +1906,19 @@ def ensure_nvtx_kernel_map(conn) -> bool:
         )
     # Materialize even when empty: the existence check then passes and consumers
     # take the (empty) map path rather than re-entering the hanging IEJoin.
-    _materialize_nvtx_kernel_map(db, results)
+    with _CATALOG_DDL_LOCK:
+        try:
+            _materialize_nvtx_kernel_map(db, results)
+        except DB_ERRORS as exc:
+            # A caller that reached here without _MAP_BUILD_LOCK held (this
+            # helper is module-private, but the DDL lock is the only thing
+            # guarding the catalog) can still lose a write-write conflict. The
+            # winner's tables are as good as ours, so re-probe instead of
+            # raising into the call sites' bare ``except DB_ERRORS: pass``,
+            # where a genuine failure would be indistinguishable from a lost
+            # race.
+            log.debug("nvtx_kernel_map CREATE lost a catalog race (%s)", exc)
+            return _nvtx_map_present(db)
     return True
 
 
