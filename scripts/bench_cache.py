@@ -11,6 +11,14 @@ Usage:
 
 --no-rebuild reuses the existing cache (only measures query time).
 --trim narrows the analysis window for the skills (default: 400 420).
+
+What the build column covers has changed, and comparing across that change is a
+mistake. ``nvtx_kernel_map`` is no longer produced by ``build_cache`` — it is
+built by the first skill that attributes kernels to NVTX ranges, and written back
+into the cache. So the build number here now excludes it (it was 58% of the build
+on an 881 MB capture and 64% on a 3.5 GB one) and the skill number includes it,
+once, for whichever skill in the basket reaches it first. Set
+``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1`` to measure the old split.
 """
 
 from __future__ import annotations

@@ -1,17 +1,30 @@
-"""On-demand nvtx_kernel_map builder (issue #257).
+"""On-demand nvtx_kernel_map builder (issues #257, #319).
 
 The four skills that attribute kernels to NVTX regions depend on a precomputed
-`nvtx_kernel_map`, built only during the parquet-cache build. On the direct-attach
-no-cache path the map is absent and each skill falls to an in-file IEJoin that
-hangs DuckDB's sqlite_scanner. `ensure_nvtx_kernel_map` materialises the map
-on-demand via the shared Python sort-merge (`_sweep_nvtx_kernel_map`), fed by
-flat fetches that run fine on every backend.
+`nvtx_kernel_map`. Without it each falls to an in-file IEJoin that hangs DuckDB's
+sqlite_scanner, so `ensure_nvtx_kernel_map` builds it on demand via the shared
+Python sort-merge (`_sweep_nvtx_kernel_map`).
+
+It started (#257) as cover for the direct-attach no-cache path, where the map was
+the one artifact nothing produced. It is now the *only* producer: #319 took the
+map out of the cache build, because it was the most expensive artifact there and
+the fewest runs read it. Two builds sit behind the one accessor — a streaming one
+that writes Parquet back into the cache, and the original in-memory one for
+backends with no cache directory — and the tests below cover both.
 """
 
+import concurrent.futures
+import json
+import os
+import shutil
 import sqlite3
+import threading
+import time
+from pathlib import Path
 
 import pytest
 
+from nsys_ai import parquet_cache
 from nsys_ai.parquet_cache import _sweep_nvtx_kernel_map, ensure_nvtx_kernel_map
 
 # ── The sort-merge sweep (shared containment core) ──────────────────────────
@@ -187,3 +200,353 @@ def test_the_map_is_visible_to_a_thread_local_cursor():
         assert got is not None, f"{name} is invisible to a cursor — is it TEMP again?"
 
     assert con.cursor().execute("SELECT COUNT(*) FROM nvtx_kernel_map").fetchone()[0] == expected
+
+
+# ── The map is deferred out of the cache build, then persisted (issue #319) ──
+#
+# ``build_cache`` used to produce all sixteen Parquets before returning. On the
+# project's 881 MB reference capture that was 19.8 s of which the map was 11.6 s,
+# and ``overlap_breakdown`` — which reads none of it — then took 0.3 s. On the
+# 3.5 GB capture the map is 59.9 s of a 93.2 s build. So the map is built on the
+# first query that needs it, and written back into the cache so the next process
+# reads it instead of rebuilding it.
+#
+# The two halves have to land together. Deferring alone would have moved the cost
+# onto ``ensure_nvtx_kernel_map``'s in-memory build, which ``fetchall``s where the
+# cache builder streams: measured on the 881 MB capture, a second
+# ``nvtx_layer_breakdown`` run went from 7.6 s to 16.1 s and gained 0.5 GB of peak
+# RSS, because the in-memory map died with the process. The tests below pin both
+# halves.
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+
+
+@pytest.fixture
+def cached_profile(tmp_path):
+    """A copy of the NVTX fixture with a freshly built Parquet cache."""
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(FIXTURE, profile)
+    cache_dir = Path(parquet_cache.build_cache(str(profile)))
+    return profile, cache_dir
+
+
+def test_building_a_cache_does_not_build_the_map(cached_profile):
+    """The issue's own regression test: opening must not produce the map.
+
+    Both Parquets absent and the stamp saying so, which is the difference
+    between "not built yet" and "built wrong" that #312's partial-publication
+    guard depends on. A cache without the map is a complete, valid cache — every
+    consumer probes for the map rather than assuming it — which is why this
+    needed no ``_CACHE_VERSION`` bump.
+    """
+    profile, cache_dir = cached_profile
+
+    assert not (cache_dir / "nvtx_kernel_map.parquet").exists()
+    assert not (cache_dir / "nvtx_path_dict.parquet").exists()
+    assert parquet_cache.is_cache_valid(str(profile)) is True
+
+    stamp = json.loads((cache_dir / ".cache_version").read_text())
+    assert stamp["nvtx_kernel_map_ready"] is False
+    assert stamp["deferred_nvtx_kernel_map"] is True
+
+
+def test_a_skill_that_does_not_attribute_nvtx_never_builds_the_map(cached_profile):
+    """``overlap_breakdown`` is the skill the issue measured at 0.3 s against a
+    19.8 s open. It must not pay for the map, and it must still answer."""
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.base import is_abstention
+    from nsys_ai.skills.registry import get_skill
+
+    profile, cache_dir = cached_profile
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        rows = get_skill("overlap_breakdown").execute(prof.query_conn())
+
+    assert not is_abstention(rows) and rows, "the control skill produced nothing"
+    assert not (cache_dir / "nvtx_kernel_map.parquet").exists(), (
+        "a skill that never attributes kernels to NVTX ranges paid for the map"
+    )
+
+
+def test_the_first_nvtx_query_publishes_the_map_into_the_cache(cached_profile):
+    """The persisting half. Without it the deferral is a memory regression."""
+    from nsys_ai.profile import Profile
+
+    profile, cache_dir = cached_profile
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        assert ensure_nvtx_kernel_map(prof.db) is True
+        rows = prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0]
+
+    assert rows > 0
+    assert (cache_dir / "nvtx_kernel_map.parquet").is_file()
+    assert (cache_dir / "nvtx_path_dict.parquet").is_file()
+
+    stamp = json.loads((cache_dir / ".cache_version").read_text())
+    assert stamp["nvtx_kernel_map_ready"] is True
+    assert stamp["deferred_nvtx_kernel_map"] is False
+    assert parquet_cache.is_cache_valid(str(profile)) is True, (
+        "rewriting the stamp must not invalidate the cache — a torn or "
+        "unparseable stamp costs a full rebuild"
+    )
+
+    # No staging directory survives a successful publish.
+    assert [p.name for p in cache_dir.iterdir() if p.is_dir()] == []
+
+    # A later open finds it by glob, with no accessor call at all.
+    with Profile(str(profile), cache_mode="parquet") as prof2:
+        again = prof2.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0]
+    assert again == rows
+
+
+def test_the_map_is_absent_from_schema_discovery_until_it_is_built(cached_profile):
+    """Deferral hides the map from the catalog, not just from the cache dir.
+
+    The skill system does not care — both consumers call
+    ``ensure_nvtx_kernel_map`` before probing for the map — but the text-to-SQL
+    surface reads the catalog directly: ``ai/backend/profile_db_tool.py``
+    rewrites ``sqlite_master`` to ``SHOW TABLES`` and gives the result to the
+    model, and the ``schema_inspect`` skill reads
+    ``information_schema.columns``. Before this change the map was listed the
+    moment a connection was handed out, because ``build_cache`` wrote its
+    Parquet and ``open_cached_db``'s glob viewed it; now, on a cold cache, it is
+    not there and a ``SELECT`` against it raises a Catalog Error where it used
+    to return rows.
+
+    That is a discoverability and performance change, not a correctness one —
+    nothing in the agent's prompt names the map — but it was unpinned, so this
+    test states both ends of the window: invisible before the first build,
+    visible after it, and visible at open to every later process because the
+    published Parquet becomes a view and DuckDB's ``SHOW TABLES`` lists views.
+    """
+    from nsys_ai.connection import DB_ERRORS
+    from nsys_ai.profile import Profile
+
+    def _catalog(db):
+        listed = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
+        described = {
+            r[0]
+            for r in db.execute(
+                "SELECT DISTINCT table_name FROM information_schema.columns"
+            ).fetchall()
+        }
+        return listed, described
+
+    profile, _cache_dir = cached_profile
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        listed, described = _catalog(prof.db)
+        assert "nvtx_kernel_map" not in listed, "the deferred map is still advertised"
+        assert "nvtx_path_dict" not in listed, "the deferred dictionary is still advertised"
+        assert "nvtx_kernel_map" not in described
+        with pytest.raises(DB_ERRORS):
+            prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()
+
+        assert ensure_nvtx_kernel_map(prof.db) is True
+        listed, described = _catalog(prof.db)
+        assert {"nvtx_kernel_map", "nvtx_path_dict"} <= listed, (
+            "the built map must be discoverable — SHOW TABLES lists DuckDB views too"
+        )
+        assert "nvtx_kernel_map" in described
+
+    with Profile(str(profile), cache_mode="parquet") as prof2:
+        listed, _ = _catalog(prof2.db)
+        assert {"nvtx_kernel_map", "nvtx_path_dict"} <= listed, (
+            "a published map must be visible at open, with no accessor call"
+        )
+
+
+def test_the_lazily_built_map_is_identical_to_the_eager_one(tmp_path, monkeypatch):
+    """Same rows, same dictionary, whichever builder produced them.
+
+    Both go through ``_write_nvtx_kernel_map_parquet``, so this is a check that
+    the split into ``_build_nvtx_kernel_map_from_parquet`` did not change what
+    the sweep is fed — the on-demand caller has no attached SQLite and no
+    ``src_tables`` set, and if that mattered the rows would differ here.
+    """
+    import duckdb
+
+    from nsys_ai.profile import Profile
+
+    lazy = tmp_path / "lazy.sqlite"
+    eager = tmp_path / "eager.sqlite"
+    shutil.copy(FIXTURE, lazy)
+    shutil.copy(FIXTURE, eager)
+
+    lazy_dir = Path(parquet_cache.build_cache(str(lazy)))
+    with Profile(str(lazy), cache_mode="parquet") as prof:
+        assert ensure_nvtx_kernel_map(prof.db) is True
+
+    monkeypatch.setenv("NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP", "1")
+    eager_dir = Path(parquet_cache.build_cache(str(eager)))
+    assert (eager_dir / "nvtx_kernel_map.parquet").is_file(), (
+        "control: the env var must still force the eager build"
+    )
+
+    db = duckdb.connect()
+    try:
+        for name in ("nvtx_kernel_map", "nvtx_path_dict"):
+            got = db.execute(
+                f"SELECT * FROM '{lazy_dir / name}.parquet' ORDER BY ALL"
+            ).fetchall()
+            want = db.execute(
+                f"SELECT * FROM '{eager_dir / name}.parquet' ORDER BY ALL"
+            ).fetchall()
+            assert got, f"{name} is empty on the lazy side"
+            assert got == want, f"{name} differs between the lazy and eager builders"
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(
+    parquet_cache._fcntl is None,
+    reason="build-lock degrades to no-op without POSIX fcntl; this assertion "
+    "only holds on platforms where the lock is real.",
+)
+def test_concurrent_cursors_build_the_map_once(cached_profile):
+    """Four threads, four ``.cursor()`` handles, one build.
+
+    This race is not hypothetical and predates the deferral: run against a
+    direct-attached profile before the per-database lock existed, all four
+    threads ran the whole fetch-and-sweep and three then lost the ``CREATE
+    TABLE`` to a DuckDB "Catalog write-write conflict on create"
+    TransactionException. It was invisible because both production call sites
+    swallow it under ``except DB_ERRORS: pass`` and then find the winner's
+    table. Deferring the build makes it reachable far more often, since it now
+    fires on whichever skill happens to run first.
+
+    ``CREATE VIEW IF NOT EXISTS`` does not fix it — the conflict is raised
+    before the existence check — so the DDL is serialised in Python instead.
+
+    On this path two things could be doing the serialising: ``_MAP_BUILD_LOCK``
+    and, inside it, ``_build_lock``'s flock. Measured with the Python lock
+    removed, this test still passes — flock blocks threads within a process as
+    well as across them, and the re-check inside it finds the published Parquet.
+    So this test pins the *outcome* for the cached path; the lock itself is
+    pinned by its in-memory counterpart below, where there is no lock file.
+    """
+    from nsys_ai.profile import Profile
+
+    profile, cache_dir = cached_profile
+    threads = 4
+    calls = []
+    calls_lock = threading.Lock()
+    original = parquet_cache._build_nvtx_kernel_map_from_parquet
+
+    def counting(db, src_dir, out_dir=None):
+        with calls_lock:
+            calls.append(1)
+        # Long enough that every other thread is queued on the lock before this
+        # one publishes; the sweep on this fixture is a few milliseconds.
+        time.sleep(0.3)
+        return original(db, src_dir, out_dir)
+
+    parquet_cache._build_nvtx_kernel_map_from_parquet = counting
+    try:
+        with Profile(str(profile), cache_mode="parquet") as prof:
+            barrier = threading.Barrier(threads)
+
+            def runner():
+                barrier.wait(timeout=10)
+                # query_conn(), not db.cursor(): a worker thread's cursor only
+                # resolves to the owning connection's cache directory because
+                # query_conn registers it (#301). A raw cursor finds no cache
+                # dir and silently takes the in-memory build instead — which is
+                # what the first draft of this test measured.
+                cur = prof.query_conn()
+                assert ensure_nvtx_kernel_map(cur) is True
+                return cur.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0]
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as pool:
+                futures = [pool.submit(runner) for _ in range(threads)]
+                counts = [f.result(timeout=60) for f in futures]
+    finally:
+        parquet_cache._build_nvtx_kernel_map_from_parquet = original
+
+    assert len(calls) == 1, (
+        f"{len(calls)} threads ran the sweep; they are not being serialised"
+    )
+    assert len(set(counts)) == 1 and counts[0] > 0, (
+        f"threads disagreed about the map: {counts}"
+    )
+    assert (cache_dir / "nvtx_kernel_map.parquet").is_file()
+
+
+def test_a_read_only_cache_directory_degrades_to_the_in_memory_build(cached_profile):
+    """``open_cached_db``'s fast path exists so a prebuilt cache works on a
+    read-only mount. The lazy build must not break that: it cannot create its
+    lock file or its staging directory there, and the only acceptable answer is
+    to fall back to the in-memory build, not to raise into the caller.
+    """
+    from nsys_ai.profile import Profile
+
+    profile, cache_dir = cached_profile
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        mode = cache_dir.stat().st_mode
+        parent_mode = cache_dir.parent.stat().st_mode
+        # The lock file lives beside the cache dir, the staging dir inside it.
+        os.chmod(cache_dir, 0o500)
+        os.chmod(cache_dir.parent, 0o500)
+        try:
+            assert ensure_nvtx_kernel_map(prof.db) is True
+            rows = prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0]
+        finally:
+            os.chmod(cache_dir.parent, parent_mode)
+            os.chmod(cache_dir, mode)
+
+    assert rows > 0, "the in-memory fallback produced no map"
+    assert not (cache_dir / "nvtx_kernel_map.parquet").exists(), (
+        "something was written into a read-only cache directory"
+    )
+    assert [p.name for p in cache_dir.iterdir() if p.is_dir()] == [], (
+        "a staging directory was left behind"
+    )
+
+
+def test_concurrent_cursors_build_the_in_memory_map_once():
+    """The same guarantee on the backend that has no cache to write into.
+
+    This race is real and predates the deferral. Reproduced on this fixture with
+    the lock removed: four threads on their own ``.cursor()`` handles all ran the
+    whole fetch-and-sweep, and three then lost the ``CREATE TABLE`` to a DuckDB
+    ``TransactionException: Catalog write-write conflict on create`` — four times
+    the work and four times the memory to produce one table. It looked harmless
+    because both production call sites swallow the exception under ``except
+    DB_ERRORS: pass`` and then find the winner's table.
+
+    The cached path is serialised by ``_build_lock``'s flock, which works across
+    threads as well as processes. This path has no such file, so the Python lock
+    is the only thing standing between four threads and four sweeps — and
+    ``ensure_nvtx_kernel_map`` is reached far more often now that the map is not
+    precomputed at open.
+    """
+    con = _duckdb_profile()
+    threads = 4
+    calls = []
+    calls_lock = threading.Lock()
+    original = parquet_cache._sweep_nvtx_kernel_map
+
+    def counting(kr_rows, nvtx_rows):
+        with calls_lock:
+            calls.append(1)
+        time.sleep(0.3)
+        return original(kr_rows, nvtx_rows)
+
+    parquet_cache._sweep_nvtx_kernel_map = counting
+    try:
+        barrier = threading.Barrier(threads)
+
+        def runner():
+            barrier.wait(timeout=10)
+            cur = con.cursor()
+            assert ensure_nvtx_kernel_map(cur) is True
+            return cur.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as pool:
+            futures = [pool.submit(runner) for _ in range(threads)]
+            counts = [f.result(timeout=60) for f in futures]
+    finally:
+        parquet_cache._sweep_nvtx_kernel_map = original
+
+    assert len(calls) == 1, (
+        f"{len(calls)} of {threads} threads ran the sweep; _MAP_BUILD_LOCK is not "
+        "serialising the in-memory build"
+    )
+    assert counts == [2] * threads, f"threads disagreed about the map: {counts}"
