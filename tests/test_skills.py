@@ -1038,3 +1038,91 @@ def test_run_skill_name_param_does_not_collide(minimal_nsys_conn):
     )
     # Returns formatted text (an error string is fine) — the point is no raise.
     assert isinstance(result, str)
+
+
+def test_root_cause_readme_coverage_claim_matches_wiring():
+    """Pin the coverage claim in docs/root-causes/README.md to the actual wiring.
+
+    Read off the two statically declared skill lists: ``Agent.analyze``'s
+    ``core_skills`` (what a plain ``agent analyze`` runs) and
+    ``EvidenceBuilder._SKILL_PIPELINE`` (what ``--evidence`` adds). Each
+    assertion below is tied to the sentence it guards, and the two lists are
+    kept separate on purpose: the README distinguishes "runs on every
+    ``agent analyze``" from "runs under ``--evidence``", so a claim about the
+    former must be checked against ``core_skills`` alone. Checking it against
+    the union would let a skill silently drop out of the plain run while this
+    test stayed green.
+
+    Scope, deliberately narrow: this reads those two lists only. It does NOT
+    model runtime fan-out (``critical_path`` -> ``cpu_gpu_pipeline``,
+    ``profile_health_manifest`` -> ``root_cause_matcher`` -> ``sync_cost_analysis``),
+    so it under-reports the skills that actually execute — a skill absent from
+    both lists may still run as fan-out. Every claim asserted here is one that
+    membership in these lists is sufficient to settle. Do not "fix" it into a
+    general reachability check; that framing was tried and rejected because it
+    cannot see fan-out.
+
+    If this fails, docs/root-causes/README.md and the pipeline have diverged;
+    update both together.
+    """
+    import inspect
+    import re
+
+    from nsys_ai.agent.loop import Agent
+    from nsys_ai.evidence_builder import EvidenceBuilder
+
+    src = inspect.getsource(Agent.analyze)
+    body = src.split("core_skills = [", 1)[1].split("]", 1)[0]
+    core_skills = set(re.findall(r'"([a-z0-9_]+)"', body))
+    assert len(core_skills) >= 10, f"core_skills parse looks wrong: {core_skills}"
+
+    pipeline = {skill for skill, _params in EvidenceBuilder._SKILL_PIPELINE.values()}
+    declared = core_skills | pipeline
+
+    # "Five of the detection skills named above run on every `agent analyze`."
+    # Checked against core_skills only — see the docstring.
+    automatic = {
+        "gpu_idle_gaps",
+        "top_kernels",
+        "nccl_breakdown",
+        "memory_transfers",
+        "kernel_launch_overhead",
+    }
+    assert automatic <= core_skills, (
+        "README says these run on every `agent analyze` but they are no longer in "
+        f"Agent.analyze's core_skills: {sorted(automatic - core_skills)}"
+    )
+
+    # "The other three named skills are not part of that run" — and are not in
+    # the evidence pipeline either, so `skill run` really is the only route.
+    manual = {"thread_utilization", "nvtx_kernel_map", "tensor_core_usage"}
+    assert not (manual & declared), (
+        "README says these need an explicit `skill run` but they are now wired "
+        f"into the pipeline: {sorted(manual & declared)}"
+    )
+
+    # Row 7: the NVTX abstention the README quotes comes from these two, and
+    # the README says it is reported without an extra command.
+    assert {"iteration_timing", "nvtx_layer_breakdown"} <= core_skills, (
+        "README's Row 7 claim relies on iteration_timing and nvtx_layer_breakdown "
+        "running on a plain `agent analyze`"
+    )
+
+    # Row 13: the `tc_eligible_inactive` finding is emitted by top_kernels'
+    # to_findings, which only runs from the evidence pipeline.
+    assert "top_kernels" in pipeline, (
+        "README's Row 13 claim relies on top_kernels being in the evidence pipeline"
+    )
+
+    # Row 2: the README says critical_path runs under `--evidence` and not on a
+    # plain `agent analyze`, and that cpu_gpu_pipeline needs an explicit
+    # `skill run`. cpu_gpu_pipeline is reached at runtime only as fan-out from
+    # critical_path, so its absence from core_skills is what makes the "not
+    # covered by a plain `agent analyze`" half true.
+    assert "critical_path" in pipeline and "critical_path" not in core_skills, (
+        "README's Row 2 claim relies on critical_path being evidence-only"
+    )
+    assert "cpu_gpu_pipeline" not in declared, (
+        "README says cpu_gpu_pipeline needs an explicit `skill run`, but it is now "
+        "declared in core_skills or the evidence pipeline"
+    )
