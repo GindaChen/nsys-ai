@@ -45,8 +45,12 @@ import time
 from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import duckdb
+
+if TYPE_CHECKING:  # pyarrow is imported lazily at the one call site that needs it
+    import pyarrow as pa
 
 from nsys_ai.connection import resolve_table_variant
 from nsys_ai.exceptions import ProfileNotFoundError
@@ -639,7 +643,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # ── Generate nvtx_kernel_map ──────────────────────────────────────
         if has_kernel and has_nvtx and has_runtime and not defer_nvtx_map:
             _progress("nvtx_kernel_map.parquet")
-            _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
+            _build_nvtx_kernel_map(db, src_tables, cache_dir)
         elif defer_nvtx_map:
             log.info("Deferring nvtx_kernel_map build for large profile (on-demand NVTX SQL enabled)")
 
@@ -1063,8 +1067,9 @@ def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
     """Write nvtx_high.parquet — nvtx.parquet minus op-level noise.
 
     On profiles where ~95% of NVTX events are ``aten::*`` (typical PyTorch
-    traces), this shrinks the input set for downstream IEJoin operations
-    (``nvtx_kernel_map`` build, ``nvtx_layer_breakdown`` slow path) by ~20×.
+    traces), this shrinks the input set for ``nvtx_layer_breakdown``'s slow
+    path — still a real range join — by ~20×. The ``nvtx_kernel_map`` build is
+    a stack sweep and deliberately reads the unfiltered nvtx.parquet instead.
 
     Preserves the same (globalTid, start) sort as nvtx.parquet so DuckDB
     zonemaps stay effective.
@@ -1095,19 +1100,29 @@ def _build_nvtx_kernel_map(
     db: duckdb.DuckDBPyConnection,
     src_tables: set[str],
     cache_dir: Path,
-    sqlite_path: str,
 ) -> None:
-    """Generate nvtx_kernel_map.parquet using pure DuckDB SQL.
+    """Generate nvtx_kernel_map.parquet with a per-thread stack sweep.
 
-    Uses DuckDB's native IEJoin algorithm for range predicates
-    (n.start <= r.start AND n.end >= r.end), which is 20-100x faster
-    than the previous Python sort-merge loop.
+    There is one builder and one path. Each kernel is attributed to its
+    innermost enclosing NVTX push/pop range by ``_sweep_nvtx_kernel_map``; no
+    SQL range join is involved (the comment below records why one was tried and
+    dropped), and there is no fallback.
 
-    Hot path uses **Parquet** for ``kernels``, ``runtime``, and ``nvtx`` (already
-    exported in this cache build) so the heavy range join never scans the
-    attached SQLite ``NVTX_EVENTS`` table — significantly faster on large traces.
+    Nor is a source that exists but cannot be read handled here: the
+    ``read_parquet`` error propagates out of this function, and ``build_cache``
+    deletes the half-built temp dir rather than publishing it. That is what
+    every export of a primary source in this build does; the one export that
+    swallows its error, ``_build_nvtx_high``, is a derived convenience view that
+    callers already probe for and fall back from, which is precisely what these
+    three sources are not. They are shared with the rest of the cache, so an
+    unreadable one is not a reason to drop the map and keep the cache, it is a
+    reason to have no cache. ``Profile.__init__`` then logs and falls back to raw
+    SQLite; the profile stays readable, just without Parquet acceleration. The
+    only degraded-but-continue case is a *missing* source, handled below.
 
-    Falls back to Python sort-merge if the SQL approach fails.
+    Sources are the ``kernels``, ``runtime`` and ``nvtx`` Parquets already
+    exported by this cache build, so the heavy read never scans the attached
+    SQLite ``NVTX_EVENTS`` table.
     """
     kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
     runtime_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_RUNTIME")
@@ -1120,7 +1135,7 @@ def _build_nvtx_kernel_map(
     kp = cache_dir / "kernels.parquet"
     rp = cache_dir / "runtime.parquet"
     np = cache_dir / "nvtx.parquet"
-    # IEJoin source must be the full nvtx.parquet, NOT nvtx_high.parquet.
+    # The sweep's NVTX source must be the full nvtx.parquet, NOT nvtx_high.parquet.
     # nvtx_kernel_map is the canonical "kernel → enclosing NVTX range" mapping
     # used by attribute_kernels_to_nvtx() and downstream skills via the fast
     # path. Using a filtered source would silently drop kernels whose only
@@ -1129,9 +1144,14 @@ def _build_nvtx_kernel_map(
     # full nvtx when nvtx_kernel_map exists but is empty/incomplete.
     # The slow path in nvtx_layer_breakdown still benefits from nvtx_high
     # (see _pick_nvtx_view in that file).
+    # All three are written unconditionally earlier in this same build, under
+    # the very predicates (has_kernel/has_nvtx/has_runtime) that gate the call
+    # to this function, and none of those writes is wrapped in a try/except — a
+    # failure there aborts the whole build. So this branch cannot normally fire;
+    # it exists so a future reordering degrades to a logged skip rather than a
+    # duckdb.Error out of read_parquet.
     if not (kp.is_file() and rp.is_file() and np.is_file()):
-        log.warning("Parquet prerequisites missing for nvtx_kernel_map; using Python fallback")
-        _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
+        log.warning("nvtx_kernel_map: parquet sources missing; skipping map")
         return
 
     kps = _safe_path(kp)
@@ -1157,22 +1177,30 @@ def _build_nvtx_kernel_map(
     #
     # Sources stay Parquet-only, as before, so the heavy read never touches the
     # attached SQLite.
+    #
+    # Neither call below is wrapped in a try/except, and wrapping them would be
+    # theatre: both helpers are generator functions, so these two lines only
+    # build generator objects. The ``db.execute`` inside each runs lazily, on
+    # first advance, which happens inside ``_sweep_nvtx_kernel_map`` — outside
+    # any guard placed here. A duckdb.Error therefore cannot surface at this
+    # point, and per the docstring it should not be swallowed at the next one
+    # either.
     tc_by_kernel: dict[tuple, tuple[int, int]] = {}
-    try:
-        kr_rows = _stream_kernel_runtime(db, kps, rps, tc_by_kernel)
-        # The sweep advances one index per thread, so this must arrive sorted.
-        #
-        # Streamed rather than fetchall()'d, and the label strings interned. The
-        # ranges outnumber the kernels five to one here (15.9M vs 3.1M on a
-        # 3.5GB capture), so they dominate: fetchall built 15.9M tuples that the
-        # sweep then copied into 15.9M more, and every label was a separate str
-        # object even though NVTX text repeats heavily. Feeding a generator
-        # drops the first copy, and interning collapses the labels onto one
-        # object per distinct string.
-        nvtx_rows = _stream_nvtx_ranges(db, nps)
-    except duckdb.Error as e:
-        log.warning("nvtx_kernel_map: source read failed (%s); skipping map", e)
-        return
+    kr_rows = _stream_kernel_runtime(db, kps, rps, tc_by_kernel)
+    # Only the NVTX side has to arrive sorted. The sweep advances a single index
+    # over the ranges per thread without re-sorting them, but it does sort the
+    # kernel side itself (``kr_by_tid[tid].sort(...)``), so asking the kernel
+    # query for an order it will redo buys nothing. That asymmetry is what
+    # tests/test_determinism.py pins.
+    #
+    # Streamed rather than fetchall()'d, and the label strings interned. The
+    # ranges outnumber the kernels five to one here (15.9M vs 3.1M on a 3.5GB
+    # capture), so they dominate: fetchall built 15.9M tuples that the sweep
+    # then copied into 15.9M more, and every label was a separate str object
+    # even though NVTX text repeats heavily. Feeding a generator drops the first
+    # copy, and interning collapses the labels onto one object per distinct
+    # string.
+    nvtx_rows = _stream_nvtx_ranges(db, nps)
 
     # Both inputs are generators, so neither can be tested for emptiness here --
     # an exhausted-but-truthy generator would silently produce nothing. The
@@ -1197,7 +1225,12 @@ def _build_nvtx_kernel_map(
 
 
 def _stream_kernel_runtime(db, kernels_parquet: str, runtime_parquet: str, tc_out: dict):
-    """Yield ``(globalTid, r_start, r_end, k_start, k_end, kernel_name)``, sorted.
+    """Yield ``(globalTid, r_start, r_end, k_start, k_end, kernel_name)``.
+
+    Deliberately unordered. ``_sweep_nvtx_kernel_map`` buckets these rows by
+    thread and sorts each bucket by ``r_start`` itself, so an ORDER BY here
+    would only be redone in Python — and stating an invariant the consumer does
+    not have invites someone to rely on it.
 
     Streamed and interned for the same reason as the NVTX ranges, and the effect
     is larger here: a 3.5GB capture has 3,077,650 of these rows carrying only
@@ -1216,7 +1249,6 @@ def _stream_kernel_runtime(db, kernels_parquet: str, runtime_parquet: str, tc_ou
                COALESCE(CAST(k.uses_tc AS INTEGER), 0) AS uses_tc
         FROM read_parquet('{kernels_parquet}') k
         JOIN read_parquet('{runtime_parquet}') r ON r.correlationId = k.correlationId
-        ORDER BY r.globalTid, r.start
         """
     )
     make_reader = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
@@ -1275,14 +1307,15 @@ def _stream_nvtx_ranges(db, nvtx_parquet: str):
             yield tids[i], starts[i], ends[i], shared
 
 
-def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> None:
-    """Write sweep ``results`` to nvtx_kernel_map.parquet + nvtx_path_dict.parquet.
+def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
+    """Build the ``(nvtx_kernel_map, nvtx_path_dict)`` Arrow pair from sweep rows.
 
-    The single writer for the cache build, so the file layout cannot drift by
-    which code path produced the rows. It emits all nine columns; the Python
-    path used to write seven, omitting ``is_tc_eligible``/``uses_tc``, which made
-    a cache built that way silently different from one built by the SQL path.
-    Rows arriving without the flags default to 0 rather than failing.
+    The single definition of the map's schema, shared by the cache writer and
+    the on-demand materializer so the two cannot drift. All nine columns are
+    emitted, including ``is_tc_eligible``/``uses_tc``: consumers probe for those
+    two by presence (``connection.cached_nvtx_map_has_embedded_tc``), so a map
+    missing them is not merely thinner, it routes every reader onto a different
+    aggregate. Rows arriving without the flags default to 0 rather than failing.
     """
     import pyarrow as pa
 
@@ -1308,6 +1341,16 @@ def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> 
             "nvtx_path": pa.array(list(distinct_paths), pa.string()),
         }
     )
+    return map_table, dict_table
+
+
+def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> None:
+    """Write sweep ``results`` to nvtx_kernel_map.parquet + nvtx_path_dict.parquet.
+
+    The single writer for the cache build, so the file layout cannot drift by
+    which code path produced the rows.
+    """
+    map_table, dict_table = _nvtx_map_arrow_tables(results)
 
     try:
         db.register("_nvtx_kernel_map", map_table)
@@ -1333,12 +1376,15 @@ def _write_nvtx_kernel_map_parquet(db, results: list[dict], cache_dir: Path) -> 
 def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
     """Per-thread sort-merge attributing each kernel to its innermost enclosing
     NVTX range. O(N+M) per thread; the shared containment core used by both the
-    parquet-cache Python fallback and the on-demand builder (issue #257).
+    parquet-cache builder and the on-demand builder (issue #257).
 
     kr_rows: iterable of ``(globalTid, r_start, r_end, k_start, k_end,
     kernel_name)`` — the kernel name already resolved by the caller (so each can
-    match its own map's convention). nvtx_rows: ``(globalTid, start, end, text)``
-    (PushPop ranges), sorted by ``(globalTid, start)``. Returns rows:
+    match its own map's convention), **in any order**: this function buckets
+    them by thread and sorts each bucket by ``r_start`` itself.
+    nvtx_rows: ``(globalTid, start, end, text)``
+    (PushPop ranges), which *must* arrive sorted by ``(globalTid, start)`` —
+    they are swept with a single advancing index per thread. Returns rows:
     ``{nvtx_text, nvtx_depth, nvtx_path, kernel_name, k_start, k_end, k_dur_ns}``.
     """
     from collections import defaultdict
@@ -1412,105 +1458,16 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
     return results
 
 
-def _build_nvtx_kernel_map_python(
-    db: duckdb.DuckDBPyConnection,
-    src_tables: set[str],
-    cache_dir: Path,
-    sqlite_path: str,
-) -> None:
-    """Generate nvtx_kernel_map.parquet using Python sort-merge (fallback).
-
-    This is the original O(N+M) per-thread sweep algorithm.  Used only when the
-    pure-SQL IEJoin approach fails (e.g., schema incompatibilities).
-    """
-    kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
-    runtime_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_RUNTIME")
-    nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
-
-    # ── Load data from attached SQLite via DuckDB ─────────────────────
-    kr_rows = db.execute(f"""
-        SELECT r.globalTid, r.start, r."end",
-               k.start AS ks, k."end" AS ke, k.shortName
-        FROM src.{kernel_table} k
-        JOIN src.{runtime_table} r ON r.correlationId = k.correlationId
-        ORDER BY r.globalTid, r.start
-    """).fetchall()
-
-    if not kr_rows:
-        return
-
-    has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
-    if has_textid:
-        text_expr = "COALESCE(n.text, s.value)"
-        text_join = "LEFT JOIN src.StringIds s ON n.textId = s.id"
-    else:
-        text_expr = "n.text"
-        text_join = ""
-
-    nvtx_rows = db.execute(f"""
-        SELECT n.globalTid, n.start, n."end", {text_expr} AS text
-        FROM src.{nvtx_table} n
-        {text_join}
-        WHERE n.eventType = 59 AND n."end" > n.start
-        ORDER BY n.globalTid, n.start
-    """).fetchall()
-
-    # StringIds lookup
-    short_name_ids = {r[5] for r in kr_rows if r[5] is not None}
-    sid_map: dict = {}
-    if short_name_ids:
-        placeholders = ",".join(str(int(i)) for i in short_name_ids)
-        sid_rows = db.execute(
-            f"SELECT id, value FROM src.StringIds WHERE id IN ({placeholders})"
-        ).fetchall()
-        sid_map = dict(sid_rows)
-
-    # ── Sort-merge sweep ──────────────────────────────────────────────
-    # Resolve the kernel name (shortName here, as this fallback always has) into
-    # the row before the sweep, which is name-agnostic.
-    kr_named = [
-        (r[0], r[1], r[2], r[3], r[4], sid_map.get(r[5], f"kernel_{r[5]}")) for r in kr_rows
-    ]
-    results = _sweep_nvtx_kernel_map(kr_named, nvtx_rows)
-
-    if not results:
-        return
-
-    _write_nvtx_kernel_map_parquet(db, results, cache_dir)
-
-
 def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
     """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` tables on a
     DuckDB connection from sweep ``results``. Emits the full 9-column
     cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
     so consumers take their map-only fast path (a TC-less map would force
     nvtx_layer_breakdown into a (start,end) kernels-join that double-counts
-    timestamp-colliding kernels)."""
-    import pyarrow as pa
-
-    paths = sorted({r["nvtx_path"] for r in results})
-    path_to_id = {p: i + 1 for i, p in enumerate(paths)}
-    map_tbl = pa.table(
-        {
-            "path_id": pa.array([path_to_id[r["nvtx_path"]] for r in results], pa.int64()),
-            "nvtx_text": pa.array([r["nvtx_text"] for r in results], pa.string()),
-            "nvtx_depth": pa.array([r["nvtx_depth"] for r in results], pa.int32()),
-            "kernel_name": pa.array([r["kernel_name"] for r in results], pa.string()),
-            "k_start": pa.array([r["k_start"] for r in results], pa.int64()),
-            "k_end": pa.array([r["k_end"] for r in results], pa.int64()),
-            "k_dur_ns": pa.array([r["k_dur_ns"] for r in results], pa.int64()),
-            "is_tc_eligible": pa.array(
-                [r.get("is_tc_eligible", 0) for r in results], pa.int32()
-            ),
-            "uses_tc": pa.array([r.get("uses_tc", 0) for r in results], pa.int32()),
-        }
-    )
-    dict_tbl = pa.table(
-        {
-            "path_id": pa.array([path_to_id[p] for p in paths], pa.int64()),
-            "nvtx_path": pa.array(paths, pa.string()),
-        }
-    )
+    timestamp-colliding kernels). Shares ``_nvtx_map_arrow_tables`` with the
+    cache writer, so the on-demand map and the cached one are the same shape by
+    construction rather than by two lists of columns kept in step."""
+    map_tbl, dict_tbl = _nvtx_map_arrow_tables(results)
     db.register("_odm_nkm", map_tbl)
     db.register("_odm_npd", dict_tbl)
     try:
@@ -1589,7 +1546,8 @@ def ensure_nvtx_kernel_map(conn) -> bool:
             f"ORDER BY r.globalTid, r.start"
         ).fetchall()
         # nvtx must arrive sorted by start: the sweep advances a single index
-        # over it per thread without re-sorting (matches _build_nvtx_kernel_map_python).
+        # over it per thread without re-sorting. The kernel side above needs no
+        # such guarantee — the sweep sorts that one itself.
         nvtx_rows = db.execute(
             f'SELECT n.globalTid, n.start, n."end", {text_expr} AS text '
             f"FROM {nvtx_table} n {text_join} "

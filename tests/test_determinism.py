@@ -213,6 +213,84 @@ def test_the_sweep_resolves_label_ties_by_data_not_by_input_order():
     assert answers == {("aaa", "aaa > zzz")}
 
 
+def test_the_sweep_does_not_depend_on_the_order_kernels_arrive_in():
+    """The kernel side may arrive in any order; only the NVTX side must be sorted.
+
+    `_stream_kernel_runtime` used to carry `ORDER BY r.globalTid, r.start` and a
+    comment claiming the sweep "advances one index per thread, so this must
+    arrive sorted". Half of that is true: the sweep does advance a single index
+    over the *ranges*, but it re-sorts the *kernels* itself
+    (`kr_by_tid[tid].sort(...)`), so the SQL order was being redone in Python.
+    The ORDER BY is gone; this test is what stops the self-sort from being
+    dropped as "redundant" later, which would silently make the map's contents
+    depend on DuckDB's join order.
+
+    Asserted on *content*, canonically ordered, not on the returned list order.
+    The sweep visits threads in the order they first appear in its input, so
+    interleaving two threads differently permutes the rows between thread
+    blocks without changing a single attribution — and the writer emits
+    ``COPY ... ORDER BY k_start, k_end, kernel_name`` anyway, so list order is
+    not what reaches the cache.
+
+    Checked against a real capture before being reduced to this size: on an
+    88MB profile (449,043 kernel-runtime rows, 466,398 ranges), 200 shuffles of
+    the kernel side produced one distinct result, while 5 shuffles of the NVTX
+    side produced 5 distinct results, none matching the unshuffled one. Kept
+    synthetic here so it runs in milliseconds and needs no fixture profile.
+    """
+    import random
+
+    from nsys_ai.parquet_cache import _sweep_nvtx_kernel_map
+
+    # Two threads, nested ranges, kernels landing at several depths. Distinct
+    # r_start values throughout, so the correct answer is a single total order
+    # and any dependence on arrival order shows up as an exact mismatch.
+    nvtx = [
+        (1, 0, 1000, "step"),
+        (1, 100, 400, "fwd"),
+        (1, 150, 250, "attn"),
+        (1, 500, 900, "bwd"),
+        (2, 0, 1000, "step"),
+        (2, 200, 800, "allreduce"),
+    ]
+    kr = [
+        (1, 160, 240, 1600, 2400, "kA"),
+        (1, 300, 380, 3000, 3800, "kB"),
+        (1, 420, 480, 4200, 4800, "kC"),  # inside step only
+        (1, 600, 700, 6000, 7000, "kD"),
+        (2, 350, 450, 3500, 4500, "kE"),
+        (2, 850, 950, 8500, 9500, "kF"),  # inside step only
+    ]
+    nvtx_sorted = sorted(nvtx, key=lambda r: (r[0], r[1]))
+
+    def canonical(rows):
+        return sorted(
+            (r["k_start"], r["k_end"], r["kernel_name"], r["nvtx_text"], r["nvtx_path"])
+            for r in rows
+        )
+
+    expected = canonical(_sweep_nvtx_kernel_map(list(kr), list(nvtx_sorted)))
+    # Guard the guard: a sweep that attributed nothing, or that attributed
+    # everything to the outermost range, would make the comparison below pass
+    # for the wrong reason.
+    assert len(expected) == len(kr)
+    assert [row[-1] for row in expected] == [
+        "step > fwd > attn",  # kA, k_start 1600
+        "step > fwd",  # kB, 3000
+        "step > allreduce",  # kE, 3500
+        "step",  # kC, 4200 — inside `step` only
+        "step > bwd",  # kD, 6000
+        "step",  # kF, 8500 — inside `step` only
+    ]
+
+    for seed in range(50):
+        shuffled = list(kr)
+        random.Random(seed).shuffle(shuffled)
+        assert canonical(_sweep_nvtx_kernel_map(shuffled, list(nvtx_sorted))) == expected, (
+            f"kernel arrival order changed the sweep's answer (seed {seed})"
+        )
+
+
 def test_the_direct_attach_builder_keeps_the_same_total_order():
     """`nvtx_attribution` builds the map on a direct-attached profile, where
     there is no parquet cache. Its ordering must match the sweep's, or cached

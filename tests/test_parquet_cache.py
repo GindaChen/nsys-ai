@@ -551,6 +551,72 @@ class TestDamagedInput:
                 prof.query_conn()
         assert "no suitable KERNEL table found" in str(excinfo.value)
 
+    def test_an_unreadable_map_source_aborts_the_build_and_a_missing_one_skips(
+        self, tmp_path
+    ):
+        """The two cases ``_build_nvtx_kernel_map``'s docstring distinguishes.
+
+        They are easy to confuse, and the docstring got them backwards until
+        this test existed: it claimed an unreadable source was "logged and the
+        map skipped". It is not. Both source readers are generator functions, so
+        their ``db.execute`` runs lazily inside ``_sweep_nvtx_kernel_map``,
+        where nothing catches it — the error leaves the builder and
+        ``build_cache`` throws the half-built temp dir away.
+
+        That is the wanted behaviour, not a defect: the map's sources are the
+        same Parquets the rest of the cache reads, so one of them being garbage
+        means the cache is unusable, and publishing it minus the map would hide
+        that. Pinned here so that adding a ``try/except`` around the sweep —
+        which would look like a tidy-up — is a visible change to a documented
+        behaviour instead of a silent one.
+
+        A *missing* source is the opposite and stays a logged skip; that branch
+        is unreachable in a normal build, so this is its only exercise.
+        """
+        import shutil
+
+        import duckdb
+
+        src = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+        profile = tmp_path / "p.sqlite"
+        shutil.copy(src, profile)
+
+        cache_dir = Path(parquet_cache.build_cache(str(profile)))
+        map_path = cache_dir / "nvtx_kernel_map.parquet"
+        assert map_path.is_file(), "control: the healthy build must produce a map"
+
+        con = sqlite3.connect(str(profile))
+        try:
+            src_tables = {
+                r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        finally:
+            con.close()
+
+        db = duckdb.connect()
+        try:
+            nvtx = cache_dir / "nvtx.parquet"
+            healthy = nvtx.read_bytes()
+            map_path.unlink()
+
+            nvtx.write_bytes(b"NOTAPARQUET" * 100)
+            with pytest.raises(duckdb.Error):
+                parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+            assert not map_path.exists(), "a map was written from an unreadable source"
+
+            nvtx.unlink()
+            parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+            assert not map_path.exists(), "the missing-source skip wrote a map anyway"
+
+            # Control: the same call on the restored source does build one, so
+            # the two assertions above are about the damage, not about the
+            # arguments being wrong.
+            nvtx.write_bytes(healthy)
+            parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+            assert map_path.is_file(), "the builder no longer works on healthy sources"
+        finally:
+            db.close()
+
 
 class TestConcurrentBuild:
     """Regression: two terminals opening the same profile concurrently
@@ -719,9 +785,15 @@ def test_the_map_is_built_by_the_sweep_and_carries_all_nine_columns(tmp_path):
     Output was compared row-for-row against the IEJoin's on that capture:
     3,042,699 rows, zero differences either direction, all nine columns.
 
-    Nine columns is the other half. The Python builder used to write seven,
-    omitting is_tc_eligible/uses_tc, so a cache built by that path was silently
-    different from one built by the SQL path. Both now go through one writer.
+    Nine columns is the other half, and this is now the only guard on it. A
+    second, unreachable builder used to exist alongside the sweep; unifying the
+    two on one nine-column writer fixed the shape but not the values — it went
+    on filling is_tc_eligible/uses_tc with zeroes where the sweep writes 296/296
+    on this fixture, and since consumers probe those columns by *presence*
+    (connection.cached_nvtx_map_has_embedded_tc), nine zeroed columns read as
+    "TC data available" where seven had correctly fallen back to a kernels-join.
+    That builder is gone, so nothing but this test stands between a future
+    change and an all-zero map.
     """
     import shutil
 
