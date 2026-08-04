@@ -11,6 +11,23 @@ Layout:
 Threading:
     stream_agent_loop runs in a @work(thread=True) worker.
     UI updates are dispatched via self.call_from_thread().
+
+    A thread worker cannot be interrupted: Worker.cancel() only marks it
+    cancelled, and all three ways a turn ends go through that same non-stopping
+    path — cancel_all() on Ctrl+C, exclusive supersession by a new submit, and
+    the cancel_all() Textual itself runs when the message loop exits on quit.
+    The worker therefore stops itself, by checking worker.is_cancelled on every
+    stream event; that is what stops it pulling the LLM stream and holding the
+    profile DB connection open.
+
+    Each turn also carries a _generation_id, and every worker-to-UI hop goes
+    via _ui_call, which drops the call if the turn it belongs to is no longer
+    the live one. The two guards do not subsume each other: quitting cancels
+    the worker without bumping the id, and the early-return paths below never
+    reach the stream loop that consults is_cancelled. _ui_call is also defence
+    in depth against a window is_cancelled does not close by construction — a
+    callback already handed to call_from_thread when the cancel lands still
+    runs on the main thread — for which we have no deterministic test.
 """
 
 from __future__ import annotations
@@ -23,6 +40,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
+from textual.worker import NoActiveWorker, get_current_worker
 
 # ---------------------------------------------------------------------------
 # Profile helper — load top kernels without importing the full Profile class.
@@ -173,6 +191,9 @@ class NsysChatApp(App):
         self._streaming_buffer: list[str] = []
         # Last navigation message (set by _on_action_navigate, consumed by _on_stream_done).
         self._last_nav_message: str = ""
+        # Bumped on every submit and every cancel; a worker whose id no longer
+        # matches is stale and must not touch the UI or the history.
+        self._generation_id: int = 0
 
     # ── Compose ──────────────────────────────────────────────────────────────
 
@@ -250,11 +271,15 @@ class NsysChatApp(App):
         event.input.value = ""
         self._add_user_turn(user_msg)
         self._is_generating = True
+        self._generation_id += 1
         self._streaming_buffer = []
         self._last_nav_message = ""
         # Show "AI: " prefix in RichLog; streaming chunks go to #streaming-area.
         self.query_one("#streaming-area", Static).update("[bold green]AI:[/bold green] …")
-        self._run_stream_worker(user_msg)
+        # Hand the worker its own generation id. Reading it off self on the worker
+        # thread would let a late-scheduled stale worker pick up a newer turn's id
+        # and pass every guard below.
+        self._run_stream_worker(user_msg, self._generation_id)
 
     # ── Main-thread UI callbacks (called via call_from_thread) ────────────────
 
@@ -263,6 +288,11 @@ class NsysChatApp(App):
         log = self.query_one("#chat-log", RichLog)
         log.write(f"[bold yellow]You:[/bold yellow] {text}")
         self._chat_messages.append({"role": "user", "content": text})
+
+    def _ui_call(self, gen: int, fn, *args) -> None:
+        """Run *fn* on the main thread only if *gen* is still the live turn."""
+        if gen == self._generation_id:
+            fn(*args)
 
     def _on_text_chunk(self, chunk: str) -> None:
         """Append streaming text chunk to the Static display area."""
@@ -361,25 +391,42 @@ class NsysChatApp(App):
     # ── Background worker ─────────────────────────────────────────────────────
 
     @work(thread=True, exclusive=True)
-    def _run_stream_worker(self, user_msg: str) -> None:
+    def _run_stream_worker(self, user_msg: str, gen: int) -> None:
         """Background thread: calls stream_agent_loop, posts UI updates via call_from_thread.
+
+        *gen* is the generation id of the turn that started this worker, passed in
+        by the caller rather than read off self here — a worker that starts late
+        would otherwise read whatever generation is live by then, including one
+        belonging to a turn that superseded it.
 
         Imports chat module lazily so the rest of the app works without litellm installed.
         """
         try:
+            worker = get_current_worker()
+        except NoActiveWorker:
+            worker = None
+
+        def cancelled() -> bool:
+            return (worker is not None and worker.is_cancelled) or gen != self._generation_id
+
+        try:
             from .chat import _get_model_and_key, distill_history, stream_agent_loop
         except ImportError as e:
-            self.call_from_thread(self._on_system_event, f"chat module unavailable: {e}")
-            self.call_from_thread(self._on_stream_done, "")
+            self.call_from_thread(
+                self._ui_call, gen, self._on_system_event, f"chat module unavailable: {e}"
+            )
+            self.call_from_thread(self._ui_call, gen, self._on_stream_done, "")
             return
 
         model, _ = _get_model_and_key()
         if not model:
             self.call_from_thread(
+                self._ui_call,
+                gen,
                 self._on_system_event,
                 "No LLM configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.",
             )
-            self.call_from_thread(self._on_stream_done, "")
+            self.call_from_thread(self._ui_call, gen, self._on_stream_done, "")
             return
 
         # Build a lightweight ui_context so the model knows which profile it's analyzing.
@@ -399,27 +446,34 @@ class NsysChatApp(App):
         messages = list(self._chat_messages)
         accumulated: list[str] = []
 
+        stream = stream_agent_loop(
+            model=model,
+            messages=messages,
+            ui_context=ui_context,
+            profile_path=self.profile_path,
+            max_turns=5,
+        )
         try:
-            for event in stream_agent_loop(
-                model=model,
-                messages=messages,
-                ui_context=ui_context,
-                profile_path=self.profile_path,
-                max_turns=5,
-            ):
+            for event in stream:
+                if cancelled():
+                    break
                 etype = event.get("type")
                 if etype == "text":
                     chunk = event.get("content", "")
                     if chunk:
                         accumulated.append(chunk)
-                        self.call_from_thread(self._on_text_chunk, chunk)
+                        self.call_from_thread(self._ui_call, gen, self._on_text_chunk, chunk)
                 elif etype == "system":
-                    self.call_from_thread(self._on_system_event, event.get("content", ""))
+                    self.call_from_thread(
+                        self._ui_call, gen, self._on_system_event, event.get("content", "")
+                    )
                 elif etype == "action":
                     action = event.get("action", {})
                     atype = action.get("type")
                     if atype == "navigate_to_kernel":
                         self.call_from_thread(
+                            self._ui_call,
+                            gen,
                             self._on_action_navigate,
                             action.get("target_name", ""),
                             action.get("reason"),
@@ -428,15 +482,39 @@ class NsysChatApp(App):
                         start_s = action.get("start_s", 0)
                         end_s = action.get("end_s", 0)
                         self.call_from_thread(
+                            self._ui_call,
+                            gen,
                             self._on_system_event,
                             f"🔍 Zoom: {start_s:.3f}s – {end_s:.3f}s",
                         )
                 # "done" type is handled by loop termination.
         except Exception as e:
-            self.call_from_thread(self._on_system_event, f"Stream error: {e}")
+            if not cancelled():
+                self.call_from_thread(
+                    self._ui_call, gen, self._on_system_event, f"Stream error: {e}"
+                )
+        finally:
+            # Close on this thread: the generator owns the profile DB connection
+            # and must be finalized by the thread that advanced it (chat.py
+            # _prepare_session). This is not what makes that true — CPython
+            # refcounting finalizes the generator on this thread anyway, when
+            # this frame is released at function exit (measured). What the
+            # explicit close buys is that the thread and the ordering are a
+            # stated contract rather than an artefact of refcount semantics,
+            # and that a cancelled turn frees the connection at the break
+            # instead of holding it to function exit. Teardown failures are
+            # swallowed as they were when GC did the finalizing — raising here
+            # would skip _on_stream_done and strand the submit guard.
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+        if cancelled():
+            return
 
         final_content = "".join(accumulated)
-        self.call_from_thread(self._on_stream_done, final_content)
+        self.call_from_thread(self._ui_call, gen, self._on_stream_done, final_content)
 
         # Distill history to compress tool call/result sequences for lean context (§11.7).
         try:
@@ -457,6 +535,7 @@ class NsysChatApp(App):
         """Cancel the current AI generation if running (Ctrl+C)."""
         if self._is_generating:
             self.workers.cancel_all()
+            self._generation_id += 1
             self._is_generating = False
             self._streaming_buffer = []
             self.query_one("#streaming-area", Static).update("")

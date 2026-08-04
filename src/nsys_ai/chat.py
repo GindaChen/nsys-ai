@@ -584,9 +584,14 @@ def stream_agent_loop(
     path touches is ``profile_db_tool._schema_cache``, which is lock-guarded
     and holds strings — so two turns may overlap freely, and they do:
     ``@work(thread=True, exclusive=True)`` cancels the asyncio task, not the OS
-    thread, so a cancelled chat turn keeps running alongside its replacement
-    (Textual's own docs: thread workers cannot be interrupted, only asked to
-    check ``is_cancelled``). That overlap is harmless only because each
+    thread, so a cancelled chat turn is not stopped by anything Textual does
+    (its own docs: thread workers cannot be interrupted, only asked to check
+    ``is_cancelled``). Both Textual consumers do the asking — ``tui_textual``
+    on ``worker.is_cancelled``, ``tree/chat.py`` on its own cancel event — and
+    break out of the loop, so the overlap now lasts until the abandoned turn's
+    next event rather than to the end of its turn. Bounded, not eliminated: the
+    break cannot land mid-event, and the replacement turn starts before the
+    abandoned one notices. That overlap is harmless only because each
     invocation holds its own connection; see ``_prepare_session``. The
     *diff_context* path holds no connection of its own — its ``ToolDispatcher``
     is built with ``conn=None``, as is the one in ``diff_tools.run_diff_tool``
