@@ -429,6 +429,129 @@ class TestUnrecognisedKernelTable:
         ) == ["CUPTI_ACTIVITY_KIND_KERNEL_X1"]
 
 
+class TestDamagedInput:
+    """What happens when the bytes on disk are wrong.
+
+    The sibling class above covers "the cache was never published". This one
+    covers the two cases after that: a cache that *was* published and then went
+    bad on disk, and a profile that is itself truncated. Both are ordinary in
+    practice — an interrupted build, a killed capture, a full filesystem, an
+    rsync that stopped halfway — and only three or four files in the whole suite
+    touched malformed input before this.
+
+    Every assertion here is a behaviour that was measured first. Nothing in this
+    class asserts what the code *should* do; where the current behaviour is
+    wrong, it is pinned as wrong and said so.
+    """
+
+    def test_a_corrupt_kernels_parquet_falls_back_instead_of_failing(
+        self, minimal_nsys_db_path
+    ):
+        """A damaged cache file must degrade to sqlite3, not take the profile down.
+
+        Silent otherwise in the loudest possible way: the cache is an
+        optimisation the user never asked for, so a byte-level fault inside it
+        surfacing as an error on a perfectly good capture is the worst outcome
+        available. Nothing else in the suite writes garbage into a published
+        cache, so a change that let ``duckdb.Error`` escape
+        ``Profile.__init__``'s fallback would go unnoticed.
+        """
+        from nsys_ai.profile import Profile
+        from nsys_ai.skills.registry import get_skill
+
+        with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
+            if prof.db is None:
+                pytest.skip("requires duckdb")
+        cache_dir = Path(minimal_nsys_db_path).with_suffix(".nsys-cache")
+        (cache_dir / "kernels.parquet").write_bytes(b"NOTAPARQUET" * 100)
+
+        with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
+            assert prof.db is None, "a corrupt cache file was accepted as a cache"
+            rows = get_skill("top_kernels").execute(prof.query_conn(), limit=3)
+        assert rows, "falling back to sqlite3 lost the kernel data"
+
+    def test_a_corrupt_cache_is_never_repaired(self, minimal_nsys_db_path):
+        """Pinned defect, not a virtue: the damage is permanent and invisible.
+
+        ``is_cache_valid()`` checks for the cache directory and its manifest, not
+        for readable Parquet, so a corrupt cache stays "valid" forever. Every
+        subsequent open pays the fallback and gets the degraded answer — the
+        sqlite3 path returns fewer columns than the cached one (``top_kernels``
+        loses ``tc_eligible``/``uses_tc``, ``nvtx_kernel_map`` loses demangled
+        names), so the user silently gets a thinner analysis on every run until
+        someone deletes the directory by hand.
+
+        This test exists so that fixing it — discard and rebuild on the first
+        unreadable read — is a visible change to a stated behaviour rather than
+        an accidental one. When that lands, this test should fail and be
+        rewritten to assert the repair.
+        """
+        from nsys_ai.profile import Profile
+
+        with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
+            if prof.db is None:
+                pytest.skip("requires duckdb")
+        cache_dir = Path(minimal_nsys_db_path).with_suffix(".nsys-cache")
+        damaged = cache_dir / "kernels.parquet"
+        damaged.write_bytes(b"GARBAGE" * 50)
+        damaged_size = damaged.stat().st_size
+
+        for attempt in range(3):
+            with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
+                assert prof.db is None, f"open #{attempt + 1} unexpectedly used the cache"
+
+        assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True, (
+            "is_cache_valid now rejects a corrupt cache — good, but this test "
+            "pins the old behaviour; rewrite it to assert the repair"
+        )
+        assert damaged.stat().st_size == damaged_size, (
+            "the damaged file changed size — something is rebuilding now; "
+            "rewrite this test to assert the repair"
+        )
+
+    def test_a_truncated_profile_raises_rather_than_answering(self, tmp_path):
+        """Half a capture must fail loudly, not analyse whatever survived.
+
+        The loud-fail path from #305 seen from the other end. Nothing about the
+        truncation is detected as truncation: ``sqlite3.connect`` succeeds
+        (connecting is lazy), the first read of ``sqlite_master`` raises
+        ``DatabaseError: database disk image is malformed``, and every layer
+        above swallows that on its way to concluding there is no kernel table.
+        The user gets a ``SchemaError`` — the right *outcome*, reached for
+        reasons the message gets wrong.
+
+        Both halves are asserted, and the second is pinned deliberately. The
+        message currently blames the capture ("may have been captured without
+        CUDA kernel tracing") for a file that is simply cut in half, which is a
+        wart worth fixing; pinning it means fixing it is a visible change. And
+        without the first half, a change to kernel-table detection could turn a
+        truncated profile into an empty-but-successful analysis, which reads to
+        a user exactly like a profile with no GPU work.
+        """
+        from nsys_ai.exceptions import SchemaError
+        from nsys_ai.profile import Profile
+
+        source = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+        truncated = tmp_path / "truncated.sqlite"
+        data = source.read_bytes()
+        truncated.write_bytes(data[: len(data) // 2])
+        del data
+
+        # Control: connecting is lazy and succeeds, so nothing before the first
+        # read can tell this file apart from a healthy one.
+        control = sqlite3.connect(str(truncated))
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                control.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        finally:
+            control.close()
+
+        with pytest.raises(SchemaError) as excinfo:
+            with Profile(str(truncated)) as prof:
+                prof.query_conn()
+        assert "no suitable KERNEL table found" in str(excinfo.value)
+
+
 class TestConcurrentBuild:
     """Regression: two terminals opening the same profile concurrently
     must NOT both run the full ETL.
