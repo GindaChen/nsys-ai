@@ -14,6 +14,10 @@ def _execute(conn, **kwargs):
     # removes the skill from the output with no trace that it was even asked.
     from ...overlap import detect_iterations
 
+    # Plain requires_nvtx, NOT requires_pushpop_nvtx, on purpose: detect_iterations
+    # reads NVTX rows as bare intervals and never filters eventType, so it works
+    # unchanged on a Start/End-only profile — measured, identical rows. Guarding
+    # on Push/Pop here would break profiles that work today.
     guard = requires_nvtx(conn, needs="Iteration detection")
     if guard:
         return guard

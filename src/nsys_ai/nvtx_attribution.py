@@ -70,7 +70,15 @@ def _sort_merge_attribute(
     if not kr_rows:
         return []
 
-    # Phase 2: Load NVTX ranges (eventType 59 = NVTX push/pop range)
+    # Phase 2: Load NVTX ranges (eventType 59 = NVTX push/pop range).
+    #
+    # The 59 filter is a deliberate exclusion of Start/End ranges (eventType 60),
+    # not an oversight — do not widen it. The sweep below is a per-thread nesting
+    # stack, which is sound only because NVIDIA keeps push/pop ranges on a
+    # per-thread stack and they are therefore strictly nested. Start/End ranges
+    # may overlap arbitrarily and may start and end on different threads, so
+    # feeding them to this stack would produce wrong parents, not more coverage.
+    # `skills.base.requires_pushpop_nvtx` makes that exclusion visible to users.
     has_textid = adapter.detect_nvtx_text_id()
 
     if has_textid:

@@ -107,6 +107,109 @@ def requires_nvtx(conn, *, needs: str = "Region attribution") -> list[dict] | No
     )
 
 
+def requires_pushpop_nvtx(conn, *, needs: str = "Region attribution") -> list[dict] | None:
+    """Abstain unless ``conn`` carries Push/Pop NVTX ranges, else None.
+
+    Kernel attribution in this package is a per-thread nesting sweep
+    (``nvtx_attribution._sort_merge_attribute`` and the cache's equivalent in
+    ``parquet_cache``). That sweep is only valid for eventType 59
+    (``NvtxPushPopRange``): NVIDIA maintains the push/pop range stack per CPU
+    thread, so a thread's ranges are strictly nested by construction. eventType
+    60 (``NvtxStartEndRange``) carries no such guarantee — NVIDIA documents that
+    Start/End ranges "expose arbitrary concurrency (not just nesting)" and that
+    "the start of a range can occur on a different thread than the end", which
+    Nsight materialises as a single row with ``globalTid`` and ``endGlobalTid``
+    disagreeing. Widening the ``eventType = 59`` filter would therefore not fix
+    anything; it would feed non-nested intervals to a stack.
+
+    So Start/End ranges are deliberately not attributed, and this guard makes
+    that visible. Without it a 60-only profile produced an empty result and the
+    formatter asked "are NVTX annotations present?" — a question whose answer is
+    yes, and which ``profile_health_manifest`` answers with the region names on
+    the very same profile, because ``Profile.aggregate_nvtx_ranges`` does not
+    filter eventType.
+
+    Known limitation, stated rather than half-solved: on a *mixed* profile the
+    59-probe hits, this guard passes, and the 60 ranges are still dropped from
+    attribution with no signal. Rank-ordering every range kind is not worth
+    building for a case with no observed users: no committed profile fixture and
+    no real capture available here holds a single eventType-60 row — a 3.5GB
+    trace with 15.9M NVTX rows is 100% eventType 59 — and PyTorch annotates with
+    push/pop. The Start/End fixtures the tests build are synthetic on purpose.
+
+    NVTXT ranges (eventType 70/71, the text-import variants) are excluded on the
+    same grounds, so the message says "Push/Pop (eventType 59)" rather than
+    implying 59 is the only range kind Nsight records.
+
+    Fails open. Several test databases create ``NVTX_EVENTS`` with no
+    ``eventType`` column at all, and a schema surprise must not be reported to a
+    user as "your annotation is the wrong kind".
+    """
+    missing = requires_nvtx(conn, needs=needs)
+    if missing:
+        return missing
+
+    from ..connection import wrap_connection
+
+    adapter = wrap_connection(conn)
+    nvtx_table = resolve_nvtx_table(conn)
+
+    def _has(event_type: int | None) -> bool | None:
+        """Does a row of this eventType exist? None when the probe cannot run.
+
+        ``event_type=None`` probes for any row at all, which needs no
+        ``eventType`` column.
+        """
+        where = "" if event_type is None else f"WHERE eventType = {int(event_type)}"
+        try:
+            cur = adapter.execute(f"SELECT 1 FROM {nvtx_table} {where} LIMIT 1")
+            return cur.fetchone() is not None
+        except DB_ERRORS:
+            return None
+
+    # 59 first, deliberately. Measured on a 15.9M-row capture: the push/pop
+    # probe returns on the first row in 0.05ms, while a miss costs a full scan
+    # (0.48s), so probing 60 first would tax every healthy profile for nothing.
+    # A GROUP BY census costs 2.3s and tells us no more than these two probes.
+    has_pushpop = _has(59)
+    if has_pushpop is None or has_pushpop:
+        return None
+
+    has_startend = _has(60)
+    if has_startend:
+        return abstain(
+            f"This profile's NVTX annotation consists only of Start/End ranges "
+            f"(eventType 60). {needs} maps kernels to ranges with a per-thread "
+            f"nesting sweep, which is valid only for Push/Pop ranges "
+            f"(eventType 59): those are kept on a per-thread stack and so are "
+            f"strictly nested. Start/End ranges may begin and end on different "
+            f"threads and may overlap arbitrarily, so they are not attributed. "
+            f"Re-annotate with nvtxRangePush/nvtxRangePop "
+            f"(torch.cuda.nvtx.range_push/range_pop, or the "
+            f"torch.cuda.nvtx.range context manager) to use this skill.",
+            nvtx_event_types="60",
+        )
+
+    # An NVTX table with no rows at all is a different question, and not this
+    # guard's. Callers already handle it in ways an abstention would make worse:
+    # `code_attribution_candidates` returns a structured row carrying the
+    # requested window and the skill's limitations, which is more useful than a
+    # reason string. Claiming "only marks, categories or domain records" would
+    # also simply be false — there are no records. Left as it was.
+    has_rows = _has(None)
+    if has_rows is None or not has_rows:
+        return None
+
+    return abstain(
+        f"This profile's {nvtx_table} table carries no range rows that "
+        f"{needs.lower()} can use — only marks, categories or domain records, "
+        f"which are instants and so have no extent to attribute a kernel to. "
+        f"Re-capture with nvtxRangePush/nvtxRangePop ranges around the code you "
+        f"want attributed.",
+        nvtx_event_types="none",
+    )
+
+
 def is_abstention(rows: list[dict] | None) -> bool:
     """True when ``rows`` is a skill saying it could not run.
 

@@ -1242,6 +1242,11 @@ def _stream_nvtx_ranges(db, nvtx_parquet: str):
     Batched through Arrow so the whole result never exists as one list of
     tuples, and labels interned so repeated NVTX text costs one string object
     rather than one per row.
+
+    ``eventType = 59`` deliberately excludes Start/End ranges (eventType 60)
+    rather than merely overlooking them: the consumer is a per-thread nesting
+    stack, valid only for push/pop ranges. See
+    ``skills.base.requires_pushpop_nvtx`` for why widening this is not the fix.
     """
     result = db.execute(
         f"""

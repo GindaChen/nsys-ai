@@ -25,7 +25,7 @@ on ``nvtx_path``. The ``nccl_compile_context_breakdown`` skill is the
 canonical example.
 """
 
-from ..base import Skill, SkillParam, requires_nvtx
+from ..base import Skill, SkillParam, requires_pushpop_nvtx
 
 
 def _execute(conn, **kwargs):
@@ -35,7 +35,7 @@ def _execute(conn, **kwargs):
     # Say so rather than raising: callers catch and log, so an exception here
     # removes the skill from the output with no trace that it was even asked.
 
-    guard = requires_nvtx(conn, needs="Region attribution")
+    guard = requires_pushpop_nvtx(conn, needs="Region attribution")
     if guard:
         return guard
 

@@ -552,6 +552,285 @@ def test_the_marker_is_not_re_implemented_across_the_codebase():
     assert not offenders, "raw marker checks outside skills/base.py:\n" + "\n".join(offenders)
 
 
+# ── #307: Start/End (eventType 60) ranges are not attributed, and say so ───
+#
+# Every attribution path filters `eventType = 59`. A profile annotated only
+# with Start/End ranges therefore produced an empty result and a formatter
+# asking "are NVTX annotations present?" — while `profile_health_manifest`
+# named the very same regions on the very same profile, because
+# `Profile.aggregate_nvtx_ranges` does not filter eventType. Two skills in one
+# run disagreeing, and the wrong one phrased as a question whose answer is yes.
+#
+# The decision is NOT to widen the filter. NVIDIA keeps push/pop ranges on a
+# per-thread stack, so they nest strictly by construction — which is precisely
+# what the sweep exploits. Start/End ranges "expose arbitrary concurrency (not
+# just nesting)" and "the start of a range can occur on a different thread than
+# the end". Feeding those to a nesting stack yields wrong parents, not more
+# coverage. So the four Push/Pop-dependent skills abstain with a stated reason.
+
+# The four skills whose attribution is a per-thread nesting sweep. The two
+# iteration skills are deliberately absent: `overlap.detect_iterations` never
+# filters eventType, so they work on a Start/End profile and guarding them
+# would be a regression. `test_iteration_timing_still_runs_on_start_end_ranges`
+# pins that.
+PUSHPOP_DEPENDENT = [
+    ("nvtx_kernel_map", {}),
+    ("nvtx_layer_breakdown", {}),
+    ("code_attribution_candidates", {"start_ns": 0, "end_ns": 10**9}),
+    ("nccl_compile_context_breakdown", {}),
+]
+
+
+def _build_nvtx_profile(path: Path, rows: list[tuple]) -> Path:
+    """A minimal attributable profile whose NVTX rows are exactly ``rows``.
+
+    Kernels and their correlated runtime launches sit inside the ranges, so the
+    only reason a skill can fail to attribute is the eventType — otherwise a
+    passing abstention assertion would prove nothing.
+
+    ``endGlobalTid`` is present because that is how real exports carry a
+    Start/End pair that begins and ends on different threads: one row with two
+    thread ids. Stated plainly — no capture available here has a populated one
+    (it is NULL across all 15.9M NVTX rows of the largest trace on this
+    machine), so the cross-thread row below is a reasoned reconstruction of the
+    documented shape, not an observed sample.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE StringIds(id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(globalPid INTEGER, deviceId INTEGER,
+          streamId INTEGER, correlationId INTEGER, start INTEGER,"end" INTEGER,
+          shortName INTEGER, demangledName INTEGER,
+          gridX INTEGER, gridY INTEGER, gridZ INTEGER,
+          blockX INTEGER, blockY INTEGER, blockZ INTEGER);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INTEGER,
+          correlationId INTEGER, start INTEGER,"end" INTEGER, nameId INTEGER);
+        CREATE TABLE NVTX_EVENTS(globalTid INTEGER, endGlobalTid INTEGER,
+          start INTEGER,"end" INTEGER, text TEXT, eventType INTEGER,
+          rangeId INTEGER, textId INTEGER);
+        """
+    )
+    conn.executemany(
+        "INSERT INTO StringIds VALUES (?,?)",
+        [(1, "gemm_nn_128x128"), (2, "ncclDevKernel_AllReduce"), (24, "cudaLaunchKernel")],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?,?,?,?,?,1,1,1,128,1,1)",
+        [
+            (100, 0, 7, 1, 1_000_000, 2_000_000, 1, 1),
+            (100, 0, 7, 2, 2_200_000, 3_000_000, 2, 2),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?,?,24)",
+        [(100, 1, 900_000, 950_000), (100, 2, 2_100_000, 2_150_000)],
+    )
+    conn.executemany(
+        "INSERT INTO NVTX_EVENTS(globalTid, endGlobalTid, start, [end], text, "
+        "eventType, rangeId, textId) VALUES (?,?,?,?,?,?,?,NULL)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+# Two ranges on ONE thread that overlap without nesting — impossible under
+# push/pop, which is the whole point — plus a pair whose start and end are on
+# different threads.
+_START_END_ROWS = [
+    (100, None, 500_000, 2_500_000, "train_step", 60, 0),
+    (100, None, 2_000_000, 3_500_000, "overlapping_phase", 60, 1),
+    (100, 101, 800_000, 2_800_000, "cross_thread_span", 60, 2),
+]
+_PUSH_POP_ROWS = [
+    (100, None, 500_000, 3_500_000, "train_step", 59, 0),
+    (100, None, 900_000, 2_500_000, "forward", 59, 1),
+]
+# eventType 34 is NvtxMark in the profile's own ENUM_NSYS_EVENT_TYPE table:
+# an instant, with no duration to attribute a kernel to.
+_MARKS_ONLY_ROWS = [
+    (100, None, 900_000, -1, "step_begin", 34, 0),
+    (100, None, 2_600_000, -1, "step_end", 34, 1),
+]
+
+
+@pytest.fixture
+def start_end_profile(tmp_path):
+    return _build_nvtx_profile(tmp_path / "start_end.sqlite", _START_END_ROWS)
+
+
+@pytest.fixture
+def push_pop_profile(tmp_path):
+    return _build_nvtx_profile(tmp_path / "push_pop.sqlite", _PUSH_POP_ROWS)
+
+
+def test_the_start_end_fixture_really_is_start_end_only(start_end_profile):
+    """Guard the premise, so the abstention assertions cannot go vacuous."""
+    conn = sqlite3.connect(start_end_profile)
+    try:
+        types = {r[0] for r in conn.execute("SELECT DISTINCT eventType FROM NVTX_EVENTS")}
+        cross = conn.execute(
+            "SELECT count(*) FROM NVTX_EVENTS WHERE endGlobalTid IS NOT NULL "
+            "AND endGlobalTid != globalTid"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert types == {60}, f"the fixture is no longer Start/End-only: {types}"
+    assert cross == 1, "the cross-thread row that push/pop cannot express is gone"
+
+
+@pytest.mark.parametrize("skill_name,kwargs", PUSHPOP_DEPENDENT)
+def test_start_end_only_nvtx_abstains_instead_of_reporting_nothing(
+    skill_name, kwargs, start_end_profile
+):
+    """The bug: silence that reads as "this profile has no annotation"."""
+    from nsys_ai.skills.base import is_abstention
+
+    conn = sqlite3.connect(start_end_profile)
+    try:
+        rows = get_skill(skill_name).execute(conn, **kwargs)
+    finally:
+        conn.close()
+
+    assert is_abstention(rows), f"{skill_name} reported nothing instead of abstaining: {rows[:1]}"
+    reason = rows[0]["reason"]
+    # Name the kind and the number, so the user can check it against their own
+    # annotation calls rather than guessing what "unsupported" means.
+    assert "Start/End" in reason, reason
+    assert "60" in reason, reason
+    assert "59" in reason, reason
+    # And say what to do about it.
+    assert "nvtxRangePush" in reason, reason
+    assert rows[0].get("nvtx_event_types") == "60"
+
+
+@pytest.mark.parametrize("skill_name,kwargs", PUSHPOP_DEPENDENT)
+def test_push_pop_nvtx_is_not_swept_up_by_the_new_guard(skill_name, kwargs, push_pop_profile):
+    """A guard that is too broad is the real failure mode.
+
+    Same fixture builder, same kernels, same ranges — only eventType differs —
+    so this pins that the abstention above is caused by the event kind and not
+    by the fixture being unattributable in the first place.
+    """
+    from nsys_ai.skills.base import is_abstention
+
+    conn = sqlite3.connect(push_pop_profile)
+    try:
+        rows = get_skill(skill_name).execute(conn, **kwargs)
+    finally:
+        conn.close()
+    assert not is_abstention(rows), (
+        f"{skill_name} told a Push/Pop profile its annotation was the wrong kind: {rows[0]}"
+    )
+
+
+def test_the_push_pop_fixture_is_actually_attributable(push_pop_profile):
+    """Otherwise the test above passes on an empty result and proves nothing."""
+    conn = sqlite3.connect(push_pop_profile)
+    try:
+        rows = get_skill("nvtx_kernel_map").execute(conn)
+    finally:
+        conn.close()
+    assert rows, "the positive fixture attributes no kernels — the negative test is vacuous"
+    assert {r["nvtx_text"] for r in rows} & {"forward", "train_step"}
+
+
+def test_iteration_timing_still_runs_on_start_end_ranges(start_end_profile):
+    """Deliberate scope. `overlap.detect_iterations` is eventType-agnostic, so
+    these two skills work on Start/End ranges and must not be guarded."""
+    from nsys_ai.skills.base import is_abstention
+
+    conn = sqlite3.connect(start_end_profile)
+    try:
+        rows = get_skill("iteration_timing").execute(conn, marker="train_step")
+    finally:
+        conn.close()
+    assert not is_abstention(rows), (
+        "iteration_timing was guarded on Push/Pop; it does not need it and "
+        f"profiles that work today would stop: {rows[0]}"
+    )
+
+
+def test_marks_only_nvtx_abstains_with_its_own_reason(tmp_path):
+    """Neither 59 nor 60: the table has no ranges at all, only instants."""
+    from nsys_ai.skills.base import is_abstention
+
+    path = _build_nvtx_profile(tmp_path / "marks.sqlite", _MARKS_ONLY_ROWS)
+    conn = sqlite3.connect(path)
+    try:
+        rows = get_skill("nvtx_kernel_map").execute(conn)
+    finally:
+        conn.close()
+
+    assert is_abstention(rows), rows[:1]
+    assert rows[0].get("nvtx_event_types") == "none"
+    assert "no range rows" in rows[0]["reason"], rows[0]["reason"]
+
+
+def test_an_empty_nvtx_table_is_left_alone_by_the_push_pop_guard(tmp_path):
+    """Deliberate scope, and the one case the guard must NOT claim.
+
+    A present-but-empty NVTX_EVENTS table is a third state, distinct from
+    "Start/End only" and "marks only", and it is not what #307 is about. The
+    "only marks, categories or domain records" reason would be plainly false
+    there — the table holds no records at all — and `code_attribution_candidates`
+    already answers this case with a structured row carrying the requested
+    window and the skill's limitations, which a reason string would replace with
+    something less useful.
+    """
+    from nsys_ai.skills.base import is_abstention, requires_pushpop_nvtx
+
+    path = _build_nvtx_profile(tmp_path / "empty_nvtx.sqlite", [])
+    conn = sqlite3.connect(path)
+    try:
+        guard = requires_pushpop_nvtx(conn, needs="Region attribution")
+        rows = get_skill("nvtx_layer_breakdown").execute(conn)
+    finally:
+        conn.close()
+
+    assert guard is None, f"an empty NVTX table was claimed as the wrong kind: {guard}"
+    assert not is_abstention(rows)
+
+
+def test_the_push_pop_guard_fails_open_when_there_is_no_eventType_column(tmp_path):
+    """A schema surprise must not be reported as "your annotation is the wrong
+    kind". Five test modules build NVTX_EVENTS without an eventType column."""
+    from nsys_ai.skills.base import is_abstention, requires_pushpop_nvtx
+
+    path = tmp_path / "no_eventtype.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE NVTX_EVENTS(globalTid INTEGER, start INTEGER,"end" INTEGER, text TEXT);
+        INSERT INTO NVTX_EVENTS VALUES (100, 0, 9000, 'my_layer');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(path)
+    try:
+        guard = requires_pushpop_nvtx(conn, needs="Region attribution")
+    finally:
+        conn.close()
+    assert guard is None, f"a missing column was turned into a false abstention: {guard}"
+    assert not is_abstention(guard or [])
+
+
+def test_the_push_pop_guard_is_defined_once():
+    """Same reason as the NVTX guard below: an inlined eventType probe would
+    drift, and one that hard-codes NVTX_EVENTS misses NVTX_EVENTS_V2."""
+    src_root = Path(__file__).resolve().parent.parent / "src" / "nsys_ai"
+    copies = [
+        p.relative_to(src_root)
+        for p in (src_root / "skills" / "builtins").rglob("*.py")
+        if "eventType = 60" in p.read_text() or "eventType=60" in p.read_text()
+    ]
+    assert copies == [], f"an eventType-60 probe was inlined in: {copies}"
+
+
 def test_the_nvtx_guard_is_defined_once():
     """Six skills needed the same resolve-and-abstain block.
 
