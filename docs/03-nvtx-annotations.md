@@ -167,14 +167,16 @@ whose `globalTid` and `endGlobalTid` differ. Handing those to a nesting stack
 would produce confident, wrong parents, so nsys-ai does not attribute them.
 The same applies to the NVTXT-imported variants (70 and 71).
 
-On a profile whose NVTX is entirely Start/End, the skills that depend on
+On a profile with no push/pop ranges at all, the skills that depend on
 attribution — `nvtx_kernel_map`, `nvtx_layer_breakdown`,
 `code_attribution_candidates`, `nccl_compile_context_breakdown` — abstain and
 say why, rather than returning an empty result that reads as "this profile has
-no annotation". To get attribution, annotate with `nvtxRangePush` /
-`nvtxRangePop` (`torch.cuda.nvtx.range_push` / `range_pop`, or the
-`torch.cuda.nvtx.range` context manager). PyTorch's own annotations already
-use push/pop.
+no annotation". An entirely Start/End profile gets a reason naming that; any
+other case, including an NVTXT import, gets a reason listing the eventTypes
+actually present, read from the profile's own `ENUM_NSYS_EVENT_TYPE`. To get
+attribution, annotate with `nvtxRangePush` / `nvtxRangePop`
+(`torch.cuda.nvtx.range_push` / `range_pop`, or the `torch.cuda.nvtx.range`
+context manager). PyTorch's own annotations already use push/pop.
 
 Region *listing* is unaffected and does see Start/End ranges: the NVTX tree,
 `region_mfu`, iteration detection, `host_sync_parent_ranges` and `gc_impact`

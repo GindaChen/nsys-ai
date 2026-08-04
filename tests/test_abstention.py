@@ -754,7 +754,7 @@ def test_iteration_timing_still_runs_on_start_end_ranges(start_end_profile):
 
 
 def test_marks_only_nvtx_abstains_with_its_own_reason(tmp_path):
-    """Neither 59 nor 60: the table has no ranges at all, only instants."""
+    """Neither 59 nor 60: a third reason, and it reports the type it measured."""
     from nsys_ai.skills.base import is_abstention
 
     path = _build_nvtx_profile(tmp_path / "marks.sqlite", _MARKS_ONLY_ROWS)
@@ -765,8 +765,77 @@ def test_marks_only_nvtx_abstains_with_its_own_reason(tmp_path):
         conn.close()
 
     assert is_abstention(rows), rows[:1]
-    assert rows[0].get("nvtx_event_types") == "none"
-    assert "no range rows" in rows[0]["reason"], rows[0]["reason"]
+    reason = rows[0]["reason"]
+    assert rows[0].get("nvtx_event_types") == "34", reason
+    assert "34" in reason, reason
+    # It must still name what it needs, or the user cannot act on it.
+    assert "59" in reason and "nvtxRangePush" in reason, reason
+
+
+def test_nvtxt_imported_ranges_are_not_called_marks(tmp_path):
+    """The fallthrough must not describe rows it never inspected.
+
+    A profile built by `nsys import` from an .nvtxt annotation file carries its
+    ranges as eventType 70/71 (NvtxtPushPopRange / NvtxtStartEndRange in the
+    profile's own ENUM_NSYS_EVENT_TYPE). Those are not attributed here — the
+    sweep filters eventType 59 and nothing else — so an abstention is right.
+    But an earlier version of this branch probed only "does any row exist" and
+    then told the user the table held "only marks, categories or domain
+    records, which are instants": two claims about their data, both false, from
+    a branch that had inspected neither. Reporting `nvtx_event_types="none"`
+    was wrong there for the same reason.
+    """
+    from nsys_ai.skills.base import is_abstention
+
+    for event_type in (70, 71):
+        path = _build_nvtx_profile(
+            tmp_path / f"nvtxt_{event_type}.sqlite",
+            [(100, None, 500_000, 3_000_000, "imported_step", event_type, 0)],
+        )
+        conn = sqlite3.connect(path)
+        try:
+            rows = get_skill("nvtx_kernel_map").execute(conn)
+        finally:
+            conn.close()
+
+        assert is_abstention(rows), f"eventType {event_type}: {rows[:1]}"
+        reason = rows[0]["reason"]
+        # The claims that were false.
+        assert "instants" not in reason, reason
+        assert "only marks" not in reason, reason
+        assert "no range rows" not in reason, reason
+        # And the measured truth, in both the prose and the machine field.
+        assert str(event_type) in reason, reason
+        assert rows[0].get("nvtx_event_types") == str(event_type), rows[0]
+
+
+def test_the_fallthrough_names_event_types_from_the_profiles_own_enum(tmp_path):
+    """`ENUM_NSYS_EVENT_TYPE` is the authority for the export in hand.
+
+    Naming the type from a list hard-coded here would be the same mistake this
+    branch exists to correct, one Nsight release later. The bare number is the
+    documented fallback when the profile does not carry the table, which the
+    fixtures above exercise.
+    """
+    from nsys_ai.skills.base import requires_pushpop_nvtx
+
+    path = _build_nvtx_profile(
+        tmp_path / "nvtxt_named.sqlite",
+        [(100, None, 500_000, 3_000_000, "imported_step", 70, 0)],
+    )
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE ENUM_NSYS_EVENT_TYPE(id INTEGER PRIMARY KEY, label TEXT);"
+        "INSERT INTO ENUM_NSYS_EVENT_TYPE VALUES (70, 'NvtxtPushPopRange');"
+    )
+    conn.commit()
+    try:
+        guard = requires_pushpop_nvtx(conn, needs="Region attribution")
+    finally:
+        conn.close()
+
+    assert guard is not None
+    assert "70 (NvtxtPushPopRange)" in guard[0]["reason"], guard[0]["reason"]
 
 
 def test_an_empty_nvtx_table_is_left_alone_by_the_push_pop_guard(tmp_path):
@@ -796,7 +865,14 @@ def test_an_empty_nvtx_table_is_left_alone_by_the_push_pop_guard(tmp_path):
 
 def test_the_push_pop_guard_fails_open_when_there_is_no_eventType_column(tmp_path):
     """A schema surprise must not be reported as "your annotation is the wrong
-    kind". Five test modules build NVTX_EVENTS without an eventType column."""
+    kind".
+
+    Not hypothetical: eight modules in this suite (test_baseline, test_diff,
+    test_e2e_golden_loop, test_fingerprint, test_profile_resolve,
+    test_region_mfu, test_skills, test_tools_profile) build NVTX_EVENTS with no
+    eventType column at all. The count is only there to say the shape is
+    common; if it drifts, nothing about this test does.
+    """
     from nsys_ai.skills.base import is_abstention, requires_pushpop_nvtx
 
     path = tmp_path / "no_eventtype.sqlite"
@@ -817,6 +893,35 @@ def test_the_push_pop_guard_fails_open_when_there_is_no_eventType_column(tmp_pat
         conn.close()
     assert guard is None, f"a missing column was turned into a false abstention: {guard}"
     assert not is_abstention(guard or [])
+
+
+def test_a_non_numeric_eventType_column_fails_open_too(tmp_path):
+    """SQLite columns are dynamically typed, so the census can meet text.
+
+    Same contract as the missing-column case: a schema surprise must produce no
+    claim at all, not a claim about the user's annotation, and certainly not a
+    ValueError out of a guard.
+    """
+    from nsys_ai.skills.base import requires_pushpop_nvtx
+
+    path = tmp_path / "text_eventtype.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE NVTX_EVENTS(globalTid INTEGER, start INTEGER,"end" INTEGER,
+          text TEXT, eventType TEXT);
+        INSERT INTO NVTX_EVENTS VALUES (100, 0, 9000, 'my_layer', 'NvtxMark');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(path)
+    try:
+        guard = requires_pushpop_nvtx(conn, needs="Region attribution")
+    finally:
+        conn.close()
+    assert guard is None, f"a text eventType was turned into a false abstention: {guard}"
 
 
 def test_the_push_pop_guard_is_defined_once():

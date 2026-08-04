@@ -137,9 +137,11 @@ def requires_pushpop_nvtx(conn, *, needs: str = "Region attribution") -> list[di
     trace with 15.9M NVTX rows is 100% eventType 59 — and PyTorch annotates with
     push/pop. The Start/End fixtures the tests build are synthetic on purpose.
 
-    NVTXT ranges (eventType 70/71, the text-import variants) are excluded on the
-    same grounds, so the message says "Push/Pop (eventType 59)" rather than
-    implying 59 is the only range kind Nsight records.
+    NVTXT ranges (eventType 70/71, the text-import variants) are excluded too —
+    the sweep filters ``eventType = 59`` and nothing else — so every message
+    here says "Push/Pop (eventType 59)" rather than implying 59 is the only
+    range kind Nsight records. Those profiles reach the final branch, which for
+    that reason names the eventTypes it measured instead of describing them.
 
     Fails open. Several test databases create ``NVTX_EVENTS`` with no
     ``eventType`` column at all, and a schema surprise must not be reported to a
@@ -154,15 +156,12 @@ def requires_pushpop_nvtx(conn, *, needs: str = "Region attribution") -> list[di
     adapter = wrap_connection(conn)
     nvtx_table = resolve_nvtx_table(conn)
 
-    def _has(event_type: int | None) -> bool | None:
-        """Does a row of this eventType exist? None when the probe cannot run.
-
-        ``event_type=None`` probes for any row at all, which needs no
-        ``eventType`` column.
-        """
-        where = "" if event_type is None else f"WHERE eventType = {int(event_type)}"
+    def _has(event_type: int) -> bool | None:
+        """Does a row of this eventType exist? None when the probe cannot run."""
         try:
-            cur = adapter.execute(f"SELECT 1 FROM {nvtx_table} {where} LIMIT 1")
+            cur = adapter.execute(
+                f"SELECT 1 FROM {nvtx_table} WHERE eventType = {int(event_type)} LIMIT 1"
+            )
             return cur.fetchone() is not None
         except DB_ERRORS:
             return None
@@ -190,24 +189,85 @@ def requires_pushpop_nvtx(conn, *, needs: str = "Region attribution") -> list[di
             nvtx_event_types="60",
         )
 
-    # An NVTX table with no rows at all is a different question, and not this
-    # guard's. Callers already handle it in ways an abstention would make worse:
-    # `code_attribution_candidates` returns a structured row carrying the
-    # requested window and the skill's limitations, which is more useful than a
-    # reason string. Claiming "only marks, categories or domain records" would
-    # also simply be false — there are no records. Left as it was.
-    has_rows = _has(None)
-    if has_rows is None or not has_rows:
+    # Neither kind the in-process NVTX range API produces is present. What the
+    # rows actually *are* is now measured rather than asserted: an earlier
+    # version of this branch told the user the table held "only marks,
+    # categories or domain records, which are instants", having probed nothing
+    # but 59 and 60. That is false for a profile imported from an .nvtxt file,
+    # whose ranges land as eventType 70/71 and do have extent — a confident
+    # wrong claim about the user's data, which is the one thing an abstention
+    # must never be. So census the column and name what is there.
+    #
+    # The census is a third scan of a table the two misses above have already
+    # scanned twice, and it runs only on a profile that is abstaining either
+    # way, so no healthy profile pays for it: measured on the 15.9M-row capture
+    # here, DISTINCT eventType costs 0.60s, while the guard on that same
+    # profile — which hits on the first 59 row and never reaches this line —
+    # takes 0.25ms.
+    types = _distinct_event_types(adapter, nvtx_table)
+    if not types:
+        # None means the census could not run (fail open, as above). Empty means
+        # an NVTX table with no rows, which is a different question and not this
+        # guard's: callers already handle it in ways an abstention would make
+        # worse — `code_attribution_candidates` returns a structured row
+        # carrying the requested window and the skill's limitations, which is
+        # more useful than a reason string.
         return None
 
+    present = ", ".join(_describe_event_type(adapter, t) for t in types)
     return abstain(
-        f"This profile's {nvtx_table} table carries no range rows that "
-        f"{needs.lower()} can use — only marks, categories or domain records, "
-        f"which are instants and so have no extent to attribute a kernel to. "
-        f"Re-capture with nvtxRangePush/nvtxRangePop ranges around the code you "
-        f"want attributed.",
-        nvtx_event_types="none",
+        f"This profile's {nvtx_table} table holds no Push/Pop ranges "
+        f"(eventType 59) — the only kind {needs.lower()} attributes a kernel "
+        f"to — and no Start/End ranges (eventType 60) either. What it does "
+        f"hold: {present}. Annotate the code you want attributed with "
+        f"nvtxRangePush/nvtxRangePop (torch.cuda.nvtx.range_push/range_pop, or "
+        f"the torch.cuda.nvtx.range context manager) so the ranges are "
+        f"recorded as eventType 59.",
+        nvtx_event_types=",".join(str(t) for t in types),
     )
+
+
+def _distinct_event_types(adapter, nvtx_table: str) -> list[int] | None:
+    """The eventTypes present in ``nvtx_table``, or None when it cannot be read.
+
+    None and ``[]`` are different answers and both callers depend on it: None is
+    "no eventType column, or the column is not readable as numbers" and must
+    fail open, ``[]`` is "the table has no rows", which is a state this module
+    deliberately says nothing about. NULL eventTypes are dropped rather than
+    reported, so a table of nothing but NULLs reads as ``[]`` and is likewise
+    left alone.
+
+    ``ValueError``/``TypeError`` are caught alongside the driver errors because
+    SQLite columns are dynamically typed: a fixture or an unusual export can put
+    text in ``eventType``, and the whole point of this guard is that a schema
+    surprise never becomes a claim about the user's annotation.
+    """
+    try:
+        cur = adapter.execute(f"SELECT DISTINCT eventType FROM {nvtx_table}")
+        return sorted({int(r[0]) for r in cur.fetchall() if r[0] is not None})
+    except (*DB_ERRORS, ValueError, TypeError):
+        return None
+
+
+def _describe_event_type(adapter, event_type: int) -> str:
+    """``"70 (NvtxtPushPopRange)"``, or just ``"70"`` when the name is unknown.
+
+    The name comes from the profile's own ``ENUM_NSYS_EVENT_TYPE`` table, which
+    is authoritative for the export in hand — 155 rows on the fixture here, of
+    which this package hard-codes none. Missing table, missing row or a read
+    error all degrade to the bare number: a name is a convenience, and inventing
+    one from a built-in list that may not match this Nsight version would be the
+    same class of mistake this branch exists to correct.
+    """
+    try:
+        row = adapter.execute(
+            "SELECT label FROM ENUM_NSYS_EVENT_TYPE WHERE id = ?", (int(event_type),)
+        ).fetchone()
+    except DB_ERRORS:
+        return str(event_type)
+    if not row or not row[0]:
+        return str(event_type)
+    return f"{event_type} ({row[0]})"
 
 
 def is_abstention(rows: list[dict] | None) -> bool:
