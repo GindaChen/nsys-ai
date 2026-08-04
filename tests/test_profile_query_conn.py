@@ -66,33 +66,80 @@ def test_worker_threads_get_their_own_reused_handle():
         assert len(seen) <= 4, f"expected at most one handle per worker, got {len(seen)}"
 
 
-def test_concurrent_skill_runs_agree_with_the_sequential_answer():
-    """The behaviour the accessor exists to protect.
+def test_repeated_memo_reads_hand_out_independent_copies():
+    """Every read of one memoized answer must get its own row dicts.
 
-    Run through a shared connection this returns wrong row counts silently; the
-    sequential baseline is the oracle.
+    This test used to claim it verified concurrent skill runs against a
+    sequential oracle, on a thread pool. It did neither, and both claims were
+    measured false. Recorded here rather than quietly deleted, because the way it
+    failed is the way any concurrency test in this repo will fail:
+
+    * Its oracle was the cache. Across all forty concurrent calls the process
+      issued exactly *one* distinct SQL statement — everything after the
+      sequential baseline was served by the per-connection skill memo (#295),
+      shared with every derived cursor (#302). It was comparing copies of the
+      baseline against the baseline.
+    * Its bound did not bind. The comment said a regression must fail the build
+      and not hang it, and ``f.result(timeout=60)`` looked like it enforced
+      that. It does not: the TimeoutError leaves the ``with
+      ThreadPoolExecutor(...)`` block, ``__exit__`` calls ``shutdown(wait=True)``
+      and joins the deadlocked workers forever. Mutated to hand every thread the
+      shared connection, this test ran past 120 seconds of wall clock on a couple
+      of seconds of CPU before being killed by hand — and pytest collects this
+      file seven files *before* the bounded probe that is supposed to catch that
+      regression, so under it CI hung to the job timeout instead of failing.
+
+    The real property — concurrent skill answers equal the sequential ones, with
+    the memo cleared so the calls reach the database, bounded by a subprocess
+    kill so a deadlock is a failure — lives in ``tests/test_skill_concurrency.py``.
+
+    What is left here needs no threads at all, and therefore cannot hang: the
+    memo's isolation is fully observable from repeated sequential reads. Both
+    halves of it are asserted, because they are two different copies guarding two
+    different directions:
+
+    * ``Skill.execute`` copies on the way *out* of the cache, so no two readers
+      hold the same dict. Without it, one reader's in-place edit is visible to
+      every later reader.
+    * It copies on the way *in* as well, so the first caller — which is handed
+      the freshly built list, not a copy of it — cannot reach the cache either.
+      That one is invisible to an identity check and only shows up if you
+      actually mutate what the first call returned, which is what the last block
+      does.
     """
     with Profile(str(FIXTURE)) as prof:
         if prof.db is None:  # pragma: no cover
             pytest.skip("DuckDB not in use")
         skill = get_skill("top_kernels")
-        baseline = skill.execute(prof.query_conn(), limit=5)
 
-        # Bounded wait on purpose. Removing the per-thread handle does not just
-        # return wrong rows — threads contending for one connection's result set
-        # deadlocked and ran past ten minutes when this was mutation-checked. A
-        # regression must fail the build, not hang it.
-        batches = []
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for _ in range(5):
-                futures = [
-                    ex.submit(lambda: skill.execute(prof.query_conn(), limit=5)) for _ in range(8)
-                ]
-                batches.append([f.result(timeout=60) for f in futures])
+        # The first call builds and stores; every later one is a memo hit. Three
+        # reads, because the copy-on-read defect only shows between two *hits* —
+        # the builder's own list is distinct from the cache either way.
+        first = skill.execute(prof.query_conn(), limit=5)
+        assert first, "the fixture returned no kernels, so nothing below is tested"
+        reads = [first] + [skill.execute(prof.query_conn(), limit=5) for _ in range(2)]
 
-    for batch in batches:
-        for rows in batch:
-            assert rows == baseline, "a concurrent run disagreed with the sequential answer"
+        for rows in reads[1:]:
+            assert rows == first, "a memoized read returned different values"
+
+        seen_ids: set[int] = set()
+        for rows in reads:
+            for row in rows:
+                assert id(row) not in seen_ids, (
+                    "two readers were handed the same row dict — the memo stopped "
+                    "copying on the way out"
+                )
+                seen_ids.add(id(row))
+
+        # Copy-on-store: poison what the *builder* was handed. If the cache kept
+        # that same list, the poison is served to everyone after it.
+        marker = "poisoned-by-the-first-caller"
+        first[0]["kernel_name"] = marker
+        after = skill.execute(prof.query_conn(), limit=5)
+        assert after[0].get("kernel_name") != marker, (
+            "the first caller's in-place edit reached the cache — the memo stopped "
+            "copying on the way in"
+        )
 
 
 def test_a_sqlite_only_profile_gets_the_sqlite_connection():
@@ -118,47 +165,24 @@ def test_the_accessor_works_during_construction():
         assert prof.query_conn() is not None
 
 
-def test_worker_threads_share_the_owning_connection_s_cache():
-    """A second handle must not mean a second cache.
-
-    The per-connection bag backs both the probe cache and the skill memo from
-    #295. Keyed on the handle, every worker thread starts empty and re-executes
-    work the owner already did — measured as four extra executions across four
-    threads. Keyed on the owning connection, the handle a thread happens to hold
-    stops mattering.
-
-    Sharing is safe because the bag stores results, not handles: one skill with
-    one set of resolved parameters over an immutable capture has one answer.
-    """
-    skill = get_skill("top_kernels")
-    executions: list[int] = []
-    original = skill.execute_fn
-
-    def counting(conn, **kwargs):
-        executions.append(threading.get_ident())
-        return original(conn, **kwargs)
-
-    skill.execute_fn = counting
-    try:
-        with Profile(str(FIXTURE)) as prof:
-            if prof.db is None:  # pragma: no cover
-                pytest.skip("DuckDB not in use")
-            skill.execute(prof.query_conn(), limit=5)  # owner populates
-            after_owner = len(executions)
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                futures = [
-                    ex.submit(lambda: skill.execute(prof.query_conn(), limit=5)) for _ in range(8)
-                ]
-                for f in futures:
-                    f.result(timeout=60)
-    finally:
-        skill.execute_fn = original
-
-    assert after_owner == 1
-    assert len(executions) == after_owner, (
-        f"worker threads re-executed {len(executions) - after_owner} times — "
-        "the cache is keyed on the handle again, not the owning connection"
-    )
+# "A second handle must not mean a second cache" — the property that worker
+# threads share the owning connection's bag (#302) — used to be asserted here,
+# in-process, on a ThreadPoolExecutor with f.result(timeout=60). It has moved to
+# tests/test_skill_concurrency.py, which runs it in a killed subprocess.
+#
+# It is not memo-only work, which is what made it unsafe to keep here.
+# Skill.execute calls compute_profiler_overhead_ns *before* the memo lookup, and
+# that queries the database on every call — so eight futures issue eight real
+# concurrent statements. Under the regression this whole file exists to catch,
+# they contend for one DuckDB connection's pending result set and never return:
+# measured hanging past 120 seconds, with the result() timeout doing nothing
+# because the TimeoutError leaves the executor's with-block and
+# shutdown(wait=True) joins the stuck workers forever. pytest collects this file
+# well before the bounded probe, so the hang arrived first and CI would have run
+# to its job timeout rather than failing.
+#
+# Everything left in this file is either single-threaded or touches no database
+# from a thread, so this file cannot hang.
 
 
 def test_close_drops_the_per_thread_handles():
