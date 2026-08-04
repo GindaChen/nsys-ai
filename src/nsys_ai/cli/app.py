@@ -122,7 +122,6 @@ def main():
         "perfetto",
         "tui",
         "timeline",
-        "agent",
     }
     use_legacy_skill_mgmt = (
         len(sys.argv) > 2 and sys.argv[1] == "skill" and sys.argv[2] in {"add", "remove", "save"}

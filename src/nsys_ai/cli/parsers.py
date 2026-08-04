@@ -257,6 +257,41 @@ def _register_root_cause_parser(sub):
     return p
 
 
+def _register_agent_parser(sub):
+    """Register the ``agent`` subcommand tree on *sub*.
+
+    Lives on the public parser only. ``agent`` is not in ``app.main``'s
+    ``legacy_commands`` set, so ``nsys-ai agent ...`` always builds the public
+    parser and a second registration on the legacy parser would be dead.
+    """
+    p = sub.add_parser("agent", help="AI agent for profile analysis")
+    agent_sub = p.add_subparsers(dest="agent_action")
+    sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
+    sp_analyze.add_argument("profile", help="Path to .sqlite file")
+    sp_analyze.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (recommended for large profiles)",
+    )
+    sp_analyze.add_argument(
+        "--evidence", action="store_true", help="Also output evidence findings JSON"
+    )
+    sp_analyze.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output path for findings JSON (default: findings.json)",
+    )
+    sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
+    sp_ask.add_argument("profile", help="Path to .sqlite file")
+    sp_ask.add_argument("question", help="Natural language question")
+    p.set_defaults(handler=_cmd_agent)
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Main parser — public CLI surface visible to ``nsys-ai --help``
 # ---------------------------------------------------------------------------
@@ -270,8 +305,9 @@ def _build_parser():
     sub = parser.add_subparsers(
         dest="command",
         metavar=(
-            "{open,web,timeline-web,loop,chat,ask,agent-guide,"
-            "info,doctor,skill,evidence,report,diff,diff-web,export,cutracer,root-cause,help}"
+            "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
+            "info,doctor,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "root-cause,help}"
         ),
     )
 
@@ -773,6 +809,7 @@ def _build_parser():
     _register_info_parser(sub)
     _register_doctor_parser(sub)
     _register_skill_parser(sub, include_management=False)
+    _register_agent_parser(sub)
     _register_evidence_parser(sub)
     _register_root_cause_parser(sub)
 
@@ -900,32 +937,6 @@ def _register_legacy_commands(sub):
     p.set_defaults(handler=_cmd_timeline)
 
     _register_skill_parser(sub, include_management=True)
-
-    p = sub.add_parser("agent", help="AI agent for profile analysis")
-    agent_sub = p.add_subparsers(dest="agent_action")
-    sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
-    sp_analyze.add_argument("profile", help="Path to .sqlite file")
-    sp_analyze.add_argument(
-        "--trim",
-        nargs=2,
-        type=float,
-        metavar=("START_S", "END_S"),
-        default=None,
-        help="Time window in seconds (recommended for large profiles)",
-    )
-    sp_analyze.add_argument(
-        "--evidence", action="store_true", help="Also output evidence findings JSON"
-    )
-    sp_analyze.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="Output path for findings JSON (default: findings.json)",
-    )
-    sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
-    sp_ask.add_argument("profile", help="Path to .sqlite file")
-    sp_ask.add_argument("question", help="Natural language question")
-    p.set_defaults(handler=_cmd_agent)
 
     # ── evidence ──────────────────────────────────────────────────
     _register_evidence_parser(sub)

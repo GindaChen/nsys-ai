@@ -38,6 +38,7 @@ def test_subcommands():
         "diff-web",
         "loop",
         "export",
+        "agent",
         "agent-guide",
         "info",
         "skill",
@@ -52,9 +53,43 @@ def test_subcommands():
     for hidden in ["summary", "overlap", "analyze"]:
         assert hidden not in usage_text
 
-    # 'agent-guide' is public, but 'agent' should be hidden
-    assert ",agent," not in usage_text
-    assert ",agent}" not in usage_text
+    # 'agent' is public. The zero-arg banner tells the reader that
+    # `nsys-ai agent analyze` exists, and that report has no other entry point
+    # (`report`/`analyze` run a different pipeline), so --help must confirm it.
+    assert ",agent," in usage_text
+
+    # The usage metavar is hand-maintained; keep it honest about what is
+    # actually registered so machine consumers can trust it.
+    import argparse
+
+    from nsys_ai.cli.parsers import _build_parser
+
+    registered = set()
+    for action in _build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            registered = set(action.choices)
+    assert registered, "could not find the subparsers action on the public parser"
+    advertised = set(usage_text.split("{", 1)[1].split("}", 1)[0].split(","))
+    assert registered == advertised, (
+        f"usage metavar out of sync: missing {sorted(registered - advertised)}, "
+        f"stale {sorted(advertised - registered)}"
+    )
+
+
+def test_agent_subcommand_is_reachable():
+    """`nsys-ai agent` must parse the same whether or not it is in --help."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "agent", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "{analyze,ask}" in result.stdout
+
+    # Bare `agent` still prints its usage line and exits non-zero (unchanged).
+    bare = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "agent"], capture_output=True, text=True
+    )
+    assert bare.returncode == 1
+    assert "Usage: nsys-ai agent {analyze,ask}" in bare.stdout
 
 
 def test_custom_help_mentions_default_profile_shortcut():
