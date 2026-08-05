@@ -588,8 +588,11 @@ class TestDamagedInput:
         which would look like a tidy-up — is a visible change to a documented
         behaviour instead of a silent one.
 
-        A *missing* source is the opposite and stays a logged skip; that branch
-        is unreachable in a normal build, so this is its only exercise.
+        A *missing* source is the opposite and stays a logged skip. It is
+        ``_build_nvtx_kernel_map_from_parquet``'s ``is_file()`` check that does
+        that, not the ``src_tables`` guard the caller used to carry: probing
+        that guard with a raise left the whole suite green, so it never fired
+        here either, and it has been removed.
         """
         import shutil
 
@@ -607,14 +610,6 @@ class TestDamagedInput:
         map_path = cache_dir / "nvtx_kernel_map.parquet"
         assert map_path.is_file(), "control: the healthy build must produce a map"
 
-        con = sqlite3.connect(str(profile))
-        try:
-            src_tables = {
-                r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-        finally:
-            con.close()
-
         db = duckdb.connect()
         try:
             nvtx = cache_dir / "nvtx.parquet"
@@ -623,18 +618,18 @@ class TestDamagedInput:
 
             nvtx.write_bytes(b"NOTAPARQUET" * 100)
             with pytest.raises(duckdb.Error):
-                parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+                parquet_cache._build_nvtx_kernel_map(db, cache_dir)
             assert not map_path.exists(), "a map was written from an unreadable source"
 
             nvtx.unlink()
-            parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+            parquet_cache._build_nvtx_kernel_map(db, cache_dir)
             assert not map_path.exists(), "the missing-source skip wrote a map anyway"
 
             # Control: the same call on the restored source does build one, so
             # the two assertions above are about the damage, not about the
             # arguments being wrong.
             nvtx.write_bytes(healthy)
-            parquet_cache._build_nvtx_kernel_map(db, src_tables, cache_dir)
+            parquet_cache._build_nvtx_kernel_map(db, cache_dir)
             assert map_path.is_file(), "the builder no longer works on healthy sources"
         finally:
             db.close()

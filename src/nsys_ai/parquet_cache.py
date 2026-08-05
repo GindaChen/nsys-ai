@@ -225,9 +225,12 @@ def invalidate_cache(sqlite_path: str) -> None:
 def build_cache(sqlite_path: str) -> Path:
     """Build a Parquet cache from a SQLite profile (first-run ETL).
 
-    Attaches the SQLite DB via DuckDB, exports key tables to Parquet with
-    ZSTD compression, and generates ``nvtx_kernel_map.parquet`` using the
-    Python Tier 2 sort-merge logic.
+    Attaches the SQLite DB via DuckDB and exports the base tables to Parquet
+    with ZSTD compression. It does **not** build ``nvtx_kernel_map.parquet``:
+    that one is derived, only four skills read it, and it is materialised on
+    first use instead (see :func:`materialize_cached_nvtx_kernel_map`). A cache
+    with the map and one without are both complete — consumers probe for it
+    rather than assuming it.
 
     Concurrency: serialized by :func:`_build_lock` across threads and
     processes operating on the same profile, with a double-checked
@@ -697,7 +700,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # ── Generate nvtx_kernel_map ──────────────────────────────────────
         if has_kernel and has_nvtx and has_runtime and not defer_nvtx_map:
             _progress("nvtx_kernel_map.parquet")
-            _build_nvtx_kernel_map(db, src_tables, cache_dir)
+            _build_nvtx_kernel_map(db, cache_dir)
         elif defer_nvtx_map:
             # Not a degraded cache: the first NVTX-attribution query calls
             # ensure_nvtx_kernel_map, which builds the same two Parquets into
@@ -745,8 +748,12 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
 
     Returns a DuckDB connection with views named after each cached table:
       ``kernels``, ``nvtx``, ``runtime``, ``memcpy``, ``memset``,
-      ``string_ids``, ``gpu_info``, ``cuda_device``, ``nvtx_kernel_map``,
-     ``nvtx_path_dict`` (when map uses ``path_id``).
+      ``string_ids``, ``gpu_info``, ``cuda_device``.
+
+    ``nvtx_kernel_map`` and ``nvtx_path_dict`` are deliberately absent: the map
+    is built on first use, so a connection from a cache that has not needed it
+    yet carries neither view. Probe for them rather than assuming them —
+    :func:`ensure_nvtx_kernel_map` is the supported way to ask.
     """
     _require_profile_exists(sqlite_path)
     if not is_cache_valid(sqlite_path):
@@ -1165,7 +1172,6 @@ def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
 
 def _build_nvtx_kernel_map(
     db: duckdb.DuckDBPyConnection,
-    src_tables: set[str],
     cache_dir: Path,
 ) -> None:
     """Generate nvtx_kernel_map.parquet with a per-thread stack sweep.
@@ -1184,21 +1190,14 @@ def _build_nvtx_kernel_map(
     three sources are not. They are shared with the rest of the cache, so an
     unreadable one is not a reason to drop the map and keep the cache, it is a
     reason to have no cache. ``Profile.__init__`` then logs and falls back to raw
-    SQLite; the profile stays readable, just without Parquet acceleration. The
-    only degraded-but-continue case is a *missing* source, handled below.
+    SQLite; the profile stays readable, just without Parquet acceleration. A
+    *missing* Parquet source is the degraded-but-continue case, and
+    :func:`_build_nvtx_kernel_map_from_parquet` handles it by returning False.
 
     Sources are the ``kernels``, ``runtime`` and ``nvtx`` Parquets already
     exported by this cache build, so the heavy read never scans the attached
     SQLite ``NVTX_EVENTS`` table.
     """
-    kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
-    runtime_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_RUNTIME")
-    nvtx_table = _find_table(src_tables, "NVTX_EVENTS")
-
-    if not all([kernel_table, runtime_table, nvtx_table]):
-        log.info("Skipping nvtx_kernel_map: missing required tables")
-        return
-
     _build_nvtx_kernel_map_from_parquet(db, cache_dir)
 
 
