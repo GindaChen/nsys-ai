@@ -1296,9 +1296,13 @@ def _build_nvtx_kernel_map_from_parquet(
     # The partition list below is taken from the runtime side, which on that
     # capture has 51 distinct globalTid -- 12 of which launched kernels, and 4
     # of which also carry push/pop ranges. So most partitions attribute
-    # nothing and still issue two filtered scans -- both files are written
-    # sorted by globalTid, so the row-group statistics prune those scans, but
-    # the count of them is linear in thread count. A capture with several
+    # nothing and still issue two filtered scans. Only one of the two prunes
+    # cheaply: nvtx.parquet is written sorted by globalTid, so its row-group
+    # statistics narrow the scan to the matching groups. The kernel side does
+    # not -- kernels.parquet carries no globalTid column at all, so the filter
+    # applies to runtime.parquet and the correlationId join still reads the
+    # kernel rows it pairs with. Either way the count of scans is linear in
+    # thread count, which is what would bite. A capture with several
     # hundred CUDA-calling threads would want this list narrowed to the threads
     # present on both sides.
     #
