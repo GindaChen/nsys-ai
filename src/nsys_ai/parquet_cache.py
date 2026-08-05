@@ -1203,15 +1203,28 @@ def _build_nvtx_kernel_map_from_parquet(
     error.
 
     A source that exists but cannot be *read* is neither: the ``read_parquet``
-    error propagates out of this function, and ``build_cache`` deletes the
-    half-built temp dir rather than publishing it. That is what every export of
-    a primary source in this build does; the one export that swallows its error,
-    ``_build_nvtx_high``, is a derived convenience view that callers already
-    probe for and fall back from, which is precisely what these three sources
-    are not. They are shared with the rest of the cache, so an unreadable one is
-    not a reason to drop the map and keep the cache, it is a reason to have no
-    cache. ``Profile.__init__`` then logs and falls back to raw SQLite; the
-    profile stays readable, just without Parquet acceleration.
+    error propagates out of this function, and what happens next is the caller's,
+    because the two callers are in different situations.
+
+    From ``_build_cache_into`` it propagates on to ``build_cache``, which deletes
+    the half-built temp dir rather than publishing it. That is what every export
+    of a primary source in this build does; the one export that swallows its error,
+    ``_build_nvtx_high``, is a derived convenience view that callers already probe
+    for and fall back from, which is precisely what these three sources are not.
+    They are shared with the rest of the cache, so an unreadable one is not a
+    reason to drop the map and keep the cache, it is a reason to have no cache.
+    ``Profile.__init__`` then logs and falls back to raw SQLite; the profile stays
+    readable, just without Parquet acceleration.
+
+    On the on-demand path there is no half-built cache to discard — the cache is
+    already published and in use — and nothing here converts the error into a
+    False return. ``materialize_cached_nvtx_kernel_map`` catches ``OSError`` only,
+    so a ``duckdb.Error`` escapes it and ``ensure_nvtx_kernel_map``, and both call
+    sites (``nvtx_layer_breakdown`` and ``nvtx_attribution``) swallow it with
+    ``except DB_ERRORS: pass``. The query then takes its no-map fallback and the
+    cache is kept. Deliberate to the extent that a published cache is not this
+    function's to invalidate, but it does mean a corrupt ``nvtx.parquet`` is loud
+    at build time and silent afterwards.
     """
     out_dir = cache_dir if out_dir is None else out_dir
     kp = cache_dir / "kernels.parquet"

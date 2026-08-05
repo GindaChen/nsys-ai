@@ -50,20 +50,37 @@ def _params_key(resolved: dict) -> str:
 #
 # The guard protects a subset, and saying which is the point of this note. It
 # fires only for a placeholder that appears in a ``Skill.sql`` template, because
-# that is what ``Skill.execute`` inspects. Measured over the registry: three of
-# the seven — ``kernel_table``, ``runtime_table`` and ``memcpy_table`` — occur
-# in a template and are covered; ``nvtx_table``, ``memset_table``,
-# ``sync_table`` and ``sync_type_table`` occur in none and are not, at any
-# profile, ever. Their uses are Python f-strings inside ``execute_fn`` bodies,
-# which run after the guard, so a missing table there still surfaces as
-# ``no such table`` rather than an abstention.
+# that is what ``Skill.execute`` inspects — and only when the caller did not
+# name the table itself, which ``Skill.execute`` skips as the caller's business.
+# Measured over the registry: three of the seven — ``kernel_table``,
+# ``runtime_table`` and ``memcpy_table`` — occur in a template; ``nvtx_table``,
+# ``memset_table``, ``sync_table`` and ``sync_type_table`` occur in none, so for
+# those four the guard never fires, at any profile, ever. Their uses are Python
+# f-strings inside ``execute_fn`` bodies, which the guard has no way to read.
 #
-# An ``execute_fn`` skill therefore abstains for itself: ``requires_nvtx``
-# below is the shared helper for the NVTX case, and for the rest the pattern is
-# ``resolve_activity_tables().get(<key>)`` followed by ``abstain`` when it is
-# None. ``test_the_table_guard_covers_only_sql_templates`` pins the split above
-# so this note cannot quietly go stale — a template that starts using one of the
-# other four makes it fail, and the note is what should be corrected.
+# What those four do instead is per-skill, and mostly not the abstention
+# contract — issue #345 tracks closing that, and this note exists to keep the
+# gap visible until it is. ``nvtx_table`` is the nearest to right:
+# ``requires_nvtx``, ``requires_pushpop_nvtx`` and ``resolve_nvtx_table`` below
+# are the shared resolve-and-abstain helpers and seven skills abstain through one
+# of them — but ``gc_impact`` skips its NVTX half silently, and
+# ``host_sync_parent_ranges`` falls back to the literal ``NVTX_EVENTS`` and
+# reports the resulting failure as a data row with an ``error`` key.
+# For ``memset_table`` and ``sync_table`` nothing calls ``abstain`` at all:
+# ``pipeline_bubble_metrics`` skips, ``root_cause_matcher`` returns ``[]``, and
+# ``sync_cost_analysis`` probes the table and returns a zero-valued ``error``
+# row. ``sync_type_table`` reaches no f-string anywhere; its only use is the
+# ``tables.get("sync_type", ...)`` default in ``sync_cost_analysis``. So a
+# missing table on these paths is silence or an untyped error row rather than
+# either an abstention or a raised ``no such table`` — which is exactly the
+# ambiguity :func:`abstain` exists to remove.
+#
+# Extending the guard is not a one-liner, which is why this is documented rather
+# than fixed here: an ``execute_fn`` builds its own SQL, so covering it needs a
+# per-skill declaration of the tables it requires.
+# ``test_the_table_guard_covers_only_sql_templates`` pins the split above so this
+# note cannot quietly go stale — a template that starts using one of the other
+# four makes it fail, and the note is what should be corrected.
 ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
     "kernel_table": ("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
     "runtime_table": ("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
@@ -84,13 +101,15 @@ def abstain(reason: str, **detail) -> list[dict]:
     ``EvidenceBuilder`` catch and log, so the failure leaves nothing a reader of
     the output can see.
 
-    Where abstaining is visible is a caller that reads the rows rather than the
-    findings: ``skill run`` prints "not applicable to this profile" followed by
-    the reason, and ``Agent.analyze`` branches on :func:`is_abstention_row`. It
-    is *not* ``EvidenceBuilder`` — its ``_invoke_to_findings`` drops abstention
-    rows before ``to_findings_fn``, so an abstaining skill contributes no
-    finding either. Measured on a profile whose only memcpy table is the P2P
-    ``..._MEMCPY2``: 16 findings with the guard and 16 with it disabled.
+    Where abstaining is visible is a caller that formats the rows rather than
+    one that turns them into findings, and there is exactly one place that
+    formats them: :meth:`Skill.format_rows` renders the reason as "not
+    applicable to this profile". Both callers of it show the abstention for
+    free — ``skill run`` (via :meth:`Skill.run`) and ``Agent.analyze``. It is
+    *not* ``EvidenceBuilder``: its ``_invoke_to_findings`` drops abstention rows
+    before ``to_findings_fn``, so an abstaining skill contributes no finding
+    either. The measurement behind that claim is recorded once, beside the guard
+    in :meth:`Skill.execute`, rather than copied here.
 
     Both cases matter for grounding. "This profile has no NVTX annotation, so
     layer attribution is unavailable" is a useful answer; silence is not, and
@@ -571,9 +590,10 @@ class Skill:
             # abstaining skill contributes no finding — exactly as a raising one
             # did. Measured on a profile whose only memcpy table is the P2P
             # ``..._MEMCPY2``: 16 findings either way, none of them memcpy.
-            # It shows up where a caller reads the rows rather than the findings
-            # — ``skill run`` prints "not applicable to this profile" with the
-            # reason, and ``Agent.analyze`` branches on ``is_abstention_row``.
+            # It shows up where a caller formats the rows rather than turning
+            # them into findings: ``Skill.format_rows`` prints "not applicable
+            # to this profile" with the reason, for both of its callers —
+            # ``skill run`` and ``Agent.analyze``.
             # The reason to raise it here is the contract, not a change in what
             # the evidence pipeline emits.
             #
