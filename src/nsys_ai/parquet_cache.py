@@ -1923,11 +1923,12 @@ def _ensure_nvtx_kernel_map_in_memory(adapter, db) -> bool:
             f"JOIN {runtime_table} r ON r.correlationId = k.correlationId "
             f"LEFT JOIN StringIds sd ON k.demangledName = sd.id "
             f"LEFT JOIN StringIds ss ON k.shortName = ss.id "
-            f"ORDER BY r.globalTid, r.start"
         ).fetchall()
-        # nvtx must arrive sorted by start: the sweep advances a single index
-        # over it per thread without re-sorting. The kernel side above needs no
-        # such guarantee — the sweep sorts that one itself.
+        # Only the NVTX side has to arrive sorted. The sweep advances a single
+        # index over the ranges per thread without re-sorting them, but it does
+        # sort the kernel side itself (``kr_by_tid[tid].sort(...)``), so asking
+        # the kernel query above for an order it will redo buys nothing. That
+        # asymmetry is what tests/test_determinism.py pins.
         nvtx_rows = db.execute(
             f'SELECT n.globalTid, n.start, n."end", {text_expr} AS text '
             f"FROM {nvtx_table} n {text_join} "
