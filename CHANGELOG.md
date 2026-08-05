@@ -88,6 +88,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - SQL sweep-line overlap analysis (about 3x faster on the analysis call), NVTX
   layer breakdown reduced from ~43s to ~1.4s, and automatic trimming of long
   profiles to a representative window.
+- The `nvtx_kernel_map` build sweeps one capture thread at a time and streams
+  both sides of each, so what it holds in Python tracks the batch rather than
+  the profile. On a 3.5 GB capture, peak memory for the build fell from 7.50 GB
+  to 3.55 GB — and from 5.28 GB to 1.39 GB inside the sweep itself — producing
+  the same map.
 
 ### Docs
 

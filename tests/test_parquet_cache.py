@@ -576,10 +576,12 @@ class TestDamagedInput:
 
         They are easy to confuse, and the docstring got them backwards until
         this test existed: it claimed an unreadable source was "logged and the
-        map skipped". It is not. Both source readers are generator functions, so
-        their ``db.execute`` runs lazily inside ``_sweep_nvtx_kernel_map``,
-        where nothing catches it — the error leaves the builder and
-        ``build_cache`` throws the half-built temp dir away.
+        map skipped". It is not. A damaged runtime.parquet raises out of the
+        eager partition query, before anything is staged; a damaged
+        nvtx.parquet raises later, from the generator whose ``db.execute`` runs
+        on first advance inside ``_attribute_thread``. Both cases are checked
+        below, and in neither does anything catch the error — it leaves the
+        builder and ``build_cache`` throws the half-built temp dir away.
 
         That is the wanted behaviour, not a defect: the map's sources are the
         same Parquets the rest of the cache reads, so one of them being garbage
@@ -620,6 +622,17 @@ class TestDamagedInput:
             with pytest.raises(duckdb.Error):
                 parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
             assert not map_path.exists(), "a map was written from an unreadable source"
+            nvtx.write_bytes(healthy)
+
+            # The other source, which is read eagerly to list the partitions
+            # and so raises from a different statement than the one above.
+            runtime = cache_dir / "runtime.parquet"
+            healthy_runtime = runtime.read_bytes()
+            runtime.write_bytes(b"NOTAPARQUET" * 100)
+            with pytest.raises(duckdb.Error):
+                parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
+            assert not map_path.exists(), "a map was written from an unreadable source"
+            runtime.write_bytes(healthy_runtime)
 
             nvtx.unlink()
             parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
@@ -880,3 +893,356 @@ def test_the_path_dictionary_matches_the_map(tmp_path):
             "LEFT JOIN nvtx_path_dict d USING (path_id) WHERE d.nvtx_path IS NULL"
         ).fetchone()[0]
     assert orphans == 0, f"{orphans} rows carry a path_id with no dictionary entry"
+
+
+class TestStreamedSweep:
+    """The cached map builder sweeps one thread of the capture at a time.
+
+    Peak memory then tracks the batch rather than the profile: measured on a
+    3.5 GB capture (15.9 M ranges, 3.1 M kernel-runtime rows) the build went from
+    6.95 GB peak / 51.2 s to 3.31 GB / 37.3 s, producing 3,042,699 rows with zero
+    differences in either direction across all nine columns and the path
+    dictionary.
+
+    These tests assert *contents*, not that a build finished, because both known
+    ways of getting this wrong are silent. A hand-vectorised version of the same
+    attribution was wrong on 15% of rows. Sharing one DuckDB handle between the
+    two Arrow readers truncates the sweep with no exception at all — 968,394 rows
+    instead of 3,042,699 on that capture, and 2 instead of 1,643 on the fixture
+    below.
+    """
+
+    FIXTURES = ("h100_2gpu_1s.sqlite", "mfu_2gpu_before.sqlite")
+
+    @staticmethod
+    def _cache_for(tmp_path, fixture):
+        """Copy a fixture out of tests/fixtures and build its cache.
+
+        The copy is not hygiene theatre: opening a profile in place builds
+        indices in the source database and grows the file, and these fixtures
+        are checked in.
+        """
+        import shutil
+
+        src = Path(__file__).resolve().parent / "fixtures" / fixture
+        profile = tmp_path / fixture
+        shutil.copy(src, profile)
+        return Path(parquet_cache.build_cache(str(profile)))
+
+    @staticmethod
+    def _streamed(db, cache_dir, out_dir):
+        """Run the production builder into ``out_dir`` and read its nine columns
+        back with the path text joined in."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
+        if not built:
+            return None
+        mp = parquet_cache._safe_path(out_dir / "nvtx_kernel_map.parquet")
+        dp = parquet_cache._safe_path(out_dir / "nvtx_path_dict.parquet")
+        return db.execute(
+            f"SELECT m.nvtx_text, m.nvtx_depth, d.nvtx_path, m.kernel_name, m.k_start, "
+            f"m.k_end, m.k_dur_ns, m.is_tc_eligible, m.uses_tc "
+            f"FROM read_parquet('{mp}') m JOIN read_parquet('{dp}') d USING (path_id)"
+        ).fetchall()
+
+    @staticmethod
+    def _oracle(db, cache_dir):
+        """The same answer via ``_sweep_nvtx_kernel_map``, which holds both sides
+        in memory and is what the on-demand builder still uses.
+
+        Not a reimplementation of the streamed builder: it reads both sources in
+        one shot, in the shape the pre-streaming builder read them, and attaches
+        the Tensor Core flags afterwards from a side table the way that builder
+        did. Only the containment core is shared.
+        """
+        kps = parquet_cache._safe_path(cache_dir / "kernels.parquet")
+        rps = parquet_cache._safe_path(cache_dir / "runtime.parquet")
+        nps = parquet_cache._safe_path(cache_dir / "nvtx.parquet")
+        kr = db.execute(
+            f'SELECT r.globalTid, r.start, r."end", k.start, k."end", k.name, '
+            f"COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0), "
+            f"COALESCE(CAST(k.uses_tc AS INTEGER), 0) "
+            f"FROM read_parquet('{kps}') k "
+            f"JOIN read_parquet('{rps}') r ON r.correlationId = k.correlationId"
+        ).fetchall()
+        nvtx = db.execute(
+            f'SELECT globalTid, start, "end", CAST(text AS VARCHAR) '
+            f"FROM read_parquet('{nps}') "
+            f'WHERE eventType = 59 AND "end" > start AND text IS NOT NULL '
+            f"ORDER BY globalTid, start"
+        ).fetchall()
+        tc = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr}
+        rows = []
+        for r in parquet_cache._sweep_nvtx_kernel_map([k[:6] for k in kr], nvtx):
+            elig, used = tc.get((r["k_start"], r["k_end"], r["kernel_name"]), (0, 0))
+            rows.append(
+                (
+                    r["nvtx_text"],
+                    r["nvtx_depth"],
+                    r["nvtx_path"],
+                    r["kernel_name"],
+                    r["k_start"],
+                    r["k_end"],
+                    r["k_dur_ns"],
+                    elig,
+                    used,
+                )
+            )
+        return rows
+
+    @pytest.mark.parametrize("fixture", FIXTURES)
+    def test_the_streamed_builder_matches_the_list_sweep_row_for_row(self, tmp_path, fixture):
+        """Row count first, then the rows themselves, in both directions."""
+        import collections
+
+        import duckdb
+
+        cache_dir = self._cache_for(tmp_path, fixture)
+        db = duckdb.connect()
+        try:
+            got = self._streamed(db, cache_dir, tmp_path / "streamed")
+            want = self._oracle(db, cache_dir)
+        finally:
+            db.close()
+
+        assert want, f"{fixture}: the oracle attributed nothing, so this compares nothing"
+        assert got is not None, f"{fixture}: the streamed builder wrote no map"
+        # Stated separately from the contents comparison because a truncated
+        # sweep is the specific failure this class exists to catch, and a count
+        # says so unambiguously.
+        assert len(got) == len(want), (
+            f"{fixture}: the streamed builder produced {len(got)} rows against the "
+            f"sweep's {len(want)}"
+        )
+        got_counts = collections.Counter(got)
+        want_counts = collections.Counter(want)
+        assert got_counts == want_counts, (
+            f"{fixture}: {sum((want_counts - got_counts).values())} rows missing and "
+            f"{sum((got_counts - want_counts).values())} extra"
+        )
+
+    def test_shrinking_the_arrow_batch_does_not_change_the_answer(self, tmp_path, monkeypatch):
+        """Every batch boundary exercised at once, and the truncation trap with it.
+
+        ``_SWEEP_BATCH_ROWS`` sizes both input readers and the output buffer, so
+        a small prime here puts range and kernel boundaries at unrelated offsets
+        and splits the output across many row groups. Nothing about the answer
+        may move: the open stack is per thread and a thread's ranges are strictly
+        nested, so there is no carried state at a batch boundary to get wrong.
+
+        This is also the regression test for the two-readers-one-connection
+        truncation, and it is the *shrunk* batch that gives it teeth. At the
+        default 262,144 rows this fixture's NVTX side is a single batch, so the
+        reader has already handed every row to Python before the kernel reader
+        opens and a shared handle loses nothing — measured, 1,643 rows either
+        way. At batch size 7 the same mutation yields 2.
+        """
+        import duckdb
+
+        cache_dir = self._cache_for(tmp_path, "h100_2gpu_1s.sqlite")
+        db = duckdb.connect()
+        try:
+            full = self._streamed(db, cache_dir, tmp_path / "full")
+            monkeypatch.setattr(parquet_cache, "_SWEEP_BATCH_ROWS", 7)
+            tiny = self._streamed(db, cache_dir, tmp_path / "tiny")
+        finally:
+            db.close()
+
+        assert full, "the control build attributed nothing"
+        assert tiny is not None, "the shrunk-batch build wrote no map"
+        assert len(tiny) == len(full), (
+            f"batching changed the row count: {len(tiny)} at batch 7 against {len(full)}"
+        )
+        assert sorted(tiny) == sorted(full), "batching changed the attribution"
+
+    def test_both_map_writers_emit_the_same_columns(self, tmp_path):
+        """The two producers of a nvtx_kernel_map, column by column.
+
+        There are two, and since the streamed builder stopped sharing a writer
+        with the in-memory one they list their columns independently:
+        ``_nvtx_map_arrow_tables`` (in-memory, reached through
+        ``_materialize_nvtx_kernel_map``) and the ``SELECT`` inside
+        ``_publish_nvtx_kernel_map_parquet`` (cached). Nothing else in the suite
+        compares them — the oracle test above checks the cached map's *rows*
+        against ``_sweep_nvtx_kernel_map`` and never calls the Arrow writer — so
+        a tenth column added to one of them would land with the suite green.
+
+        That is not cosmetic: ``connection.cached_nvtx_map_has_embedded_tc``
+        decides by column presence, so a map missing ``is_tc_eligible`` /
+        ``uses_tc`` reroutes every NVTX consumer onto a different aggregate
+        rather than failing.
+        """
+        import duckdb
+
+        cache_dir = self._cache_for(tmp_path, "h100_2gpu_1s.sqlite")
+        out_dir = tmp_path / "published"
+        out_dir.mkdir()
+        db = duckdb.connect()
+        try:
+            built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
+            assert built, "the cached builder wrote no map to compare against"
+            published = {
+                name: [
+                    (r[0], r[1])
+                    for r in db.execute(
+                        f"DESCRIBE SELECT * FROM "
+                        f"read_parquet('{parquet_cache._safe_path(out_dir / name)}')"
+                    ).fetchall()
+                ]
+                for name in ("nvtx_kernel_map.parquet", "nvtx_path_dict.parquet")
+            }
+        finally:
+            db.close()
+
+        # An empty result is enough: the schema is fixed by the writer, not by
+        # the rows, and this keeps the comparison about column names and types.
+        map_tbl, dict_tbl = parquet_cache._nvtx_map_arrow_tables([])
+        arrow_to_duckdb = {"string": "VARCHAR", "int32": "INTEGER", "int64": "BIGINT"}
+
+        def as_duckdb(table):
+            return [(f.name, arrow_to_duckdb[str(f.type)]) for f in table.schema]
+
+        assert as_duckdb(map_tbl) == published["nvtx_kernel_map.parquet"], (
+            "the in-memory map writer and the cached one no longer agree; "
+            "_nvtx_map_arrow_tables and _publish_nvtx_kernel_map_parquet list "
+            "their columns separately and have to be edited together"
+        )
+        assert as_duckdb(dict_tbl) == published["nvtx_path_dict.parquet"], (
+            "the two path-dictionary writers no longer agree"
+        )
+
+    def test_threads_with_only_one_side_are_swept_without_affecting_the_others(self, tmp_path):
+        """The three partition shapes a real capture contains.
+
+        On the 3.5 GB reference capture one thread carries 3,917 ranges and no
+        kernels at all, eight carry kernels and no ranges, and four carry both.
+        Built here directly as Parquet rather than through a SQLite fixture, so
+        the thread layout is stated rather than hoped for.
+
+        The kernel on thread 3 sits inside a range that opened before it and
+        closes after it, which is the case a stream cannot recover from by
+        re-reading: the range has to still be on the open stack when the kernel
+        arrives.
+        """
+        import duckdb
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        cache_dir = tmp_path / "synthetic.nsys-cache"
+        cache_dir.mkdir()
+        pq.write_table(
+            pa.table(
+                {
+                    "correlationId": pa.array([1, 2, 3], pa.int64()),
+                    "start": pa.array([1100, 2100, 3100], pa.int64()),
+                    "end": pa.array([1200, 2200, 3200], pa.int64()),
+                    "name": pa.array(["kA", "kB", "kC"], pa.string()),
+                    "is_tc_eligible": pa.array([1, 0, 0], pa.int32()),
+                    "uses_tc": pa.array([1, 0, 0], pa.int32()),
+                }
+            ),
+            cache_dir / "kernels.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    # tid 2 launches two kernels and has no NVTX ranges at all;
+                    # tid 3 launches one, inside a range that opened long before
+                    # it. tid 1 appears only on the NVTX side.
+                    "correlationId": pa.array([1, 2, 3], pa.int64()),
+                    "globalTid": pa.array([2, 2, 3], pa.int64()),
+                    "start": pa.array([100, 200, 500], pa.int64()),
+                    "end": pa.array([150, 250, 550], pa.int64()),
+                }
+            ),
+            cache_dir / "runtime.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "globalTid": pa.array([1, 3, 3, 3], pa.int64()),
+                    "start": pa.array([0, 0, 400, 900], pa.int64()),
+                    "end": pa.array([999, 999, 600, 999], pa.int64()),
+                    "text": pa.array(["orphan", "step", "fwd", "after"], pa.string()),
+                    "eventType": pa.array([59, 59, 59, 59], pa.int32()),
+                }
+            ),
+            cache_dir / "nvtx.parquet",
+        )
+
+        db = duckdb.connect()
+        try:
+            rows = self._streamed(db, cache_dir, tmp_path / "out")
+        finally:
+            db.close()
+
+        # tid 2's kernels have no enclosing range and tid 1 has no kernels, so
+        # exactly one row survives — attributed to the inner range, with the
+        # outer one still open around it.
+        assert rows == [("fwd", 1, "step > fwd", "kC", 3100, 3200, 100, 0, 0)], rows
+
+    def test_a_capture_with_nothing_to_attribute_publishes_no_map(self, tmp_path):
+        """No kernel inside any range is a skip, not an empty map and not a crash.
+
+        The streamed builder cannot test its inputs for emptiness — they are
+        generators opened per thread — so "no kernels", "no ranges" and "no
+        overlap" all have to come out the same way: nothing written, False
+        returned, and the scratch Parquet cleaned up behind it.
+        """
+        import duckdb
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        cache_dir = tmp_path / "empty.nsys-cache"
+        cache_dir.mkdir()
+        pq.write_table(
+            pa.table(
+                {
+                    "correlationId": pa.array([1], pa.int64()),
+                    "start": pa.array([1100], pa.int64()),
+                    "end": pa.array([1200], pa.int64()),
+                    "name": pa.array(["kA"], pa.string()),
+                    "is_tc_eligible": pa.array([0], pa.int32()),
+                    "uses_tc": pa.array([0], pa.int32()),
+                }
+            ),
+            cache_dir / "kernels.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "correlationId": pa.array([1], pa.int64()),
+                    "globalTid": pa.array([9], pa.int64()),
+                    "start": pa.array([100], pa.int64()),
+                    "end": pa.array([150], pa.int64()),
+                }
+            ),
+            cache_dir / "runtime.parquet",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "globalTid": pa.array([9], pa.int64()),
+                    "start": pa.array([500], pa.int64()),
+                    "end": pa.array([600], pa.int64()),
+                    "text": pa.array(["elsewhere"], pa.string()),
+                    "eventType": pa.array([59], pa.int32()),
+                }
+            ),
+            cache_dir / "nvtx.parquet",
+        )
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        db = duckdb.connect()
+        try:
+            built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
+        finally:
+            db.close()
+
+        assert built is False
+        assert not (out_dir / "nvtx_kernel_map.parquet").exists()
+        assert not (out_dir / "nvtx_path_dict.parquet").exists()
+        assert list(out_dir.iterdir()) == [], (
+            f"the sweep left scratch files behind: {sorted(p.name for p in out_dir.iterdir())}"
+        )
