@@ -348,28 +348,34 @@ class Profile:
                     # Original behaviour: block until cache is built
                     self.db = parquet_cache.open_cached_db(path)
                 else:
-                    # "auto" mode: use cache if valid, else smart fallback
-                    if parquet_cache.is_cache_valid(path):
-                        self.db = parquet_cache.open_cached_db(path)
-                    else:
-                        size_mb = os.path.getsize(path) / 1e6
-                        if size_mb > 50:
-                            self._log.info(
-                                "Large profile (%.0fMB), using direct query mode (instant startup).",
-                                size_mb,
-                            )
-                            self._log.info(
-                                "To build a Parquet cache for faster repeated queries, re-run with "
-                                "cache_mode='parquet' or pre-build the cache."
-                            )
-                            self.db = parquet_cache.open_direct_sqlite(path)
-                        else:
-                            # Small file — build cache now (seconds)
-                            self.db = parquet_cache.open_cached_db(path)
+                    # auto: cache when one can be had, direct SQLite when it
+                    # cannot. The policy (and the measurements behind it) lives
+                    # in parquet_cache.open_auto_db, because `skill run` and
+                    # open_profile_readonly reach it without a Profile.
+                    self.db = parquet_cache.open_auto_db(path)
             except Exception as e:
-                self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
+
                 self.cache_error = e
-                self.db = None  # type: ignore[assignment]
+                # Losing the Parquet cache must not cost the DuckDB engine.
+                # The raw-sqlite3 fallback below is a third tier, not a
+                # synonym for this one: on it the `kernels` view and its
+                # tensor-core flags do not exist, so tensor_core_usage fails
+                # outright rather than running slower, and a 92.7MB profile
+                # queries in 8.15s against 5.62s on the direct attach.
+                try:
+                    self.db = parquet_cache.open_direct_sqlite(path)
+                    self._log.warning(
+                        "Parquet cache unavailable (%s); querying the SQLite export directly "
+                        "through DuckDB.",
+                        e,
+                    )
+                except Exception as direct_err:
+                    self._log.warning(
+                        "DuckDB unavailable (cache: %s; direct: %s), falling back to sqlite3.",
+                        e,
+                        direct_err,
+                    )
+                    self.db = None  # type: ignore[assignment]
         from .connection import wrap_connection
 
         self.adapter = wrap_connection(self.db if self.db is not None else self.conn)

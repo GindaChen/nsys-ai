@@ -40,6 +40,12 @@ ACCEPTED_SKIP_REASONS = (
     "Profile not found: data/nsys-hero",
     "requires duckdb",
     "parquet cache unavailable",
+    # Environment-shaped, not fixture-shaped: the read-only-directory test in
+    # test_profile_modes.py cannot mean anything on Windows (no POSIX mode bits)
+    # or as root (which ignores the write bit). It runs on every CI job we have;
+    # the reason is registered so a container that happens to run as root fails
+    # loudly on nothing rather than on this.
+    "needs POSIX directory permissions and a non-root user",
 )
 
 

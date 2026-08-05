@@ -9,6 +9,24 @@ import pytest
 
 from nsys_ai import parquet_cache
 
+
+def _reads_sqlite_in_place(prof) -> bool:
+    """True when ``prof.db`` is DuckDB with the SQLite export attached directly.
+
+    The discriminator for "the cache was refused". Before issue #317 that state
+    was observable as ``prof.db is None`` — the fallback dropped to raw
+    ``sqlite3`` and lost the DuckDB engine with it. It now lands on
+    ``open_direct_sqlite``, which attaches the export as ``src``; a cached open
+    has no ``src`` in its catalog, and a raw-``sqlite3`` fallback has no
+    ``prof.db`` at all. All three are distinguishable, which is why the tests
+    below assert on this rather than on ``is None``.
+    """
+    if prof.db is None:
+        return False
+    rows = prof.db.execute("SELECT database_name FROM duckdb_databases()").fetchall()
+    return "src" in {r[0] for r in rows}
+
+
 # Minimal schema reused by tests that need to seed custom NVTX rows. Mirrors
 # the production CUPTI/NVTX layout; intentionally narrow — just enough for
 # build_cache() to produce kernels.parquet, runtime.parquet, nvtx.parquet,
@@ -353,7 +371,7 @@ class TestUnrecognisedKernelTable:
     def test_unrecognised_kernel_table_falls_back_instead_of_poisoning_cache(
         self, minimal_nsys_db_path
     ):
-        """A non-`_V` kernel suffix must leave no cache and open via sqlite3."""
+        """A non-`_V` kernel suffix must leave no cache and read the export in place."""
         from nsys_ai.profile import Profile
 
         conn = sqlite3.connect(minimal_nsys_db_path)
@@ -367,7 +385,7 @@ class TestUnrecognisedKernelTable:
         for _ in range(2):
             prof = Profile(minimal_nsys_db_path, cache_mode="auto")
             try:
-                assert prof.db is None  # sqlite3 fallback engaged
+                assert _reads_sqlite_in_place(prof)  # fallback engaged, cache refused
                 assert prof.schema.kernel_table == "CUPTI_ACTIVITY_KIND_KERNEL_X1"
                 assert prof.meta.kernel_count > 0
             finally:
@@ -465,7 +483,7 @@ class TestDamagedInput:
     def test_a_corrupt_kernels_parquet_falls_back_instead_of_failing(
         self, minimal_nsys_db_path
     ):
-        """A damaged cache file must degrade to sqlite3, not take the profile down.
+        """A damaged cache file must degrade, not take the profile down.
 
         Silent otherwise in the loudest possible way: the cache is an
         optimisation the user never asked for, so a byte-level fault inside it
@@ -484,20 +502,22 @@ class TestDamagedInput:
         (cache_dir / "kernels.parquet").write_bytes(b"NOTAPARQUET" * 100)
 
         with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
-            assert prof.db is None, "a corrupt cache file was accepted as a cache"
+            assert _reads_sqlite_in_place(prof), "a corrupt cache file was accepted as a cache"
             rows = get_skill("top_kernels").execute(prof.query_conn(), limit=3)
-        assert rows, "falling back to sqlite3 lost the kernel data"
+        assert rows, "falling back lost the kernel data"
 
     def test_a_corrupt_cache_is_never_repaired(self, minimal_nsys_db_path):
         """Pinned defect, not a virtue: the damage is permanent and invisible.
 
         ``is_cache_valid()`` checks for the cache directory and its manifest, not
         for readable Parquet, so a corrupt cache stays "valid" forever. Every
-        subsequent open pays the fallback and gets the degraded answer — the
-        sqlite3 path returns fewer columns than the cached one (``top_kernels``
-        loses ``tc_eligible``/``uses_tc``, ``nvtx_kernel_map`` loses demangled
-        names), so the user silently gets a thinner analysis on every run until
-        someone deletes the directory by hand.
+        subsequent open pays the fallback — since #317 that is DuckDB reading the
+        export in place, which keeps the enriched ``kernels`` view but loses the
+        precomputed ``nvtx_kernel_map``, so NVTX attribution is rebuilt from
+        scratch on every run until someone deletes the directory by hand. (Before
+        #317 the fallback was raw ``sqlite3`` and the loss was larger: no
+        ``kernels`` view at all, so ``top_kernels`` shed
+        ``tc_eligible``/``uses_tc`` and ``tensor_core_usage`` could not run.)
 
         This test exists so that fixing it — discard and rebuild on the first
         unreadable read — is a visible change to a stated behaviour rather than
@@ -516,7 +536,9 @@ class TestDamagedInput:
 
         for attempt in range(3):
             with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
-                assert prof.db is None, f"open #{attempt + 1} unexpectedly used the cache"
+                assert _reads_sqlite_in_place(prof), (
+                    f"open #{attempt + 1} unexpectedly used the cache"
+                )
 
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True, (
             "is_cache_valid now rejects a corrupt cache — good, but this test "
