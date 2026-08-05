@@ -345,8 +345,12 @@ class Profile:
                     # Force direct SQLite via DuckDB — zero ETL, instant startup
                     self.db = parquet_cache.open_direct_sqlite(path)
                 elif cache_mode == "parquet":
-                    # Original behaviour: block until cache is built
-                    self.db = parquet_cache.open_cached_db(path)
+                    # Original behaviour: block until cache is built.
+                    # env_escape=False: this branch never reads
+                    # NSYS_AI_CACHE_MODE, so the build banner must not tell the
+                    # user to set it — on this path it does nothing. It names
+                    # cache_mode="direct" instead, which is the way out here.
+                    self.db = parquet_cache.open_cached_db(path, env_escape=False)
                 else:
                     # auto: cache when one can be had, direct SQLite when it
                     # cannot. The policy (and the measurements behind it) lives

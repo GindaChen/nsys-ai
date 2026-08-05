@@ -57,9 +57,12 @@ Environment (large profiles / DuckDB tuning):
   caller that does not ask for a specific mode. ``direct`` skips the build and
   queries the SQLite export in place (instant open, slower queries); ``parquet``
   forces the build even when the affordability check would have declined it.
-  It is the escape hatch for the entry points that expose no cache flag — the
-  TUI, the web server and every CLI subcommand except ``skill run``, which also
-  has ``--no-cache``. Note it is consulted only when no valid cache exists yet:
+  Every entry point honours it, including ``skill run`` — which is the point of
+  the variable, since the TUI, the timeline, the web server and the one-shot
+  subcommands expose no cache flag at all. ``skill run`` is the only one that
+  also takes ``--no-cache``.
+
+  Note it is consulted only when no valid cache exists yet:
   ``direct`` skips *building* one, it does not refuse an existing one.
 """
 
@@ -284,7 +287,7 @@ def invalidate_cache(sqlite_path: str) -> None:
         log.info("Removed cache: %s", cache_dir)
 
 
-def build_cache(sqlite_path: str) -> Path:
+def build_cache(sqlite_path: str, *, env_escape: bool = True) -> Path:
     """Build a Parquet cache from a SQLite profile (first-run ETL).
 
     Attaches the SQLite DB via DuckDB and exports the base tables to Parquet
@@ -305,6 +308,9 @@ def build_cache(sqlite_path: str) -> Path:
     file at all when the cache is already good. This matters for
     read-only profile directories (NFS / read-only mounts) where the
     cache is readable but the lock file cannot be created.
+
+    ``env_escape`` is passed straight to :func:`_build_banner` and only picks
+    which escape hatch that banner names; it changes nothing about the build.
 
     Returns the cache directory path.
     """
@@ -331,7 +337,7 @@ def build_cache(sqlite_path: str) -> Path:
             )
         )
         try:
-            _build_cache_into(sqlite_path, tmp_dir)
+            _build_cache_into(sqlite_path, tmp_dir, env_escape=env_escape)
         except BaseException:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
@@ -611,7 +617,7 @@ def _stderr_is_tty() -> bool:
         return False
 
 
-def _build_banner(sqlite_path: str) -> None:
+def _build_banner(sqlite_path: str, *, env_escape: bool = True) -> None:
     """Announce a long build before it starts, with the way out.
 
     The per-step progress line already exists, but it says nothing until the
@@ -627,6 +633,16 @@ def _build_banner(sqlite_path: str) -> None:
     ``materialize_cached_nvtx_kernel_map`` prints nothing at all. Instrumenting
     that build is the real fix and belongs with issue #300; saying it out loud
     is the floor.
+
+    ``env_escape`` picks which way out the last line names, because the two
+    callers do not have the same one. Reached through ``open_auto_db`` — every
+    entry point in this project — ``NSYS_AI_CACHE_MODE=direct`` genuinely skips
+    the build, including from its own ``=parquet`` branch. Reached through
+    ``open_cached_db`` directly, i.e. ``Profile(cache_mode="parquet")``, the
+    variable is never consulted and printing it would be advice that does
+    nothing; there the way out is the argument, so that is what it says.
+    Advertising an inert escape hatch is the exact defect #317 set out to fix
+    on ``skill run`` — narrowing it to one path is not fixing it.
     """
     try:
         size_mb = os.path.getsize(sqlite_path) / 1e6
@@ -634,6 +650,7 @@ def _build_banner(sqlite_path: str) -> None:
         return
     if size_mb < _BUILD_BANNER_MIN_MB:
         return
+    escape = "Set NSYS_AI_CACHE_MODE=direct" if env_escape else 'Pass cache_mode="direct"'
     # "4-5x" rather than the 3-9x range the docstring quotes: this banner only
     # fires at >=500 MB, and in that region direct-vs-warm-cached query time
     # measured 3.9x (924 MB) and 5.1x (3.7 GB). Quoting the whole-range figure
@@ -645,17 +662,17 @@ def _build_banner(sqlite_path: str) -> None:
         f"queries afterwards are 4-5x faster).\n"
         f"[nsys-ai] The first NVTX-attributing query then builds the kernel map "
         f"(~{size_mb / _MAP_BUILD_MB_PER_S:.0f}s more, also once per profile).\n"
-        f"[nsys-ai] Set NSYS_AI_CACHE_MODE=direct to skip the build and query "
+        f"[nsys-ai] {escape} to skip the build and query "
         f"the SQLite export in place.\n"
     )
     sys.stderr.flush()
 
 
-def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
+def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = True) -> Path:
     """Internal: build the Parquet cache into the given directory."""
 
     log.info("Building analysis cache (first run only)...")
-    _build_banner(sqlite_path)
+    _build_banner(sqlite_path, env_escape=env_escape)
     t0 = time.monotonic()
 
     db = duckdb.connect()
@@ -861,9 +878,17 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                 "(set NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1 to build it now)"
             )
 
-        # Clear progress line
+        # The CR and the padding exist only to overwrite the progress line
+        # _draw left on screen, so they belong to the same condition _draw does.
+        # Emitted unconditionally they put a bare CR and 40 spaces into every
+        # piped or redirected run — litter in exactly the case the tty gate was
+        # added to clean up.
         elapsed = time.monotonic() - t0
-        sys.stderr.write(f"\r[nsys-ai] Cache ready ({elapsed:.1f}s)" + " " * 40 + "\n")
+        ready = f"[nsys-ai] Cache ready ({elapsed:.1f}s)"
+        if _stderr_is_tty():
+            sys.stderr.write("\r" + ready + " " * 40 + "\n")
+        else:
+            sys.stderr.write(ready + "\n")
         sys.stderr.flush()
 
         # ── Write version stamp ───────────────────────────────────────────
@@ -891,10 +916,16 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
     return cache_dir
 
 
-def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
+def open_cached_db(sqlite_path: str, *, env_escape: bool = True) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection with views over the Parquet cache.
 
     If the cache doesn't exist or is stale, builds it first.
+
+    ``env_escape=False`` says the caller reached here without consulting
+    ``NSYS_AI_CACHE_MODE``, so the build banner must not advertise it. Only
+    :class:`~nsys_ai.profile.Profile` with an explicit ``cache_mode="parquet"``
+    passes it; ``open_auto_db`` leaves it at the default because on that path
+    the variable really does work.
 
     Returns a DuckDB connection with views named after each cached table:
       ``kernels``, ``nvtx``, ``runtime``, ``memcpy``, ``memset``,
@@ -907,7 +938,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     """
     _require_profile_exists(sqlite_path)
     if not is_cache_valid(sqlite_path):
-        build_cache(sqlite_path)
+        build_cache(sqlite_path, env_escape=env_escape)
 
     cache_dir = _cache_dir_for(sqlite_path)
 
@@ -1018,6 +1049,19 @@ def open_auto_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
       build (27.44 + 0.04). Direct still wins, but by 1.5x — before the #322
       deferral this comparison was 18.7 s against 79.2 s, so the advice is much
       weaker than it used to be.
+
+      Say plainly which callers those are, because the eight-skill basket did
+      not measure them and they inherit this default anyway: nothing in this
+      project passes ``cache_mode``, so the TUI, the timeline, the web server
+      and the one-shot subcommands (``info``, ``kernels``, ``export``) all land
+      on ``auto``. A TUI that used to open a 3.7 GB profile in ~13 s now waits
+      ~27 s at startup. That is a real regression for a one-shot user and a
+      real win for anyone who then queries, and the trade was chosen for the
+      latter. ``_build_banner`` is the mitigation, not a refutation: at
+      >=500 MB it says the wait is coming and how to opt out. If someone wants
+      this reversed for the interactive entry points, the honest fix is to
+      measure a TUI-shaped basket and let those callers pass ``cache_mode``,
+      not to put the size rule back.
     * **A light workload on a small profile, when RAM is tight.** The same
       93 MB capture queried with four cheap skills that never touch NVTX
       attribution (``top_kernels``, ``gpu_idle_gaps``, ``memory_transfers``,

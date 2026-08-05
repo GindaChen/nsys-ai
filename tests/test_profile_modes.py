@@ -2,6 +2,7 @@ import os
 import stat
 import subprocess
 import sys
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -332,4 +333,40 @@ def test_a_declined_cache_says_so_at_warning(minimal_nsys_db_path, tmp_path, cap
     assert any("Not building an analysis cache" in r.getMessage() for r in caplog.records), (
         "the declined-cache notice did not reach WARNING, so lastResort drops it and a "
         "silently degraded run produces nothing on stderr"
+    )
+
+
+def test_the_batch_audit_script_opens_the_same_way_skill_run_does():
+    """scripts/batch_audit_skills.py claims parity with `nsys-ai skill run`.
+
+    It exists to reproduce what that subcommand does across every registry
+    skill, and its module docstring says so. When `skill run` moved to
+    `open_auto_db` the script kept calling `open_cached_db`, so it silently
+    ignored NSYS_AI_CACHE_MODE and built caches on profiles the CLI would have
+    read in place — an audit of a path the CLI no longer takes, under a
+    docstring asserting the opposite.
+
+    This is the fourth time in this file's neighbourhood that prose one level
+    up from a change survived it and became false (#321, #325, #317). A grep
+    over call sites in src/ does not catch it, because the script is not in
+    src/. Pinning the two together in a test does.
+    """
+    root = Path(__file__).resolve().parent.parent
+    script = (root / "scripts" / "batch_audit_skills.py").read_text()
+    handlers = (root / "src" / "nsys_ai" / "cli" / "handlers.py").read_text()
+
+    # What `skill run` actually calls, read from the handler rather than
+    # assumed, so this test tracks the CLI instead of restating it.
+    assert "open_auto_db(args.profile)" in handlers, (
+        "`skill run` no longer calls open_auto_db — update this test and the "
+        "batch audit script together, they are supposed to agree"
+    )
+
+    assert "return open_auto_db(profile_path)" in script, (
+        "batch_audit_skills.py does not open the way `skill run` does; its "
+        "docstring claims it does, and NSYS_AI_CACHE_MODE does not reach it"
+    )
+    # The docstrings are the half that goes stale silently, so assert on them too.
+    assert "open_cached_db()" not in script, (
+        "batch_audit_skills.py still advertises the open_cached_db path it no longer takes"
     )
