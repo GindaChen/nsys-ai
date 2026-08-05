@@ -172,10 +172,30 @@ class NsightSchema:
 
         Today this is usually CUPTI_ACTIVITY_KIND_KERNEL, but we keep
         the detection logic resilient to future renames.
+
+        Variants of the canonical name are chosen by the shared resolver, never
+        here. This used to be its own "exact name, else sorted(candidates)[0]"
+        scan, which picks the *oldest* variant: on a profile carrying both
+        ``..._KERNEL_V2`` and ``..._KERNEL_V3`` it returned ``_V2`` while
+        ``resolve_activity_tables()["kernel"]`` returned ``_V3``, so
+        ``launch_overhead_ms`` — whose SQL joins ``kernel_table`` against the
+        resolved runtime table — read two tables that did not describe the same
+        window. Measured on a fixture with all three activity tables doubled and
+        the ``_V2`` copies truncated to a quarter: 0.0 ms / 0 iterations against
+        the ``_V3``-only control's 0.05 ms / 28.
+
+        The substring sweep below stays as a last resort for a rename the
+        resolver cannot see (a name that does not start with the canonical
+        prefix at all). Its ``sorted`` is only for determinism between such
+        unrelated names — by then there is no version ordering left to get wrong.
         """
-        # Preferred legacy/known name
-        if "CUPTI_ACTIVITY_KIND_KERNEL" in self.tables:
-            return "CUPTI_ACTIVITY_KIND_KERNEL"
+        from .connection import resolve_table_variant
+
+        resolved = resolve_table_variant(
+            set(self.tables), "CUPTI_ACTIVITY_KIND_KERNEL", allow_other_suffixes=True
+        )
+        if resolved:
+            return resolved
 
         # Fallback: any non-enum table with KERNEL in the name
         candidates = [

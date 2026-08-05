@@ -120,13 +120,11 @@ def launch_overhead_ms(
     kernel_table = prof.schema.kernel_table
     if not kernel_table:
         return 0.0
-    tables = prof.schema.tables
-    runtime_table: str | None = "CUPTI_ACTIVITY_KIND_RUNTIME"
-    if runtime_table not in tables:
-        runtime_table = next(
-            (t for t in sorted(tables) if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME")),
-            None,
-        )
+    # Via the shared resolver, never a local prefix scan: this used to take
+    # sorted(...)[0] — the *oldest* variant — and so disagreed with every other
+    # reader on a profile carrying both _V2 and _V3. ``prof`` must therefore
+    # carry a real ConnectionAdapter (wrap_connection), not a bare connection.
+    runtime_table = prof.adapter.resolve_activity_tables().get("runtime")
     if not runtime_table:
         return 0.0
 
@@ -506,25 +504,18 @@ def detect_iterations(
 
     primary_tid = _find_primary_thread(prof, device)
 
-    # Resolve table names dynamically (versioned-table support)
-    # Prefer exact canonical name first, then sorted prefix fallback
-    # (consistent with base._resolve_activity_tables).
-    tables = prof.schema.tables
-
-    nvtx_table = "NVTX_EVENTS"
-    if nvtx_table not in tables:
-        for t in sorted(tables):
-            if t.startswith("NVTX_EVENTS"):
-                nvtx_table = t
-                break
-    has_nvtx = nvtx_table in tables
-
-    runtime_table = "CUPTI_ACTIVITY_KIND_RUNTIME"
-    if runtime_table not in tables:
-        for t in sorted(tables):
-            if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME"):
-                runtime_table = t
-                break
+    # Resolve table names through the shared resolver (versioned-table support).
+    # These two sites used to scan prefixes locally and take sorted(...)[0] — the
+    # *oldest* variant — which is the opposite of what every other reader picks.
+    # The literal fallbacks keep the pre-existing shape for an absent table:
+    # ``has_nvtx`` gates the NVTX query away entirely, and a missing runtime
+    # table still surfaces as "no such table CUPTI_ACTIVITY_KIND_RUNTIME" rather
+    # than as a query reading ``FROM None``.
+    resolved = prof.adapter.resolve_activity_tables()
+    resolved_nvtx = resolved.get("nvtx")
+    has_nvtx = resolved_nvtx is not None
+    nvtx_table = resolved_nvtx or "NVTX_EVENTS"
+    runtime_table = resolved.get("runtime") or "CUPTI_ACTIVITY_KIND_RUNTIME"
 
     # Filter to primary thread's top-level iterations
     # Use COALESCE to handle newer schemas where text is NULL and textId is used

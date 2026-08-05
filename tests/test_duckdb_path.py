@@ -234,18 +234,27 @@ class TestDuckDBCompatibilityFixes:
         assert type(p.meta).__name__ == "ProfileMeta"
 
     def test_memory_transfers_duckdb_error(self, duckdb_conn):
-        """memory_transfers H2D distribution should catch duckdb.Error on missing table."""
+        """h2d_distribution must not raise duckdb.Error when the memcpy table is absent.
+
+        It now says so rather than going quiet: ``Skill.execute`` abstains when
+        a table the template reads cannot be resolved, and the H2D wrapper
+        passes that abstention through instead of trying to classify a pattern
+        out of the marker row. The original assertion here was ``rows == []``,
+        which ``abstain``'s docstring defines as "ran, nothing to report" —
+        the wrong answer for an empty database.
+        """
         import duckdb
 
+        from nsys_ai.skills.base import is_abstention
         from nsys_ai.skills.registry import get_skill
 
         skill = get_skill("h2d_distribution")
 
         # Create a fresh DuckDB connection without the memcpy table
         bad_conn = duckdb.connect()
-        # Should quietly return [] instead of raising duckdb.Error
         rows = skill.execute(bad_conn)
-        assert rows == []
+        assert is_abstention(rows)
+        assert "CUPTI_ACTIVITY_KIND_MEMCPY" in rows[0]["reason"]
 
     def _make_textid_db(self, nvtx_rows: list[tuple], string_rows: list[tuple]):
         """Return a minimal DuckDB connection with textId-based NVTX schema."""

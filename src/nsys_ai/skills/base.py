@@ -41,6 +41,23 @@ def _params_key(resolved: dict) -> str:
     return json.dumps(resolved, sort_keys=True, default=str)
 
 
+# The activity-table placeholders a SQL template may use, mapped to the key
+# ``ConnectionAdapter.resolve_activity_tables`` files the resolved name under
+# and to the canonical (unversioned) name. Declared once here so the injection
+# in ``Skill.execute`` and the "cannot run" check over it read the same list;
+# they used to be one hand-written ``setdefault`` per entry, which made it easy
+# to add a placeholder to the injection and forget the guard.
+ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
+    "kernel_table": ("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
+    "runtime_table": ("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
+    "nvtx_table": ("nvtx", "NVTX_EVENTS"),
+    "memcpy_table": ("memcpy", "CUPTI_ACTIVITY_KIND_MEMCPY"),
+    "memset_table": ("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
+    "sync_table": ("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"),
+    "sync_type_table": ("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
+}
+
+
 def abstain(reason: str, **detail) -> list[dict]:
     """Return the row a skill emits when it *cannot run*, with the reason why.
 
@@ -416,7 +433,9 @@ class Skill:
         """Run the skill against a connection.
 
         If ``execute_fn`` is set, delegates to it.  Otherwise runs the
-        skill's SQL query against *conn*.
+        skill's SQL query against *conn* — unless one of the activity tables
+        that query reads cannot be resolved on this profile, in which case it
+        abstains instead of running a query that is certain to fail.
 
         Args:
             conn: SQLite connection to an Nsight profile database
@@ -426,7 +445,9 @@ class Skill:
                       in the SQL template.
 
         Returns:
-            List of result rows as dicts
+            List of result rows as dicts, or the single-row abstention marker
+            :func:`abstain` builds. Callers that treat rows as data must test
+            for it with :func:`is_abstention`.
         """
         # Auto-create performance indexes (one-time per connection).
         ensure_indexes(conn)
@@ -504,34 +525,33 @@ class Skill:
         # CUPTI_ACTIVITY_KIND_KERNEL which may be _KERNEL_V2/_V3 in
         # newer Nsight Systems versions.
         tables = adapter.resolve_activity_tables()
-        resolved.setdefault(
-            "kernel_table",
-            tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
-        )
-        resolved.setdefault(
-            "runtime_table",
-            tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
-        )
-        resolved.setdefault(
-            "nvtx_table",
-            tables.get("nvtx", "NVTX_EVENTS"),
-        )
-        resolved.setdefault(
-            "memcpy_table",
-            tables.get("memcpy", "CUPTI_ACTIVITY_KIND_MEMCPY"),
-        )
-        resolved.setdefault(
-            "memset_table",
-            tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
-        )
-        resolved.setdefault(
-            "sync_table",
-            tables.get("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"),
-        )
-        resolved.setdefault(
-            "sync_type_table",
-            tables.get("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
-        )
+        unresolved: list[str] = []
+        for placeholder, (key, canonical) in ACTIVITY_TABLE_PLACEHOLDERS.items():
+            if placeholder in resolved:
+                # Caller named the table explicitly; that is their business.
+                continue
+            resolved[placeholder] = tables.get(key, canonical)
+            if tables.get(key) is None and "{" + placeholder + "}" in self.sql:
+                unresolved.append(canonical)
+        if unresolved:
+            # The template reads a table this profile does not have. Substituting
+            # the canonical literal anyway (which is what the ``.get`` fallback
+            # above does, and all this branch used to do) sends the skill into
+            # ``sqlite3.OperationalError: no such table`` — and ``EvidenceBuilder``
+            # catches that, so the skill vanishes from the findings with no trace.
+            # ``abstain`` is the contract for "cannot run"; see its docstring.
+            #
+            # Only a placeholder the template actually uses counts: the fallbacks
+            # are still written into ``resolved`` because ``str.format`` needs a
+            # value for every key it is given, not only the ones in this template.
+            names = ", ".join(sorted(set(unresolved)))
+            return abstain(
+                f"This profile has no {names} table, so '{self.name}' has "
+                f"nothing to read. Either the capture did not trace that "
+                f"activity kind, or the export names it something this version "
+                f"does not recognise as a variant.",
+                missing_tables=sorted(set(unresolved)),
+            )
 
         # NVTX text resolution: handle both legacy (text column only)
         # and modern schemas (textId → StringIds lookup).

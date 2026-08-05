@@ -820,8 +820,11 @@ def _find_table(tables: set[str], prefix: str) -> str | None:
     ``connection.py`` so the cached and uncached engines cannot pick different
     source tables on a profile that carries several variants. Unlike that
     resolver this one stays strict about ``_V<n>``: it decides which table the
-    ETL *copies*, and a looser match would let an unrelated activity kind
-    (``CUPTI_ACTIVITY_KIND_MEMCPY2``) be cached as the memcpy table.
+    ETL *copies*, so an unrecognised suffix should leave the entry uncached
+    rather than cache a guess under the canonical name. (Both sides now reject a
+    bare trailing digit — ``CUPTI_ACTIVITY_KIND_MEMCPY2`` is peer-to-peer
+    memcpy, not a memcpy version — so the two differ only on suffixes neither
+    has met, such as a hypothetical ``..._NEXTGEN``.)
     """
     return resolve_table_variant(tables, prefix)
 
@@ -829,11 +832,15 @@ def _find_table(tables: set[str], prefix: str) -> str | None:
 def _kernel_like_tables(tables: set[str]) -> list[str]:
     """Source tables ``NsightSchema`` would accept as the kernel activity table.
 
-    Mirrors ``NsightSchema._detect_kernel_table``: any non-``ENUM_`` table with
-    ``KERNEL`` in its name. Used to tell "this profile has no kernel data at all"
-    (a legitimate state — Nsight creates tables lazily) from "this profile has
-    kernel data under a name ``_find_table`` did not match", which must not be
-    cached.
+    Mirrors the *set* ``NsightSchema._detect_kernel_table`` will accept: any
+    non-``ENUM_`` table with ``KERNEL`` in its name. Which one of them that
+    function picks is the shared resolver's business and not mirrored here —
+    every name the resolver can return starts with
+    ``CUPTI_ACTIVITY_KIND_KERNEL``, so it is a subset of this list either way.
+
+    Used to tell "this profile has no kernel data at all" (a legitimate state —
+    Nsight creates tables lazily) from "this profile has kernel data under a
+    name ``_find_table`` did not match", which must not be cached.
     """
     return sorted(t for t in tables if "KERNEL" in t.upper() and not t.upper().startswith("ENUM_"))
 
