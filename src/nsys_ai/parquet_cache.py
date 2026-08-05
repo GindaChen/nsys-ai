@@ -64,7 +64,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1189,7 +1189,6 @@ def _build_nvtx_kernel_map_from_parquet(
     db: duckdb.DuckDBPyConnection,
     cache_dir: Path,
     out_dir: Path | None = None,
-    progress: Callable[[int, int], None] | None = None,
 ) -> bool:
     """Generate nvtx_kernel_map.parquet with a per-thread stack sweep.
 
@@ -1198,21 +1197,17 @@ def _build_nvtx_kernel_map_from_parquet(
     range join is involved (the comment below records why one was tried and
     dropped), and there is no fallback.
 
-    **One thread of the capture at a time**, so peak memory tracks the batch
-    rather than the profile. ``eventType = 59`` is a per-thread Push/Pop stack,
-    so a thread's ranges are strictly nested and its work is independent of
-    every other thread's: partitioning on ``globalTid`` needs no carried state
-    at a partition boundary at all. Within a thread both sides then arrive
-    sorted by start and are consumed through a single advancing cursor, so
-    neither side is ever a list. Measured on a 3.5 GB capture (15.9 M ranges,
-    3.1 M kernel-runtime rows): peak inside the sweep 5.24 GB -> 1.83 GB, with
-    byte-identical output (3,042,699 rows).
-
-    ``progress``, when given, is called ``progress(threads_done, threads_total)``
-    after each thread. The deferred build is where the wait now lives — roughly
-    60 s on that capture, previously with no reporting channel at all — and the
-    thread is the natural unit to report, because it is the unit the sweep
-    already works in.
+    **One thread of the capture at a time**, so what the sweep holds in Python
+    tracks the batch rather than the profile. ``eventType = 59`` is a per-thread
+    Push/Pop stack, so a thread's ranges are strictly nested and its work is
+    independent of every other thread's: partitioning on ``globalTid`` needs no
+    carried state at a partition boundary at all. Within a thread both sides
+    then arrive sorted by start and are consumed through a single advancing
+    cursor, so neither side is ever a list. Measured on a 3.5 GB capture
+    (15.9 M ranges, 3.1 M kernel-runtime rows), peak process RSS: 5.28 GB ->
+    1.39 GB inside the sweep, 7.50 GB -> 3.55 GB for the whole build, with
+    unchanged output (3,042,699 rows). The 3.55 GB is the publish step below,
+    which still sorts the whole map in DuckDB; that is #339.
 
     Sources are the ``kernels``, ``runtime`` and ``nvtx`` Parquets already in
     ``cache_dir`` — written earlier in the same build, or published by an
@@ -1287,35 +1282,52 @@ def _build_nvtx_kernel_map_from_parquet(
     # by construction. A containment IEJoin cannot know that and pays the
     # general-case cost: on a 3.5 GB capture (2.19 M kernels, 15.9 M ranges) it
     # ran over twenty minutes, saturating twelve cores, to produce a 3.0 M-row
-    # result. The sweep below does the same work in 19 s, and its output was
-    # compared row-for-row against the IEJoin's on that capture --
-    # 3,042,699 rows, zero differences in either direction.
+    # result. The sweep below does the same work in 35 s on that capture, and
+    # its output was compared row-for-row against the IEJoin's -- 3,042,699
+    # rows, zero differences in either direction.
     #
-    # The equality key is why the join had so little to work with: globalTid had
-    # five distinct values, so IEJoin partitioned into five buckets and range-
-    # joined millions against millions inside each. That same count is what
-    # makes the thread a usable *chunk* here: measured on the 3.5 GB capture the
-    # runtime table carries thirteen distinct globalTid, four of which hold
-    # 99.97% of the ranges in four near-equal quarters.
+    # The equality key is why the join had so little to work with: on the NVTX
+    # side globalTid has five distinct values, so IEJoin partitioned into five
+    # buckets and range-joined millions against millions inside each. The same
+    # skew is what makes the thread a usable *chunk* here: four of those five
+    # threads hold 99.97% of the 15.9 M ranges in near-equal quarters (measured
+    # on the 3.5 GB capture, from nvtx.parquet).
+    #
+    # The partition list below is taken from the runtime side, which on that
+    # capture has 51 distinct globalTid -- 12 of which launched kernels, and 4
+    # of which also carry push/pop ranges. So most partitions attribute
+    # nothing and still issue two filtered scans -- both files are written
+    # sorted by globalTid, so the row-group statistics prune those scans, but
+    # the count of them is linear in thread count. A capture with several
+    # hundred CUDA-calling threads would want this list narrowed to the threads
+    # present on both sides.
     #
     # Sources stay Parquet-only, as before, so the heavy read never touches the
     # attached SQLite.
     #
-    # Nothing below is wrapped in a try/except, and wrapping it would be
-    # theatre: the two stream helpers are generator functions, so their
-    # ``execute`` runs lazily on first advance, inside ``_attribute_thread``.
-    # A duckdb.Error from an unreadable source therefore surfaces out of this
-    # function, which is what tests/test_parquet_cache.py pins — the staged file
-    # is removed by the ``finally`` and no map is published.
+    # On errors: the partition query below is eager, so an unreadable
+    # runtime.parquet raises there, before anything is staged. Everything after
+    # it goes through the two stream helpers, which are generator functions, so
+    # their ``execute`` runs on first advance inside ``_attribute_thread`` --
+    # under the ``try`` whose ``finally`` removes the staged file. Either way a
+    # duckdb.Error leaves this function and no map is published, which is what
+    # tests/test_parquet_cache.py pins. The ``try`` blocks below are there to
+    # release the writer, the cursors and the staged file, and none of them
+    # swallows an error; adding one that did would be a change to a documented
+    # behaviour.
     import pyarrow.parquet as pq
 
     # The partitions are the threads that launched work, so this reads the
     # runtime side: a thread with ranges and no kernels attributes nothing and
     # does not need a partition. A NULL globalTid is excluded rather than
     # partitioned on, because a per-thread nesting stack over rows carrying no
-    # thread id is not defined — no shipped Nsight export produces one, and the
-    # previous builder would have bucketed such rows together and attributed
-    # them to each other.
+    # thread id is not defined. This is the one place the two builders can
+    # disagree: ``_sweep_nvtx_kernel_map``, which the on-demand builder still
+    # uses, buckets those rows under a single ``None`` key and attributes them
+    # to each other, which is a made-up answer rather than a better one. No
+    # export seen here has the case at all -- the column is the thread that
+    # made the CUDA API call, and runtime.parquet on the 3.5 GB reference
+    # capture has zero NULLs in it.
     tids = [
         row[0]
         for row in db.execute(
@@ -1347,8 +1359,7 @@ def _build_nvtx_kernel_map_from_parquet(
         writer = pq.ParquetWriter(staged, schema, compression="zstd")
         try:
             buf: list[tuple] = []
-            total = len(tids)
-            for done, tid in enumerate(tids, 1):
+            for tid in tids:
                 nvtx_rows = _stream_thread_nvtx(nvtx_cur, nps, tid)
                 kr_rows = _stream_thread_kernels(kernel_cur, kps, rps, tid)
                 try:
@@ -1365,8 +1376,6 @@ def _build_nvtx_kernel_map_from_parquet(
                     # cursor's result now rather than at the next collection.
                     nvtx_rows.close()
                     kr_rows.close()
-                if progress is not None:
-                    progress(done, total)
             if buf:
                 _write_staged_batch(writer, schema, buf)
                 n_written += len(buf)
@@ -1436,9 +1445,15 @@ def _publish_nvtx_kernel_map_parquet(db, staged: Path, out_dir: Path) -> None:
     an on-demand one still agree. DuckDB orders VARCHAR by UTF-8 bytes and
     Python by code point, which coincide for UTF-8.
 
-    The published map's ``ORDER BY k_start, k_end, kernel_name`` is what makes
-    two builds of the same profile byte-comparable; it is also the step that
-    dominates peak memory on a large capture, tracked separately in #339.
+    The published map's ``ORDER BY k_start, k_end, kernel_name`` clusters it by
+    kernel start, which is the axis its readers filter on. It is *not* a total
+    order and does not make two builds byte-comparable: one kernel reached
+    through more than one runtime row yields several rows sharing that key, and
+    on the 3.5 GB reference capture 759,299 keys are shared by 1.6 M of the
+    3.1 M kernel-runtime rows. What is pinned is the row multiset
+    (``TestStreamedSweep`` in tests/test_parquet_cache.py), not the byte layout.
+    This sort is also the step that dominates peak memory on a large capture,
+    tracked separately in #339.
     """
     sps = _safe_path(staged)
     dps = _safe_path(out_dir / "nvtx_path_dict.parquet")
@@ -1552,12 +1567,16 @@ def _stream_thread_kernels(cur, kernels_parquet: str, runtime_parquet: str, tid)
 def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
     """Build the ``(nvtx_kernel_map, nvtx_path_dict)`` Arrow pair from sweep rows.
 
-    The in-memory builder's writer. The cached builder streams straight to
+    The in-memory builder's writer, and its only caller is
+    ``_materialize_nvtx_kernel_map``. The cached builder streams straight to
     Parquet instead (``_publish_nvtx_kernel_map_parquet``) and never holds the
-    rows; the two are kept in step by
-    ``test_the_lazily_built_map_is_identical_to_the_eager_one`` and by the
-    row-for-row oracle comparison in tests/test_parquet_cache.py, not by sharing
-    this function. All nine columns are
+    rows, so the two maps' columns are now two lists that have to be edited
+    together. The list here and the ``SELECT`` there are compared column by
+    column in ``TestStreamedSweep.test_both_map_writers_emit_the_same_columns``
+    (tests/test_parquet_cache.py); nothing else catches a divergence, because
+    the row-for-row oracle in that class compares the *cached* map against
+    ``_sweep_nvtx_kernel_map``'s rows and never calls this function. All nine
+    columns are
     emitted, including ``is_tc_eligible``/``uses_tc``: consumers probe for those
     two by presence (``connection.cached_nvtx_map_has_embedded_tc``), so a map
     missing them is not merely thinner, it routes every reader onto a different
@@ -1718,9 +1737,11 @@ def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
     cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
     so consumers take their map-only fast path (a TC-less map would force
     nvtx_layer_breakdown into a (start,end) kernels-join that double-counts
-    timestamp-colliding kernels). Shares ``_nvtx_map_arrow_tables`` with the
-    cache writer, so the on-demand map and the cached one are the same shape by
-    construction rather than by two lists of columns kept in step."""
+    timestamp-colliding kernels). The nine columns are listed in
+    ``_nvtx_map_arrow_tables`` above, and again in the cached builder's
+    ``_publish_nvtx_kernel_map_parquet``; the two lists are separate and
+    ``TestStreamedSweep.test_both_map_writers_emit_the_same_columns`` is what
+    keeps them equal."""
     map_tbl, dict_tbl = _nvtx_map_arrow_tables(results)
     db.register("_odm_nkm", map_tbl)
     db.register("_odm_npd", dict_tbl)
@@ -1882,9 +1903,7 @@ def _publish_stamp_map_ready(cache_dir: Path) -> None:
         _check_cache_size(cache_dir, str(cache_dir.parent / source))
 
 
-def materialize_cached_nvtx_kernel_map(
-    conn, progress: Callable[[int, int], None] | None = None
-) -> bool:
+def materialize_cached_nvtx_kernel_map(conn) -> bool:
     """Build ``nvtx_kernel_map`` into ``conn``'s Parquet cache, then view it.
 
     The persisted half of the deferred-map design. ``build_cache`` no longer
@@ -1904,11 +1923,6 @@ def materialize_cached_nvtx_kernel_map(
     Never call this from inside ``build_cache``: that holds ``_build_lock`` for
     the same cache directory, and flock is not reentrant across the fds involved
     — the process would wedge. The only callers are query-time.
-
-    ``progress`` is forwarded to the sweep and called ``progress(done, total)``
-    per thread of the capture. It fires only on the branch that actually builds:
-    a map already published by another process returns before any work, and so
-    reports nothing, which is the honest answer for a wait that did not happen.
     """
     from .connection import DuckDBAdapter, forget_nvtx_map_probes, wrap_connection
 
@@ -1954,9 +1968,7 @@ def materialize_cached_nvtx_kernel_map(
                 tempfile.mkdtemp(prefix=".nvtx_map_build_", dir=cache_dir)
             )
             try:
-                built = _build_nvtx_kernel_map_from_parquet(
-                    db, cache_dir, staging, progress=progress
-                )
+                built = _build_nvtx_kernel_map_from_parquet(db, cache_dir, staging)
                 if not built:
                     return False
                 # Publish the dictionary first. A concurrent opener globbing
@@ -1987,7 +1999,7 @@ def materialize_cached_nvtx_kernel_map(
     return ok
 
 
-def ensure_nvtx_kernel_map(conn, progress: Callable[[int, int], None] | None = None) -> bool:
+def ensure_nvtx_kernel_map(conn) -> bool:
     """Make ``nvtx_kernel_map`` + ``nvtx_path_dict`` queryable on a DuckDB
     connection when they are absent, so NVTX-attribution skills take their fast
     map-backed path instead of an in-file IEJoin that hangs DuckDB's
@@ -2020,12 +2032,9 @@ def ensure_nvtx_kernel_map(conn, progress: Callable[[int, int], None] | None = N
     four times the memory to produce one table. Both call sites swallowed the
     exception under ``except DB_ERRORS``, so it was invisible.
 
-    ``progress``, when given, is called ``progress(done, total)`` per thread of
-    the capture by the persisted build. It is the only reporting channel this
-    path has: the wait a user sees on a large profile is now here rather than in
-    ``build_cache``, and it was previously silent — stderr during it captured as
-    exactly ``''``. The in-memory fallback reports nothing, because it has no
-    chunk to report.
+    The wait is silent, and stays so here. It moved out of ``build_cache`` and
+    into this call — stderr during it captures as exactly ``''`` — and reporting
+    it needs a channel from here back to the caller, which is #332.
     """
     from .connection import DB_ERRORS, DuckDBAdapter, wrap_connection
 
@@ -2047,7 +2056,7 @@ def ensure_nvtx_kernel_map(conn, progress: Callable[[int, int], None] | None = N
         if _nvtx_map_present(db):
             return True
         # Persisted build, when this connection has a cache to write into.
-        if materialize_cached_nvtx_kernel_map(db, progress=progress):
+        if materialize_cached_nvtx_kernel_map(db):
             return True
         return _ensure_nvtx_kernel_map_in_memory(adapter, db)
 
@@ -2080,9 +2089,9 @@ def _ensure_nvtx_kernel_map_in_memory(adapter, db) -> bool:
         text_join = ""
 
     # kernel_name and the embedded TC flags resolved exactly as the cache-built
-    # map's TC-enriched ``kernels`` view (_tc_enriched_sql), so the on-demand map
-    # is a byte-for-byte drop-in: name = COALESCE(demangled, short, 'kernel_'||id),
-    # TC eligibility/use by the same name regexes.
+    # map's TC-enriched ``kernels`` view (_tc_enriched_sql), so those three
+    # columns are a drop-in for the cached map's: name = COALESCE(demangled,
+    # short, 'kernel_'||id), TC eligibility/use by the same name regexes.
     tc_active = _TC_ACTIVE_PATTERN
     tc_elig = _TC_ELIGIBLE_PATTERN
     lname = "lower(COALESCE(sd.value, ss.value, ''))"

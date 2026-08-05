@@ -526,13 +526,13 @@ def test_concurrent_cursors_build_the_map_once(cached_profile):
     calls_lock = threading.Lock()
     original = parquet_cache._build_nvtx_kernel_map_from_parquet
 
-    def counting(db, src_dir, out_dir=None, **kwargs):
+    def counting(db, src_dir, out_dir=None):
         with calls_lock:
             calls.append(1)
         # Long enough that every other thread is queued on the lock before this
         # one publishes; the sweep on this fixture is a few milliseconds.
         time.sleep(0.3)
-        return original(db, src_dir, out_dir, **kwargs)
+        return original(db, src_dir, out_dir)
 
     parquet_cache._build_nvtx_kernel_map_from_parquet = counting
     try:

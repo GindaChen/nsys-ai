@@ -576,10 +576,12 @@ class TestDamagedInput:
 
         They are easy to confuse, and the docstring got them backwards until
         this test existed: it claimed an unreadable source was "logged and the
-        map skipped". It is not. Both source readers are generator functions, so
-        their ``db.execute`` runs lazily inside ``_sweep_nvtx_kernel_map``,
-        where nothing catches it — the error leaves the builder and
-        ``build_cache`` throws the half-built temp dir away.
+        map skipped". It is not. A damaged runtime.parquet raises out of the
+        eager partition query, before anything is staged; a damaged
+        nvtx.parquet raises later, from the generator whose ``db.execute`` runs
+        on first advance inside ``_attribute_thread``. Both cases are checked
+        below, and in neither does anything catch the error — it leaves the
+        builder and ``build_cache`` throws the half-built temp dir away.
 
         That is the wanted behaviour, not a defect: the map's sources are the
         same Parquets the rest of the cache reads, so one of them being garbage
@@ -620,6 +622,17 @@ class TestDamagedInput:
             with pytest.raises(duckdb.Error):
                 parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
             assert not map_path.exists(), "a map was written from an unreadable source"
+            nvtx.write_bytes(healthy)
+
+            # The other source, which is read eagerly to list the partitions
+            # and so raises from a different statement than the one above.
+            runtime = cache_dir / "runtime.parquet"
+            healthy_runtime = runtime.read_bytes()
+            runtime.write_bytes(b"NOTAPARQUET" * 100)
+            with pytest.raises(duckdb.Error):
+                parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
+            assert not map_path.exists(), "a map was written from an unreadable source"
+            runtime.write_bytes(healthy_runtime)
 
             nvtx.unlink()
             parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
@@ -917,11 +930,11 @@ class TestStreamedSweep:
         return Path(parquet_cache.build_cache(str(profile)))
 
     @staticmethod
-    def _streamed(db, cache_dir, out_dir, **kwargs):
+    def _streamed(db, cache_dir, out_dir):
         """Run the production builder into ``out_dir`` and read its nine columns
         back with the path text joined in."""
         out_dir.mkdir(parents=True, exist_ok=True)
-        built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir, **kwargs)
+        built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
         if not built:
             return None
         mp = parquet_cache._safe_path(out_dir / "nvtx_kernel_map.parquet")
@@ -1042,34 +1055,60 @@ class TestStreamedSweep:
         )
         assert sorted(tiny) == sorted(full), "batching changed the attribution"
 
-    def test_the_build_reports_one_progress_call_per_thread(self, tmp_path):
-        """The deferred build's only reporting channel.
+    def test_both_map_writers_emit_the_same_columns(self, tmp_path):
+        """The two producers of a nvtx_kernel_map, column by column.
 
-        It had none before: the map is no longer built by ``build_cache``, so the
-        wait moved into the first NVTX query, where stderr captured as exactly
-        ``''``. Chunking is what creates a unit to report, and the thread is that
-        unit.
+        There are two, and since the streamed builder stopped sharing a writer
+        with the in-memory one they list their columns independently:
+        ``_nvtx_map_arrow_tables`` (in-memory, reached through
+        ``_materialize_nvtx_kernel_map``) and the ``SELECT`` inside
+        ``_publish_nvtx_kernel_map_parquet`` (cached). Nothing else in the suite
+        compares them — the oracle test above checks the cached map's *rows*
+        against ``_sweep_nvtx_kernel_map`` and never calls the Arrow writer — so
+        a tenth column added to one of them would land with the suite green.
+
+        That is not cosmetic: ``connection.cached_nvtx_map_has_embedded_tc``
+        decides by column presence, so a map missing ``is_tc_eligible`` /
+        ``uses_tc`` reroutes every NVTX consumer onto a different aggregate
+        rather than failing.
         """
         import duckdb
 
         cache_dir = self._cache_for(tmp_path, "h100_2gpu_1s.sqlite")
-        seen: list[tuple[int, int]] = []
+        out_dir = tmp_path / "published"
+        out_dir.mkdir()
         db = duckdb.connect()
         try:
-            rows = self._streamed(
-                db,
-                cache_dir,
-                tmp_path / "out",
-                progress=lambda done, total: seen.append((done, total)),
-            )
+            built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
+            assert built, "the cached builder wrote no map to compare against"
+            published = {
+                name: [
+                    (r[0], r[1])
+                    for r in db.execute(
+                        f"DESCRIBE SELECT * FROM "
+                        f"read_parquet('{parquet_cache._safe_path(out_dir / name)}')"
+                    ).fetchall()
+                ]
+                for name in ("nvtx_kernel_map.parquet", "nvtx_path_dict.parquet")
+            }
         finally:
             db.close()
 
-        assert rows, "the build attributed nothing, so it reported nothing either"
-        assert seen, "the build reported no progress at all"
-        total = seen[0][1]
-        assert seen == [(i, total) for i in range(1, total + 1)], (
-            f"progress did not count 1..{total} exactly once each: {seen}"
+        # An empty result is enough: the schema is fixed by the writer, not by
+        # the rows, and this keeps the comparison about column names and types.
+        map_tbl, dict_tbl = parquet_cache._nvtx_map_arrow_tables([])
+        arrow_to_duckdb = {"string": "VARCHAR", "int32": "INTEGER", "int64": "BIGINT"}
+
+        def as_duckdb(table):
+            return [(f.name, arrow_to_duckdb[str(f.type)]) for f in table.schema]
+
+        assert as_duckdb(map_tbl) == published["nvtx_kernel_map.parquet"], (
+            "the in-memory map writer and the cached one no longer agree; "
+            "_nvtx_map_arrow_tables and _publish_nvtx_kernel_map_parquet list "
+            "their columns separately and have to be edited together"
+        )
+        assert as_duckdb(dict_tbl) == published["nvtx_path_dict.parquet"], (
+            "the two path-dictionary writers no longer agree"
         )
 
     def test_threads_with_only_one_side_are_swept_without_affecting_the_others(self, tmp_path):
