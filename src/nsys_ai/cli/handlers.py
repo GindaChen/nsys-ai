@@ -475,7 +475,15 @@ def _cmd_warm(args, _profile):
         base_count = sum(1 for p in cache_dir.glob("*.parquet") if p.name not in map_files)
 
     # Confirmed failures only. MAP_NO_ATTRIBUTION and MAP_SOURCES_MISSING mean
-    # the sweep had nothing to write; the three below mean it could not write.
+    # the sweep had nothing to write, which is not a failure of `warm`.
+    #
+    # The three below all leave this process unable to serve the map, which is
+    # what `warm` promises and so what it must report. They are not the same on
+    # disk, though: MAP_NOT_WRITABLE and MAP_NO_CACHE_DIR persisted nothing,
+    # while MAP_VIEWS_FAILED wrote both Parquets and only failed to create the
+    # views over them — so a later process finds them by glob and skips the
+    # sweep. Reporting it is still right; describing it as "could not write"
+    # would not be.
     if outcome in (
         parquet_cache.MAP_NOT_WRITABLE,
         parquet_cache.MAP_VIEWS_FAILED,

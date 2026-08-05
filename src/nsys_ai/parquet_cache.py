@@ -1943,9 +1943,16 @@ def materialize_cached_nvtx_kernel_map_outcome(conn) -> tuple[str, str]:
 
     Returns ``(outcome, detail)``. ``outcome`` is one of the ``MAP_*`` constants
     above; ``detail`` is a human-readable elaboration, empty when there is
-    nothing to add. Everything other than ``MAP_MATERIALIZED`` leaves the cache
-    directory unchanged and the caller falling back to the in-memory build,
-    which is exactly the behaviour those backends had before.
+    nothing to add. Everything other than ``MAP_MATERIALIZED`` leaves the caller
+    falling back to the in-memory build, which is exactly the behaviour those
+    backends had before.
+
+    That is *not* the same as leaving the cache directory unchanged, and
+    ``MAP_VIEWS_FAILED`` is the exception that matters: the two Parquets were
+    written, and only the views over them could not be created. The next process
+    finds them by glob and skips the sweep. So it is a failure of this call, not
+    a failure to persist, and code that groups it with the "could not write"
+    outcomes is wrong about what is on disk.
 
     Note that ``MAP_NO_ATTRIBUTION`` publishes nothing, so it is *not* a state
     the next process inherits: a profile that reaches it re-runs the full sweep
