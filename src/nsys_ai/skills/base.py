@@ -66,13 +66,19 @@ def _params_key(resolved: dict) -> str:
 # of them — but ``gc_impact`` skips its NVTX half silently, and
 # ``host_sync_parent_ranges`` falls back to the literal ``NVTX_EVENTS`` and
 # reports the resulting failure as a data row with an ``error`` key.
-# For ``memset_table`` and ``sync_table`` nothing calls ``abstain`` at all:
-# ``pipeline_bubble_metrics`` skips, ``root_cause_matcher`` returns ``[]``, and
-# ``sync_cost_analysis`` probes the table and returns a zero-valued ``error``
-# row. ``sync_type_table`` reaches no f-string anywhere; its only use is the
-# ``tables.get("sync_type", ...)`` default in ``sync_cost_analysis``. So a
-# missing table on these paths is silence or an untyped error row rather than
-# either an abstention or a raised ``no such table`` — which is exactly the
+# For ``memset_table``, ``sync_table`` and ``sync_type_table`` nothing calls
+# ``abstain`` at all: ``pipeline_bubble_metrics`` skips, ``root_cause_matcher``
+# returns ``[]``, and ``sync_cost_analysis`` probes only the sync table and
+# returns a zero-valued ``error`` row when it is absent. ``sync_type_table`` is
+# the worst of the three, because it is unprobed and load-bearing: its resolved
+# name reaches the main query's ``LEFT JOIN {type_table}`` in
+# ``sync_cost_analysis``, under a local named ``type_table`` — which is why
+# grepping for ``sync_type`` does not find it. Drop ``ENUM_CUPTI_SYNC_TYPE``
+# from tests/fixtures/h100_2gpu_1s.sqlite and leave the sync table in place, and
+# the skill reports "Synchronization tables not found in profile" with zeroes,
+# naming the table that is present rather than the one that is not. So a missing
+# table on these paths is silence, an untyped error row, or a wrong one, rather
+# than either an abstention or a raised ``no such table`` — which is exactly the
 # ambiguity :func:`abstain` exists to remove.
 #
 # Extending the guard is not a one-liner, which is why this is documented rather
