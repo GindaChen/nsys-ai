@@ -245,6 +245,7 @@ via `--against` or as the `before` positional.
 | `tui` | NVTX tree TUI |
 | `web` | Web viewer server |
 | `info` | Profile metadata and GPU hardware |
+| `warm` | Build the Parquet cache and NVTX kernel map up front |
 | `summary` | Top kernels and stream breakdown |
 | `analyze` | Full auto-report (`--format json` emits evidence findings) |
 | `overlap` | Compute / NCCL overlap analysis |
