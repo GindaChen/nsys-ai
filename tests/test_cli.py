@@ -41,6 +41,7 @@ def test_subcommands():
         "agent",
         "agent-guide",
         "info",
+        "warm",
         "skill",
         "evidence",
         "cutracer",
@@ -538,3 +539,232 @@ def test_diff_against_unknown_baseline_errors(tmp_path):
     )
     assert result.returncode == 2
     assert "unknown baseline" in result.stderr.lower()
+
+
+def test_warm_subcommand_help():
+    """warm should be a public verb taking a profile path."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "profile" in result.stdout
+
+
+def test_warm_missing_profile_exits_nonzero(tmp_path):
+    """A missing profile is an error, not a silent no-op."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", str(tmp_path / "nope.sqlite")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+
+
+def test_warm_builds_the_nvtx_kernel_map_and_then_reports_already_warm(tmp_path):
+    """The behavioural gate: warm must leave the map on disk, not defer it.
+
+    Building the cache alone does not build the map — that is deliberate
+    (``_should_defer_nvtx_kernel_map``), and it is exactly the cost warm exists
+    to move off the first NVTX-attribution query. If warm ever stops calling
+    ``materialize_cached_nvtx_kernel_map``, the two Parquets below go missing.
+    """
+    import shutil
+    from pathlib import Path
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(fixture, profile)
+
+    first = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert first.returncode == 0, f"stderr: {first.stderr}\nstdout: {first.stdout}"
+    assert "warmed in" in first.stdout
+
+    cache_dir = tmp_path / "p.nsys-cache"
+    assert (cache_dir / "nvtx_kernel_map.parquet").is_file()
+    assert (cache_dir / "nvtx_path_dict.parquet").is_file()
+    assert "nvtx kernel map: 0 rows" not in first.stdout
+
+    # Second run finds both halves already on disk and builds nothing.
+    second = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert second.returncode == 0, f"stderr: {second.stderr}\nstdout: {second.stdout}"
+    assert "already warm" in second.stdout
+    assert "warmed in" not in second.stdout
+
+
+def test_warm_on_a_read_only_cache_directory_says_why_and_exits_nonzero(tmp_path):
+    """A warm that silently did not warm defeats the point of running it.
+
+    A prebuilt cache on a read-only mount still serves queries — the lazy map
+    build degrades to an in-memory one — so nothing else notices. ``warm`` has
+    to, because the artifact it exists to persist cannot be persisted.
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "ro.sqlite"
+    shutil.copy(fixture, profile)
+    cache_dir = Path(parquet_cache.build_cache(str(profile)))
+    assert not (cache_dir / "nvtx_kernel_map.parquet").exists(), (
+        "the cache build produced the map, so this test is no longer testing warm"
+    )
+
+    mode = cache_dir.stat().st_mode
+    parent_mode = cache_dir.parent.stat().st_mode
+    # The lock file lives beside the cache dir, the staging dir inside it.
+    os.chmod(cache_dir, 0o500)
+    os.chmod(cache_dir.parent, 0o500)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        os.chmod(cache_dir.parent, parent_mode)
+        os.chmod(cache_dir, mode)
+
+    assert result.returncode == 1, f"stdout: {result.stdout}"
+    assert "cannot warm" in result.stderr
+    assert "already warm" not in result.stdout
+
+
+def test_warm_when_only_the_lock_directory_is_read_only(tmp_path):
+    """The map's lock file lives *beside* the cache, not inside it.
+
+    ``_build_lock`` creates ``<cache_dir>.build.lock`` in the parent directory,
+    so a writable cache dir under a read-only parent stops the build just as
+    dead as a read-only cache dir does — and probing the cache dir's own mode
+    cannot see it. warm has to learn this from the build, not infer it.
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "lock.sqlite"
+    shutil.copy(fixture, profile)
+    cache_dir = Path(parquet_cache.build_cache(str(profile)))
+    lock = cache_dir.parent / f"{cache_dir.name}.build.lock"
+    if lock.exists():
+        lock.unlink()
+
+    parent_mode = cache_dir.parent.stat().st_mode
+    os.chmod(cache_dir.parent, 0o500)  # cache_dir itself stays writable
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        os.chmod(cache_dir.parent, parent_mode)
+
+    assert result.returncode == 1, f"stdout: {result.stdout}"
+    assert "cannot warm" in result.stderr
+    assert "already warm" not in result.stdout
+    assert not (cache_dir / "nvtx_kernel_map.parquet").exists()
+
+
+def test_a_command_run_after_warm_builds_nothing(tmp_path):
+    """The payoff the file-existence assertions do not pin.
+
+    warm is only worth running if the next process finds both halves on disk.
+    A cold ``skill run`` prints the cache build's own progress lines to stderr,
+    so their absence after a warm is the observable form of "nothing was built".
+    """
+    import shutil
+    from pathlib import Path
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(fixture, profile)
+
+    warm = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert warm.returncode == 0, f"stderr: {warm.stderr}\nstdout: {warm.stdout}"
+
+    after = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "skill", "run", "nvtx_layer_breakdown", str(profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert after.returncode == 0, f"stderr: {after.stderr}"
+    noise = after.stderr + after.stdout
+    for marker in ("Building cache", "Cache ready", "skipping map"):
+        assert marker not in noise, f"{marker!r} means warm left work behind:\n{noise}"
+
+
+def test_warm_does_not_report_already_warm_after_an_empty_sweep(tmp_path, capsys, monkeypatch):
+    """An empty sweep publishes nothing, so the next call repeats it.
+
+    ``already warm`` is the signal a caller uses to decide repeat warms are
+    free. For this outcome they are not: the sweep runs to completion, finds no
+    kernel inside any range, writes no Parquet, and the whole cost returns on
+    the next invocation. The outcome is forced here for the same reason as in
+    ``test_an_empty_sweep_is_told_apart_from_a_missing_source``.
+    """
+    import argparse
+    import shutil
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+    from nsys_ai import profile as profile_module
+    from nsys_ai.cli.handlers import _cmd_warm
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "empty.sqlite"
+    shutil.copy(fixture, profile)
+    # Base cache valid, map absent: exactly the state that used to print
+    # "already warm" while the sweep it just paid for cached nothing.
+    parquet_cache.build_cache(str(profile))
+    monkeypatch.setattr(
+        parquet_cache,
+        "materialize_cached_nvtx_kernel_map_outcome",
+        lambda conn: (parquet_cache.MAP_NO_ATTRIBUTION, ""),
+    )
+
+    _cmd_warm(argparse.Namespace(profile=str(profile)), profile_module)
+
+    out = capsys.readouterr().out
+    assert "already warm" not in out, out
+    assert "partly warm" in out, out
+
+
+def test_warm_succeeds_when_there_is_nothing_for_the_sweep_to_read(tmp_path):
+    """A profile the sweep can find nothing in is warm, not broken.
+
+    This minimal export has no RUNTIME table, so ``runtime.parquet`` never
+    reaches the cache and the map build stops before the sweep. That is a
+    property of the capture, not a failure to warm: exit 0, and the missing
+    source named rather than described as "no attribution".
+    """
+    profile = tmp_path / "min.sqlite"
+    _write_min_profile(profile, dur_ns=10_000_000)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "warm", str(profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert "nothing for the sweep to read" in result.stdout
+    assert "runtime.parquet" in result.stdout
+    assert (tmp_path / "min.nsys-cache").is_dir()

@@ -1246,3 +1246,34 @@ class TestStreamedSweep:
         assert list(out_dir.iterdir()) == [], (
             f"the sweep left scratch files behind: {sorted(p.name for p in out_dir.iterdir())}"
         )
+def test_an_empty_sweep_is_told_apart_from_a_missing_source(tmp_path, monkeypatch):
+    """The two Falses ``_build_nvtx_kernel_map_from_parquet`` returns are not
+    the same event, and a caller that cannot tell them apart cannot report
+    either honestly.
+
+    The builder is forced to fail because provoking a genuinely empty sweep
+    needs a capture with kernels, runtime and NVTX that overlap nowhere; what is
+    under test is the classification around it, not the sweep.
+    """
+    import shutil
+
+    src = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile = tmp_path / "p.sqlite"
+    shutil.copy(src, profile)
+
+    from nsys_ai.profile import Profile
+
+    monkeypatch.setattr(
+        parquet_cache, "_build_nvtx_kernel_map_from_parquet", lambda *a, **k: False
+    )
+    with Profile(str(profile), cache_mode="parquet") as prof:
+        cache_dir = Path(parquet_cache.cache_dir_for_connection(prof.db))
+        assert (cache_dir / "runtime.parquet").is_file(), "fixture no longer has a runtime table"
+
+        outcome, _ = parquet_cache.materialize_cached_nvtx_kernel_map_outcome(prof.db)
+        assert outcome == parquet_cache.MAP_NO_ATTRIBUTION
+
+        (cache_dir / "runtime.parquet").unlink()
+        outcome, detail = parquet_cache.materialize_cached_nvtx_kernel_map_outcome(prof.db)
+        assert outcome == parquet_cache.MAP_SOURCES_MISSING
+        assert "runtime.parquet" in detail

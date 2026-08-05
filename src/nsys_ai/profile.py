@@ -306,6 +306,14 @@ class Profile:
 
     _log = logging.getLogger(__name__)
 
+    #: The exception that sent this Profile down the SQLite fallback, or None.
+    #: ``db is None`` says only *that* the cache is unavailable; commands whose
+    #: job is the cache itself (``warm``) need to say *why*, and re-running the
+    #: build to find out would repeat an ETL that can take minutes. Set only in
+    #: the fallback branch below; every other construction path leaves the class
+    #: default in place.
+    cache_error: Exception | None = None
+
     def __init__(self, path: str, *, cache_mode: str = "auto", backend: str = "sqlite"):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
@@ -360,6 +368,7 @@ class Profile:
                             self.db = parquet_cache.open_cached_db(path)
             except Exception as e:
                 self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
+                self.cache_error = e
                 self.db = None  # type: ignore[assignment]
         from .connection import wrap_connection
 

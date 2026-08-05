@@ -49,6 +49,7 @@ def show_help():
     print()
     print("  Analysis:")
     print("    nsys-ai info    <profile>                Profile metadata & GPUs")
+    print("    nsys-ai warm    <profile>                Pre-build cache & NVTX map")
     print("    nsys-ai summary <profile> [--gpu N]      Kernel stats & commentary")
     print("    nsys-ai timeline <profile> --gpu N --trim S E   Timeline TUI")
     print("    nsys-ai tui     <profile> --gpu N --trim S E   Tree TUI")

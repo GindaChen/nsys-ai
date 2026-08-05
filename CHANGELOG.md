@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `nsys-ai warm <profile>` builds the Parquet cache and the NVTX kernel map in
+  one step, so the stack sweep is paid deliberately up front rather than by
+  whoever issues the first NVTX-attribution query. It reports how long each half
+  took, tells "warmed" apart from "already warm", and exits non-zero with the
+  reason when the cache cannot be written.
 - `nsys-ai baseline` keeps a local store of named profile snapshots (`tag`,
   `list`, `show`) so `diff --against baseline:<name>` resolves a stable name to a
   known snapshot instead of a fragile path. The store lives in

@@ -1907,7 +1907,30 @@ def _publish_stamp_map_ready(cache_dir: Path) -> None:
         _check_cache_size(cache_dir, str(cache_dir.parent / source))
 
 
+# Outcomes of :func:`materialize_cached_nvtx_kernel_map_outcome`. Only
+# MAP_MATERIALIZED leaves the map queryable; the rest are the distinct reasons
+# the bool-returning wrapper collapses into a single False.
+MAP_MATERIALIZED = "materialized"  # views exist over a published map
+MAP_NO_CACHE_DIR = "no-cache-dir"  # connection is not backed by a Parquet cache
+MAP_SOURCES_MISSING = "sources-missing"  # a source Parquet the sweep reads is absent
+MAP_NO_ATTRIBUTION = "no-attribution"  # the sweep ran and produced no rows
+MAP_NOT_WRITABLE = "not-writable"  # an OSError while locking, staging or publishing
+MAP_VIEWS_FAILED = "views-failed"  # published, but the views would not create
+
+
 def materialize_cached_nvtx_kernel_map(conn) -> bool:
+    """True when ``nvtx_kernel_map`` is queryable on ``conn`` off the cache.
+
+    Thin wrapper over :func:`materialize_cached_nvtx_kernel_map_outcome`, which
+    is the one to call when the *reason* for a False matters — the six outcomes
+    it distinguishes range from "this profile has nothing to attribute" to "the
+    cache directory could not be written", and a caller that only sees False
+    cannot tell a warm profile from a failed one.
+    """
+    return materialize_cached_nvtx_kernel_map_outcome(conn)[0] == MAP_MATERIALIZED
+
+
+def materialize_cached_nvtx_kernel_map_outcome(conn) -> tuple[str, str]:
     """Build ``nvtx_kernel_map`` into ``conn``'s Parquet cache, then view it.
 
     The persisted half of the deferred-map design. ``build_cache`` no longer
@@ -1918,11 +1941,22 @@ def materialize_cached_nvtx_kernel_map(conn) -> bool:
     merely move the cost — and onto the more expensive in-memory path, which
     ``fetchall``s where this streams.
 
-    Returns False, changing nothing, when there is no cache directory behind
-    ``conn`` (direct SQLite attach, ``parquetdir`` export, a bare test
-    connection) or when the directory cannot be written (read-only mount). The
-    caller then falls back to the in-memory build, which is exactly the
-    behaviour those backends had before.
+    Returns ``(outcome, detail)``. ``outcome`` is one of the ``MAP_*`` constants
+    above; ``detail`` is a human-readable elaboration, empty when there is
+    nothing to add. Everything other than ``MAP_MATERIALIZED`` leaves the caller
+    falling back to the in-memory build, which is exactly the behaviour those
+    backends had before.
+
+    That is *not* the same as leaving the cache directory unchanged, and
+    ``MAP_VIEWS_FAILED`` is the exception that matters: the two Parquets were
+    written, and only the views over them could not be created. The next process
+    finds them by glob and skips the sweep. So it is a failure of this call, not
+    a failure to persist, and code that groups it with the "could not write"
+    outcomes is wrong about what is on disk.
+
+    Note that ``MAP_NO_ATTRIBUTION`` publishes nothing, so it is *not* a state
+    the next process inherits: a profile that reaches it re-runs the full sweep
+    on every call.
 
     Never call this from inside ``build_cache``: that holds ``_build_lock`` for
     the same cache directory, and flock is not reentrant across the fds involved
@@ -1932,22 +1966,22 @@ def materialize_cached_nvtx_kernel_map(conn) -> bool:
 
     adapter = wrap_connection(conn)
     if not isinstance(adapter, DuckDBAdapter):
-        return False
+        return (MAP_NO_CACHE_DIR, "the connection is not DuckDB-backed")
     db = adapter.raw_conn
 
     registered = cache_dir_for_connection(db)
     if registered is None:
-        return False
+        return (MAP_NO_CACHE_DIR, "no cache directory is registered for this connection")
     cache_dir = Path(registered)
     if not cache_dir.is_dir():
-        return False
+        return (MAP_NO_CACHE_DIR, f"{cache_dir} is not a directory")
 
     # Cheap path first: a previous process already published the map, and this
     # connection just has not created the views yet. No lock, no write — which
     # is also what makes a read-only cache directory work.
     if _create_nvtx_map_views(db, cache_dir):
         forget_nvtx_map_probes(db)
-        return True
+        return (MAP_MATERIALIZED, "")
 
     import shutil
     import tempfile
@@ -1957,7 +1991,7 @@ def materialize_cached_nvtx_kernel_map(conn) -> bool:
             # Another process may have published while we waited.
             if _create_nvtx_map_views(db, cache_dir):
                 forget_nvtx_map_probes(db)
-                return True
+                return (MAP_MATERIALIZED, "")
 
             # Staged inside the cache directory so the os.replace below is a
             # rename within one filesystem rather than a copy. A process killed
@@ -1974,7 +2008,19 @@ def materialize_cached_nvtx_kernel_map(conn) -> bool:
             try:
                 built = _build_nvtx_kernel_map_from_parquet(db, cache_dir, staging)
                 if not built:
-                    return False
+                    # That helper answers False for exactly two reasons and does
+                    # not say which. Re-test the cheaper one — the same
+                    # ``is_file()`` predicate it checked a moment ago, on files
+                    # nothing creates in between — so the caller can tell a
+                    # degraded cache from a profile with nothing to attribute.
+                    missing = [
+                        name
+                        for name in ("kernels.parquet", "runtime.parquet", "nvtx.parquet")
+                        if not (cache_dir / name).is_file()
+                    ]
+                    if missing:
+                        return (MAP_SOURCES_MISSING, f"missing from the cache: {', '.join(missing)}")
+                    return (MAP_NO_ATTRIBUTION, "")
                 # Publish the dictionary first. A concurrent opener globbing
                 # mid-publish then sees a dict with no map and falls back, which
                 # is correct; the reverse order would give it a map whose
@@ -1992,15 +2038,17 @@ def materialize_cached_nvtx_kernel_map(conn) -> bool:
 
             _publish_stamp_map_ready(cache_dir)
     except OSError as exc:
-        # Read-only cache directory: no lock file, no staging dir. Degrade to
-        # the in-memory build rather than failing the query.
+        # Read-only cache directory, a full disk, an unwritable lock file in the
+        # cache's *parent* — anything that stops the lock/stage/publish sequence.
+        # Degrade to the in-memory build rather than failing the query, and hand
+        # the caller the OSError's own words so it can name the real path.
         log.info("cannot persist nvtx_kernel_map into %s (%s)", cache_dir, exc)
-        return False
+        return (MAP_NOT_WRITABLE, str(exc))
 
-    ok = _create_nvtx_map_views(db, cache_dir)
-    if ok:
+    if _create_nvtx_map_views(db, cache_dir):
         forget_nvtx_map_probes(db)
-    return ok
+        return (MAP_MATERIALIZED, "")
+    return (MAP_VIEWS_FAILED, f"the map was published into {cache_dir} but no view could be created")
 
 
 def ensure_nvtx_kernel_map(conn) -> bool:

@@ -48,6 +48,7 @@ from .handlers import (
     _cmd_tree,
     _cmd_tui,
     _cmd_viewer,
+    _cmd_warm,
     _cmd_web,
 )
 
@@ -100,6 +101,17 @@ def _register_doctor_parser(sub):
         help="Run slow checks too (e.g. NCCL eager/inductor split); off by default",
     )
     p.set_defaults(handler=_cmd_doctor)
+    return p
+
+
+def _register_warm_parser(sub):
+    """Register the ``warm`` subcommand on *sub*."""
+    p = sub.add_parser(
+        "warm",
+        help="Build the Parquet cache and NVTX kernel map ahead of the first query",
+    )
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    p.set_defaults(handler=_cmd_warm)
     return p
 
 
@@ -306,7 +318,7 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
-            "info,doctor,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
             "root-cause,help}"
         ),
     )
@@ -808,6 +820,7 @@ def _build_parser():
     # Agent-facing commands (promoted from legacy so --help exposes them)
     _register_info_parser(sub)
     _register_doctor_parser(sub)
+    _register_warm_parser(sub)
     _register_skill_parser(sub, include_management=False)
     _register_agent_parser(sub)
     _register_evidence_parser(sub)

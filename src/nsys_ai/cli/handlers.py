@@ -408,6 +408,119 @@ def _cmd_doctor(args, _profile):
         sys.exit(1)
 
 
+def _cmd_warm(args, _profile):
+    """Build the Parquet cache and the NVTX kernel map before anything reads them.
+
+    Both halves already existed and neither was reachable up front: opening with
+    ``cache_mode="parquet"`` forces the base-table build, and
+    ``materialize_cached_nvtx_kernel_map_outcome`` runs the stack sweep and
+    writes it back into the cache directory. What was missing is a verb that runs
+    them together, so the sweep — seconds on a small capture, around a minute on
+    a multi-gigabyte one — lands here instead of on whoever happens to issue the
+    first NVTX-attribution query.
+
+    Exits non-zero, with the reason, when either half could not be persisted: a
+    warm that silently did not warm defeats the point of running it. That is why
+    the map build is asked for its outcome rather than its bool — the bool
+    cannot tell "this profile has nothing to attribute" from "the cache could
+    not be written", and only the second is a failure.
+    """
+    import time
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+    from nsys_ai.connection import cache_dir_for_connection
+
+    path = _profile.resolve_profile_path(args.profile)
+    base_was_valid = parquet_cache.is_cache_valid(path)
+
+    started = time.perf_counter()
+    with _profile.open(path, cache_mode="parquet") as prof:
+        # This spans the whole open — the build when one is needed, plus the
+        # schema probe and metadata discovery Profile.__init__ always runs. It
+        # is reported as such below rather than as a build time.
+        open_s = time.perf_counter() - started
+        profile_path = prof.path
+        if prof.db is None:
+            # Profile swallowed the build failure and fell back to SQLite, which
+            # is right for a command that just wants an answer and wrong for
+            # this one. It records the exception so warm can name it without
+            # re-running an ETL that may have run for minutes before failing.
+            failed = prof.cache_error
+            why = (
+                f"{failed.__class__.__name__}: {failed}"
+                if failed is not None
+                else "no error was recorded"
+            )
+            print(f"cannot warm: the Parquet cache is unavailable ({why})", file=sys.stderr)
+            sys.exit(1)
+        registered = cache_dir_for_connection(prof.db)
+        if registered is None:
+            print(
+                "cannot warm: this profile is not served from a Parquet cache",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cache_dir = Path(registered)
+        map_was_present = (cache_dir / "nvtx_kernel_map.parquet").is_file()
+
+        map_started = time.perf_counter()
+        outcome, detail = parquet_cache.materialize_cached_nvtx_kernel_map_outcome(prof.db)
+        map_s = time.perf_counter() - map_started
+        mapped = outcome == parquet_cache.MAP_MATERIALIZED
+        map_rows = (
+            prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0] if mapped else 0
+        )
+        map_files = {"nvtx_kernel_map.parquet", "nvtx_path_dict.parquet"}
+        base_count = sum(1 for p in cache_dir.glob("*.parquet") if p.name not in map_files)
+
+    # Confirmed failures only. MAP_NO_ATTRIBUTION and MAP_SOURCES_MISSING mean
+    # the sweep had nothing to write, which is not a failure of `warm`.
+    #
+    # The three below all leave this process unable to serve the map, which is
+    # what `warm` promises and so what it must report. They are not the same on
+    # disk, though: MAP_NOT_WRITABLE and MAP_NO_CACHE_DIR persisted nothing,
+    # while MAP_VIEWS_FAILED wrote both Parquets and only failed to create the
+    # views over them — so a later process finds them by glob and skips the
+    # sweep. Reporting it is still right; describing it as "could not write"
+    # would not be.
+    if outcome in (
+        parquet_cache.MAP_NOT_WRITABLE,
+        parquet_cache.MAP_VIEWS_FAILED,
+        parquet_cache.MAP_NO_CACHE_DIR,
+    ):
+        print(
+            f"cannot warm: the NVTX kernel map could not be persisted ({detail})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Profile: {profile_path}")
+    print(f"Cache:   {cache_dir}")
+    base_state = "already built" if base_was_valid else "built"
+    print(f"  base tables: {base_count} parquet files ({base_state}; opened in {open_s:.2f}s)")
+    if mapped:
+        map_state = "already built" if map_was_present else "built"
+        print(f"  nvtx kernel map: {map_rows} rows ({map_state}, {map_s:.2f}s)")
+    elif outcome == parquet_cache.MAP_SOURCES_MISSING:
+        print(f"  nvtx kernel map: nothing for the sweep to read — {detail} ({map_s:.2f}s)")
+    else:
+        print(
+            "  nvtx kernel map: the sweep found no kernel inside any NVTX range, "
+            f"so there was nothing to cache ({map_s:.2f}s)"
+        )
+
+    if outcome == parquet_cache.MAP_NO_ATTRIBUTION:
+        # The sweep ran to completion and published nothing, so the next caller
+        # pays it again. Claiming "already warm" here would be the one lie this
+        # verb cannot afford.
+        print("partly warm: the empty sweep is not cached, so it runs again on the next call")
+    elif base_was_valid and (map_was_present or outcome == parquet_cache.MAP_SOURCES_MISSING):
+        print("already warm")
+    else:
+        print(f"warmed in {time.perf_counter() - started:.2f}s")
+
+
 def _cmd_analyze(args, _profile):
     fmt = getattr(args, "format", "text") or "text"
     if fmt == "json":
