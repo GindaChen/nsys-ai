@@ -1,6 +1,6 @@
 """Memory transfer summary — H2D, D2H, D2D, P2P breakdown."""
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, is_abstention
 
 _COPY_KINDS = {1: "H2D", 2: "D2H", 8: "D2D", 10: "P2P"}
 
@@ -210,11 +210,16 @@ H2D_DIST_SKILL.to_findings_fn = _to_findings_dist
 
 # Replace the direct SQL with a safe execute_fn for the module
 def _execute_h2d_dist(conn, **kwargs):
-    """Execute the H2D distribution query safely with pattern classification.
+    """Execute the H2D distribution query, then classify the pattern it shows.
 
     This function is assigned as ``H2D_DIST_SKILL.execute_fn`` and wraps the
-    underlying SQL execution so that if the memcpy table does not exist, it
-    returns an empty result instead of propagating a ``SkillExecutionError``.
+    underlying SQL execution. A profile with no memcpy table now abstains
+    inside ``Skill.execute`` rather than reaching the database at all, and that
+    abstention is returned untouched: classifying it would read ``total_mb``
+    off the marker row and raise ``KeyError``. The ``SkillExecutionError``
+    branch below stays for the errors the guard does not cover — a table that
+    resolves but cannot be read, for instance — and returns ``[]`` there as it
+    always has.
 
     After executing the SQL, appends a pattern classification dict as the
     last element of the result list.
@@ -241,6 +246,9 @@ def _execute_h2d_dist(conn, **kwargs):
         if "no such table" in err_msg or "does not exist" in err_msg:
             return []
         raise
+
+    if is_abstention(rows):
+        return rows
 
     # Append pattern classification as metadata
     if rows:

@@ -104,17 +104,20 @@ def _resolve_nvtx_table_for_auto_trim(prof) -> str | None:
     Preference order:
       * ``nvtx_high`` view — DuckDB cache, aten::* already filtered.
       * ``nvtx`` view — DuckDB cache, full NVTX with resolved text.
-      * Versioned canonical table — ``NVTX_EVENTS`` / ``NVTX_EVENTS_V2`` /
-        ``NVTX_EVENTS_V3`` (the actual nsys export schema for the version
-        we attached). Resolved via ``prof.schema.tables`` rather than
-        hardcoded so newer Nsight exports without an unversioned alias
-        still work.
+      * Versioned canonical table — ``NVTX_EVENTS``, else the highest
+        ``NVTX_EVENTS_V<n>`` (the actual nsys export schema for the version
+        we attached). Resolved from ``prof.schema.tables`` through the shared
+        ``resolve_table_variant`` rather than hardcoded, so newer Nsight
+        exports without an unversioned alias still work and this site cannot
+        drift from the ordering every other reader uses.
 
     Returns the chosen name or ``None`` when no NVTX source can be opened.
     """
     import sqlite3
 
     import duckdb
+
+    from ...connection import resolve_table_variant
 
     # Cache-view candidates always have resolved text (no StringIds join
     # needed by the caller). Probe each; pick the first that can be
@@ -131,12 +134,7 @@ def _resolve_nvtx_table_for_auto_trim(prof) -> str | None:
         tables = set(prof.schema.tables)
     except Exception:
         tables = set()
-    if "NVTX_EVENTS" in tables:
-        return "NVTX_EVENTS"
-    for t in sorted(tables):
-        if t.startswith("NVTX_EVENTS"):
-            return t
-    return None
+    return resolve_table_variant(tables, "NVTX_EVENTS", allow_other_suffixes=True)
 
 
 def _build_auto_trim_nvtx_sql(prof, nvtx_table: str) -> str:

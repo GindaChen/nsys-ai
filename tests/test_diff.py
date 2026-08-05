@@ -2253,6 +2253,7 @@ def test_launch_overhead_ms_counts_only_exposed_idle():
     """launch_overhead_ms = GPU-idle time overlapping a kernel-launch API call."""
     import sqlite3
 
+    from nsys_ai.connection import wrap_connection
     from nsys_ai.overlap import launch_overhead_ms
 
     conn = sqlite3.connect(":memory:")
@@ -2293,7 +2294,10 @@ def test_launch_overhead_ms_counts_only_exposed_idle():
 
     class _Prof:
         schema = _Schema()
-        adapter = conn
+        # A real Profile always wraps its connection; launch_overhead_ms resolves
+        # the runtime table through the adapter, so a bare sqlite3.Connection
+        # (which happens to satisfy .execute) is not a faithful stub.
+        adapter = wrap_connection(conn)
 
     assert launch_overhead_ms(_Prof(), device=0) == 2.0  # 0.5 + 1.5
     assert launch_overhead_ms(_Prof(), device=99) == 0.0  # no kernels on device
@@ -2303,6 +2307,7 @@ def test_launch_overhead_ms_without_runtime_table_is_zero():
     """No runtime table → launch overhead is 0.0 (best-effort enrichment)."""
     import sqlite3
 
+    from nsys_ai.connection import wrap_connection
     from nsys_ai.overlap import launch_overhead_ms
 
     conn = sqlite3.connect(":memory:")
@@ -2319,7 +2324,7 @@ def test_launch_overhead_ms_without_runtime_table_is_zero():
 
     class _Prof:
         schema = _Schema()
-        adapter = conn
+        adapter = wrap_connection(conn)
 
     assert launch_overhead_ms(_Prof(), device=0) == 0.0
 

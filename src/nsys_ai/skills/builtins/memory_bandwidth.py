@@ -9,7 +9,7 @@ Analyzes CUDA memory copy operations to compute:
 Goes beyond the basic memory_transfers skill which only does direction aggregation.
 """
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain
 
 _COPY_KIND_NAMES = {
     0: "Unknown",
@@ -32,13 +32,23 @@ def _execute(conn, **kwargs):
     device = int(kwargs.get("device", 0))
     limit = int(kwargs.get("limit", 5))
 
-    memcpy_table = None
-    for t in prof.schema.tables:
-        if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
-            memcpy_table = '"' + t.replace('"', '""') + '"'
-            break
-    if not memcpy_table:
-        return []
+    # Through the adapter, like every other memcpy reader (profile.py,
+    # viewer.py, indexing.py), not a local prefix scan: the scan this replaces
+    # walked ``prof.schema.tables``, which is ``list(<set>)``, so on a profile
+    # carrying both CUPTI_ACTIVITY_KIND_MEMCPY and CUPTI_ACTIVITY_KIND_MEMCPY2
+    # (peer-to-peer copies, a different activity kind) which one it read was
+    # set-hash order. Going through the adapter also picks up the cache's
+    # unversioned alias view on the DuckDB engines.
+    resolved = prof.adapter.resolve_activity_tables().get("memcpy")
+    if not resolved:
+        return abstain(
+            "This profile has no CUPTI_ACTIVITY_KIND_MEMCPY table, so it "
+            "records no host/device copies. Bandwidth analysis needs them — a "
+            "capture traced with --trace=cuda has them; a profile carrying "
+            "only CUPTI_ACTIVITY_KIND_MEMCPY2 has peer-to-peer copies, which "
+            "are a different activity kind and are not read here."
+        )
+    memcpy_table = '"' + resolved.replace('"', '""') + '"'
 
     trim_clause = ""
     trim = None

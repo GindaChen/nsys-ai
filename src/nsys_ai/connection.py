@@ -374,13 +374,27 @@ def resolve_table_variant(
     2. otherwise the highest ``_V<n>``, compared as an *integer* so ``_V10``
        beats ``_V3`` (lexicographic order gets that backwards);
     3. otherwise, only when ``allow_other_suffixes``, the alphabetically first
-       remaining name that starts with ``prefix``, so an unforeseen future
-       suffix still resolves to something rather than to nothing.
+       remaining name that starts with ``prefix`` *whose remainder is not a bare
+       number*, so an unforeseen future suffix still resolves to something rather
+       than to nothing.
 
     The ``_V<n>`` match is anchored (``fullmatch``) rather than a bare
     ``startswith``: ``CUPTI_ACTIVITY_KIND_MEMCPY2`` is a real CUPTI activity
     kind (peer-to-peer memcpy) and must never be mistaken for a newer variant
-    of ``CUPTI_ACTIVITY_KIND_MEMCPY``.
+    of ``CUPTI_ACTIVITY_KIND_MEMCPY``. Anchoring tier 2 alone did not deliver
+    that: on a profile carrying only ``..._MEMCPY2`` the permissive tier 3
+    returned it anyway. So tier 3 excludes an all-digit remainder too — every
+    versioning shape this repo has met is ``_V<n>``, and a bare trailing digit
+    is CUPTI's way of naming a *sibling* activity kind, not a version.
+
+    The consequence is deliberate: a MEMCPY2-only profile resolves ``memcpy`` to
+    ``None`` rather than reporting P2P copies (a different ``copyKind`` domain)
+    as ordinary memcpy traffic. It puts such a profile in the same class as one
+    that carries no memcpy table at all, and each reader answers that the way it
+    already did — ``memory_transfers`` and ``memory_bandwidth`` abstain naming
+    the missing table, ``kernel_overlap_matrix`` reports a matrix with no
+    ``memcpy_*`` category. This function does not itself decide any of that; do
+    not read a guarantee about caller behaviour out of it.
     """
     if prefix in tables:
         return prefix
@@ -392,7 +406,7 @@ def resolve_table_variant(
         match = _VERSION_SUFFIX_RE.fullmatch(name[len(prefix) :])
         if match:
             versioned.append((int(match.group(1)), name))
-        elif allow_other_suffixes:
+        elif allow_other_suffixes and not name[len(prefix) :].isdigit():
             others.append(name)
     if versioned:
         return max(versioned)[1]
