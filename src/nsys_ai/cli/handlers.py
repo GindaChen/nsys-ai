@@ -408,6 +408,106 @@ def _cmd_doctor(args, _profile):
         sys.exit(1)
 
 
+def _warm_failure_reason(path: str) -> str:
+    """Why the Parquet cache for *path* could not be built, in the build's words.
+
+    ``Profile`` turns a failed cache build into a log warning and falls back to
+    SQLite, which is the right trade for every command that only wants to answer
+    a question — and the wrong one for ``warm``, whose entire job is the cache.
+    Repeating the build is how the reason gets said out loud; on the case this
+    exists for (a read-only profile directory) it fails the same way every time.
+    """
+    from nsys_ai import parquet_cache
+
+    try:
+        parquet_cache.build_cache(path)
+    except Exception as exc:  # noqa: BLE001 - reported verbatim, not handled
+        return str(exc) or exc.__class__.__name__
+    return "the Parquet cache was built but could not be opened"
+
+
+def _cmd_warm(args, _profile):
+    """Build the Parquet cache and the NVTX kernel map before anything reads them.
+
+    Both halves already existed and neither was reachable up front: opening with
+    ``cache_mode="parquet"`` forces the base-table build, and
+    ``materialize_cached_nvtx_kernel_map`` runs the stack sweep and writes it
+    back into the cache directory. What was missing is a verb that runs them
+    together, so the sweep — seconds on a small capture, around a minute on a
+    multi-gigabyte one — lands here instead of on whoever happens to issue the
+    first NVTX-attribution query.
+
+    Exits non-zero, with the reason, when the cache could not be written: a warm
+    that silently did not warm defeats the point of running it.
+    """
+    import time
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+    from nsys_ai.connection import cache_dir_for_connection
+
+    path = _profile.resolve_profile_path(args.profile)
+    base_was_valid = parquet_cache.is_cache_valid(path)
+
+    started = time.perf_counter()
+    with _profile.open(path, cache_mode="parquet") as prof:
+        base_s = time.perf_counter() - started
+        profile_path = prof.path
+        if prof.db is None:
+            print(f"cannot warm: {_warm_failure_reason(profile_path)}", file=sys.stderr)
+            sys.exit(1)
+        registered = cache_dir_for_connection(prof.db)
+        if registered is None:
+            print(
+                "cannot warm: this profile is not served from a Parquet cache",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cache_dir = Path(registered)
+        map_was_present = (cache_dir / "nvtx_kernel_map.parquet").is_file()
+
+        map_started = time.perf_counter()
+        mapped = parquet_cache.materialize_cached_nvtx_kernel_map(prof.db)
+        map_s = time.perf_counter() - map_started
+        map_rows = (
+            prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0] if mapped else 0
+        )
+        map_files = {"nvtx_kernel_map.parquet", "nvtx_path_dict.parquet"}
+        base_count = sum(1 for p in cache_dir.glob("*.parquet") if p.name not in map_files)
+
+    # materialize_cached_nvtx_kernel_map answers False both for "the sweep found
+    # nothing to attribute" and for "the cache directory could not be written",
+    # and only the second is a failure to warm. A profile whose base cache was
+    # already valid reaches build_cache's fast path without ever touching the
+    # lock file, so a read-only cache directory gets this far unnoticed.
+    if not mapped and not (cache_dir / "nvtx_kernel_map.parquet").is_file():
+        if not os.access(cache_dir, os.W_OK):
+            print(
+                f"cannot warm: {cache_dir} is not writable, so the NVTX kernel map "
+                "cannot be built",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    print(f"Profile: {profile_path}")
+    print(f"Cache:   {cache_dir}")
+    base_state = "already built" if base_was_valid else "built"
+    print(f"  base tables: {base_count} parquet files ({base_state}, {base_s:.2f}s)")
+    if mapped:
+        map_state = "already built" if map_was_present else "built"
+        print(f"  nvtx kernel map: {map_rows} rows ({map_state}, {map_s:.2f}s)")
+    else:
+        print(
+            "  nvtx kernel map: no NVTX/kernel attribution in this profile "
+            f"(nothing to build, {map_s:.2f}s)"
+        )
+
+    if base_was_valid and (map_was_present or not mapped):
+        print("already warm")
+    else:
+        print(f"warmed in {time.perf_counter() - started:.2f}s")
+
+
 def _cmd_analyze(args, _profile):
     fmt = getattr(args, "format", "text") or "text"
     if fmt == "json":
