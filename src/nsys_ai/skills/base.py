@@ -535,11 +535,22 @@ class Skill:
                 unresolved.append(canonical)
         if unresolved:
             # The template reads a table this profile does not have. Substituting
-            # the canonical literal anyway (which is what the ``.get`` fallback
-            # above does, and all this branch used to do) sends the skill into
-            # ``sqlite3.OperationalError: no such table`` — and ``EvidenceBuilder``
-            # catches that, so the skill vanishes from the findings with no trace.
-            # ``abstain`` is the contract for "cannot run"; see its docstring.
+            # the canonical literal anyway — which is what the ``.get`` fallback
+            # above does, and all this branch used to do — sends the skill into
+            # ``sqlite3.OperationalError: no such table``. ``abstain`` is the
+            # contract for "cannot run"; see its docstring.
+            #
+            # Where that is visible, precisely, because the obvious answer is
+            # wrong: NOT in ``EvidenceBuilder``. Its ``_invoke_to_findings``
+            # drops abstention rows before they reach ``to_findings_fn``, so an
+            # abstaining skill contributes no finding — exactly as a raising one
+            # did. Measured on a profile whose only memcpy table is the P2P
+            # ``..._MEMCPY2``: 16 findings either way, none of them memcpy.
+            # It shows up where a caller reads the rows rather than the findings
+            # — ``skill run`` prints "not applicable to this profile" with the
+            # reason, and ``Agent.analyze`` branches on ``is_abstention_row``.
+            # The reason to raise it here is the contract, not a change in what
+            # the evidence pipeline emits.
             #
             # Only a placeholder the template actually uses counts: the fallbacks
             # are still written into ``resolved`` because ``str.format`` needs a
