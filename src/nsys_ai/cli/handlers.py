@@ -479,6 +479,27 @@ def _write_evidence_report_or_die(report, out_path: str) -> None:
     )
 
 
+def _print_skipped_section(report, stream) -> None:
+    """Print the analyses that could not run, or nothing when they all ran.
+
+    Beside the findings, never among them: an abstention says the analysis had
+    no coverage, not that the profile has a problem. A report with no
+    abstentions prints exactly what it printed before this section existed.
+    """
+    if not report.skipped:
+        return
+    print(f"── Skipped ({len(report.skipped)}) ──", file=stream, flush=True)
+    for entry in report.skipped:
+        # The analyzer name leads because that is the one the user can act on:
+        # it is what ``evidence build --analyzers`` accepts. The skill follows
+        # in parentheses as the handle for ``skill run``.
+        print(
+            f"  {entry.analyzer} ({entry.skill}) — skipped: {entry.reason}",
+            file=stream,
+            flush=True,
+        )
+
+
 def _cmd_analyze_json(args, _profile):
     """Emit a v0.1 evidence findings report as JSON.
 
@@ -504,6 +525,10 @@ def _cmd_analyze_json(args, _profile):
         # single source of truth.
         payload = report.to_dict()
         print(_json.dumps(payload, indent=2))
+        # stdout stays a single JSON document, so the human-readable notice
+        # goes to stderr — the same split `_write_evidence_report_or_die`
+        # already uses for its "Saved N finding(s)" line.
+        _print_skipped_section(report, sys.stderr)
 
         out = getattr(args, "output", None)
         if out:
@@ -1325,6 +1350,7 @@ def _cmd_evidence(args, _profile):
         if fmt == "json":
             payload = report.to_dict()
             print(json.dumps(payload, indent=2))
+            _print_skipped_section(report, sys.stderr)
         else:
             sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
             print(f"── Evidence Findings ({len(report.findings)}) ──")
@@ -1334,6 +1360,7 @@ def _cmd_evidence(args, _profile):
                 print(f"  {icon} [{f.type}] {f.label}  ({dur_ms:.1f}ms)")
                 if f.note:
                     print(f"      {f.note}")
+            _print_skipped_section(report, sys.stdout)
 
         out = getattr(args, "output", None)
         if out:

@@ -772,6 +772,10 @@ class TestEvidenceReportEnvelope:
         # not supplied), so consumers can rely on the key existing.
         assert "profile_id" in d
         assert d["profile_id"] == ""
+        # ``skipped`` (the analyses that could not run) is additive the same
+        # way: always present, empty when nothing abstained, so "nothing was
+        # skipped" is distinguishable from "this producer had no such field".
+        assert d["skipped"] == []
 
     def test_envelope_carries_profile_id(self):
         """When set, profile_id is serialized verbatim in the envelope."""

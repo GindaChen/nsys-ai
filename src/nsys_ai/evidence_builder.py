@@ -10,7 +10,7 @@ import logging
 import os
 from collections.abc import Callable
 
-from .annotation import EvidenceReport, Finding, rank_findings
+from .annotation import EvidenceReport, Finding, SkippedAnalysis, rank_findings
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -109,6 +109,7 @@ class EvidenceBuilder:
                   If None, run all analyzers.
         """
         from .fingerprint import get_profile_id
+        from .skills.base import is_abstention
         from .skills.registry import get_skill
 
         # Coerce to str up-front: ``Profile.path`` is whatever the caller
@@ -126,6 +127,10 @@ class EvidenceBuilder:
         profile_id = get_profile_id(getattr(self.prof, "conn", None), fallback_path=profile_path)
 
         findings: list[Finding] = []
+        # Analyses that abstained, in pipeline order. An abstention makes no
+        # finding by design, so without this the report is indistinguishable
+        # from one where every skill ran and the profile came out clean.
+        skipped: list[SkippedAnalysis] = []
         # v0.1 context handed to upgraded skills' to_findings_fn for
         # constructing TraceSelection / EvidenceRow with provenance.
         context: dict = {"profile_id": profile_id}
@@ -150,6 +155,21 @@ class EvidenceBuilder:
                 # Use DuckDB if available, fallback to SQLite
                 conn = self.prof.query_conn()
                 rows = skill.execute(conn, **kwargs)
+                if is_abstention(rows):
+                    # One entry per analyzer, not per skill: two pipeline
+                    # entries can share a skill (kernel_instances runs as both
+                    # nccl_stalls and kernel_hotspots), and each of them is a
+                    # separate piece of coverage the report lost. The pipeline
+                    # is a dict, so the analyzer name cannot repeat.
+                    #
+                    # ``reason`` should always be present — ``abstain`` sets
+                    # it — but a hand-rolled abstention row could omit it, and
+                    # an empty reason renders as a dangling "skipped:" line.
+                    reason = str(rows[0].get("reason") or "could not run")
+                    skipped.append(
+                        SkippedAnalysis(analyzer=analyzer_name, skill=skill_name, reason=reason)
+                    )
+                    continue
                 if skill.to_findings_fn:
                     findings.extend(_invoke_to_findings(skill.to_findings_fn, rows, context))
             except Exception as e:
@@ -164,4 +184,5 @@ class EvidenceBuilder:
             profile_id=profile_id,
             profile_path=profile_path,
             findings=rank_findings(findings),
+            skipped=skipped,
         )
