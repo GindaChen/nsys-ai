@@ -410,24 +410,39 @@ Trim modes on `nsys-ai skill run` (preference order):
 | `--trim START_S END_S` | manual window, seconds |
 | `-p trim_start_ns=… -p trim_end_ns=…` | when ns precision matters |
 
-Heavy skills (range-IEJoin: kernels × avg NVTX depth):
+Heavy skills:
 
-| Skill | Trim trigger |
-|---|---|
-| `nvtx_layer_breakdown` | `nvtx.iteration_count > 1` OR full span > 30 s* |
-| `nvtx_kernel_map` | same |
-| `gpu_idle_gaps` | full span > 30 s* |
+| Skill | Cost driver | Trim trigger |
+|---|---|---|
+| `nvtx_layer_breakdown` | reads `nvtx_kernel_map`; falls back to an in-file range join (kernels × avg NVTX depth) when the map is unavailable | `nvtx.iteration_count > 1` OR full span > 30 s* |
+| `nvtx_kernel_map` | per-thread stack sweep over the NVTX table, building the map if it is not there yet | same |
+| `gpu_idle_gaps` | window scan over the kernel table (no NVTX join) | full span > 30 s* |
 
 \* When `data_quality.auto_trim.applied == true` the top-level `profile_span_ms`
 is the trimmed window; read the actual span from
 `data_quality.auto_trim.profile_full_span_ms`.
 
-**First-open cache trap.** The cache builder materializes
-`nvtx_kernel_map.parquet` via the same range-IEJoin, so on NVTX-heavy
-profiles even a cheap skill (`iteration_timing`, `profile_health_manifest`)
-blocks on it the first time — observed > 10 min on a 10 M NVTX × 1 M
-kernel profile. Once `<profile>.nsys-cache/nvtx_kernel_map.parquet`
-exists, subsequent skill runs range from sub-second (`top_kernels`,
+**Where the first-open cost lands.** By default `build_cache` exports the base
+tables only. `nvtx_kernel_map.parquet` is deferred to the first skill that needs
+NVTX attribution — `nvtx_kernel_map`, `nvtx_layer_breakdown`,
+`nccl_compile_context_breakdown`, `cutracer_analysis`. Skills that never read
+the map, including `iteration_timing`, `profile_health_manifest` and
+`top_kernels`, do not wait on it. Deferring it is worth real time: the map was
+measured at 11.6 s of a 19.8 s cache build on an 881 MB profile and 59.9 s of a
+93.2 s build on a 3.5 GB profile.
+
+That first skill runs a per-thread stack sweep. Where the connection has a
+Parquet cache directory behind it, the result is written back into
+`<profile>.nsys-cache/` and the sweep is paid once per profile. Where it does
+not — a direct SQLite attach, a `parquetdir` export — the map is built as
+in-memory tables instead, so the sweep is paid once per process. Policy lives in
+`_should_defer_nvtx_kernel_map()` in `parquet_cache.py`:
+`NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1` (or `NSYS_AI_DEFER_NVTX_KERNEL_MAP=0`)
+moves the cost back into `build_cache`, and
+`NSYS_AI_DEFER_NVTX_KERNEL_MAP_MB=<float>` makes it size-dependent, building
+profiles under the threshold eagerly.
+
+Once the cache exists, skill runs range from sub-second (`top_kernels`,
 `memory_transfers`, `h2d_distribution`) to 20–30 s for the heavier ones
 (`iteration_detail`, `host_sync_parent_ranges`, `nvtx_layer_breakdown`).
 
