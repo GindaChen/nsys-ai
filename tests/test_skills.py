@@ -1126,3 +1126,34 @@ def test_root_cause_readme_coverage_claim_matches_wiring():
         "README says cpu_gpu_pipeline needs an explicit `skill run`, but it is now "
         "declared in core_skills or the evidence pipeline"
     )
+
+
+def test_the_table_guard_covers_only_sql_templates():
+    """The subset ``ACTIVITY_TABLE_PLACEHOLDERS``' note claims, re-measured.
+
+    ``Skill.execute`` abstains on an unresolvable activity table by looking for
+    the placeholder in ``self.sql``, so a placeholder used only inside an
+    ``execute_fn`` body is never covered — that skill has to abstain for itself.
+    The note above the constant says which three of the seven are covered, and a
+    note about coverage is the kind that goes stale silently: the first template
+    to use ``{sync_table}`` would inherit a guard the note says it does not
+    have, and the next reader would trust the wrong half.
+
+    Failing here is not a defect. It means the split moved, and the note is what
+    to correct.
+    """
+    from nsys_ai.skills import get_skill, list_skills
+    from nsys_ai.skills.base import ACTIVITY_TABLE_PLACEHOLDERS
+
+    in_templates = {
+        placeholder
+        for name in list_skills()
+        for placeholder in ACTIVITY_TABLE_PLACEHOLDERS
+        if "{" + placeholder + "}" in (get_skill(name).sql or "")
+    }
+
+    assert in_templates == {"kernel_table", "runtime_table", "memcpy_table"}, (
+        "the guarded subset changed; update the note above "
+        f"ACTIVITY_TABLE_PLACEHOLDERS in skills/base.py. Now guarded: "
+        f"{sorted(in_templates)}"
+    )
