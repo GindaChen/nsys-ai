@@ -219,7 +219,7 @@ class TestBuildAndOpen:
         """Regression: nvtx_kernel_map.parquet must include kernels whose only
         enclosing NVTX ranges are aten::* (e.g. emit_nvtx-style traces).
 
-        If _build_nvtx_kernel_map() sourced the IEJoin from nvtx_high.parquet
+        If _build_nvtx_kernel_map_from_parquet() sourced the IEJoin from nvtx_high.parquet
         instead of full nvtx.parquet, such kernels would silently disappear
         from the precomputed map and the fast path in nvtx_layer_breakdown
         would return zero attribution.
@@ -265,7 +265,7 @@ class TestBuildAndOpen:
 
         assert n_rows >= 1, (
             "nvtx_kernel_map.parquet is empty on aten::-only trace; "
-            "_build_nvtx_kernel_map() must source from full nvtx.parquet, "
+            "_build_nvtx_kernel_map_from_parquet() must source from full nvtx.parquet, "
             "not the filtered nvtx_high.parquet"
         )
         # The leaf attribution should be one of the aten:: ranges we seeded.
@@ -572,7 +572,7 @@ class TestDamagedInput:
     def test_an_unreadable_map_source_aborts_the_build_and_a_missing_one_skips(
         self, tmp_path, monkeypatch
     ):
-        """The two cases ``_build_nvtx_kernel_map``'s docstring distinguishes.
+        """The two cases ``_build_nvtx_kernel_map_from_parquet``'s docstring distinguishes.
 
         They are easy to confuse, and the docstring got them backwards until
         this test existed: it claimed an unreadable source was "logged and the
@@ -588,11 +588,11 @@ class TestDamagedInput:
         which would look like a tidy-up — is a visible change to a documented
         behaviour instead of a silent one.
 
-        A *missing* source is the opposite and stays a logged skip. It is
-        ``_build_nvtx_kernel_map_from_parquet``'s ``is_file()`` check that does
-        that, not the ``src_tables`` guard the caller used to carry: probing
-        that guard with a raise left the whole suite green, so it never fired
-        here either, and it has been removed.
+        A *missing* source is the opposite and stays a logged skip. It is the
+        builder's own ``is_file()`` check that does that, not the ``src_tables``
+        guard its former wrapper used to carry: probing that guard with a raise
+        left the whole suite green, so it never fired here either, and both the
+        guard and the wrapper have been removed.
         """
         import shutil
 
@@ -603,8 +603,8 @@ class TestDamagedInput:
         shutil.copy(src, profile)
 
         # ``build_cache`` defers the map, so ask for it explicitly: this test is
-        # about what ``_build_nvtx_kernel_map`` does with damaged sources, not
-        # about when it is called.
+        # about what ``_build_nvtx_kernel_map_from_parquet`` does with damaged
+        # sources, not about when it is called.
         monkeypatch.setenv("NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP", "1")
         cache_dir = Path(parquet_cache.build_cache(str(profile)))
         map_path = cache_dir / "nvtx_kernel_map.parquet"
@@ -618,18 +618,18 @@ class TestDamagedInput:
 
             nvtx.write_bytes(b"NOTAPARQUET" * 100)
             with pytest.raises(duckdb.Error):
-                parquet_cache._build_nvtx_kernel_map(db, cache_dir)
+                parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
             assert not map_path.exists(), "a map was written from an unreadable source"
 
             nvtx.unlink()
-            parquet_cache._build_nvtx_kernel_map(db, cache_dir)
+            parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
             assert not map_path.exists(), "the missing-source skip wrote a map anyway"
 
             # Control: the same call on the restored source does build one, so
             # the two assertions above are about the damage, not about the
             # arguments being wrong.
             nvtx.write_bytes(healthy)
-            parquet_cache._build_nvtx_kernel_map(db, cache_dir)
+            parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir)
             assert map_path.is_file(), "the builder no longer works on healthy sources"
         finally:
             db.close()

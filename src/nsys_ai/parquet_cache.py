@@ -700,7 +700,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # ── Generate nvtx_kernel_map ──────────────────────────────────────
         if has_kernel and has_nvtx and has_runtime and not defer_nvtx_map:
             _progress("nvtx_kernel_map.parquet")
-            _build_nvtx_kernel_map(db, cache_dir)
+            _build_nvtx_kernel_map_from_parquet(db, cache_dir)
         elif defer_nvtx_map:
             # Not a degraded cache: the first NVTX-attribution query calls
             # ensure_nvtx_kernel_map, which builds the same two Parquets into
@@ -1177,10 +1177,11 @@ def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
     """)
 
 
-def _build_nvtx_kernel_map(
+def _build_nvtx_kernel_map_from_parquet(
     db: duckdb.DuckDBPyConnection,
     cache_dir: Path,
-) -> None:
+    out_dir: Path | None = None,
+) -> bool:
     """Generate nvtx_kernel_map.parquet with a per-thread stack sweep.
 
     There is one builder and one path. Each kernel is attributed to its
@@ -1188,38 +1189,10 @@ def _build_nvtx_kernel_map(
     SQL range join is involved (the comment below records why one was tried and
     dropped), and there is no fallback.
 
-    Nor is a source that exists but cannot be read handled here: the
-    ``read_parquet`` error propagates out of this function, and ``build_cache``
-    deletes the half-built temp dir rather than publishing it. That is what
-    every export of a primary source in this build does; the one export that
-    swallows its error, ``_build_nvtx_high``, is a derived convenience view that
-    callers already probe for and fall back from, which is precisely what these
-    three sources are not. They are shared with the rest of the cache, so an
-    unreadable one is not a reason to drop the map and keep the cache, it is a
-    reason to have no cache. ``Profile.__init__`` then logs and falls back to raw
-    SQLite; the profile stays readable, just without Parquet acceleration. A
-    *missing* Parquet source is the degraded-but-continue case, and
-    :func:`_build_nvtx_kernel_map_from_parquet` handles it by returning False.
-
-    Sources are the ``kernels``, ``runtime`` and ``nvtx`` Parquets already
-    exported by this cache build, so the heavy read never scans the attached
-    SQLite ``NVTX_EVENTS`` table.
-    """
-    _build_nvtx_kernel_map_from_parquet(db, cache_dir)
-
-
-def _build_nvtx_kernel_map_from_parquet(
-    db: duckdb.DuckDBPyConnection,
-    cache_dir: Path,
-    out_dir: Path | None = None,
-) -> bool:
-    """The sweep itself, reading only Parquet already in ``cache_dir``.
-
-    Split out from :func:`_build_nvtx_kernel_map` so the on-demand build can
-    reach it: that caller has a published cache and *no* attached SQLite, so it
-    has no ``src_tables`` set to probe. The probe was never load-bearing here
-    anyway — the three source names it resolved were used for nothing but the
-    ``is_file()`` checks repeated below.
+    Sources are the ``kernels``, ``runtime`` and ``nvtx`` Parquets already in
+    ``cache_dir`` — written earlier in the same build, or published by an
+    earlier one when the on-demand caller runs, which has no attached SQLite at
+    all. Either way the heavy read never scans the SQLite ``NVTX_EVENTS`` table.
 
     ``out_dir`` defaults to ``cache_dir``; the on-demand caller points it at a
     staging directory so the two Parquets can be published with ``os.replace``
@@ -1227,8 +1200,31 @@ def _build_nvtx_kernel_map_from_parquet(
 
     Returns True when a map was written. False means the sweep found nothing to
     attribute or a source was missing — both are logged skips, and neither is an
-    error. An *unreadable* source is a different thing and still propagates; see
-    the caller's docstring.
+    error.
+
+    A source that exists but cannot be *read* is neither: the ``read_parquet``
+    error propagates out of this function, and what happens next is the caller's,
+    because the two callers are in different situations.
+
+    From ``_build_cache_into`` it propagates on to ``build_cache``, which deletes
+    the half-built temp dir rather than publishing it. That is what every export
+    of a primary source in this build does; the one export that swallows its error,
+    ``_build_nvtx_high``, is a derived convenience view that callers already probe
+    for and fall back from, which is precisely what these three sources are not.
+    They are shared with the rest of the cache, so an unreadable one is not a
+    reason to drop the map and keep the cache, it is a reason to have no cache.
+    ``Profile.__init__`` then logs and falls back to raw SQLite; the profile stays
+    readable, just without Parquet acceleration.
+
+    On the on-demand path there is no half-built cache to discard — the cache is
+    already published and in use — and nothing here converts the error into a
+    False return. ``materialize_cached_nvtx_kernel_map`` catches ``OSError`` only,
+    so a ``duckdb.Error`` escapes it and ``ensure_nvtx_kernel_map``, and both call
+    sites (``nvtx_layer_breakdown`` and ``nvtx_attribution``) swallow it with
+    ``except DB_ERRORS: pass``. The query then takes its no-map fallback and the
+    cache is kept. Deliberate to the extent that a published cache is not this
+    function's to invalidate, but it does mean a corrupt ``nvtx.parquet`` is loud
+    at build time and silent afterwards.
     """
     out_dir = cache_dir if out_dir is None else out_dir
     kp = cache_dir / "kernels.parquet"
