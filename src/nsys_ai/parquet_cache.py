@@ -27,7 +27,10 @@ deferring it, and peak RSS on the 3.5 GB capture fell from 7.01 GB to 5.97 GB.
 The 13 base tables are the opposite case — 8.6s of that 93.2s, wanted by nearly
 every skill — so they stay eager and are deliberately not split up.
 
-Cache invalidation uses mtime comparison + a version stamp file. A cache with
+Cache invalidation uses mtime comparison + a version stamp file — the stamp's
+mtime dates the step 1 build, and step 3 rewrites that stamp with its timestamps
+preserved so publishing the map can never revalidate a cache that has since gone
+stale against its source. A cache with
 the map and one without are both legal, complete caches: every consumer probes
 for the map rather than assuming it, which is why deferring it does not need a
 ``_CACHE_VERSION`` bump. "Not built yet" and "built wrong" stay distinct on
@@ -169,6 +172,14 @@ def is_cache_valid(sqlite_path: str) -> bool:
       - The cache directory exists
       - The version stamp matches ``_CACHE_VERSION``
       - The cache is at least as new as the SQLite file (mtime comparison)
+
+    The freshness test reads no cache contents: ``.cache_version``'s own mtime
+    *is* the token, standing in for "when was this cache built". Every writer of
+    that file must therefore preserve its timestamps unless it is publishing a
+    genuinely new build — a writer that merely edits the JSON (see
+    :func:`_publish_stamp_map_ready`) and lets ``os.replace`` date the result
+    "now" revalidates a cache this function had correctly rejected, and the
+    stale Parquet is then served silently.
     """
     cache_dir = _cache_dir_for(sqlite_path)
     version_file = cache_dir / ".cache_version"
@@ -1648,11 +1659,22 @@ def _create_nvtx_map_views(db, cache_dir: Path) -> bool:
 def _publish_stamp_map_ready(cache_dir: Path) -> None:
     """Record in ``.cache_version`` that the map is now on disk.
 
-    Informational — nothing reads these two keys to decide behaviour, and
-    ``is_cache_valid`` does not consult them — but leaving them saying
-    "deferred" after the map exists would make the stamp lie to anyone
-    debugging. Written temp-file + ``os.replace`` because a torn stamp fails the
-    JSON parse in ``is_cache_valid`` and costs a full rebuild.
+    The two keys are informational — nothing reads them to decide behaviour.
+    The *file* they live in is not: its mtime is the cache's freshness token,
+    compared against the source SQLite's mtime by :func:`is_cache_valid`. This
+    rewrite happens at query time, arbitrarily long after the build that the
+    token is supposed to date, so an ``os.replace`` alone would stamp the token
+    "now" and revalidate a cache that had correctly gone stale — the source can
+    change while a cached connection is live (a re-capture to the same path),
+    and every later process would then be served the old Parquet. Hence the
+    ``os.utime`` restore below: the file's contents advance, its timestamps do
+    not, and a stale cache stays stale. The stat and the replace both run under
+    ``_build_lock`` (see :func:`materialize_cached_nvtx_kernel_map`), so a
+    concurrent rebuild cannot slip between them and have its fresh stamp aged
+    backwards.
+
+    Written temp-file + ``os.replace`` because a torn stamp fails the JSON parse
+    in ``is_cache_valid`` and costs a full rebuild.
 
     A failure here is not a build failure: the Parquet is already published and
     the next open finds it by glob regardless.
@@ -1660,18 +1682,38 @@ def _publish_stamp_map_ready(cache_dir: Path) -> None:
     stamp = cache_dir / ".cache_version"
     try:
         meta = json.loads(stamp.read_text())
+        before = os.stat(stamp)
     except (json.JSONDecodeError, OSError):
         return
     meta["nvtx_kernel_map_ready"] = True
     meta["deferred_nvtx_kernel_map"] = False
     tmp = cache_dir / ".cache_version.tmp"
+    replaced = False
     try:
         tmp.write_text(json.dumps(meta))
         os.replace(tmp, stamp)
+        replaced = True
     except OSError as exc:
         log.debug("could not refresh cache stamp after lazy map build (%s)", exc)
         with contextlib.suppress(OSError):
             tmp.unlink()
+
+    if replaced:
+        # Its own except, and its own message: folding this into the block
+        # above would report a silently revalidated stale cache as "could not
+        # refresh cache stamp" and would try to unlink a tmp that os.replace
+        # has already consumed. ``ns=`` rather than the float fields — the
+        # float form rounds, and the invariant is an exact one.
+        try:
+            os.utime(stamp, ns=(before.st_atime_ns, before.st_mtime_ns))
+        except OSError as exc:
+            log.warning(
+                "could not restore the freshness token on %s (%s); a cache that "
+                "is stale against its source may now pass is_cache_valid until "
+                "it is rebuilt",
+                stamp,
+                exc,
+            )
 
     # The oversized-map warning used to fire only from _build_cache_into, which
     # no longer builds the map — so without this it would never fire again. The
