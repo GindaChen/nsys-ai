@@ -22,14 +22,16 @@ window           baseline  ceiling  mutation that moves it (all measured here)
 auto / open       0.07 MB   1.0 MB  build nvtx_kernel_map during ``build_cache``
                                     again (``NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1``)
                                     -> 4.84 MB
-auto / skills     4.93 MB   5.5 MB  ``list(_stream_nvtx_ranges(...))`` -> 6.15 MB
-auto / attrib     0.30 MB   0.8 MB  drop the ``LIMIT`` push-down in
-                                    ``nvtx_attribution`` -> 1.57 MB
+auto / skills     2.03 MB   2.6 MB  hold one thread's ranges instead of streaming
+                                    them, ``list(_stream_thread_nvtx(...))``
+                                    -> 6.12 MB
+auto / attrib     0.16 MB   0.8 MB  drop the ``LIMIT`` push-down in
+                                    ``nvtx_attribution`` -> 1.42 MB
 direct / open     0.05 MB   1.0 MB  route ``cache_mode="direct"`` through
                                     ``open_cached_db`` -> 4.85 MB
 direct / skills   6.62 MB   7.4 MB  dict instead of tuple buckets in
                                     ``_sweep_nvtx_kernel_map`` -> 8.06 MB
-direct / attrib   0.44 MB   0.9 MB  drop the ``LIMIT`` push-down -> 1.70 MB
+direct / attrib   0.44 MB   0.9 MB  drop the ``LIMIT`` push-down -> 1.69 MB
 ===============  ========  =======  ==================================================
 
 ``cache_mode="direct"`` is the second case because it is the path a real
@@ -48,22 +50,24 @@ ever reach it at all.
 What the two modes still do differently is *how* they build it, and that is the
 one number worth reading as a comparison rather than a bound:
 
-* ``auto`` reaches ``materialize_cached_nvtx_kernel_map``, which streams its
-  sources out of the cached Parquet — 4.93 MB;
+* ``auto`` reaches ``materialize_cached_nvtx_kernel_map``, which sweeps one
+  thread of the capture at a time and streams both sides of each — 2.03 MB;
 * ``direct`` has no cache directory to write into and falls through to
   ``ensure_nvtx_kernel_map``'s in-memory build, which ``fetchall()``s the entire
   NVTX table and the whole kernel/runtime join into Python tuples — 6.62 MB.
 
-Identical output, 26% less Python heap for the streaming one. That gap is why
+Identical output, 69% less Python heap for the streaming one. That gap is why
 the deferral had to land with a persisting builder rather than by flipping a
 default: deferring onto the ``fetchall`` path would have made the common case
 cheaper to open and more expensive to run.
 
-The direct path stays the one that materialises most, at 2.9x the input against
-the cached path's 2.2x. That is not asserted as good; it is pinned so it does not
-get worse silently, and so that fixing it (streaming the in-memory build the way
-the cached one already streams) shows up as a deliberate change to a stated
-number.
+The gap is also the one number here that is not a constant factor. ``direct``
+holds both sides of the whole profile, so its 2.9x of the input is a ratio that
+follows the capture; ``auto`` holds one Arrow batch per side plus one thread's
+open stack, measured at depth <= 7 on a 3.5 GB capture, so its cost does not.
+The 2.03 MB is what that looks like on a 2.269 MB fixture — 0.9x rather than the
+2.2x this window recorded before the sweep was chunked. Fixing the direct path
+the same way would show up as a deliberate change to a stated number.
 
 Why there is a third window
 ---------------------------
@@ -72,11 +76,11 @@ Because the second stopped bounding what it used to, and noticing that was not
 optional. Before the deferral, ``auto``'s skills window held only the attribution
 query, so dropping the ``LIMIT`` push-down in ``attribute_kernels_to_nvtx`` took
 it from 0.27 MB to 1.53 MB and the ceiling caught it. After the deferral that
-window is dominated by the 4.93 MB map build, and the same mutation moves it by
-0.00 MB — the push-down would have lost its only guard while the suite stayed
-green. The third window runs attribution once more with the build already paid,
-which is what the second window used to measure, and the mutation moves it 0.30
--> 1.57 MB again.
+window is dominated by the map build, and the same mutation moves it by 0.00 MB
+— the push-down would have lost its only guard while the suite stayed green. The
+third window runs attribution once more with the build already paid, which is
+what the second window used to measure, and the mutation moves it 0.16 -> 1.42
+MB again.
 
 It calls ``attribute_kernels_to_nvtx`` directly rather than re-running the skill.
 Skills memoize their rows per connection and resolved parameters, so a second
@@ -168,7 +172,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
 # 9% under its mutation; if that one ever flakes on another interpreter it is the
 # first to re-derive, and the honest fix is a bigger gap, not a bigger ceiling.
 CASES = {
-    "auto": (1.0, 5.5, 0.8, 0.07, 4.93, 0.30),
+    "auto": (1.0, 2.6, 0.8, 0.07, 2.03, 0.16),
     "direct": (1.0, 7.4, 0.9, 0.05, 6.62, 0.44),
 }
 
@@ -294,11 +298,12 @@ def test_running_skills_stays_under_the_python_heap_ceiling(measured, request):
     dominates: whichever builder runs, it is the largest single Python
     allocation this repo makes.
 
-    ``auto`` streams its sources out of the cached Parquet and lands at 4.93 MB;
-    materialising the NVTX generator with ``list(_stream_nvtx_ranges(...))``
-    takes it to 6.15 MB, and that change leaves every other assertion in the
-    suite passing, because the answers are identical — only the memory differs,
-    and nothing else looks at memory.
+    ``auto`` sweeps one thread of the capture at a time, streaming both sides of
+    each out of the cached Parquet, and lands at 2.03 MB; holding a thread's
+    ranges instead, with ``list(_stream_thread_nvtx(...))``, takes it to 6.12 MB.
+    That change leaves every other assertion in the suite passing, because the
+    answers are identical — only the memory differs, and nothing else looks at
+    memory.
 
     ``direct`` has no cache to write into and takes the ``fetchall`` build
     instead, at 6.62 MB. Turning that sweep's per-thread buckets from tuples
@@ -335,9 +340,9 @@ def test_attributing_against_a_built_map_stays_under_the_python_heap_ceiling(
     took that coverage away without failing anything. Dropping the ``LIMIT``
     push-down in ``attribute_kernels_to_nvtx`` — the optimisation its own
     docstring describes as keeping unrelated kernels out of Python — used to move
-    the auto/skills number from 0.27 MB to 1.53 MB; underneath the 4.93 MB build
-    it moves that number by 0.00 MB. Measured here it is 0.30 -> 1.57 MB on
-    ``auto`` and 0.44 -> 1.70 MB on ``direct``, so the push-down keeps a guard.
+    the auto/skills number from 0.27 MB to 1.53 MB; underneath the map build it
+    moves that number by 0.00 MB. Measured here it is 0.16 -> 1.42 MB on ``auto``
+    and 0.44 -> 1.69 MB on ``direct``, so the push-down keeps a guard.
 
     The two baselines differ because the map is a Parquet-backed view on ``auto``
     and an in-memory DuckDB table on ``direct``; the rows arriving in Python are

@@ -216,16 +216,21 @@ def test_the_sweep_resolves_label_ties_by_data_not_by_input_order():
 def test_the_sweep_does_not_depend_on_the_order_kernels_arrive_in():
     """The kernel side may arrive in any order; only the NVTX side must be sorted.
 
-    `_stream_kernel_runtime` used to carry `ORDER BY r.globalTid, r.start` and a
+    The kernel-side query used to carry `ORDER BY r.globalTid, r.start` and a
     comment claiming the sweep "advances one index per thread, so this must
     arrive sorted". Half of that is true: the sweep does advance a single index
-    over the *ranges*, but it re-sorts the *kernels* itself
-    (`kr_by_tid[tid].sort(...)`), so the SQL order was being redone in Python.
-    The ORDER BY is gone; this test is what stops the self-sort from being
-    dropped as "redundant" later, which would silently make the map's contents
-    depend on DuckDB's join order. It now guards *both* builders: the on-demand
-    `_ensure_nvtx_kernel_map_in_memory` carried the same redundant ORDER BY and
-    no longer does, so neither caller hands the sweep a pre-sorted kernel side.
+    over the *ranges*, but `_sweep_nvtx_kernel_map` re-sorts the *kernels* itself
+    (`kr_list.sort(...)`), so the SQL order was being redone in Python. This test
+    is what stops that self-sort from being dropped as "redundant" later, which
+    would silently make the map's contents depend on DuckDB's join order.
+
+    It guards `_sweep_nvtx_kernel_map`, which is the on-demand builder's entry
+    point (`_ensure_nvtx_kernel_map_in_memory`) and the only caller that buckets
+    rows in Python. The cached builder no longer comes through here: it
+    partitions by thread in SQL and streams both sides, so it *does* ask for
+    `ORDER BY r.start` per thread — a stream has nowhere to put a later sort.
+    That is not this ORDER BY coming back; it is a different query, on a
+    different axis, feeding a consumer that no longer sorts.
 
     Asserted on *content*, canonically ordered, not on the returned list order.
     The sweep visits threads in the order they first appear in its input, so

@@ -450,10 +450,12 @@ def test_the_map_is_absent_from_schema_discovery_until_it_is_built(cached_profil
 def test_the_lazily_built_map_is_identical_to_the_eager_one(tmp_path, monkeypatch):
     """Same rows, same dictionary, whichever builder produced them.
 
-    Both go through ``_write_nvtx_kernel_map_parquet``, so this is a check that
-    the split into ``_build_nvtx_kernel_map_from_parquet`` did not change what
-    the sweep is fed — the on-demand caller has no attached SQLite and no
-    ``src_tables`` set, and if that mattered the rows would differ here.
+    Both go through ``_build_nvtx_kernel_map_from_parquet``, so this is a check
+    that the split into it did not change what the sweep is fed — the on-demand
+    caller has no attached SQLite and no ``src_tables`` set, and if that mattered
+    the rows would differ here. The two differ only in ``out_dir``: one writes
+    into the cache directory, the other into a staging directory that is then
+    renamed over it.
     """
     import duckdb
 
@@ -524,13 +526,13 @@ def test_concurrent_cursors_build_the_map_once(cached_profile):
     calls_lock = threading.Lock()
     original = parquet_cache._build_nvtx_kernel_map_from_parquet
 
-    def counting(db, src_dir, out_dir=None):
+    def counting(db, src_dir, out_dir=None, **kwargs):
         with calls_lock:
             calls.append(1)
         # Long enough that every other thread is queued on the lock before this
         # one publishes; the sweep on this fixture is a few milliseconds.
         time.sleep(0.3)
-        return original(db, src_dir, out_dir)
+        return original(db, src_dir, out_dir, **kwargs)
 
     parquet_cache._build_nvtx_kernel_map_from_parquet = counting
     try:

@@ -88,6 +88,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - SQL sweep-line overlap analysis (about 3x faster on the analysis call), NVTX
   layer breakdown reduced from ~43s to ~1.4s, and automatic trimming of long
   profiles to a representative window.
+- The `nvtx_kernel_map` build sweeps one capture thread at a time and streams
+  both sides of each, so its memory tracks the batch rather than the profile. On
+  a 3.5 GB capture the build fell from 6.95 GB peak and 51.2 s to 3.31 GB and
+  37.3 s, producing identical output. It also reports progress per thread, which
+  the deferred build previously had no way to do.
 
 ### Docs
 
