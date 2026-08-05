@@ -297,6 +297,100 @@ def test_the_first_nvtx_query_publishes_the_map_into_the_cache(cached_profile):
     assert again == rows
 
 
+def _age_the_stamp(cache_dir, seconds=5.0):
+    """Move ``.cache_version``'s mtime *backwards* so the cache reads as stale.
+
+    Read this before rewriting it. The obvious alternative — pushing the source
+    SQLite's mtime forwards — produces a test that passes with the fix reverted:
+    a source dated into the future is also newer than the publish's "now", so
+    ``is_cache_valid`` stays False either way and nothing is being measured. The
+    window this test exists for is ``build < source change < publish``, and with
+    the build already done the only way to reach that ordering without sleeping
+    is to age the stamp, leaving the source's real, present-day mtime in front
+    of it and the publish's later still.
+    """
+    stamp = cache_dir / ".cache_version"
+    aged = os.stat(stamp).st_mtime_ns - int(seconds * 1e9)
+    os.utime(stamp, ns=(aged, aged))
+    return aged
+
+
+def test_a_stale_cache_is_not_resurrected_by_the_lazy_map_publish(cached_profile):
+    """Publishing the map must not re-date the cache's freshness token (#323).
+
+    ``is_cache_valid`` decides staleness from ``.cache_version``'s mtime, so the
+    query-time stamp rewrite that records "map ready" is not the inert
+    bookkeeping it looks like: an ``os.replace`` alone stamps it "now", which is
+    newer than any source change that happened while this connection was open,
+    and the cache this function had correctly rejected passes again.
+
+    The two informational keys are asserted as well, so the fix cannot be met by
+    skipping the publish — the stamp must still stop saying "deferred".
+    """
+    profile, cache_dir = cached_profile
+
+    # A connection opened while the cache was still valid — the live web/tui/
+    # chat/loop session in the issue.
+    db = parquet_cache.open_cached_db(str(profile))
+    try:
+        _age_the_stamp(cache_dir)
+        assert parquet_cache.is_cache_valid(str(profile)) is False, (
+            "the aged stamp should already read as stale before the publish"
+        )
+
+        assert ensure_nvtx_kernel_map(db) is True
+    finally:
+        db.close()
+
+    assert parquet_cache.is_cache_valid(str(profile)) is False, (
+        "publishing the lazily built map resurrected a cache that was stale "
+        "against its source; every later process is now served the old Parquet"
+    )
+
+    stamp = json.loads((cache_dir / ".cache_version").read_text())
+    assert stamp["nvtx_kernel_map_ready"] is True
+    assert stamp["deferred_nvtx_kernel_map"] is False
+
+
+def test_a_changed_source_is_reread_after_a_lazy_map_publish(cached_profile):
+    """The issue's reproduction, at the level a user feels it (#323).
+
+    Re-capturing to the same path while a cached connection is live is the
+    ordinary way a profile changes. The live connection keeps its own Parquet
+    views for its lifetime — that is unchanged and out of scope — but the *next*
+    process must see the new capture, and it does not if the map publish has
+    quietly revalidated the old cache.
+    """
+    profile, cache_dir = cached_profile
+
+    db = parquet_cache.open_cached_db(str(profile))
+    try:
+        cached_rows = db.execute("SELECT count(*) FROM nvtx").fetchone()[0]
+
+        # Re-capture: same path, twice the NVTX events.
+        con = sqlite3.connect(str(profile))
+        con.execute("INSERT INTO NVTX_EVENTS SELECT * FROM NVTX_EVENTS")
+        con.commit()
+        source_rows = con.execute("SELECT count(*) FROM NVTX_EVENTS").fetchone()[0]
+        con.close()
+        assert source_rows == 2 * cached_rows > 0
+
+        _age_the_stamp(cache_dir)
+        assert ensure_nvtx_kernel_map(db) is True
+    finally:
+        db.close()
+
+    later = parquet_cache.open_cached_db(str(profile))
+    try:
+        served = later.execute("SELECT count(*) FROM nvtx").fetchone()[0]
+    finally:
+        later.close()
+
+    assert served == source_rows, (
+        f"a later open was served {served} stale rows; the source has {source_rows}"
+    )
+
+
 def test_the_map_is_absent_from_schema_discovery_until_it_is_built(cached_profile):
     """Deferral hides the map from the catalog, not just from the cache dir.
 

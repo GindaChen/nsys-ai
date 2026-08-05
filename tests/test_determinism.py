@@ -223,7 +223,9 @@ def test_the_sweep_does_not_depend_on_the_order_kernels_arrive_in():
     (`kr_by_tid[tid].sort(...)`), so the SQL order was being redone in Python.
     The ORDER BY is gone; this test is what stops the self-sort from being
     dropped as "redundant" later, which would silently make the map's contents
-    depend on DuckDB's join order.
+    depend on DuckDB's join order. It now guards *both* builders: the on-demand
+    `_ensure_nvtx_kernel_map_in_memory` carried the same redundant ORDER BY and
+    no longer does, so neither caller hands the sweep a pre-sorted kernel side.
 
     Asserted on *content*, canonically ordered, not on the returned list order.
     The sweep visits threads in the order they first appear in its input, so
