@@ -425,9 +425,18 @@ is the trimmed window; read the actual span from
 **Where the first-open cost lands.** By default `build_cache` exports the base
 tables only. `nvtx_kernel_map.parquet` is deferred to the first skill that needs
 NVTX attribution — `nvtx_kernel_map`, `nvtx_layer_breakdown`,
-`nccl_compile_context_breakdown`, `cutracer_analysis`. Skills that never read
-the map, including `iteration_timing`, `profile_health_manifest` and
-`top_kernels`, do not wait on it. Deferring it is worth real time: the map was
+`nccl_compile_context_breakdown`, `cutracer_analysis`. Skills that never reach
+NVTX attribution, such as `iteration_timing` and `top_kernels`, do not wait on
+it.
+
+`profile_health_manifest` is **not** one of them, which matters because §9 opens
+by telling you to run it. It calls `root_cause_matcher`, which reaches NVTX
+attribution, so the manifest triggers the deferred build and pays for it.
+Verified by running it against a freshly built cache: `nvtx_kernel_map.parquet`
+is absent after `open()` and present after the manifest returns. Budget the
+first `profile_health_manifest` on a large profile as a build, not as a query.
+
+Deferring it is still worth real time: the map was
 measured at 11.6 s of a 19.8 s cache build on an 881 MB profile and 59.9 s of a
 93.2 s build on a 3.5 GB profile.
 
