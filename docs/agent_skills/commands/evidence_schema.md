@@ -110,7 +110,14 @@ Findings should encode **conclusions**, not raw data. The agent must reason abou
   "title": "Human-readable title for the report",
   "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
   "profile_path": "path/to/profile.sqlite",
-  "findings": [ ... ]
+  "findings": [ ... ],
+  "skipped": [
+    {
+      "analyzer": "memory_anomalies",
+      "skill": "memory_bandwidth",
+      "reason": "This profile has no CUPTI_ACTIVITY_KIND_MEMCPY table, so it records no host/device copies. Bandwidth analysis needs them — ..."
+    }
+  ]
 }
 ```
 
@@ -121,8 +128,9 @@ Findings should encode **conclusions**, not raw data. The agent must reason abou
 - `profile_id`: Content-derived stable identifier produced by `fingerprint.get_profile_id`. Format: `nsys1:sha256:<64-hex>` (or `nsys1:path:<64-hex>` fallback when the source carries no Nsight metadata, e.g. a parquetdir-only backend). Two surfaces looking at the same profile agree on this value without depending on the filesystem path. **Every `TraceSelection.profile_id` produced during the same build carries the same value** — readers can join across surfaces by equality.
 - `profile_path`: Filesystem path the producer opened. Reference only — not an identifier.
 - `findings`: Array of Finding objects (see above).
+- `skipped`: Array of analyses that could not run on this profile, and why. A Finding says something about the profile's performance; an entry here says something about the analysis's *coverage*, which is why the two are separate arrays rather than one ranked list. Each entry carries `analyzer` (the name `evidence build --analyzers` accepts), `skill` (the name `skill run` accepts — several analyzers can share one skill), and `reason` (the text the skill passed to `abstain`). **The key is always emitted, empty array included**: `"skipped": []` means nothing was skipped, while a missing key means the producer predates the field. Do not read an empty array as a clean bill of health without checking that the key was present.
 
-Legacy payloads without the envelope keys (`schema_version` / `producer` / `producer_version` / `profile_id`) load identically — readers ignore unknown / missing envelope fields, and `profile_id` defaults to `""` for pre-`profile_id` payloads.
+Legacy payloads without the envelope keys (`schema_version` / `producer` / `producer_version` / `profile_id`) load identically — readers ignore unknown / missing envelope fields, and `profile_id` defaults to `""` for pre-`profile_id` payloads. Payloads written before `skipped` existed load with an empty `skipped` list. `skipped` is additive, so it does not bump `schema_version`.
 
 ---
 

@@ -78,9 +78,18 @@ The JSON output is an EvidenceReport object following the [Evidence Schema](evid
       "severity": "warning",
       "note": "Stream 7: 12.34ms idle — CPU: cudaLaunchKernel (11.2ms)"
     }
-  ]
+  ],
+  "skipped": []
 }
 ```
+
+`skipped` lists the analyzers that could not run on this profile — a missing
+memcpy table, a profile with no NVTX annotation — with the reason each one
+gave. It is emitted even when empty, so `[]` means "everything ran" rather
+than "this build does not report it". `--format text` prints the same list as
+a `Skipped` section after the findings; `--format json` prints it to stderr so
+stdout stays a single JSON document. See the
+[Evidence Schema](evidence_schema.md#evidencereport-wrapper) for the field.
 
 ### Finding Types
 
