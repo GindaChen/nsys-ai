@@ -88,6 +88,37 @@ def test_a_peer_to_peer_memcpy_table_is_not_mistaken_for_a_memcpy_variant():
     assert resolved["memcpy"] == "CUPTI_ACTIVITY_KIND_MEMCPY_V3"
 
 
+def test_a_versioned_peer_to_peer_table_is_not_a_memcpy_variant_either():
+    """The sibling case the first attempt at this guard let through.
+
+    Rejecting a remainder only when it is entirely digits stops ``..._MEMCPY2``
+    but not ``..._MEMCPY2_V2``, whose remainder ``2_V2`` is not all digits — so
+    a peer-to-peer export that also carried the version suffix this repo exists
+    to handle still had its copies resolved as ordinary memcpy traffic, and
+    counted into a different ``copyKind`` domain's totals.
+
+    Tested through ``_find_activity_tables`` rather than the resolver directly,
+    because it is the permissive tier 3 (``allow_other_suffixes=True``) that
+    lets these through, and only the query side enables it.
+    """
+    for name in (
+        "CUPTI_ACTIVITY_KIND_MEMCPY2",
+        "CUPTI_ACTIVITY_KIND_MEMCPY2_V2",
+        "CUPTI_ACTIVITY_KIND_MEMCPY2_V10",
+    ):
+        assert _find_activity_tables({name}).get("memcpy") is None, (
+            f"{name} was resolved as a memcpy variant"
+        )
+
+    # And the real variant still wins when both are present.
+    assert (
+        _find_activity_tables(
+            {"CUPTI_ACTIVITY_KIND_MEMCPY_V3", "CUPTI_ACTIVITY_KIND_MEMCPY2_V3"}
+        )["memcpy"]
+        == "CUPTI_ACTIVITY_KIND_MEMCPY_V3"
+    )
+
+
 def test_an_unrecognised_suffix_still_resolves_to_something():
     """The query-side resolver keeps a permissive last resort so a future
     suffix shape degrades to "reads the odd table" rather than "reads nothing"."""

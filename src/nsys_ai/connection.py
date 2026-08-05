@@ -383,9 +383,14 @@ def resolve_table_variant(
     kind (peer-to-peer memcpy) and must never be mistaken for a newer variant
     of ``CUPTI_ACTIVITY_KIND_MEMCPY``. Anchoring tier 2 alone did not deliver
     that: on a profile carrying only ``..._MEMCPY2`` the permissive tier 3
-    returned it anyway. So tier 3 excludes an all-digit remainder too — every
-    versioning shape this repo has met is ``_V<n>``, and a bare trailing digit
-    is CUPTI's way of naming a *sibling* activity kind, not a version.
+    returned it anyway. So tier 3 excludes any remainder that *begins* with a
+    digit — every versioning shape this repo has met is ``_V<n>``, which starts
+    with an underscore, while a trailing digit is CUPTI's way of naming a
+    *sibling* activity kind. Testing the whole remainder rather than its first
+    character was not enough: it rejected ``..._MEMCPY2`` but not the versioned
+    peer-to-peer table ``..._MEMCPY2_V2``, whose remainder ``2_V2`` is not all
+    digits — so a P2P-only export that carried the suffix still had its copies
+    counted as ordinary memcpy traffic.
 
     The consequence is deliberate: a MEMCPY2-only profile resolves ``memcpy`` to
     ``None`` rather than reporting P2P copies (a different ``copyKind`` domain)
@@ -406,7 +411,7 @@ def resolve_table_variant(
         match = _VERSION_SUFFIX_RE.fullmatch(name[len(prefix) :])
         if match:
             versioned.append((int(match.group(1)), name))
-        elif allow_other_suffixes and not name[len(prefix) :].isdigit():
+        elif allow_other_suffixes and not name[len(prefix) :][:1].isdigit():
             others.append(name)
     if versioned:
         return max(versioned)[1]
