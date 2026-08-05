@@ -309,3 +309,63 @@ async def test_quitting_the_app_stops_the_worker(profile_copy, fake_stream):
         f"worker kept pulling the stream after the app quit: {fake_stream.produced}"
     )
     assert let_go, f"worker never let go of the stream; it pulled {fake_stream.produced}"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_worker_with_no_worker_handle_stops_at_the_stream_loop(
+    profile_copy, fake_stream
+):
+    """The generation half of ``cancelled()``, which nothing else observes.
+
+    ``cancelled()`` tests ``worker.is_cancelled or gen != self._generation_id``.
+    The first half is what every production path trips, so removing the second
+    alone leaves the rest of this file green — it is only load-bearing where
+    ``get_current_worker()`` raises ``NoActiveWorker`` and ``worker`` is None,
+    which is the undecorated body running on a plain thread.
+
+    ``test_stale_worker_early_return_leaves_the_live_turn_alone`` already runs
+    it that way, but returns before the stream loop, so it never reaches
+    ``cancelled()`` at all. This one gets past the early returns with a working
+    fake model and a real stream, so the loop runs with the generation as its
+    only guard.
+
+    Asserted on what the generator *produced*, not on what reached the UI: the
+    point is that the worker stopped pulling the stream — and so released the
+    profile connection — rather than merely having its writes dropped.
+    """
+    from nsys_ai.tui_textual import NsysChatApp
+
+    app = NsysChatApp(profile_copy)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        # Turn A was handed generation 1; the app has since moved on to 3.
+        # Seed the history the worker snapshots: _GatedStream labels its chunks
+        # from messages[-1], and this test drives the body directly rather than
+        # through on_input_submitted, which is what normally appends it.
+        app._chat_messages.append({"role": "user", "content": "A"})
+        app._generation_id = 3
+        app._is_generating = True
+
+        raw = NsysChatApp._run_stream_worker.__wrapped__
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                raw(app, "A", 1)
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        fake_stream.gate("A").set()
+        thread.join(timeout=10)
+        await pilot.pause()
+
+    assert not thread.is_alive(), "the stale worker never finished"
+    assert not errors, f"the stale worker raised: {errors}"
+
+    produced = [c for c in fake_stream.produced if c.startswith("<A")]
+    assert produced == ["<A0>"], (
+        f"a stale worker kept pulling the stream: produced {produced}. Only the "
+        "first chunk is unavoidable — the loop checks cancelled() after it."
+    )

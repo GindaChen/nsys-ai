@@ -22,12 +22,27 @@ Threading:
 
     Each turn also carries a _generation_id, and every worker-to-UI hop goes
     via _ui_call, which drops the call if the turn it belongs to is no longer
-    the live one. The two guards do not subsume each other: quitting cancels
-    the worker without bumping the id, and the early-return paths below never
-    reach the stream loop that consults is_cancelled. _ui_call is also defence
-    in depth against a window is_cancelled does not close by construction — a
-    callback already handed to call_from_thread when the cancel lands still
-    runs on the main thread — for which we have no deterministic test.
+    the live one. Which guard covers which path is worth stating exactly,
+    because the short version gets it wrong:
+
+    - is_cancelled is what the stream loop needs. Quitting cancels the worker
+      without bumping the generation, so nothing else stops that case;
+      removing it leaves test_quitting_the_app_stops_the_worker red.
+    - _generation_id is what the early-return paths need. They return before
+      reaching the loop that consults is_cancelled, so their only guard is the
+      one inside _ui_call; removing it leaves
+      test_stale_worker_early_return_leaves_the_live_turn_alone red.
+    - cancelled() tests both, and its generation half earns its place only
+      where get_current_worker() raises NoActiveWorker and `worker` is None:
+      every production path that bumps the id also cancels the worker, so
+      is_cancelled covers the loop by itself there. Pinned by
+      test_a_stale_worker_with_no_worker_handle_stops_at_the_stream_loop —
+      before that test existed, removing this half left the whole suite green.
+
+    _ui_call is also defence in depth against a window is_cancelled does not
+    close by construction — a callback already handed to call_from_thread when
+    the cancel lands still runs on the main thread — for which we have no
+    deterministic test.
 """
 
 from __future__ import annotations
