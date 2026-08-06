@@ -80,17 +80,15 @@ def test_launch_overhead_sweep_is_total():
     assert "ORDER BY k.start, k.[end], k.correlationId, r.start, r.[end]" in src
 
 
-def test_kernel_launch_overhead_orders_the_fanned_out_runtime_side():
-    """Same defect, same cause, in the skill that reports per-launch overhead.
-
-    Its join is on correlationId too, so the runtime columns are required for
-    the order to be total.
-    """
+def test_kernel_launch_overhead_has_total_aggregate_and_match_order():
+    """Aggregate ties and multiple runtime candidates need stable winners."""
     skill = (
         Path(__file__).resolve().parent.parent
         / "src/nsys_ai/skills/builtins/kernel_launch_overhead.py"
     ).read_text()
-    assert "r.start ASC, r.[end] ASC" in skill
+    assert "s_kernel.value ASC" in skill
+    assert "l.device_id ASC" in skill
+    assert "r.global_tid ASC" in skill
 
 
 def test_iteration_extraction_prefers_the_enclosing_range():

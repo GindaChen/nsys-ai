@@ -134,11 +134,11 @@ def test_a_second_reader_does_not_share_rows_with_the_first():
 def test_sql_only_skills_are_cached_too():
     """The store used to sit inside the execute_fn branch only.
 
-    The five SQL-only skills therefore built a cache key and then took a
-    guaranteed miss on every call — paying the cost without the benefit.
-    `root_cause_matcher` runs one of them, and `Agent.analyze()` runs all five.
+    SQL-only skills therefore built a cache key and then took a guaranteed miss
+    on every call, paying the cost without the benefit. Keep one registered
+    SQL-only skill pinned here as skills move between execution paths.
     """
-    skill = get_skill("kernel_launch_overhead")
+    skill = get_skill("stream_concurrency")
     assert skill.execute_fn is None, "this skill is no longer SQL-only; pick another"
     conn = sqlite3.connect(FIXTURE)
     try:
@@ -149,7 +149,7 @@ def test_sql_only_skills_are_cached_too():
             k
             for bag in connection._sqlite_probe_bags.values()
             for k in bag
-            if k.startswith("skill:kernel_launch_overhead")
+            if k.startswith("skill:stream_concurrency")
         ]
     finally:
         conn.close()
@@ -222,6 +222,9 @@ def test_the_build_executes_fewer_skills_without_changing_findings(profile):
     # the skill does not declare and does not read (`communicator_data` is
     # forwarded through `root_cause_matcher`), so three of the remaining
     # executions are semantically identical calls the memo fails to absorb.
-    # Narrowing the key to declared parameters would take this to 18; that is a
-    # separate change with its own correctness surface.
-    assert total <= 21, f"{total} skill executions — duplicates came back: {dict(counts)}"
+    # kernel_launch_overhead is now independently enrolled in the evidence
+    # pipeline, adding one distinct execution rather than a duplicate. Narrowing
+    # the key to declared parameters would take this to 19; that is a separate
+    # change with its own correctness surface.
+    assert counts["kernel_launch_overhead"] == 1
+    assert total <= 22, f"{total} skill executions — duplicates came back: {dict(counts)}"

@@ -70,6 +70,24 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
     return kwargs
 
 
+def _small_kernel_launch_summary(rows: list[dict]) -> tuple[int, int]:
+    """Return (launch occurrences, kernel types) below the 10us threshold."""
+    qualifying = []
+    for row in rows:
+        launch_count = int(row.get("launch_count", 0) or 0)
+        if launch_count <= 0:
+            continue
+        if "avg_kernel_us" in row:
+            avg_kernel_us = float(row.get("avg_kernel_us", 0) or 0)
+        else:
+            avg_kernel_us = (
+                float(row.get("total_kernel_ms", 0) or 0) * 1000.0 / launch_count
+            )
+        if avg_kernel_us < 10.0:
+            qualifying.append(row)
+    return sum(int(row.get("launch_count", 0) or 0) for row in qualifying), len(qualifying)
+
+
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Run all pattern matchers against the profile."""
     findings = []
@@ -333,22 +351,23 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 )
 
     # --- Small Kernel Overhead ---
+    # kernel_launch_overhead now returns one aggregate per kernel name. Count
+    # launch occurrences, not aggregate rows: one tiny kernel launched many
+    # times is the same signal the former per-launch result represented.
     if launch_data:
-        # overhead_us > kernel_ms*1000 means overhead > kernel duration
-        high_overhead = [
-            e
-            for e in launch_data
-            if e.get("kernel_ms", 0) > 0 and e.get("overhead_us", 0) > e["kernel_ms"] * 1000
-        ]
-        if len(high_overhead) >= 5:
+        small_launches, small_kernel_types = _small_kernel_launch_summary(launch_data)
+        if small_launches >= 5:
             findings.append(
                 {
                     "pattern": "Small Kernel Overhead",
                     "severity": "warning",
-                    "evidence": f"{len(high_overhead)} kernels with launch overhead > kernel duration",
+                    "evidence": (
+                        f"{small_launches} launches across {small_kernel_types} "
+                        "kernel type(s) averaging <10us"
+                    ),
                     "recommendation": (
-                        "Use torch.compile() to fuse element-wise ops, "
-                        "enable cudnn.benchmark, or use CUDA graphs."
+                        "Use torch.compile() or a fused Triton/CUDA kernel to "
+                        "combine repeated small operations, or use CUDA graphs."
                     ),
                 }
             )
