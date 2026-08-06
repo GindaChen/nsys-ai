@@ -1,0 +1,390 @@
+import json
+import os
+import stat
+import threading
+import time
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
+import pytest
+
+from nsys_ai.profile_runner import (
+    LocalProfileRunner,
+    RunProgress,
+    RunStage,
+    RunStatus,
+)
+from nsys_ai.runspec import EnvironmentSpec, RunSpec, RunSpecError
+
+_FAKE_NSYS = r'''#!/usr/bin/env python3
+import json
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def value_after(flag):
+    index = sys.argv.index(flag)
+    return sys.argv[index + 1]
+
+
+def make_sqlite(path, with_kernel=True):
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE META_DATA_EXPORT (name TEXT, value TEXT);
+            INSERT INTO META_DATA_EXPORT VALUES
+                ('EXPORT_PRODUCT_NAME', 'NVIDIA Nsight Systems'),
+                ('EXPORT_PRODUCT_VERSION', '2026.2.1.106'),
+                ('EXPORT_SCHEMA_VERSION', '3.25.0');
+            CREATE TABLE TARGET_INFO_GPU (id INTEGER, name TEXT);
+            INSERT INTO TARGET_INFO_GPU VALUES (0, 'Fake GPU');
+            CREATE TABLE StringIds (id INTEGER, value TEXT);
+            INSERT INTO StringIds VALUES (1, 'fake_kernel');
+            CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+                deviceId INTEGER, streamId INTEGER, start INTEGER, end INTEGER,
+                shortName INTEGER, demangledName INTEGER, correlationId INTEGER
+            );
+        """)
+        if with_kernel:
+            conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (0, 7, 10, 20, 1, 1, 1)")
+
+
+if sys.argv[1] == 'profile':
+    output = Path(value_after('-o'))
+    mode_arg = next((arg for arg in sys.argv if arg.startswith('--fake-mode=')), '')
+    mode = mode_arg.partition('=')[2] or 'valid'
+    print(json.dumps(sys.argv), flush=True)
+
+    if mode == 'hang':
+        child = subprocess.Popen([
+            sys.executable,
+            '-c',
+            'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)',
+        ])
+        output.with_suffix('.child.pid').write_text(str(child.pid))
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            time.sleep(1)
+    if mode == 'env':
+        ok = (
+            os.environ.get('VISIBLE_SETTING') == 'enabled'
+            and os.environ.get('RUNNER_SECRET') == 'private-value'
+            and os.environ.get('INHERITED_SETTING') == 'inherited'
+        )
+        if not ok:
+            sys.exit(21)
+    if mode == 'clean_env':
+        ok = (
+            os.environ.get('VISIBLE_SETTING') == 'enabled'
+            and 'INHERITED_SETTING' not in os.environ
+        )
+        if not ok:
+            sys.exit(22)
+    if mode == 'large_logs':
+        sys.stdout.write('o' * (2 * 1024 * 1024))
+        sys.stderr.write('e' * (2 * 1024 * 1024))
+    if mode in {'missing_report', 'nonzero_without_report'}:
+        sys.exit(17 if mode == 'nonzero_without_report' else 0)
+
+    report = output.with_suffix('.nsys-rep')
+    if mode == 'empty_report':
+        report.touch()
+    else:
+        report.write_text(mode)
+    if mode == 'nonzero_with_report':
+        sys.exit(19)
+    sys.exit(0)
+
+if sys.argv[1] == 'export':
+    output = Path(value_after('-o'))
+    report = Path(sys.argv[-1])
+    mode = report.read_text()
+    if mode == 'export_failed':
+        print('intentional export failure', file=sys.stderr)
+        sys.exit(23)
+    if mode == 'invalid':
+        output.write_bytes(b'not a sqlite database')
+    else:
+        make_sqlite(output, with_kernel=mode != 'empty_profile')
+    sys.exit(0)
+
+sys.exit(99)
+'''
+
+
+@pytest.fixture
+def fake_nsys(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = bin_dir / "nsys"
+    executable.write_text(_FAKE_NSYS)
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return executable
+
+
+def _spec(mode="valid", **overrides):
+    values = {
+        "argv": ("/usr/bin/true", f"--fake-mode={mode}"),
+        "environment": EnvironmentSpec(),
+    }
+    values.update(overrides)
+    return RunSpec(**values)
+
+
+def _run(tmp_path, fake_nsys, mode="valid", **spec_overrides):
+    runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
+    return runner.run(_spec(mode, **spec_overrides))
+
+
+def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
+    stages = []
+    runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
+    result = runner.run(_spec(), lambda update: stages.append(update))
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.nsys_return_code == 0
+    assert result.application_return_code is None
+    assert result.profile is not None
+    assert result.profile.kernel_count == 1
+    assert result.profile.profile_id.startswith("nsys1:sha256:")
+    assert result.profile.schema_version == "3.25.0"
+    assert result.profile.product_version == "2026.2.1.106"
+    assert Path(result.report_path).is_file()
+    assert Path(result.sqlite_path).is_file()
+    assert RunSpec.from_json_bytes(Path(result.runspec_path).read_bytes()) == _spec()
+    assert [update.stage for update in stages] == [
+        RunStage.PREPARING,
+        RunStage.CAPTURING,
+        RunStage.EXPORTING,
+        RunStage.VALIDATING,
+        RunStage.FINISHED,
+    ]
+    with pytest.raises(FrozenInstanceError):
+        stages[0].stage = RunStage.FINISHED
+    with pytest.raises(FrozenInstanceError):
+        result.status = RunStatus.NSYS_FAILED
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("missing_report", RunStatus.NSYS_FAILED),
+        ("nonzero_without_report", RunStatus.NSYS_FAILED),
+        ("nonzero_with_report", RunStatus.APPLICATION_FAILED),
+        ("empty_report", RunStatus.INVALID_PROFILE),
+        ("export_failed", RunStatus.EXPORT_FAILED),
+        ("invalid", RunStatus.INVALID_PROFILE),
+        ("empty_profile", RunStatus.INVALID_PROFILE),
+    ],
+)
+def test_capture_export_and_validation_failures_are_distinct(
+    tmp_path, fake_nsys, mode, expected
+):
+    result = _run(tmp_path, fake_nsys, mode)
+
+    assert result.status is expected
+    if mode == "nonzero_with_report":
+        assert result.nsys_return_code == 19
+        assert result.application_return_code is None
+        assert "inferred" in result.detail
+
+
+def test_launch_failure_is_returned_with_file_backed_logs(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    result = LocalProfileRunner(
+        tmp_path / "artifacts", "/definitely/missing/nsys"
+    ).run(_spec())
+
+    assert result.status is RunStatus.LAUNCH_FAILED
+    assert result.nsys_return_code is None
+    assert Path(result.runspec_path).is_file()
+    assert Path(result.stdout_path).is_file()
+    assert Path(result.stderr_path).is_file()
+
+
+def test_existing_artifact_directory_is_rejected_without_using_stale_report(
+    tmp_path, fake_nsys
+):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    stale_report = artifact_dir / "profile.nsys-rep"
+    stale_report.write_text("valid")
+
+    result = LocalProfileRunner(artifact_dir, str(fake_nsys)).run(
+        _spec("nonzero_with_report")
+    )
+
+    assert result.status is RunStatus.LAUNCH_FAILED
+    assert result.nsys_return_code is None
+    assert stale_report.read_text() == "valid"
+
+
+def test_already_cancelled_run_has_no_launch_or_artifact_side_effects(
+    tmp_path, fake_nsys
+):
+    cancellation = threading.Event()
+    cancellation.set()
+    artifact_dir = tmp_path / "artifacts"
+
+    result = LocalProfileRunner(artifact_dir, str(fake_nsys)).run(
+        _spec(), cancellation=cancellation
+    )
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.nsys_return_code is None
+    assert not artifact_dir.exists()
+
+
+def test_relative_executable_is_resolved_before_switching_to_spec_cwd(
+    tmp_path, monkeypatch
+):
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    executable = tools_dir / "nsys"
+    executable.write_text(_FAKE_NSYS)
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    workload_dir = tmp_path / "workload"
+    workload_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    result = LocalProfileRunner(
+        tmp_path / "artifacts", "./tools/nsys"
+    ).run(_spec(cwd=str(workload_dir)))
+
+    assert result.status is RunStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("bad_location", ["argv", "public", "missing"])
+def test_secret_preflight_has_zero_filesystem_side_effects(
+    tmp_path, fake_nsys, monkeypatch, bad_location
+):
+    secret = "private-value"
+    if bad_location != "missing":
+        monkeypatch.setenv("RUNNER_SECRET", secret)
+    argv = (
+        ("/usr/bin/true", f"--token={secret}")
+        if bad_location == "argv"
+        else ("/usr/bin/true", "--fake-mode=valid")
+    )
+    public = {"ENDPOINT": f"https://example.test/{secret}"} if bad_location == "public" else {}
+    spec = RunSpec(
+        argv=argv,
+        environment=EnvironmentSpec(public=public, secrets=("RUNNER_SECRET",)),
+    )
+    artifact_dir = tmp_path / "artifacts"
+
+    with pytest.raises(RunSpecError) as exc_info:
+        LocalProfileRunner(artifact_dir, str(fake_nsys)).run(spec)
+
+    assert secret not in str(exc_info.value)
+    assert not artifact_dir.exists()
+
+
+def test_invalid_runner_inputs_have_zero_filesystem_side_effects(tmp_path, fake_nsys):
+    artifact_dir = tmp_path / "artifacts"
+    runner = LocalProfileRunner(artifact_dir, str(fake_nsys))
+
+    with pytest.raises(RunSpecError, match="spec must be"):
+        runner.run("not-a-spec")
+    with pytest.raises(RunSpecError, match="progress_callback"):
+        runner.run(_spec(), progress_callback="not-callable")
+    with pytest.raises(RunSpecError, match="cancellation"):
+        runner.run(_spec(), cancellation=object())
+
+    assert not artifact_dir.exists()
+
+
+@pytest.mark.parametrize(("policy", "mode"), [("inherit", "env"), ("clean", "clean_env")])
+def test_environment_policy_public_values_and_declared_secrets(
+    tmp_path, fake_nsys, monkeypatch, policy, mode
+):
+    monkeypatch.setenv("INHERITED_SETTING", "inherited")
+    monkeypatch.setenv("RUNNER_SECRET", "private-value")
+    environment = EnvironmentSpec(
+        policy=policy,
+        public={"VISIBLE_SETTING": "enabled"},
+        secrets=("RUNNER_SECRET",) if policy == "inherit" else (),
+    )
+
+    result = _run(tmp_path, fake_nsys, mode, environment=environment)
+
+    assert result.status is RunStatus.SUCCEEDED
+    persisted = Path(result.runspec_path).read_text()
+    logs = Path(result.stdout_path).read_text() + Path(result.stderr_path).read_text()
+    assert "private-value" not in persisted
+    assert "private-value" not in logs
+
+
+def test_workload_argv_tokens_are_preserved_without_shell_parsing(tmp_path, fake_nsys):
+    tokens = ("value with spaces", "$(not-run)", "semi;colon", "--flag=literal")
+    spec = RunSpec(argv=("/usr/bin/true", "--fake-mode=valid", *tokens))
+
+    result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(spec)
+
+    assert result.status is RunStatus.SUCCEEDED
+    captured_argv = json.loads(Path(result.stdout_path).read_text().splitlines()[0])
+    assert captured_argv[-len(tokens) :] == list(tokens)
+
+
+def test_large_stdout_and_stderr_do_not_deadlock_or_buffer_in_memory(tmp_path, fake_nsys):
+    result = _run(tmp_path, fake_nsys, "large_logs")
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert Path(result.stdout_path).stat().st_size > 2 * 1024 * 1024
+    assert Path(result.stderr_path).stat().st_size == 2 * 1024 * 1024
+
+
+def test_unexpected_validation_bug_is_not_relabelled_as_invalid_profile(
+    tmp_path, fake_nsys, monkeypatch
+):
+    def fail_identity(*args, **kwargs):
+        raise RuntimeError("identity implementation bug")
+
+    monkeypatch.setattr("nsys_ai.profile_runner.get_profile_id", fail_identity)
+
+    with pytest.raises(RuntimeError, match="identity implementation bug"):
+        _run(tmp_path, fake_nsys)
+
+
+def _process_is_running(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != "Z"
+
+
+@pytest.mark.parametrize("stop_kind", ["timeout", "cancel"])
+def test_timeout_and_cancellation_kill_the_process_tree(
+    tmp_path, fake_nsys, monkeypatch, stop_kind
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.15)
+    cancellation = threading.Event()
+    timeout = 1 if stop_kind == "timeout" else None
+    if stop_kind == "cancel":
+        threading.Timer(0.15, cancellation.set).start()
+    runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
+
+    result = runner.run(
+        _spec("hang", timeout_seconds=timeout),
+        cancellation=cancellation,
+    )
+
+    expected = RunStatus.TIMED_OUT if stop_kind == "timeout" else RunStatus.CANCELLED
+    assert result.status is expected
+    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(child_pid)
+
+
+def test_progress_model_is_frozen():
+    progress = RunProgress(RunStage.CAPTURING, 1.0)
+    with pytest.raises(FrozenInstanceError):
+        progress.elapsed_seconds = 2.0

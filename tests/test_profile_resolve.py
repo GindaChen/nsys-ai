@@ -138,6 +138,28 @@ def test_resolve_nsys_rep_success(monkeypatch, tmp_path: Path):
     assert str(rep) in args
 
 
+def test_resolve_nsys_rep_uses_selected_executable(monkeypatch, tmp_path: Path):
+    selected = "/opt/custom/nsys"
+    which_calls = []
+    monkeypatch.setattr(
+        profile_mod.shutil,
+        "which",
+        lambda name: which_calls.append(name) or selected,
+    )
+
+    def fake_run(args, **kwargs):
+        Path(args[args.index("-o") + 1]).write_bytes(b"x")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
+    rep = tmp_path / "selected.nsys-rep"
+    rep.write_bytes(b"report")
+
+    profile_mod.resolve_profile_path(str(rep), nsys_executable=selected)
+
+    assert which_calls == [selected]
+
+
 def test_resolve_nsys_rep_parquetdir_success(monkeypatch, tmp_path: Path):
     calls = {}
     monkeypatch.setattr(profile_mod.shutil, "which", lambda name: "/opt/nsys")
