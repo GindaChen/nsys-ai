@@ -187,10 +187,13 @@ def test_sqlite_fallback_connection_is_thread_affine(profile_copy, monkeypatch):
     """
     from nsys_ai import parquet_cache
 
-    def no_cache(_path):
+    def no_duckdb(_path):
         raise RuntimeError("forced fallback")
 
-    monkeypatch.setattr(parquet_cache, "open_cached_db", no_cache)
+    # Both DuckDB tiers must fail to reach raw sqlite3 — the middle tier
+    # (open_direct_sqlite) is what a failed cache build recovers through.
+    monkeypatch.setattr(parquet_cache, "open_cached_db", no_duckdb)
+    monkeypatch.setattr(parquet_cache, "open_direct_sqlite", no_duckdb)
 
     conn = chat_mod.open_profile_readonly(profile_copy)
     try:

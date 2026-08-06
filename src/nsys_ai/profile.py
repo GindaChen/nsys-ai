@@ -340,45 +340,32 @@ class Profile:
         else:
             self.conn = sqlite3.connect(path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
-            try:
-                if cache_mode == "direct":
-                    # Force direct SQLite via DuckDB — zero ETL, instant startup
-                    self.db = parquet_cache.open_direct_sqlite(path)
-                elif cache_mode == "parquet":
-                    # Original behaviour: block until cache is built.
-                    # env_escape=False: this branch never reads
-                    # NSYS_AI_CACHE_MODE, so the build banner must not tell the
-                    # user to set it — on this path it does nothing. It names
-                    # cache_mode="direct" instead, which is the way out here.
-                    self.db = parquet_cache.open_cached_db(path, env_escape=False)
-                else:
-                    # auto: cache when one can be had, direct SQLite when it
-                    # cannot. The policy (and the measurements behind it) lives
-                    # in parquet_cache.open_auto_db, because `skill run` and
-                    # open_profile_readonly reach it without a Profile.
-                    self.db = parquet_cache.open_auto_db(path)
-            except Exception as e:
-                self.cache_error = e
-                # Losing the Parquet cache must not cost the DuckDB engine.
-                # The raw-sqlite3 fallback below is a third tier, not a
-                # synonym for this one: on it the `kernels` view and its
-                # tensor-core flags do not exist, so tensor_core_usage fails
-                # outright rather than running slower, and a 92.7MB profile
-                # queries in 8.15s against 5.62s on the direct attach.
-                try:
-                    self.db = parquet_cache.open_direct_sqlite(path)
-                    self._log.warning(
-                        "Parquet cache unavailable (%s); querying the SQLite export directly "
-                        "through DuckDB.",
-                        e,
-                    )
-                except Exception as direct_err:
-                    self._log.warning(
-                        "DuckDB unavailable (cache: %s; direct: %s), falling back to sqlite3.",
-                        e,
-                        direct_err,
-                    )
-                    self.db = None  # type: ignore[assignment]
+            # Three-tier open (cache / direct attach / raw sqlite3) lives in
+            # parquet_cache.open_with_direct_fallback — also used by
+            # open_profile_readonly and skill run, so a failed build cannot
+            # drop only some entry points onto raw sqlite3 (issue #333).
+            if cache_mode == "direct":
+                # Force direct SQLite via DuckDB — zero ETL, instant startup
+                primary = parquet_cache.open_direct_sqlite
+            elif cache_mode == "parquet":
+                # Original behaviour: block until cache is built.
+                # env_escape=False: this branch never reads
+                # NSYS_AI_CACHE_MODE, so the build banner must not tell the
+                # user to set it — on this path it does nothing. It names
+                # cache_mode="direct" instead, which is the way out here.
+                primary = functools.partial(parquet_cache.open_cached_db, env_escape=False)
+            else:
+                # auto: cache when one can be had, direct SQLite when it
+                # cannot. The policy (and the measurements behind it) lives
+                # in parquet_cache.open_auto_db, because `skill run` and
+                # open_profile_readonly reach it without a Profile.
+                primary = parquet_cache.open_auto_db
+            self.db, err = parquet_cache.open_with_direct_fallback(
+                path, primary, log=self._log
+            )
+            if err is not None:
+                self.cache_error = err
+            # self.db is None → keep self.conn (raw sqlite3); already opened above
         from .connection import wrap_connection
 
         self.adapter = wrap_connection(self.db if self.db is not None else self.conn)

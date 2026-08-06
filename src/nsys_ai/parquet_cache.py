@@ -1115,6 +1115,53 @@ def open_auto_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     return open_cached_db(sqlite_path)
 
 
+def open_with_direct_fallback(
+    sqlite_path: str,
+    primary,
+    *,
+    log: logging.Logger | None = None,
+) -> tuple[duckdb.DuckDBPyConnection | None, BaseException | None]:
+    """Open via ``primary``, then ``open_direct_sqlite``, then give up.
+
+    Shared three-tier policy used by ``Profile.__init__``,
+    ``open_profile_readonly`` (chat / region_mfu), and ``skill run``. Losing
+    the Parquet cache must not cost the DuckDB engine: a failed primary open
+    falls back to a direct SQLite attach (enriched ``kernels`` view intact)
+    and reaches raw ``sqlite3`` only when that fails too.
+
+    Returns ``(conn, primary_error)``:
+      - primary succeeded → ``(duckdb_conn, None)``
+      - primary failed, direct attach recovered → ``(duckdb_conn, primary_error)``
+      - both DuckDB paths failed → ``(None, primary_error)``; caller opens
+        raw ``sqlite3`` (read-only or not is the caller's choice)
+
+    ``ProfileNotFoundError`` is re-raised: a missing file cannot be salvaged.
+    ``open_direct_sqlite`` attaches ``READ_ONLY``, so the middle tier stays
+    compatible with read-only callers.
+    """
+    _log = log if log is not None else logging.getLogger(__name__)
+    try:
+        return primary(sqlite_path), None
+    except ProfileNotFoundError:
+        raise
+    except Exception as e:
+        try:
+            db = open_direct_sqlite(sqlite_path)
+            _log.warning(
+                "Parquet cache unavailable (%s); querying the SQLite export directly "
+                "through DuckDB.",
+                e,
+            )
+            return db, e
+        except Exception as direct_err:
+            _log.warning(
+                "DuckDB unavailable (cache: %s; direct: %s), falling back to sqlite3.",
+                e,
+                direct_err,
+            )
+            return None, e
+
+
 def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection over an Nsight `parquetdir` export."""
     parquet_dir = Path(parquetdir_path)

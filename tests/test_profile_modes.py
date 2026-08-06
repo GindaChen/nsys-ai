@@ -198,6 +198,70 @@ def test_failed_cache_build_falls_back_to_duckdb_not_sqlite3(minimal_nsys_db_pat
             prof.db.execute("SELECT is_tc_eligible, uses_tc FROM kernels LIMIT 1").fetchall()
 
 
+def test_open_profile_readonly_failed_cache_keeps_duckdb_kernels(
+    minimal_nsys_db_path, tmp_path
+):
+    """chat / region_mfu must keep DuckDB when a cache build fails.
+
+    Profile already recovers via open_direct_sqlite. open_profile_readonly used
+    to drop straight to raw sqlite3 on the same failure, which loses the
+    enriched kernels view (``no such table: kernels``) and makes
+    tensor_core_usage fail outright. Force the cache open to raise, then
+    assert the handle is DuckDB and that kernels resolves.
+    """
+    import sqlite3
+
+    import duckdb
+
+    from nsys_ai.ai.backend.profile_db_tool import open_profile_readonly
+
+    db_path = _copy_fixture(minimal_nsys_db_path, tmp_path / "readonly_buildfail.sqlite")
+
+    def _boom(_path):
+        raise RuntimeError("simulated build failure")
+
+    with mock.patch("nsys_ai.parquet_cache.open_cached_db", side_effect=_boom):
+        conn = open_profile_readonly(str(db_path))
+    try:
+        assert not isinstance(conn, sqlite3.Connection), (
+            "open_profile_readonly fell to raw sqlite3 after a cache build failure"
+        )
+        assert isinstance(conn, duckdb.DuckDBPyConnection)
+        conn.execute("SELECT is_tc_eligible, uses_tc FROM kernels LIMIT 1").fetchall()
+    finally:
+        conn.close()
+
+
+def test_skill_run_open_failed_cache_keeps_duckdb_kernels(minimal_nsys_db_path, tmp_path):
+    """skill run uses the same three-tier chain as Profile.
+
+    Mirrors the handler's open: open_with_direct_fallback(path, open_auto_db).
+    A test that only checked 'no exception' would have passed before the fix.
+    """
+    import sqlite3
+
+    import duckdb
+
+    from nsys_ai.parquet_cache import open_auto_db, open_with_direct_fallback
+
+    db_path = _copy_fixture(minimal_nsys_db_path, tmp_path / "skillrun_buildfail.sqlite")
+
+    def _boom(_path):
+        raise RuntimeError("simulated build failure")
+
+    with mock.patch("nsys_ai.parquet_cache.open_cached_db", side_effect=_boom):
+        conn, err = open_with_direct_fallback(str(db_path), open_auto_db)
+    try:
+        assert err is not None
+        assert conn is not None, "skill-run open path returned None (raw sqlite3 tier)"
+        assert not isinstance(conn, sqlite3.Connection)
+        assert isinstance(conn, duckdb.DuckDBPyConnection)
+        conn.execute("SELECT is_tc_eligible, uses_tc FROM kernels LIMIT 1").fetchall()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def test_cache_mode_auto_env_override_direct(minimal_nsys_db_path, tmp_path, monkeypatch):
     """The escape hatch for the entry points that expose no cache flag."""
     db_path = _copy_fixture(minimal_nsys_db_path, tmp_path / "auto_env.sqlite")
@@ -344,7 +408,8 @@ def test_the_batch_audit_script_opens_the_same_way_skill_run_does():
     `open_auto_db` the script kept calling `open_cached_db`, so it silently
     ignored NSYS_AI_CACHE_MODE and built caches on profiles the CLI would have
     read in place — an audit of a path the CLI no longer takes, under a
-    docstring asserting the opposite.
+    docstring asserting the opposite. Both now share
+    `open_with_direct_fallback` so a failed build keeps DuckDB too.
 
     This is the fourth time in this file's neighbourhood that prose one level
     up from a change survived it and became false (#321, #325, #317). A grep
@@ -357,12 +422,13 @@ def test_the_batch_audit_script_opens_the_same_way_skill_run_does():
 
     # What `skill run` actually calls, read from the handler rather than
     # assumed, so this test tracks the CLI instead of restating it.
-    assert "open_auto_db(args.profile)" in handlers, (
-        "`skill run` no longer calls open_auto_db — update this test and the "
-        "batch audit script together, they are supposed to agree"
+    assert "open_with_direct_fallback(args.profile, primary)" in handlers, (
+        "`skill run` no longer uses open_with_direct_fallback — update this "
+        "test and the batch audit script together, they are supposed to agree"
     )
+    assert "open_auto_db" in handlers and "open_direct_sqlite if no_cache else open_auto_db" in handlers
 
-    assert "return open_auto_db(profile_path)" in script, (
+    assert "open_with_direct_fallback(profile_path, open_auto_db)" in script, (
         "batch_audit_skills.py does not open the way `skill run` does; its "
         "docstring claims it does, and NSYS_AI_CACHE_MODE does not reach it"
     )

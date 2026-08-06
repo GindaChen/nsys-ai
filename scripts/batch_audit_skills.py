@@ -2,10 +2,11 @@
 # ruff: noqa: E501
 """Run all built-in skills once against an Nsight profile (single DB connection).
 
-Uses the same ``open_auto_db()`` path as ``nsys-ai skill run`` (cache when one can
-be written, direct DuckDB-over-SQLite when it cannot, raw ``sqlite3`` only if both
-fail), so ``NSYS_AI_CACHE_MODE`` reaches this script exactly as it reaches the CLI.
-Writes per-skill JSON, logs, and ``_batch_summary.json``.
+Uses the same ``open_with_direct_fallback(open_auto_db)`` path as
+``nsys-ai skill run`` (cache when one can be written, direct DuckDB-over-SQLite
+when the build fails or cannot be afforded, raw ``sqlite3`` only if both DuckDB
+paths fail), so ``NSYS_AI_CACHE_MODE`` reaches this script exactly as it reaches
+the CLI. Writes per-skill JSON, logs, and ``_batch_summary.json``.
 
 Usage: python scripts/batch_audit_skills.py <profile.sqlite> [output_dir]
 
@@ -50,24 +51,21 @@ PRIORITY_FIRST = [
 
 
 def _open_skill_connection(profile_path: str):
-    """Match ``nsys-ai skill run`` connection setup (auto cache policy, else SQLite).
+    """Match ``nsys-ai skill run`` connection setup (three-tier auto policy).
 
-    ``open_auto_db``, not ``open_cached_db``: the handler behind ``skill run``
-    switched to the former in #317, and this script exists to reproduce what that
-    subcommand does. Calling the builder directly would silently ignore
-    ``NSYS_AI_CACHE_MODE`` and build a cache on profiles the CLI would have read
-    in place — an audit run that no longer audits the shipped path.
+    Same chain as the handler: ``open_auto_db`` → ``open_direct_sqlite`` → raw
+    ``sqlite3``, via ``open_with_direct_fallback``. Calling ``open_cached_db``
+    directly would silently ignore ``NSYS_AI_CACHE_MODE``; dropping straight to
+    raw ``sqlite3`` on a failed build would lose the enriched ``kernels`` view.
     """
     try:
-        import duckdb
-
-        from nsys_ai.parquet_cache import open_auto_db
+        from nsys_ai.parquet_cache import open_auto_db, open_with_direct_fallback
     except ImportError:
         return sqlite3.connect(profile_path)
-    try:
-        return open_auto_db(profile_path)
-    except (duckdb.Error, RuntimeError, OSError):
+    conn, _err = open_with_direct_fallback(profile_path, open_auto_db)
+    if conn is None:
         return sqlite3.connect(profile_path)
+    return conn
 
 
 def main() -> int:
