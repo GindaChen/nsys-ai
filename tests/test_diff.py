@@ -1234,6 +1234,7 @@ def test_diff_tools_run_diff_tool_and_openai_tools(tmp_path):
     prompt = build_diff_system_prompt(ctx, "/before.sqlite", "/after.sqlite", snapshot=None)
     assert "Before profile:" in prompt and "After profile:" in prompt
     assert "/before.sqlite" in prompt and "/after.sqlite" in prompt
+    assert "cannot answer" in prompt
 
 
 def test_diff_tools_global_diff_payload_includes_selection(tmp_path):

@@ -209,6 +209,7 @@ def test_agent_does_not_cite_an_abstention_as_a_measurement():
         lines = agent._evidence_lines(
             {
                 "nvtx_kernel_map": [{"_abstained": True, "reason": "no NVTX here"}],
+                "kernel_overlap_matrix": [{"error": "kernel query failed"}],
                 "top_kernels": [{"kernel_name": "gemm", "total_ms": 12.3}],
             }
         )
@@ -220,6 +221,10 @@ def test_agent_does_not_cite_an_abstention_as_a_measurement():
     assert "unavailable:" in abstained[0]
     assert "no NVTX here" in abstained[0]
     assert "metric=" not in abstained[0], "an absence was rendered as a measurement"
+
+    failed = [ln for ln in lines if "kernel_overlap_matrix" in ln]
+    assert failed and "unavailable: kernel query failed" in failed[0]
+    assert "metric=" not in failed[0]
 
     # Real evidence is unaffected.
     real = [ln for ln in lines if "top_kernels" in ln]
@@ -273,12 +278,16 @@ def test_an_unavailable_skill_does_not_raise_the_answers_confidence():
         only_abstentions = agent._confidence_label(
             {"nvtx_kernel_map": [{"_abstained": True, "reason": "x"}]}, None
         )
+        only_errors = agent._confidence_label(
+            {"kernel_overlap_matrix": [{"error": "query failed"}]}, None
+        )
         real = agent._confidence_label({"top_kernels": [{"kernel_name": "g"}]}, None)
     finally:
         agent.close()
 
     assert only_abstentions.startswith("0.20"), only_abstentions
     assert "no skill returned usable evidence" in only_abstentions
+    assert only_errors.startswith("0.20"), only_errors
     # Real evidence still scores higher, so the guard is not a blanket downgrade.
     assert real.startswith("0.60")
 
@@ -299,11 +308,42 @@ def test_verify_command_never_points_at_an_unavailable_skill():
         none_usable = agent._choose_verify_skill(
             {"nvtx_kernel_map": [{"_abstained": True}]}, ["nvtx_kernel_map"]
         )
+        error_only = agent._choose_verify_skill(
+            {"kernel_overlap_matrix": [{"error": "query failed"}]},
+            ["kernel_overlap_matrix"],
+        )
     finally:
         agent.close()
 
     assert picked == "top_kernels"
     assert none_usable is None
+    assert error_only is None
+
+
+def test_unavailable_root_cause_cannot_become_the_primary_diagnosis():
+    from nsys_ai.agent.loop import Agent
+
+    agent = Agent(str(FIXTURE))
+    unavailable = {
+        "pattern": "Fabricated root cause",
+        "recommendation": "Change the workload",
+        "_abstained": True,
+        "reason": "required table is absent",
+    }
+    try:
+        diagnosis_row = agent._first_actionable_row([unavailable])
+        answer = agent._format_evidence_first_answer(
+            "why slow?",
+            {"root_cause_matcher": [unavailable]},
+            ["root_cause_matcher"],
+        )
+    finally:
+        agent.close()
+
+    assert diagnosis_row is None
+    assert "Fabricated root cause" not in answer
+    assert "Change the workload" not in answer
+    assert "cannot answer this profile question" in answer
 
 
 def test_guard_uses_the_table_resolver_not_an_exact_name():

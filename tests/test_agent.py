@@ -1,5 +1,8 @@
 """Tests for the agent persona and loop."""
 
+import sys
+from unittest.mock import MagicMock
+
 
 def test_agent_identity():
     """Agent identity should have expected fields."""
@@ -169,5 +172,29 @@ def test_agent_verify_fallback_when_no_skill_evidence(minimal_nsys_db_path):
         agent.close()
 
     assert "Could not build a runnable verification command" in answer
+    assert "cannot answer this profile question" in answer
     assert "`nsys-ai skill list`" in answer
     assert answer.strip().splitlines()[-1] == "`nsys-ai skill list`"
+
+
+def test_agent_does_not_call_provider_for_empty_skill_rows(minimal_nsys_db_path, monkeypatch):
+    from nsys_ai.agent.loop import Agent
+
+    completion = MagicMock()
+    fake_litellm = MagicMock(completion=completion)
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+
+    agent = Agent(minimal_nsys_db_path)
+    try:
+        empty_result = agent._try_llm_synthesis("why slow?", {"top_kernels": []})
+        empty_row_result = agent._try_llm_synthesis("why slow?", {"top_kernels": [{}]})
+        error_result = agent._try_llm_synthesis(
+            "why slow?", {"top_kernels": [{"error": "query failed"}]}
+        )
+    finally:
+        agent.close()
+
+    assert empty_result is None
+    assert empty_row_result is None
+    assert error_result is None
+    completion.assert_not_called()

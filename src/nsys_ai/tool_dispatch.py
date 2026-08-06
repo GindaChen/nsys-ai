@@ -405,7 +405,8 @@ class ToolDispatcher:
             if self._consecutive_db_errors >= self._max_consecutive_db_errors:
                 result += (
                     "\n[System: Repeated SQL errors. "
-                    "Please answer from available context without further queries.]"
+                    "Do not infer profile facts. Unless another successful tool result "
+                    "supports the answer, state that the question cannot be answered.]"
                 )
         else:
             self._consecutive_db_errors = 0

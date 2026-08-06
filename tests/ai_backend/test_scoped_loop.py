@@ -90,5 +90,6 @@ def test_run_agent_loop_max_turns_in_scoped_db_loop():
             max_turns=2,
         )
 
-    assert content == "Max turns reached."
+    assert "cannot answer this profile question" in content
+    assert "bad query" in content
     assert actions == []

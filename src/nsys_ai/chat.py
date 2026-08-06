@@ -30,6 +30,8 @@ from .chat_config import (  # noqa: F401
     get_default_model,
 )
 from .ai.backend.chat_tools import (  # noqa: F401
+    TOOL_ANSWER_FROM_UI_CONTEXT,
+    TOOL_REQUEST_CLARIFICATION,
     _build_system_prompt,
     _parse_tool_call,
     _tools_openai,
@@ -108,6 +110,177 @@ MAX_ASSISTANT_CONTENT_CHARS = 8_000
 # thinking budget_tokens for Gemini 2.5 thinking models (limits per-turn thinking).
 GEMINI_THINKING_BUDGET = 8_000
 
+# Tools whose successful result is profile evidence rather than a UI action or
+# a calculation from caller-supplied numbers.
+_PROFILE_GROUNDING_TOOLS = frozenset(
+    {
+        "query_profile_db",
+        "get_gpu_peak_tflops",
+        "compute_region_mfu",
+        "get_gpu_overlap_stats",
+        "get_nccl_breakdown",
+    }
+)
+_DIFF_GROUNDING_TOOLS = frozenset(
+    {
+        "search_nvtx_regions",
+        "get_iteration_boundaries",
+        "explore_nvtx_hierarchy",
+        "get_top_nvtx_diffs",
+        "get_iteration_diff",
+        "get_region_diff",
+        "summarize_nvtx_subtree",
+        "get_launch_config_diff",
+        "get_gpu_imbalance_stats",
+        "get_global_diff",
+        "get_memory_profile_diff",
+        "get_gpu_peak_tflops",
+    }
+)
+_CONTROL_RESPONSE_TOOLS = frozenset(
+    {"request_clarification", "answer_from_ui_context"}
+)
+_CLARIFICATION_TEXT = {
+    "model_flops_per_step": "What is model_flops_per_step?",
+    "region_name": "Which NVTX region or CUDA kernel should I analyze?",
+    "peak_tflops": "What peak TFLOPS value should I use for this GPU and precision?",
+    "iteration_index": "Which iteration index should I analyze?",
+}
+_SENSITIVE_UI_PATH_TERMS = frozenset(
+    {"api_key", "token", "secret", "password", "credential", "authorization", "cookie"}
+)
+_MAX_UI_CONTEXT_PATHS = 5
+_MAX_UI_CONTEXT_VALUE_CHARS = 256
+
+
+def _tool_result_failed(content: str) -> bool:
+    """Return whether a tool result contains no usable grounding evidence."""
+    text = (content or "").strip()
+    if not text or text.startswith(
+        ("Error:", "Not executed", "No diff context", "No profile loaded")
+    ):
+        return True
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("error"))
+
+
+def _cannot_answer_from_profile(reason: str | None = None) -> str:
+    detail = (reason or "no profile data tool returned usable evidence").splitlines()[0]
+    return (
+        "I cannot answer this profile question because no supporting profile "
+        f"evidence was retrieved. Reason: {detail}"
+    )
+
+
+def _with_control_response_tools(tools: list[dict]) -> list[dict]:
+    """Expose explicit safe exits without duplicating caller-provided tools."""
+    names = {tool.get("function", {}).get("name") for tool in tools}
+    additions = [
+        tool
+        for tool in (TOOL_REQUEST_CLARIFICATION, TOOL_ANSWER_FROM_UI_CONTEXT)
+        if tool["function"]["name"] not in names
+    ]
+    return [*tools, *additions]
+
+
+def _ui_context_value(ui_context: dict, dotted_path: str):
+    value = ui_context
+    for part in dotted_path.split("."):
+        if not part or not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _ui_path_is_sensitive(dotted_path: str) -> bool:
+    segments = [segment.lower() for segment in dotted_path.split(".")]
+    return any(
+        sensitive in segment
+        for segment in segments
+        for sensitive in _SENSITIVE_UI_PATH_TERMS
+    )
+
+
+def _contains_sensitive_mapping_key(value) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or _ui_path_is_sensitive(key):
+                return True
+            if _contains_sensitive_mapping_key(item):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_sensitive_mapping_key(item) for item in value)
+    return False
+
+
+def _render_ui_context_value(value) -> str | None:
+    if value in (None, "", [], {}):
+        return None
+    if _contains_sensitive_mapping_key(value):
+        return None
+    try:
+        rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+    if len(rendered) > _MAX_UI_CONTEXT_VALUE_CHARS:
+        return None
+    return rendered
+
+
+def _resolve_control_response(
+    name: str,
+    arguments: str,
+    ui_context: dict | None,
+) -> tuple[str | None, str | None]:
+    """Validate a structured clarification or UI-grounded response."""
+    try:
+        args = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        return None, "invalid control-response arguments"
+    if not isinstance(args, dict):
+        return None, "control-response arguments must be an object"
+
+    if name == "request_clarification":
+        if set(args) != {"missing_information"}:
+            return None, "clarification accepts only missing_information"
+        missing = args.get("missing_information")
+        question = _CLARIFICATION_TEXT.get(missing) if isinstance(missing, str) else None
+        if question is None:
+            return None, "unsupported missing_information identifier"
+        return question, None
+
+    if name == "answer_from_ui_context":
+        if set(args) != {"context_paths"}:
+            return None, "UI-context response accepts only context_paths"
+        paths = args.get("context_paths")
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or len(paths) > _MAX_UI_CONTEXT_PATHS
+            or any(not isinstance(path, str) for path in paths)
+            or len(set(paths)) != len(paths)
+        ):
+            return None, "UI-context response requires 1-5 unique context_paths"
+        if not ui_context:
+            return None, "no UI context was supplied"
+        rendered_values = []
+        for path in paths:
+            if (
+                len(path) > 120
+                or _ui_path_is_sensitive(path)
+            ):
+                return None, "UI context path is invalid or sensitive"
+            rendered = _render_ui_context_value(_ui_context_value(ui_context, path))
+            if rendered is None:
+                return None, "UI context path is missing, empty, or too large"
+            rendered_values.append(f"{path}={rendered}")
+        return "UI context: " + "; ".join(rendered_values), None
+
+    return None, f"unknown control-response tool: {name}"
+
 
 # ---------------------------------------------------------------------------
 # History utilities
@@ -132,7 +305,10 @@ def _compact_old_tool_results(api_messages: list) -> None:
     cutoff = tool_turn_indices[-1]
     for m in api_messages[:cutoff]:
         if m.get("role") == "tool" and len(m.get("content", "")) > 200:
-            m["content"] = "[Summary: DB query returned results.]"
+            if _tool_result_failed(m["content"]):
+                m["content"] = "[Summary: Tool failed; no profile evidence was produced.]"
+            else:
+                m["content"] = "[Summary: DB query returned results.]"
 
 
 def distill_history(messages: list) -> list:
@@ -190,6 +366,7 @@ def run_agent_loop(
     tools: list | None = None,
     query_runner: Callable[[str], str] | None = None,
     max_turns: int = 5,
+    ui_context: dict | None = None,
 ) -> tuple[str, list]:
     """Run a multi-turn agent loop until the model stops calling tools.
 
@@ -200,6 +377,7 @@ def run_agent_loop(
         query_runner:  Callable ``(sql: str) -> str`` for ``query_profile_db``.
                        Pass ``None`` to treat DB calls as no-ops.
         max_turns:     Maximum number of LLM round-trips.
+        ui_context:    Structured UI state available to ``answer_from_ui_context``.
 
     Returns:
         ``(final_content, actions)`` — *actions* are parsed navigation/zoom dicts.
@@ -209,9 +387,13 @@ def run_agent_loop(
     except ImportError:
         return ("LLM not available (install litellm).", [])
 
-    tools = tools if tools is not None else _tools_openai()
+    tools = _with_control_response_tools(tools if tools is not None else _tools_openai())
     actions: list = []
     consecutive_db_errors = 0
+    profile_grounding_required = query_runner is not None
+    grounding_attempted = False
+    evidence_ready = False
+    grounding_failure: str | None = None
 
     for _ in range(max_turns):
         _compact_old_tool_results(api_messages)
@@ -225,6 +407,8 @@ def run_agent_loop(
         )
         choice = response.choices[0] if response.choices else None
         if not choice:
+            if profile_grounding_required and not evidence_ready:
+                return (_cannot_answer_from_profile("the provider returned no response"), actions)
             return ("", actions)
         message = choice.message
         if isinstance(message, dict):
@@ -235,6 +419,13 @@ def run_agent_loop(
             tool_calls = getattr(message, "tool_calls", None) or []
 
         if not tool_calls:
+            if (profile_grounding_required or grounding_attempted) and not evidence_ready:
+                return (
+                    _cannot_answer_from_profile(
+                        grounding_failure or "the model did not query the loaded profile"
+                    ),
+                    actions,
+                )
             return (content, actions)
 
         tc_list = []
@@ -251,26 +442,56 @@ def run_agent_loop(
             ) or "{}"
             tc_list.append((tc_id, name, args_str))
 
-        api_messages.append(
-            {
-                "role": "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
-                    for tid, n, a in tc_list
-                ],
-            }
-        )
+        batch_history_start = len(api_messages)
+        valid_tc_list = [(tid, name, args) for tid, name, args in tc_list if tid and name]
+        if valid_tc_list:
+            api_messages.append(
+                {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {
+                            "id": tid,
+                            "type": "function",
+                            "function": {"name": name, "arguments": args},
+                        }
+                        for tid, name, args in valid_tc_list
+                    ],
+                }
+            )
 
         has_external = False
+        control_response: str | None = None
+        turn_grounding_succeeded = False
+        turn_tool_failed = False
         for tc_id, name, args_str in tc_list:
             if not name or not tc_id:
+                grounding_failure = "Invalid tool call: missing name or id."
+                turn_tool_failed = True
                 continue
             action = _parse_tool_call(name, args_str)
             if action:
                 has_external = True
                 actions.append(action)
+            elif name in _CONTROL_RESPONSE_TOOLS:
+                response_text, control_error = _resolve_control_response(
+                    name, args_str, ui_context
+                )
+                if response_text is not None:
+                    control_response = response_text
+                else:
+                    grounding_failure = f"Error: {control_error}"
+                    turn_tool_failed = True
+                    api_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "name": name,
+                            "content": f"Error: {control_error}",
+                        }
+                    )
             elif name == "query_profile_db":
+                grounding_attempted = True
                 if query_runner is not None:
                     try:
                         sql = json.loads(args_str).get("sql_query", "")
@@ -279,16 +500,22 @@ def run_agent_loop(
                         _log.debug("Tool query_profile_db failed: %s", e, exc_info=True)
                         result = f"Error: {e}"
                     if result.startswith("Error:"):
+                        grounding_failure = result
+                        turn_tool_failed = True
                         consecutive_db_errors += 1
                         if consecutive_db_errors >= MAX_CONSECUTIVE_DB_ERRORS:
                             result += (
                                 "\n[System: Repeated SQL errors. "
-                                "Please answer from available context without further queries.]"
+                                "Do not infer profile facts. Unless another successful tool result "
+                                "supports the answer, state that the question cannot be answered.]"
                             )
                     else:
+                        turn_grounding_succeeded = True
                         consecutive_db_errors = 0
                 else:
                     result = "Not executed (no profile loaded)."
+                    grounding_failure = result
+                    turn_tool_failed = True
                 api_messages.append(
                     {
                         "role": "tool",
@@ -311,6 +538,10 @@ def run_agent_loop(
                     )
                 else:
                     tool_result = "Not executed."
+                if name in _PROFILE_GROUNDING_TOOLS:
+                    grounding_attempted = True
+                grounding_failure = tool_result
+                turn_tool_failed = True
                 api_messages.append(
                     {
                         "role": "tool",
@@ -320,9 +551,27 @@ def run_agent_loop(
                     }
                 )
 
-        if has_external:
-            return (content, actions)
+        if turn_tool_failed:
+            evidence_ready = False
+            del api_messages[batch_history_start:]
+            return (
+                _cannot_answer_from_profile(
+                    grounding_failure or "a tool call was invalid or failed"
+                ),
+                actions,
+            )
+        elif turn_grounding_succeeded:
+            evidence_ready = True
 
+        if control_response is not None and not turn_tool_failed:
+            return (control_response, actions)
+        if has_external:
+            # The action itself is structured and validated. Companion model
+            # prose is not, so never let a navigation call smuggle a diagnosis.
+            return ("", actions)
+
+    if (profile_grounding_required or grounding_attempted) and not evidence_ready:
+        return (_cannot_answer_from_profile(grounding_failure or "maximum turns reached"), actions)
     return ("Max turns reached.", actions)
 
 
@@ -466,6 +715,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 tools=_tools_openai(),
                 query_runner=query_runner,
                 max_turns=5,
+                ui_context=ui_context,
             )
             return {"content": content, "actions": actions}
         except Exception as e:
@@ -622,6 +872,7 @@ def stream_agent_loop(
 
     use_diff = diff_context is not None and diff_paths is not None
     tools = tools if tools is not None else (TOOLS_DIFF_OPENAI if use_diff else _tools_openai())
+    tools = _with_control_response_tools(tools)
     if use_diff:
         system_prompt = build_diff_system_prompt(
             diff_context, diff_paths[0], diff_paths[1], snapshot=None
@@ -677,6 +928,11 @@ def stream_agent_loop(
         mode="diff" if use_diff else "profile",
         diff_context=diff_context,
     )
+    grounding_required = use_diff or query_runner is not None
+    grounding_tools = _DIFF_GROUNDING_TOOLS if use_diff else _PROFILE_GROUNDING_TOOLS
+    grounding_attempted = False
+    evidence_ready = False
+    grounding_failure: str | None = None
 
     try:
         for _ in range(max_turns):
@@ -729,7 +985,6 @@ def stream_agent_loop(
                     )
                     if c:
                         content_parts.append(c)
-                        yield {"type": "text", "content": c}
 
                     tcs = (
                         getattr(delta, "tool_calls", None)
@@ -795,8 +1050,8 @@ def stream_agent_loop(
             if len(full_content) > MAX_ASSISTANT_CONTENT_CHARS:
                 full_content = full_content[:MAX_ASSISTANT_CONTENT_CHARS]
             tc_list = [
-                (t.get("id") or f"call_{idx}", t.get("name"), t.get("arguments") or "{}")
-                for idx, t in sorted(tool_calls_by_index.items())
+                (t.get("id"), t.get("name"), t.get("arguments") or "{}")
+                for _, t in sorted(tool_calls_by_index.items())
             ]
 
             if usage:
@@ -815,28 +1070,78 @@ def stream_agent_loop(
                     }
 
             if not tc_list:
+                if grounding_required and not evidence_ready:
+                    yield {
+                        "type": "text",
+                        "content": _cannot_answer_from_profile(
+                            grounding_failure or "the model did not query the loaded profile"
+                        ),
+                    }
+                elif full_content:
+                    # Buffer the complete assistant turn until we know it has
+                    # no later tool call whose failure would invalidate it.
+                    yield {"type": "text", "content": full_content}
                 yield {"type": "done", "usage": usage}
                 return
 
-            api_messages.append(
-                {
-                    "role": "assistant",
-                    "content": full_content or None,
-                    "tool_calls": [
-                        {"id": tid, "type": "function", "function": {"name": n, "arguments": a}}
-                        for tid, n, a in tc_list
-                    ],
-                }
-            )
+            batch_history_start = len(api_messages)
+            valid_tc_list = [(tid, name, args) for tid, name, args in tc_list if tid and name]
+            if valid_tc_list:
+                api_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": full_content or None,
+                        "tool_calls": [
+                            {
+                                "id": tid,
+                                "type": "function",
+                                "function": {"name": name, "arguments": args},
+                            }
+                            for tid, name, args in valid_tc_list
+                        ],
+                    }
+                )
 
             has_external = False
+            control_response: str | None = None
+            turn_grounding_succeeded = False
+            turn_tool_failed = False
             for tid, name, args_str in tc_list:
                 if not name or not tid:
+                    grounding_failure = "Invalid tool call: missing name or id."
+                    turn_tool_failed = True
+                    continue
+
+                if name in _CONTROL_RESPONSE_TOOLS:
+                    response_text, control_error = _resolve_control_response(
+                        name, args_str, ui_context
+                    )
+                    if response_text is not None:
+                        control_response = response_text
+                    else:
+                        grounding_failure = f"Error: {control_error}"
+                        turn_tool_failed = True
+                        api_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tid,
+                                "name": name,
+                                "content": f"Error: {control_error}",
+                            }
+                        )
                     continue
 
                 # 1) Profile and Diff tools — use the centralized dispatcher
                 if dispatcher.knows(name):
                     tr = dispatcher.dispatch(name, args_str)
+                    tool_failed = _tool_result_failed(tr.content)
+                    if tool_failed:
+                        grounding_failure = tr.content
+                        turn_tool_failed = True
+                    if name in grounding_tools:
+                        grounding_attempted = True
+                        if not tool_failed:
+                            turn_grounding_succeeded = True
                     yield from tr.events
                     if not tr.skip_tool_message:
                         api_messages.append(
@@ -856,6 +1161,8 @@ def stream_agent_loop(
                     yield {"type": "action", "action": action}
                 else:
                     # Unknown tool — send a stub response to avoid LLM confusion
+                    grounding_failure = "An unknown tool was not executed."
+                    turn_tool_failed = True
                     api_messages.append(
                         {
                             "role": "tool",
@@ -865,9 +1172,42 @@ def stream_agent_loop(
                         }
                     )
 
+            if turn_tool_failed:
+                evidence_ready = False
+                del api_messages[batch_history_start:]
+                yield {
+                    "type": "text",
+                    "content": _cannot_answer_from_profile(
+                        grounding_failure or "a tool call was invalid or failed"
+                    ),
+                }
+                yield {"type": "done", "usage": usage}
+                return
+            elif turn_grounding_succeeded:
+                evidence_ready = True
+
+            if control_response is not None and not turn_tool_failed:
+                yield {"type": "text", "content": control_response}
+                yield {"type": "done", "usage": usage}
+                return
             if has_external:
                 yield {"type": "done", "usage": usage}
                 return
+
+        if grounding_required and not evidence_ready:
+            yield {
+                "type": "text",
+                "content": _cannot_answer_from_profile(
+                    grounding_failure
+                    or (
+                        "profile tools returned no usable evidence"
+                        if grounding_attempted
+                        else "the model did not query the loaded profile"
+                    )
+                ),
+            }
+            yield {"type": "done", "usage": usage}
+            return
 
         # Exhausted max_turns; last message was a tool result. One more LLM call with
         # tool_choice="none" so the model can synthesize a final summary.

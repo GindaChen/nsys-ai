@@ -159,11 +159,7 @@ def _handle_chat_request(body_bytes: bytes) -> dict | None:
         return chat.chat_completion(body_bytes)
     except ImportError:
         pass
-    # Phase 0 mock: no chat module or LLM not configured
-    return {
-        "content": "Mock reply. Configure an LLM endpoint (e.g. pip install nsys-ai[ai], set ANTHROPIC_API_KEY) for real analysis.",
-        "actions": [],
-    }
+    return None
 
 
 def _handle_chat_stream(body_bytes: bytes):
