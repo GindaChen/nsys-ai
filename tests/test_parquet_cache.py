@@ -1310,11 +1310,15 @@ def test_an_empty_sweep_is_told_apart_from_a_missing_source(tmp_path, monkeypatc
 #
 # Everything below exists because none of it was reachable under test.
 # `_build_banner` returns early below _BUILD_BANNER_MIN_MB = 500 and the
-# largest fixture in this repo is 2.2 MB; `_draw` returns early unless stderr
-# is a tty, which it never is under pytest. Both bodies were verified
-# unreachable by mutating each to `raise AssertionError` — the whole
-# cache-test suite stayed green. So the size and the tty have to be faked, or
-# three lines of user-facing output and an ETA formula ship unpinned.
+# largest fixture in this repo is 2.2 MB; `_draw` returns early unless
+# stderr is a tty *and* no progress callback was supplied. Plain pytest is
+# not a tty, so the body is unreachable there — but a Textual app (see
+# tests/test_tui_chat_app.py) wraps stderr in `_PrintCapture` whose
+# `isatty()` is always True, so without a progress callback the redraws
+# *do* fire under pytest. Both bodies were verified unreachable by
+# mutating each to `raise AssertionError` — the whole cache-test suite
+# stayed green. So the size and the tty have to be faked, or three lines
+# of user-facing output and an ETA formula ship unpinned.
 
 
 class TestBuildBanner:

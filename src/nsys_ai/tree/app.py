@@ -212,12 +212,23 @@ class NsysTreeApp(App):
         # focus first and silently swallow key presses.
         self.query_one(DataTable).focus()
 
+    @staticmethod
+    def _suppress_cache_progress(label: str, step: int, total: int) -> None:
+        """Drop cache-build progress so Textual does not paint it on stderr.
+
+        Passing any callback silences the ``\\r`` redraw path inside ``build_cache``.
+        This one does nothing else: the build still runs synchronously on the
+        message loop, so the UI cannot update between steps (#332).
+        """
+
     def _load_from_db(self) -> None:
         from .. import profile as _profile
         from ..nvtx_tree import build_nvtx_tree, to_json
 
         try:
-            with _profile.open(self._db_path) as prof:
+            with _profile.open(
+                self._db_path, progress=self._suppress_cache_progress
+            ) as prof:
                 roots = build_nvtx_tree(prof, self._device, self._trim)
                 json_roots = to_json(roots)
 

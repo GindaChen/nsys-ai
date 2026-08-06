@@ -77,7 +77,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -287,7 +287,12 @@ def invalidate_cache(sqlite_path: str) -> None:
         log.info("Removed cache: %s", cache_dir)
 
 
-def build_cache(sqlite_path: str, *, env_escape: bool = True) -> Path:
+def build_cache(
+    sqlite_path: str,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> Path:
     """Build a Parquet cache from a SQLite profile (first-run ETL).
 
     Attaches the SQLite DB via DuckDB and exports the base tables to Parquet
@@ -311,6 +316,13 @@ def build_cache(sqlite_path: str, *, env_escape: bool = True) -> Path:
 
     ``env_escape`` is passed straight to :func:`_build_banner` and only picks
     which escape hatch that banner names; it changes nothing about the build.
+
+    ``progress``, when supplied, is called as ``progress(label, step, total)``
+    after each export step and suppresses all build writes to ``sys.stderr``
+    (banner, ``\\r`` redraws, and the final "Cache ready" line). Callers that
+    are not a terminal — notably a Textual app, whose ``sys.stderr.isatty()``
+    is unconditionally True — must pass one; without it the tty gate alone
+    cannot tell them apart from a real CLI tty.
 
     Returns the cache directory path.
     """
@@ -337,7 +349,9 @@ def build_cache(sqlite_path: str, *, env_escape: bool = True) -> Path:
             )
         )
         try:
-            _build_cache_into(sqlite_path, tmp_dir, env_escape=env_escape)
+            _build_cache_into(
+                sqlite_path, tmp_dir, env_escape=env_escape, progress=progress
+            )
         except BaseException:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
@@ -668,11 +682,19 @@ def _build_banner(sqlite_path: str, *, env_escape: bool = True) -> None:
     sys.stderr.flush()
 
 
-def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = True) -> Path:
+def _build_cache_into(
+    sqlite_path: str,
+    cache_dir: Path,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> Path:
     """Internal: build the Parquet cache into the given directory."""
 
     log.info("Building analysis cache (first run only)...")
-    _build_banner(sqlite_path, env_escape=env_escape)
+    # A supplied progress callback owns reporting; do not also paint stderr.
+    if progress is None:
+        _build_banner(sqlite_path, env_escape=env_escape)
     t0 = time.monotonic()
 
     db = duckdb.connect()
@@ -736,6 +758,10 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = T
         # arrive as one long line of fragments. Off a tty the banner and the
         # final "Cache ready" line carry the whole story.
         #
+        # When a progress callback is supplied it owns reporting and stderr
+        # stays quiet — required inside Textual, where sys.stderr.isatty() is
+        # True unconditionally (#332).
+        #
         # Single-threaded by construction: every caller is the build's own
         # thread, between DuckDB statements, so no write+flush pair can
         # interleave with another on the same fd.
@@ -752,7 +778,10 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = T
         def _progress(name: str) -> None:
             step[0] += 1
             label[0] = name
-            _draw()
+            if progress is not None:
+                progress(name, step[0], total_steps)
+            else:
+                _draw()
 
         # ── Export pre-joined kernels table ────────────────────────────────
         # ORDER BY (deviceId, start) is critical: it lets DuckDB's parquet
@@ -882,14 +911,16 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = T
         # _draw left on screen, so they belong to the same condition _draw does.
         # Emitted unconditionally they put a bare CR and 40 spaces into every
         # piped or redirected run — litter in exactly the case the tty gate was
-        # added to clean up.
+        # added to clean up. A progress callback replaces the whole stderr
+        # channel, so skip this line too.
         elapsed = time.monotonic() - t0
-        ready = f"[nsys-ai] Cache ready ({elapsed:.1f}s)"
-        if _stderr_is_tty():
-            sys.stderr.write("\r" + ready + " " * 40 + "\n")
-        else:
-            sys.stderr.write(ready + "\n")
-        sys.stderr.flush()
+        if progress is None:
+            ready = f"[nsys-ai] Cache ready ({elapsed:.1f}s)"
+            if _stderr_is_tty():
+                sys.stderr.write("\r" + ready + " " * 40 + "\n")
+            else:
+                sys.stderr.write(ready + "\n")
+            sys.stderr.flush()
 
         # ── Write version stamp ───────────────────────────────────────────
         meta = {
@@ -916,7 +947,12 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path, *, env_escape: bool = T
     return cache_dir
 
 
-def open_cached_db(sqlite_path: str, *, env_escape: bool = True) -> duckdb.DuckDBPyConnection:
+def open_cached_db(
+    sqlite_path: str,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection with views over the Parquet cache.
 
     If the cache doesn't exist or is stale, builds it first.
@@ -926,6 +962,8 @@ def open_cached_db(sqlite_path: str, *, env_escape: bool = True) -> duckdb.DuckD
     :class:`~nsys_ai.profile.Profile` with an explicit ``cache_mode="parquet"``
     passes it; ``open_auto_db`` leaves it at the default because on that path
     the variable really does work.
+
+    ``progress`` is forwarded to :func:`build_cache` when a build is needed.
 
     Returns a DuckDB connection with views named after each cached table:
       ``kernels``, ``nvtx``, ``runtime``, ``memcpy``, ``memset``,
@@ -938,7 +976,7 @@ def open_cached_db(sqlite_path: str, *, env_escape: bool = True) -> duckdb.DuckD
     """
     _require_profile_exists(sqlite_path)
     if not is_cache_valid(sqlite_path):
-        build_cache(sqlite_path, env_escape=env_escape)
+        build_cache(sqlite_path, env_escape=env_escape, progress=progress)
 
     cache_dir = _cache_dir_for(sqlite_path)
 
@@ -971,11 +1009,18 @@ def open_cached_db(sqlite_path: str, *, env_escape: bool = True) -> duckdb.DuckD
     return db
 
 
-def open_auto_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
+def open_auto_db(
+    sqlite_path: str,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> duckdb.DuckDBPyConnection:
     """Open a profile under the ``auto`` cache policy: cache if one can be had.
 
     Order: an existing valid cache, then the ``NSYS_AI_CACHE_MODE`` override,
     then "can a cache be written here at all", then build.
+
+    ``progress`` is forwarded to :func:`open_cached_db` / :func:`build_cache`
+    when a build runs.
 
     It lives here rather than on ``Profile`` because it is not only
     ``Profile``'s decision. ``nsys-ai skill run`` and ``open_profile_readonly``
@@ -1081,14 +1126,14 @@ def open_auto_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     one, which will not reproduce these rows.
     """
     if is_cache_valid(sqlite_path):
-        return open_cached_db(sqlite_path)
+        return open_cached_db(sqlite_path, progress=progress)
 
     env_mode = os.environ.get("NSYS_AI_CACHE_MODE", "").strip().lower()
     if env_mode == "direct":
         log.info("NSYS_AI_CACHE_MODE=direct — querying the SQLite export in place.")
         return open_direct_sqlite(sqlite_path)
     if env_mode == "parquet":
-        return open_cached_db(sqlite_path)
+        return open_cached_db(sqlite_path, progress=progress)
     if env_mode:
         log.warning("Ignoring NSYS_AI_CACHE_MODE=%r; expected 'direct' or 'parquet'.", env_mode)
 
@@ -1112,7 +1157,7 @@ def open_auto_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
             reason,
         )
         return open_direct_sqlite(sqlite_path)
-    return open_cached_db(sqlite_path)
+    return open_cached_db(sqlite_path, progress=progress)
 
 
 def open_with_direct_fallback(

@@ -314,7 +314,14 @@ class Profile:
     #: default in place.
     cache_error: Exception | None = None
 
-    def __init__(self, path: str, *, cache_mode: str = "auto", backend: str = "sqlite"):
+    def __init__(
+        self,
+        path: str,
+        *,
+        cache_mode: str = "auto",
+        backend: str = "sqlite",
+        progress: typing.Callable[[str, int, int], None] | None = None,
+    ):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
                 f"Unknown cache_mode: {cache_mode!r}. Expected 'auto', 'parquet', or 'direct'."
@@ -353,13 +360,15 @@ class Profile:
                 # NSYS_AI_CACHE_MODE, so the build banner must not tell the
                 # user to set it — on this path it does nothing. It names
                 # cache_mode="direct" instead, which is the way out here.
-                primary = functools.partial(parquet_cache.open_cached_db, env_escape=False)
+                primary = functools.partial(
+                    parquet_cache.open_cached_db, env_escape=False, progress=progress
+                )
             else:
                 # auto: cache when one can be had, direct SQLite when it
                 # cannot. The policy (and the measurements behind it) lives
                 # in parquet_cache.open_auto_db, because `skill run` and
                 # open_profile_readonly reach it without a Profile.
-                primary = parquet_cache.open_auto_db
+                primary = functools.partial(parquet_cache.open_auto_db, progress=progress)
             self.db, err = parquet_cache.open_with_direct_fallback(
                 path, primary, log=self._log
             )
@@ -1162,7 +1171,13 @@ def get_first_gpu_name(conn) -> str:
     return (row[0] or "").strip() if row else ""
 
 
-def open(path: str, *, backend: str = "sqlite", cache_mode: str = "auto") -> Profile:
+def open(
+    path: str,
+    *,
+    backend: str = "sqlite",
+    cache_mode: str = "auto",
+    progress: typing.Callable[[str, int, int], None] | None = None,
+) -> Profile:
     """Open an Nsight Systems profile using the requested backend."""
     path = resolve_profile_path(path, backend=backend)
     # Heuristic: if the given path is an empty .sqlite stub but a sibling
@@ -1174,4 +1189,4 @@ def open(path: str, *, backend: str = "sqlite", cache_mode: str = "auto") -> Pro
         if os.path.exists(base) and os.path.getsize(base) > 0:
             path = base
 
-    return Profile(path, cache_mode=cache_mode, backend=backend)
+    return Profile(path, cache_mode=cache_mode, backend=backend, progress=progress)
