@@ -19,6 +19,59 @@ def _runtime(correlation_id, start, end):
     return {"correlationId": correlation_id, "start": start, "end": end}
 
 
+class _OneShotRows:
+    def __init__(self, rows):
+        self.rows = rows
+        self.iterations = 0
+        self.yields = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations > 1:
+            raise AssertionError("runtime rows were restarted")
+        for row in self.rows:
+            self.yields += 1
+            yield row
+
+
+class _OneShotRuntimeProfile:
+    """Delegate to a real Profile but make the correlation query one-shot."""
+
+    def __init__(self, profile):
+        self._profile = profile
+        self.runtime_rows = None
+
+    def __getattr__(self, name):
+        return getattr(self._profile, name)
+
+    def _duckdb_query(self, sql, params=()):
+        rows = self._profile._duckdb_query(sql, params)
+        normalized = " ".join(sql.split())
+        if normalized.startswith("SELECT start, [end], correlationId FROM"):
+            self.runtime_rows = _OneShotRows(rows)
+            return self.runtime_rows
+        return rows
+
+
+def _adjacent_nvtx_profile(conn, correlation_id, runtime_start, runtime_end):
+    conn.execute(
+        "INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) "
+        "VALUES (100, 4500000, 8500000, 'train_step', 59, 2)"
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME "
+        "(globalTid, correlationId, start, end, nameId) VALUES (100, ?, ?, ?, 24)",
+        (correlation_id, runtime_start, runtime_end),
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
+        "(globalPid, deviceId, streamId, correlationId, start, end, shortName, demangledName) "
+        "VALUES (100, 0, 9, ?, 6000000, 6100000, 1, 1)",
+        (correlation_id,),
+    )
+    return _OneShotRuntimeProfile(Profile._from_conn(conn))
+
+
 def test_zero_iterations_produce_no_groups():
     assert list(_correlate_iteration_kernels([], [], {})) == []
 
@@ -60,21 +113,7 @@ def test_multiple_iterations_retain_the_first_row_for_the_next_window():
 
 
 def test_runtime_rows_are_iterated_once_without_rewind():
-    class OneShotRows:
-        def __init__(self, rows):
-            self.rows = rows
-            self.iterations = 0
-            self.yields = 0
-
-        def __iter__(self):
-            self.iterations += 1
-            if self.iterations > 1:
-                raise AssertionError("runtime rows were restarted")
-            for row in self.rows:
-                self.yields += 1
-                yield row
-
-    rows = OneShotRows([_runtime(i, i * 10, i * 10 + 1) for i in range(1, 5)])
+    rows = _OneShotRows([_runtime(i, i * 10, i * 10 + 1) for i in range(1, 5)])
     kernels = {i: _kernel(i) for i in range(1, 5)}
     iterations = [
         {"start": 0, "end": 15},
@@ -116,6 +155,28 @@ def test_detect_iterations_correlates_multiple_nvtx_windows(minimal_nsys_conn):
     assert all(row["heuristic"] is False for row in rows)
 
 
+def test_detect_iterations_retains_a_spanning_row_for_the_next_nvtx_window(
+    minimal_nsys_conn,
+):
+    prof = _adjacent_nvtx_profile(minimal_nsys_conn, 200, 4_500_000, 4_600_000)
+
+    rows = detect_iterations(prof, 0, marker="train_step")
+
+    assert [row["kernel_count"] for row in rows] == [4, 2]
+    assert prof.runtime_rows.iterations == 1
+
+
+def test_detect_iterations_keeps_zero_duration_row_in_both_adjacent_windows(
+    minimal_nsys_conn,
+):
+    prof = _adjacent_nvtx_profile(minimal_nsys_conn, 200, 4_500_000, 4_500_000)
+
+    rows = detect_iterations(prof, 0, marker="train_step")
+
+    assert [row["kernel_count"] for row in rows] == [5, 2]
+    assert prof.runtime_rows.iterations == 1
+
+
 def test_heuristic_windows_follow_cpu_order_across_gpu_stream_reordering(
     minimal_nsys_conn,
 ):
@@ -125,7 +186,7 @@ def test_heuristic_windows_follow_cpu_order_across_gpu_stream_reordering(
     minimal_nsys_conn.executemany(
         "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME "
         "(globalTid, correlationId, start, end, nameId) VALUES (100, ?, ?, ?, 24)",
-        [(1, 100, 110), (2, 300, 310), (3, 200, 210)],
+        [(1, 300, 310), (2, 100, 110), (3, 200, 210)],
     )
     minimal_nsys_conn.executemany(
         "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
@@ -141,10 +202,10 @@ def test_heuristic_windows_follow_cpu_order_across_gpu_stream_reordering(
 
     rows = detect_iterations(prof, 0)
 
-    assert [row["gpu_start_ns"] for row in rows] == [1_000, 6_000_000, 3_000_000]
+    assert [row["gpu_start_ns"] for row in rows] == [3_000_000, 1_000]
+    assert sum(row["kernel_count"] for row in rows) == 3
     assert [row["text"] for row in rows] == [
         "heuristic_step_0",
         "heuristic_step_1",
-        "heuristic_step_2",
     ]
     assert all(row["heuristic"] is True for row in rows)

@@ -493,6 +493,7 @@ def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
 
     rows = iter(runtime_rows)
     current = next(rows, None)
+    carried_kernels = []
     for index, iteration in enumerate(iterations):
         cpu_start, cpu_end = iteration["start"], iteration["end"]
         next_start = iterations[index + 1]["start"] if index + 1 < len(iterations) else None
@@ -500,12 +501,21 @@ def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
         while current is not None and current["start"] < cpu_start:
             current = next(rows, None)
 
-        kernels = []
+        kernels = carried_kernels
+        carried_kernels = []
         while current is not None and current["start"] <= cpu_end:
             if current["end"] <= cpu_end:
                 kernel = kernel_map.get(current["correlationId"])
                 if kernel:
                     kernels.append(kernel)
+                    # Containment is inclusive: a zero-duration row at a
+                    # shared boundary belongs to both adjacent windows.
+                    if (
+                        next_start == cpu_end
+                        and current["start"] == cpu_end
+                        and current["end"] == cpu_end
+                    ):
+                        carried_kernels.append(kernel)
             elif next_start is not None and current["start"] >= next_start:
                 break
             current = next(rows, None)
@@ -641,7 +651,7 @@ def detect_iterations(
         # but boundaries are recorded in runtime timestamps (CPU domain)
         # so the downstream rt-based filter works correctly.
         GAP_THRESHOLD_NS = 2_000_000
-        boundaries = [kernel_entries[0]["rt_start"]]
+        boundaries = [min(entry["rt_start"] for entry in kernel_entries)]
 
         last_k_end = kernel_entries[0]["kernel"]["end"]
         for entry in kernel_entries[1:]:
