@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -10,6 +11,7 @@ from nsys_ai.proposal import (
     ProposalError,
     UnsupportedProposalVersionError,
     generate_proposal,
+    validate_proposal_against_finding,
 )
 from nsys_ai.runspec import EnvironmentSpec, RunSpec, RunSpecError
 
@@ -170,6 +172,26 @@ def test_changed_artifact_content_is_rejected_by_proposal_id():
 
     with pytest.raises(ProposalError, match="proposal_id does not match"):
         Proposal.from_dict(payload)
+
+
+def test_semantic_validator_rejects_reidentified_invented_content():
+    finding = _finding()
+    payload = generate_proposal(finding, _runspec()).to_dict()
+    payload["summary"] = "Invented summary"
+    identity = dict(payload)
+    identity.pop("proposal_id")
+    canonical = json.dumps(
+        identity,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload["proposal_id"] = "proposal1:sha256:" + hashlib.sha256(canonical).hexdigest()
+    invented = Proposal.from_dict(payload)
+
+    with pytest.raises(ProposalError, match="not deterministically derived"):
+        validate_proposal_against_finding(invented, finding)
 
 
 def test_unsupported_version_and_unknown_fields_are_rejected():
