@@ -241,6 +241,41 @@ def test_secret_preflight_requires_exact_declared_names_without_values_in_errors
         )
 
 
+@pytest.mark.parametrize(
+    ("secret_value", "overrides", "location"),
+    [
+        ("private-commit", {"commit": "rev-private-commit"}, "commit"),
+        (
+            "private-repository",
+            {"repository": "/work/private-repository", "cwd": "."},
+            "repository",
+        ),
+        (
+            "private-cwd",
+            {"repository": "/work/repo", "cwd": "jobs/private-cwd"},
+            "cwd",
+        ),
+        (
+            "process-tree",
+            {"trace_options": NsysTraceOptions(sample="process-tree")},
+            "trace_options.sample",
+        ),
+    ],
+)
+def test_secret_preflight_checks_every_persisted_string_value(
+    secret_value, overrides, location
+):
+    spec = _full_spec(
+        environment=EnvironmentSpec(secrets=("HF_TOKEN",)),
+        **overrides,
+    )
+
+    with pytest.raises(RunSpecError, match=location) as exc_info:
+        validate_secret_boundaries(spec, {"HF_TOKEN": secret_value})
+
+    assert secret_value not in str(exc_info.value)
+
+
 def test_environment_validation_rejects_ambiguous_or_invalid_names():
     with pytest.raises(RunSpecError, match="both public and secret"):
         EnvironmentSpec(public={"TOKEN": "public"}, secrets=("TOKEN",))

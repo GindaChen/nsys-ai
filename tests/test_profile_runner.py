@@ -14,7 +14,7 @@ from nsys_ai.profile_runner import (
     RunStage,
     RunStatus,
 )
-from nsys_ai.runspec import EnvironmentSpec, RunSpec, RunSpecError
+from nsys_ai.runspec import EnvironmentSpec, NsysTraceOptions, RunSpec, RunSpecError
 
 _FAKE_NSYS = r'''#!/usr/bin/env python3
 import json
@@ -69,6 +69,15 @@ if sys.argv[1] == 'profile':
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         while True:
             time.sleep(1)
+    if mode in {'race_cancel', 'race_timeout'}:
+        child = subprocess.Popen([
+            sys.executable,
+            '-c',
+            'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)',
+        ])
+        output.with_suffix('.child.pid').write_text(str(child.pid))
+        time.sleep(0.15 if mode == 'race_cancel' else 0.9)
+        sys.exit(17)
     if mode == 'env':
         ok = (
             os.environ.get('VISIBLE_SETTING') == 'enabled'
@@ -169,6 +178,11 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
     with pytest.raises(FrozenInstanceError):
         result.status = RunStatus.NSYS_FAILED
 
+    artifact_dir = Path(result.runspec_path).parent
+    assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700
+    for private_path in (result.runspec_path, result.stdout_path, result.stderr_path):
+        assert stat.S_IMODE(Path(private_path).stat().st_mode) == 0o600
+
 
 @pytest.mark.parametrize(
     ("mode", "expected"),
@@ -200,7 +214,7 @@ def test_launch_failure_is_returned_with_file_backed_logs(tmp_path, monkeypatch)
         tmp_path / "artifacts", "/definitely/missing/nsys"
     ).run(_spec())
 
-    assert result.status is RunStatus.LAUNCH_FAILED
+    assert result.status is RunStatus.CAPTURE_LAUNCH_FAILED
     assert result.nsys_return_code is None
     assert Path(result.runspec_path).is_file()
     assert Path(result.stdout_path).is_file()
@@ -219,8 +233,13 @@ def test_existing_artifact_directory_is_rejected_without_using_stale_report(
         _spec("nonzero_with_report")
     )
 
-    assert result.status is RunStatus.LAUNCH_FAILED
+    assert result.status is RunStatus.ARTIFACT_SETUP_FAILED
     assert result.nsys_return_code is None
+    assert result.runspec_path is None
+    assert result.stdout_path is None
+    assert result.stderr_path is None
+    assert result.report_path is None
+    assert result.sqlite_path is None
     assert stale_report.read_text() == "valid"
 
 
@@ -237,6 +256,11 @@ def test_already_cancelled_run_has_no_launch_or_artifact_side_effects(
 
     assert result.status is RunStatus.CANCELLED
     assert result.nsys_return_code is None
+    assert result.runspec_path is None
+    assert result.stdout_path is None
+    assert result.stderr_path is None
+    assert result.report_path is None
+    assert result.sqlite_path is None
     assert not artifact_dir.exists()
 
 
@@ -285,6 +309,44 @@ def test_secret_preflight_has_zero_filesystem_side_effects(
     assert not artifact_dir.exists()
 
 
+@pytest.mark.parametrize(
+    ("secret", "overrides", "location"),
+    [
+        ("private-commit", {"commit": "rev-private-commit"}, "commit"),
+        (
+            "private-repository",
+            {"repository": "/work/private-repository", "cwd": "."},
+            "repository",
+        ),
+        (
+            "private-cwd",
+            {"repository": "/work/repo", "cwd": "jobs/private-cwd"},
+            "cwd",
+        ),
+        (
+            "process-tree",
+            {"trace_options": NsysTraceOptions(sample="process-tree")},
+            "trace_options.sample",
+        ),
+    ],
+)
+def test_secret_preflight_covers_all_persisted_runspec_strings(
+    tmp_path, fake_nsys, monkeypatch, secret, overrides, location
+):
+    monkeypatch.setenv("RUNNER_SECRET", secret)
+    spec = _spec(
+        environment=EnvironmentSpec(secrets=("RUNNER_SECRET",)),
+        **overrides,
+    )
+    artifact_dir = tmp_path / "artifacts"
+
+    with pytest.raises(RunSpecError, match=location) as exc_info:
+        LocalProfileRunner(artifact_dir, str(fake_nsys)).run(spec)
+
+    assert secret not in str(exc_info.value)
+    assert not artifact_dir.exists()
+
+
 def test_invalid_runner_inputs_have_zero_filesystem_side_effects(tmp_path, fake_nsys):
     artifact_dir = tmp_path / "artifacts"
     runner = LocalProfileRunner(artifact_dir, str(fake_nsys))
@@ -295,6 +357,18 @@ def test_invalid_runner_inputs_have_zero_filesystem_side_effects(tmp_path, fake_
         runner.run(_spec(), progress_callback="not-callable")
     with pytest.raises(RunSpecError, match="cancellation"):
         runner.run(_spec(), cancellation=object())
+
+    assert not artifact_dir.exists()
+
+
+@pytest.mark.parametrize("executable", [123, "", "bad\x00nsys"])
+def test_invalid_nsys_executable_has_zero_filesystem_side_effects(
+    tmp_path, executable
+):
+    artifact_dir = tmp_path / "artifacts"
+
+    with pytest.raises(RunSpecError, match="nsys_executable"):
+        LocalProfileRunner(artifact_dir, executable).run(_spec())
 
     assert not artifact_dir.exists()
 
@@ -351,6 +425,47 @@ def test_unexpected_validation_bug_is_not_relabelled_as_invalid_profile(
         _run(tmp_path, fake_nsys)
 
 
+def test_progress_callback_exception_does_not_change_completed_result(
+    tmp_path, fake_nsys
+):
+    calls = []
+
+    def broken_observer(update):
+        calls.append(update.stage)
+        raise RuntimeError("observer failed")
+
+    result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
+        _spec(), progress_callback=broken_observer
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert calls[-1] is RunStage.FINISHED
+
+
+def test_capturing_callback_cancellation_prevents_popen(
+    tmp_path, fake_nsys, monkeypatch
+):
+    cancellation = threading.Event()
+    popen_calls = 0
+
+    def cancel_at_capture(update):
+        if update.stage is RunStage.CAPTURING:
+            cancellation.set()
+
+    def unexpected_popen(*args, **kwargs):
+        nonlocal popen_calls
+        popen_calls += 1
+        raise AssertionError("Popen must not be called")
+
+    monkeypatch.setattr("nsys_ai.profile_runner.subprocess.Popen", unexpected_popen)
+    result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
+        _spec(), progress_callback=cancel_at_capture, cancellation=cancellation
+    )
+
+    assert result.status is RunStatus.CANCELLED
+    assert popen_calls == 0
+
+
 def _process_is_running(pid):
     try:
         state = Path(f"/proc/{pid}/stat").read_text().split()[2]
@@ -378,6 +493,54 @@ def test_timeout_and_cancellation_kill_the_process_tree(
     expected = RunStatus.TIMED_OUT if stop_kind == "timeout" else RunStatus.CANCELLED
     assert result.status is expected
     child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(child_pid)
+
+
+@pytest.mark.parametrize("stop_kind", ["timeout", "cancel"])
+def test_due_stop_beats_leader_exit_and_kills_surviving_child(
+    tmp_path, fake_nsys, monkeypatch, stop_kind
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", 0.25)
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
+    cancellation = threading.Event()
+    mode = "race_timeout" if stop_kind == "timeout" else "race_cancel"
+    timeout = 1 if stop_kind == "timeout" else None
+    if stop_kind == "cancel":
+        threading.Timer(0.08, cancellation.set).start()
+
+    result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
+        _spec(mode, timeout_seconds=timeout), cancellation=cancellation
+    )
+
+    expected = RunStatus.TIMED_OUT if stop_kind == "timeout" else RunStatus.CANCELLED
+    assert result.status is expected
+    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(child_pid)
+
+
+def test_cancellation_callable_failure_propagates_after_process_tree_cleanup(
+    tmp_path, fake_nsys, monkeypatch
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
+    pid_path = tmp_path / "artifacts" / "profile.child.pid"
+
+    def broken_cancellation():
+        if pid_path.exists():
+            raise OSError("cancellation source failed")
+        return False
+
+    with pytest.raises(OSError, match="cancellation source failed"):
+        LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
+            _spec("hang"), cancellation=broken_cancellation
+        )
+
+    child_pid = int(pid_path.read_text())
     deadline = time.monotonic() + 2
     while _process_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.02)
