@@ -26,6 +26,15 @@ def _cmd_profile(args, _profile):
     if exit_code:
         raise SystemExit(exit_code)
 
+
+def _cmd_propose(args, _profile):
+    """Generate a deterministic proposal artifact from one finding."""
+    from nsys_ai.propose_command import run_propose_command
+
+    exit_code = run_propose_command(args)
+    if exit_code:
+        raise SystemExit(exit_code)
+
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------
