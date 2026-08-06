@@ -542,10 +542,9 @@ class Skill:
                 _log.debug("No profiler overhead data found (table absent or empty)")
             resolved["overhead_ns"] = overhead_ns
 
-        # Memoize per connection. One EvidenceBuilder.build() executes 29 skills
-        # for 14 distinct names, because the health manifest and root-cause
-        # matcher re-run skills the pipeline already ran. Eight of those are
-        # exact repeats.
+        # Memoize per connection. One EvidenceBuilder.build() reaches skills
+        # both directly and through the health manifest / root-cause matcher,
+        # which re-run some analyses already requested by the pipeline.
         #
         # The key includes the resolved parameters, not just the name. The
         # repeats are mostly NOT identical — gpu_idle_gaps is called at limit=1

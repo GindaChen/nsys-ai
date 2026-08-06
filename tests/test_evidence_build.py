@@ -1,5 +1,7 @@
 """Tests for evidence build CLI and EvidenceBuilder.only parameter."""
 
+from collections import Counter
+
 from nsys_ai.evidence_builder import EvidenceBuilder
 
 
@@ -65,3 +67,11 @@ class TestEvidenceBuilderOnly:
         for name, (skill_name, params) in EvidenceBuilder._SKILL_PIPELINE.items():
             skill = get_skill(skill_name)
             assert skill is not None, f"Missing skill {skill_name} for analyzer '{name}'"
+
+    def test_default_pipeline_includes_launch_and_compile_context_once(self):
+        skill_counts = Counter(
+            skill_name for skill_name, _params in EvidenceBuilder._SKILL_PIPELINE.values()
+        )
+
+        assert skill_counts["kernel_launch_overhead"] == 1
+        assert skill_counts["nccl_compile_context_breakdown"] == 1

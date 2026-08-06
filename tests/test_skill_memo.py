@@ -1,8 +1,8 @@
 """Skill results are memoized per connection, keyed on the resolved parameters.
 
-One `EvidenceBuilder.build()` executed 29 skills for 14 distinct names, because
-the health manifest and the root-cause matcher re-run skills the pipeline has
-already run. Eight of those were exact repeats.
+An `EvidenceBuilder.build()` reaches skills both directly and through the
+health manifest and root-cause matcher, which re-run some skills the pipeline
+has already requested. Exact repeats should reuse the first result.
 
 The parameters are the reason this needs care rather than a dictionary keyed on
 the skill name. Most of the repeats are *not* identical — `gpu_idle_gaps` is
@@ -222,9 +222,9 @@ def test_the_build_executes_fewer_skills_without_changing_findings(profile):
     # the skill does not declare and does not read (`communicator_data` is
     # forwarded through `root_cause_matcher`), so three of the remaining
     # executions are semantically identical calls the memo fails to absorb.
-    # kernel_launch_overhead is now independently enrolled in the evidence
-    # pipeline, adding one distinct execution rather than a duplicate. Narrowing
-    # the key to declared parameters would take this to 19; that is a separate
-    # change with its own correctness surface.
+    # Both independently enrolled default-pack skills add one distinct execution
+    # rather than a duplicate. Narrowing the key to declared parameters would
+    # take this to 20; that is a separate change with its own correctness surface.
     assert counts["kernel_launch_overhead"] == 1
-    assert total <= 22, f"{total} skill executions — duplicates came back: {dict(counts)}"
+    assert counts["nccl_compile_context_breakdown"] == 1
+    assert total <= 23, f"{total} skill executions — duplicates came back: {dict(counts)}"
