@@ -87,6 +87,7 @@ class EvidenceBuilder:
         "h2d_spikes": ("h2d_distribution", {}),
         "kernel_launch_overhead": ("kernel_launch_overhead", {}),
         "nccl_breakdown": ("nccl_breakdown", {}),
+        "nccl_compile_context_breakdown": ("nccl_compile_context_breakdown", {}),
         # Profile-level bound class. Contributes the verdict only and reports
         # no headroom by design (the reasoning lives in
         # critical_path._to_findings). It therefore ranks below every
@@ -105,8 +106,7 @@ class EvidenceBuilder:
 
         Args:
             only: If provided, run only the named analyzers.
-                  Valid names: slow_iterations, idle_gaps, nccl_stalls,
-                  kernel_hotspots, overlap_ratio, memory_anomalies, h2d_spikes.
+                  Valid names are the keys in :attr:`_SKILL_PIPELINE`.
                   If None, run all analyzers.
         """
         from .fingerprint import get_profile_id

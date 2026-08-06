@@ -179,6 +179,7 @@ class Agent:
         12. kernel_overlap_matrix
         13. iteration_timing
         14. nvtx_layer_breakdown
+        15. nccl_compile_context_breakdown
 
         Returns:
             Formatted multi-section report with optional AI synthesis.
@@ -205,6 +206,7 @@ class Agent:
             "kernel_overlap_matrix",
             "iteration_timing",
             "nvtx_layer_breakdown",
+            "nccl_compile_context_breakdown",
         ]
 
         for skill_name in core_skills:
