@@ -69,18 +69,22 @@ def _run(conn, **kwargs):
     return SKILL.execute_fn(conn, min_launches=1, device=0, **kwargs)
 
 
-def test_uses_api_duration_and_nonnegative_queue_duration():
+def test_uses_api_duration_and_counts_only_strictly_positive_queue_time():
     conn = _connection()
     _insert_launch(conn, kernel_start=10_000, api_start=8_000, api_duration=1_000)
     _insert_launch(
-        conn, correlation=2, kernel_start=20_000, api_start=19_500,
+        conn, correlation=2, kernel_start=20_000, api_start=19_000,
+        api_duration=1_000,
+    )
+    _insert_launch(
+        conn, correlation=3, kernel_start=30_000, api_start=29_500,
         api_duration=1_000,
     )
 
     rows = _run(conn)
 
-    assert rows[0]["launch_count"] == 2
-    assert rows[0]["total_api_ms"] == pytest.approx(0.002)
+    assert rows[0]["launch_count"] == 3
+    assert rows[0]["total_api_ms"] == pytest.approx(0.003)
     assert rows[0]["avg_api_us"] == pytest.approx(1.0)
     assert rows[0]["queue_count"] == 1
     assert rows[0]["total_queue_ms"] == pytest.approx(0.001)
@@ -111,6 +115,37 @@ def test_process_identity_prevents_correlation_id_cross_join():
 
     assert rows[0]["launch_count"] == 2
     assert rows[0]["total_api_ms"] == pytest.approx(0.003)
+
+
+def test_negative_signed_global_tid_uses_official_process_mask():
+    conn = _connection()
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?,?,?,?)",
+        (-4_294_967_296, 0, 1, 7, 10_000, 15_000, 1),
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?,?,?)",
+        (-4_294_967_289, 7, 8_000, 9_000, 10),
+    )
+
+    rows = _run(conn)
+
+    assert rows[0]["launch_count"] == 1
+    assert rows[0]["total_api_ms"] == pytest.approx(0.001)
+
+
+def test_compact_unencoded_ids_do_not_bypass_process_mask():
+    conn = _connection()
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?,?,?,?)",
+        (100, 0, 1, 7, 10_000, 15_000, 1),
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?,?,?)",
+        (100, 7, 8_000, 9_000, 10),
+    )
+
+    assert _run(conn) == []
 
 
 def test_equal_timestamp_launches_remain_distinct():
@@ -151,17 +186,29 @@ def test_nonlaunch_runtime_row_cannot_steal_match():
     assert rows[0]["avg_api_us"] == pytest.approx(1.0)
 
 
-def test_duckdb_execution_path(duckdb_conn):
-    duckdb_conn.execute("INSERT INTO StringIds VALUES (99, 'duckdb_tiny_kernel')")
-    duckdb_conn.execute(
-        'UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET "end" = start + 5000, shortName = 99 '
-        'WHERE correlationId = 1'
-    )
+def test_duckdb_execution_path():
+    import duckdb
 
-    rows = SKILL.execute_fn(duckdb_conn, min_launches=1, device=0)
+    conn = duckdb.connect()
+    conn.execute("CREATE TABLE StringIds(id INTEGER PRIMARY KEY, value VARCHAR)")
+    conn.execute("INSERT INTO StringIds VALUES (1, 'tiny'), (10, 'cudaLaunchKernel')")
+    conn.execute(
+        'CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL('
+        'globalPid BIGINT, deviceId INTEGER, streamId INTEGER, '
+        'correlationId INTEGER, start BIGINT, "end" BIGINT, shortName INTEGER)'
+    )
+    conn.execute(
+        'CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME('
+        'globalTid BIGINT, correlationId INTEGER, start BIGINT, '
+        '"end" BIGINT, nameId INTEGER)'
+    )
+    _insert_launch(conn)
+
+    rows = SKILL.execute_fn(conn, min_launches=1, device=0)
 
     assert rows
     assert rows[0]["avg_kernel_us"] == pytest.approx(5.0)
+    conn.close()
 
 
 @pytest.mark.parametrize(

@@ -104,17 +104,13 @@ def _execute(conn, **kwargs):
         params.extend([int(trim_start), int(trim_end)])
     params.append(min_launches)
 
-    # Nsight encodes the process in the high bits of globalTid. The fallback
-    # equality keeps the repository's compact synthetic fixtures meaningful;
-    # real exported identifiers take the masked branch. Device, process,
-    # correlation, stream, and timestamps together retain launch identity.
+    # Nsight encodes the process in the high bits of globalTid. Apply NVIDIA's
+    # mask unconditionally; compact unencoded test IDs would weaken the same
+    # process boundary this join is responsible for enforcing.
     sql = f"""
         WITH launch_runtime AS (
             SELECT
-                CASE
-                    WHEN r.globalTid < 16777216 THEN r.globalTid
-                    ELSE (r.globalTid & CAST(-16777216 AS BIGINT))
-                END AS process_id,
+                r.globalTid & CAST(-16777216 AS BIGINT) AS process_id,
                 r.globalTid AS global_tid,
                 r.correlationId AS correlation_id,
                 r.start AS api_start_ns,
@@ -140,7 +136,7 @@ def _execute(conn, **kwargs):
                 r.api_end_ns,
                 r.api_duration_ns,
                 CASE
-                    WHEN k.start - r.api_end_ns >= 0 THEN k.start - r.api_end_ns
+                    WHEN k.start - r.api_end_ns > 0 THEN k.start - r.api_end_ns
                     ELSE NULL
                 END AS queue_duration_ns,
                 k."end" - k.start AS kernel_duration_ns,
