@@ -7,8 +7,11 @@ does not own CLI presentation, session layout, or remote execution.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
+import sqlite3
+import stat
 import subprocess  # nosec B404
 import time
 from collections.abc import Callable, Mapping
@@ -19,10 +22,22 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from .connection import DB_ERRORS
-from .exceptions import NsysAiError
+from .exceptions import NsysAiError, ProfileError
 from .fingerprint import get_profile_id
 from .profile import Profile, resolve_profile_path
-from .runspec import RunSpec, RunSpecError, build_nsys_profile_argv, validate_secret_boundaries
+from .profile_reference import (
+    LocalProfileReference,
+    inspect_local_profile_file,
+    profile_stat_signature,
+    validate_local_profile_reference,
+)
+from .runspec import (
+    RunSpec,
+    RunSpecError,
+    build_nsys_profile_argv,
+    validate_persisted_secret_strings,
+    validate_secret_boundaries,
+)
 
 
 class RunStatus(str, Enum):
@@ -57,15 +72,187 @@ class RunProgress:
     elapsed_seconds: float
 
 
-@dataclass(frozen=True)
-class LocalProfileReference:
-    """Validated identity and schema metadata for a local SQLite export."""
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-    path: str
-    profile_id: str
-    schema_version: str | None
-    product_version: str | None
-    kernel_count: int
+
+def _open_profile_descriptor(profile_path: Path) -> tuple[int, os.stat_result]:
+    try:
+        resolved_path, path_metadata = inspect_local_profile_file(profile_path)
+    except ValueError as exc:
+        raise ProfileError(str(exc)) from None
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(resolved_path, flags)
+    except FileNotFoundError:
+        raise ProfileError("local profile path does not exist") from None
+    except OSError:
+        raise ProfileError("local profile path cannot be opened safely") from None
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_metadata.st_mode):
+            raise ProfileError("local profile path is not a regular file")
+        if profile_stat_signature(path_metadata) != profile_stat_signature(
+            descriptor_metadata
+        ):
+            raise ProfileError("local profile changed while it was being opened")
+        return descriptor, descriptor_metadata
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _assert_profile_descriptor_unchanged(
+    descriptor: int,
+    profile_path: Path,
+    before: os.stat_result,
+) -> None:
+    try:
+        descriptor_after = os.fstat(descriptor)
+        resolved_after, path_after = inspect_local_profile_file(profile_path)
+    except (OSError, ValueError):
+        raise ProfileError("local profile changed during validation") from None
+    expected = profile_stat_signature(before)
+    if (
+        profile_stat_signature(descriptor_after) != expected
+        or profile_stat_signature(path_after) != expected
+        or resolved_after != profile_path
+        or not stat.S_ISREG(path_after.st_mode)
+    ):
+        raise ProfileError("local profile changed during validation")
+
+
+def build_local_profile_reference(
+    path: str | os.PathLike[str],
+    *,
+    resolved_secrets: Mapping[str, str] | None = None,
+) -> LocalProfileReference:
+    """Validate an existing SQLite export and return its local reference.
+
+    The source profile is opened in direct, read-only analysis mode. The
+    function does not export, copy, cache, or publish the profile or create a
+    session. ``resolved_secrets`` lets callers reject a declared secret that
+    would otherwise be persisted as part of the absolute local path.
+    """
+    path_conversion_failed = False
+    try:
+        raw_path = os.fspath(path)
+    except Exception:
+        path_conversion_failed = True
+        raw_path = None
+    if path_conversion_failed:
+        raise ProfileError("local profile path must be a path string")
+    if not isinstance(raw_path, str):
+        raise ProfileError("local profile path must be a path string")
+    if not raw_path:
+        raise ProfileError("local profile path must not be empty")
+    if "\x00" in raw_path:
+        raise ProfileError("local profile path must not contain NUL bytes")
+
+    try:
+        profile_path = Path(raw_path).expanduser().absolute()
+    except (OSError, RuntimeError):
+        raise ProfileError("local profile path cannot be normalized") from None
+    if profile_path.suffix.lower() != ".sqlite":
+        raise ProfileError("local profile path must name a .sqlite file")
+    secret_error_detail: str | None = None
+    try:
+        validate_persisted_secret_strings(
+            {"path": str(profile_path)},
+            resolved_secrets if resolved_secrets is not None else {},
+        )
+    except Exception:
+        declared_names: list[str] = []
+        try:
+            for name, value in (resolved_secrets or {}).items():
+                if (
+                    isinstance(name, str)
+                    and _ENVIRONMENT_NAME.fullmatch(name)
+                    and isinstance(value, str)
+                    and value
+                    and value in str(profile_path)
+                ):
+                    declared_names.append(name)
+        except Exception:
+            declared_names = []
+        detail = (
+            " " + ", ".join(sorted(declared_names))
+            if declared_names
+            else ""
+        )
+        secret_error_detail = detail
+    if secret_error_detail is not None:
+        raise ProfileError(
+            f"local profile path contains a resolved secret{secret_error_detail}"
+        )
+
+    descriptor, before = _open_profile_descriptor(profile_path)
+    connection: sqlite3.Connection | None = None
+    validation_succeeded = False
+    unexpected_error: Exception | None = None
+    kernel_count = None
+    profile_id = None
+    schema_version = None
+    product_version = None
+    try:
+        descriptor_uri = f"file:/proc/self/fd/{descriptor}?mode=ro&immutable=1"
+        connection = sqlite3.connect(
+            descriptor_uri,
+            uri=True,
+            check_same_thread=False,
+        )
+        connection.execute("PRAGMA query_only = ON")
+        with Profile._from_conn(connection) as profile:
+            kernel_count = profile.meta.kernel_count
+            profile_id = get_profile_id(
+                profile.conn, fallback_path=str(profile_path)
+            )
+            schema_version = profile.schema.schema_version
+            product_version = profile.schema.version
+        validation_succeeded = True
+    except (NsysAiError, OSError, *DB_ERRORS):
+        validation_succeeded = False
+    except Exception as exc:
+        unexpected_error = exc
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except (OSError, *DB_ERRORS):
+                validation_succeeded = False
+            except Exception as exc:
+                unexpected_error = unexpected_error or exc
+
+    changed_error = None
+    try:
+        _assert_profile_descriptor_unchanged(descriptor, profile_path, before)
+    except ProfileError as exc:
+        changed_error = exc
+    finally:
+        os.close(descriptor)
+    if changed_error is not None:
+        raise changed_error from None
+    if unexpected_error is not None:
+        raise unexpected_error
+    if not validation_succeeded:
+        raise ProfileError("local profile is not a valid Nsight SQLite export") from None
+
+    reference = LocalProfileReference(
+        path=str(profile_path),
+        profile_id=profile_id,
+        schema_version=schema_version,
+        product_version=product_version,
+        kernel_count=kernel_count,
+    )
+    try:
+        return validate_local_profile_reference(reference, require_file=True)
+    except (TypeError, ValueError) as exc:
+        raise ProfileError(str(exc)) from None
 
 
 @dataclass(frozen=True)
@@ -105,10 +292,6 @@ ProgressCallback = Callable[[RunProgress], None]
 
 _POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 2.0
-
-
-class _EmptyProfileError(ValueError):
-    """A readable profile has no GPU kernel rows."""
 
 
 class _CaptureLaunchError(Exception):
@@ -348,19 +531,10 @@ class LocalProfileRunner:
         progress(RunStage.VALIDATING)
         validation_started = time.monotonic()
         try:
-            with Profile(str(sqlite_path), cache_mode="direct") as profile:
-                if profile.meta.kernel_count <= 0:
-                    raise _EmptyProfileError("profile contains no GPU kernel activity")
-                reference = LocalProfileReference(
-                    path=str(sqlite_path),
-                    profile_id=get_profile_id(
-                        profile.conn, fallback_path=str(sqlite_path.absolute())
-                    ),
-                    schema_version=profile.schema.schema_version,
-                    product_version=profile.schema.version,
-                    kernel_count=profile.meta.kernel_count,
-                )
-        except (NsysAiError, OSError, *DB_ERRORS, _EmptyProfileError) as exc:
+            reference = build_local_profile_reference(
+                sqlite_path, resolved_secrets=resolved_secrets
+            )
+        except (NsysAiError, OSError, *DB_ERRORS) as exc:
             validation_seconds = time.monotonic() - validation_started
             return result(
                 RunStatus.INVALID_PROFILE,

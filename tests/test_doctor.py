@@ -92,7 +92,7 @@ def test_health_section_on_minimal_profile(minimal_nsys_db_path):
     assert health is not None
     assert report.profile_path == minimal_nsys_db_path
     # profile_id is content-derived when Nsight metadata is reachable.
-    assert report.profile_id is None or report.profile_id.startswith("nsys1:")
+    assert report.profile_id is None or report.profile_id.startswith("nsys2:")
     by_name = {c.name: c for c in health.checks}
     assert "Duration" in by_name
     assert "GPUs" in by_name

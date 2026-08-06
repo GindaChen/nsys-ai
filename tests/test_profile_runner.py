@@ -175,7 +175,7 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
     assert result.application_return_code is None
     assert result.profile is not None
     assert result.profile.kernel_count == 1
-    assert result.profile.profile_id.startswith("nsys1:sha256:")
+    assert result.profile.profile_id.startswith("nsys2:sha256:")
     assert result.profile.schema_version == "3.25.0"
     assert result.profile.product_version == "2026.2.1.106"
     assert Path(result.report_path).is_file()
@@ -197,6 +197,27 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
     assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700
     for private_path in (result.runspec_path, result.stdout_path, result.stderr_path):
         assert stat.S_IMODE(Path(private_path).stat().st_mode) == 0o600
+
+
+def test_runner_reuses_public_profile_reference_factory(
+    tmp_path, fake_nsys, monkeypatch
+):
+    import nsys_ai.profile_runner as profile_runner
+
+    calls = []
+    real_factory = profile_runner.build_local_profile_reference
+
+    def recording_factory(path, *, resolved_secrets=None):
+        calls.append((Path(path), dict(resolved_secrets or {})))
+        return real_factory(path, resolved_secrets=resolved_secrets)
+
+    monkeypatch.setattr(
+        profile_runner, "build_local_profile_reference", recording_factory
+    )
+    result = _run(tmp_path, fake_nsys)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert calls == [(Path(result.sqlite_path), {})]
 
 
 @pytest.mark.parametrize(

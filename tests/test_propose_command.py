@@ -33,7 +33,7 @@ def _finding(finding_id: str, *, explanation: str | None = None) -> Finding:
         headroom_basis="capture_total",
         selection=TraceSelection(
             id=f"selection-{finding_id}",
-            profile_id="nsys1:sha256:profile",
+            profile_id="nsys2:sha256:" + "1" * 64,
             source="skill:overlap_breakdown",
             start_ns=100,
             end_ns=200,
@@ -47,7 +47,7 @@ def _write_evidence(path: Path, findings: list[Finding]) -> dict:
     payload = EvidenceReport(
         "Auto-Analysis",
         profile_path="/profiles/before.sqlite",
-        profile_id="nsys1:sha256:profile",
+        profile_id="nsys2:sha256:" + "1" * 64,
         findings=findings,
     ).to_dict()
     path.write_text(json.dumps(payload), encoding="utf-8")

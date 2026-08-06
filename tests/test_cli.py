@@ -454,7 +454,7 @@ def test_baseline_tag_list_show_roundtrip(tmp_path):
     assert meta["name"] == "v1"
     assert meta["reason"] == "known good"
     assert meta["runspec"] is None
-    assert meta["profile_id"].startswith("nsys1:")
+    assert meta["profile_id"].startswith("nsys2:")
     assert meta["tagger"]
     assert meta["tagged_at"].endswith("Z")
 

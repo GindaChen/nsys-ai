@@ -4,13 +4,14 @@ import os
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from nsys_ai.annotation import SCHEMA_VERSION as DIFF_SCHEMA_VERSION
 from nsys_ai.annotation import EvidenceReport, EvidenceRow, Finding, TraceSelection
-from nsys_ai.profile_runner import LocalProfileReference
+from nsys_ai.profile_reference import LocalProfileReference
 from nsys_ai.proposal import PROPOSAL_SCHEMA_VERSION, Proposal, generate_proposal
 from nsys_ai.runspec import EnvironmentSpec, RunSpec, RunSpecError
 from nsys_ai.session_store import (
@@ -18,16 +19,21 @@ from nsys_ai.session_store import (
     SessionConflictError,
     SessionCorruptError,
     SessionError,
+    SessionState,
     SessionStore,
     UnsupportedSessionVersionError,
 )
 
 
-def _profile_reference(path: Path, profile_id: str) -> LocalProfileReference:
+def _profile_id(seed: str) -> str:
+    return "nsys2:sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _profile_reference(path: Path, identity_seed: str) -> LocalProfileReference:
     path.write_bytes(b"profile bytes remain outside the session")
     return LocalProfileReference(
         path=str(path.absolute()),
-        profile_id=profile_id,
+        profile_id=_profile_id(identity_seed),
         schema_version="3.25.0",
         product_version="2026.2.1.106",
         kernel_count=7,
@@ -248,10 +254,10 @@ def _proposal_id_for_payload(payload: dict) -> str:
 
 def _reprofiled_session(tmp_path: Path, session_id: str):
     before = _profile_reference(
-        tmp_path / f"{session_id}-before.sqlite", f"nsys1:{session_id}:before"
+        tmp_path / f"{session_id}-before.sqlite", f"{session_id}:before"
     )
     after = _profile_reference(
-        tmp_path / f"{session_id}-after.sqlite", f"nsys1:{session_id}:after"
+        tmp_path / f"{session_id}-after.sqlite", f"{session_id}:after"
     )
     finding = _finding(before)
     spec = RunSpec(argv=("true",))
@@ -274,8 +280,8 @@ def _reprofiled_session(tmp_path: Path, session_id: str):
 
 def test_complete_session_round_trip_uses_exact_layout_and_local_references(tmp_path):
     sessions = tmp_path / ".nsys-ai" / "sessions"
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     store = SessionStore(sessions)
 
     state = store.create("run-001", before_profile=before)
@@ -405,8 +411,8 @@ def test_symlink_alias_cannot_bypass_the_single_writer_lock(tmp_path):
 
 def test_new_process_reloads_persisted_phase_and_profile_reference(tmp_path):
     store = SessionStore(tmp_path / "sessions")
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     finding = _finding(before)
     spec = RunSpec(argv=("true",))
     store.create("restart", before_profile=before)
@@ -438,7 +444,7 @@ print(json.dumps({"phase": snapshot.state.phase, "profile_id": snapshot.state.af
     )
     assert json.loads(result.stdout) == {
         "phase": "reprofile",
-        "profile_id": "nsys1:after",
+        "profile_id": after.profile_id,
     }
 
 
@@ -697,8 +703,8 @@ def test_findings_producer_version_drift_remains_compatible(tmp_path):
 
 
 def test_findings_and_diff_must_match_session_profile_identities(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     store = SessionStore(tmp_path / "sessions")
     store.create("identity", before_profile=before)
     finding = _finding(before)
@@ -708,7 +714,7 @@ def test_findings_and_diff_must_match_session_profile_identities(tmp_path):
             writer.publish_findings(EvidenceReport("missing provenance"))
         with pytest.raises(ValueError, match="findings profile_id"):
             writer.publish_findings(
-                EvidenceReport("wrong", profile_id="nsys1:other")
+                EvidenceReport("wrong", profile_id=_profile_id("other"))
             )
         writer.publish_runspec(spec)
         writer.publish_findings(
@@ -722,7 +728,7 @@ def test_findings_and_diff_must_match_session_profile_identities(tmp_path):
         writer.publish_proposal(generate_proposal(finding, spec))
         writer.publish_after_profile(after)
         mismatched = _diff(before, after)
-        mismatched["after"]["profile_id"] = "nsys1:other"
+        mismatched["after"]["profile_id"] = _profile_id("other")
         with pytest.raises(ValueError, match="diff after profile_id"):
             writer.publish_diff(mismatched)
 
@@ -732,7 +738,7 @@ def test_findings_and_diff_must_match_session_profile_identities(tmp_path):
 
 
 def test_malformed_typed_findings_are_rejected_before_publication(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     malformed = [
         Finding(type=None, label="missing type", start_ns=1),
         Finding(
@@ -774,7 +780,7 @@ def test_malformed_typed_findings_are_rejected_before_publication(tmp_path):
 
 
 def test_malformed_findings_payload_is_rejected_on_restart(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     report = EvidenceReport(
         "diagnosis",
         profile_path=before.path,
@@ -803,7 +809,7 @@ def test_malformed_findings_payload_is_rejected_on_restart(tmp_path):
 
 
 def test_wrong_nested_evidence_scalar_and_container_types_are_rejected(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     malformed = [
         Finding(type=123, label="wrong scalar", start_ns=1),
         Finding(
@@ -847,7 +853,7 @@ def test_wrong_nested_evidence_scalar_and_container_types_are_rejected(tmp_path)
 def test_nested_finding_selection_must_match_before_profile_on_publish_and_load(
     tmp_path,
 ):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     finding = _finding(before)
     report = EvidenceReport(
         "diagnosis",
@@ -860,7 +866,7 @@ def test_nested_finding_selection_must_match_before_profile_on_publish_and_load(
     session_dir = store.root / "selection-profile"
     manifest_before = (session_dir / "session.json").read_bytes()
 
-    finding.selection.profile_id = "nsys1:other"
+    finding.selection.profile_id = _profile_id("other")
     with store.writer("selection-profile") as writer:
         with pytest.raises(ValueError, match="selection profile_id"):
             writer.publish_findings(report)
@@ -872,7 +878,7 @@ def test_nested_finding_selection_must_match_before_profile_on_publish_and_load(
         writer.publish_findings(report)
     findings_path = session_dir / "findings.json"
     payload = json.loads(findings_path.read_text())
-    payload["findings"][0]["selection"]["profile_id"] = "nsys1:other"
+    payload["findings"][0]["selection"]["profile_id"] = _profile_id("other")
     findings_path.write_text(json.dumps(payload))
     manifest_path = session_dir / "session.json"
     manifest = json.loads(manifest_path.read_text())
@@ -886,8 +892,8 @@ def test_nested_finding_selection_must_match_before_profile_on_publish_and_load(
 
 
 def test_diff_requires_reprofile_phase(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     store = SessionStore(tmp_path / "sessions")
     store.create("missing-refs")
     with store.writer("missing-refs") as writer:
@@ -1025,7 +1031,7 @@ def test_diff_lineage_requires_exact_shape_types_and_parent_context(
     elif mutation == "baseline_type":
         lineage["baseline_profile_id"] = 1
     else:
-        lineage["baseline_profile_id"] = "nsys1:not-the-before-profile"
+        lineage["baseline_profile_id"] = "nsys2:sha256:" + "f" * 64
 
     with store.writer("diff-lineage-shape") as writer:
         with pytest.raises(ValueError, match="diff_lineage"):
@@ -1039,7 +1045,7 @@ def test_diff_lineage_requires_exact_shape_types_and_parent_context(
         ("diff_id", "another-diff"),
         ("role", "improvement"),
         ("rank", 1),
-        ("baseline_profile_id", "nsys1:not-the-before-profile"),
+        ("baseline_profile_id", "nsys2:sha256:" + "f" * 64),
     ],
 )
 def test_diff_lineage_context_is_revalidated_after_tamper_and_redigest(
@@ -1201,7 +1207,7 @@ def test_directional_diff_invariants_are_revalidated_on_restart(
     ("side", "field", "wrong_value"),
     [
         ("before", "path", "/tmp/not-the-before-profile.sqlite"),
-        ("after", "profile_id", "nsys1:not-after"),
+        ("after", "profile_id", _profile_id("not-after")),
         ("before", "schema_version", "9.9"),
         ("after", "product_version", "2099.1"),
     ],
@@ -1230,7 +1236,7 @@ def test_diff_side_metadata_must_match_session_references_before_publication(
     ("side", "field", "wrong_value"),
     [
         ("before", "path", "/tmp/not-the-before-profile.sqlite"),
-        ("after", "profile_id", "nsys1:not-after"),
+        ("after", "profile_id", _profile_id("not-after")),
         ("before", "schema_version", "9.9"),
         ("after", "product_version", "2099.1"),
     ],
@@ -1327,7 +1333,7 @@ def test_runspec_secret_preflight_happens_before_publication(tmp_path):
 
 
 def test_proposal_future_version_is_rejected_by_manifest_contract(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     store = SessionStore(tmp_path / "sessions")
     store.create("proposal", before_profile=before)
     finding = _finding(before)
@@ -1361,7 +1367,7 @@ def test_proposal_future_version_is_rejected_by_manifest_contract(tmp_path):
 
 
 def test_invented_proposal_projection_is_rejected_on_publish_and_reload(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     finding = _finding(before)
     report = EvidenceReport(
         "diagnosis",
@@ -1399,7 +1405,7 @@ def test_invented_proposal_projection_is_rejected_on_publish_and_reload(tmp_path
 
 
 def test_missing_selection_abstention_round_trips_without_weakening_identity(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     finding = _finding(before, "missing-selection")
     finding.selection = None
     report = EvidenceReport(
@@ -1428,7 +1434,7 @@ def test_missing_selection_abstention_round_trips_without_weakening_identity(tmp
         writer.publish_proposal(proposal)
         with pytest.raises(ValueError, match="non-abstained proposal"):
             writer.publish_after_profile(
-                _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+                _profile_reference(tmp_path / "after.sqlite", "after")
             )
 
     snapshot = store.load("missing-selection")
@@ -1439,8 +1445,8 @@ def test_missing_selection_abstention_round_trips_without_weakening_identity(tmp
 
 
 def test_proposal_requires_session_profile_and_exactly_one_finding(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    other = _profile_reference(tmp_path / "other.sqlite", "nsys1:other")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    other = _profile_reference(tmp_path / "other.sqlite", "other")
     known = _finding(before, "known")
     unknown = _finding(before, "unknown")
     wrong_profile = _finding(other, "known")
@@ -1473,7 +1479,7 @@ def test_interrupted_proposal_manifest_update_recovers_previous_proposal(
 ):
     import nsys_ai.session_store as session_store
 
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     first_finding = _finding(before, "f1", action="First action")
     second_finding = _finding(before, "f2", action="Second action")
     report = EvidenceReport(
@@ -1516,10 +1522,10 @@ def test_interrupted_proposal_manifest_update_recovers_previous_proposal(
 
 
 def test_dependent_overwrites_cannot_break_proposal_or_diff_references(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     replacement_after = _profile_reference(
-        tmp_path / "replacement.sqlite", "nsys1:replacement"
+        tmp_path / "replacement.sqlite", "replacement"
     )
     finding = _finding(before)
     report = EvidenceReport(
@@ -1771,7 +1777,7 @@ def test_load_rejects_noncanonical_diff_decisions(tmp_path, decision):
 
 
 def test_runspec_and_proposal_verification_cannot_diverge(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     finding = _finding(before)
     first_spec = RunSpec(argv=("true", "--mode=first"))
     second_spec = RunSpec(argv=("true", "--mode=second"))
@@ -1808,7 +1814,7 @@ def test_runspec_and_proposal_verification_cannot_diverge(tmp_path):
 
 
 def test_null_verification_abstention_requires_null_session_runspec(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
     finding = _finding(before)
     report = EvidenceReport(
         "diagnosis",
@@ -1827,7 +1833,7 @@ def test_null_verification_abstention_requires_null_session_runspec(tmp_path):
             writer.publish_runspec(RunSpec(argv=("true",)))
         with pytest.raises(ValueError, match="non-abstained proposal"):
             writer.publish_after_profile(
-                _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+                _profile_reference(tmp_path / "after.sqlite", "after")
             )
 
     snapshot = store.load("null-verification")
@@ -1866,8 +1872,8 @@ def test_non_finite_json_values_are_rejected_before_publication(tmp_path):
 
 
 def test_closed_writer_rejects_every_publication_method(tmp_path):
-    before = _profile_reference(tmp_path / "before.sqlite", "nsys1:before")
-    after = _profile_reference(tmp_path / "after.sqlite", "nsys1:after")
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
     store = SessionStore(tmp_path / "sessions")
     store.create("closed", before_profile=before)
     writer = store.writer("closed")
@@ -1905,12 +1911,380 @@ def test_malformed_or_unsupported_json_is_rejected_as_corrupt(tmp_path):
         store.load("future")
 
 
-def test_profile_reference_rejects_remote_kind_and_is_not_revalidated_on_restart(tmp_path):
-    profile = _profile_reference(tmp_path / "profile.sqlite", "nsys1:profile")
+@pytest.mark.parametrize(
+    ("field", "manifest_field", "value"),
+    [
+        ("profile_id", "profile_id", "nsys1:sha256:" + "0" * 64),
+        ("profile_id", "profile_id", "nsys2:path:" + "0" * 64),
+        ("profile_id", "profile_id", "opaque-profile-id"),
+        ("profile_id", "profile_id", "nsys2:sha256:" + "A" * 64),
+        ("profile_id", "profile_id", "nsys2:sha256:" + "0" * 63),
+        ("profile_id", "profile_id", "nsys2:sha256:" + "0" * 65),
+        ("kernel_count", "kernel_count", 0),
+        ("kernel_count", "kernel_count", True),
+        ("path", "path", "relative.sqlite"),
+        ("path", "path", "/tmp/profile.nsys-rep"),
+        ("schema_version", "export_schema_version", ""),
+        ("product_version", "product_version", ""),
+    ],
+)
+def test_every_session_reference_boundary_rejects_invalid_contract(
+    tmp_path, field, manifest_field, value
+):
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    invalid = replace(valid, **{field: value})
+    store = SessionStore(tmp_path / "sessions")
+
+    with pytest.raises((TypeError, ValueError)):
+        store.create("invalid-create", before_profile=invalid)
+
+    store.create("invalid-publish")
+    with store.writer("invalid-publish") as writer:
+        with pytest.raises((TypeError, ValueError)):
+            writer.publish_findings(
+                EvidenceReport("invalid reference"),
+                before_profile=invalid,
+            )
+        with pytest.raises((TypeError, ValueError)):
+            writer.publish_after_profile(invalid)
+
+    state_payload = SessionState(
+        session_id="invalid-from-dict",
+        before_profile=valid,
+    ).to_dict()
+    state_payload["profiles"]["before"][manifest_field] = value
+    with pytest.raises(SessionCorruptError, match="invalid local profile reference"):
+        SessionState.from_dict(state_payload)
+
+    store.create("invalid-load", before_profile=valid)
+    manifest_path = store.root / "invalid-load" / "session.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"]["before"][manifest_field] = value
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(SessionCorruptError, match="invalid local profile reference"):
+        store.load("invalid-load")
+
+
+def test_session_reference_validation_error_does_not_disclose_path(tmp_path):
+    secret = "sentinel-private-profile-path"
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    missing = replace(
+        valid,
+        path=str(tmp_path / secret / "missing.sqlite"),
+    )
+
+    with pytest.raises(ValueError) as rejected:
+        SessionStore(tmp_path / "sessions").create(
+            "missing",
+            before_profile=missing,
+        )
+
+    assert secret not in str(rejected.value)
+
+
+@pytest.mark.parametrize(
+    "path_kind",
+    [
+        "parent_symlink",
+        "broken_parent_symlink",
+        "special_parent",
+        "final_symlink",
+        "broken_final_symlink",
+        "canonical_mismatch",
+        "missing_canonical_mismatch",
+        "empty",
+        "special",
+    ],
+)
+def test_session_publication_boundaries_reject_unsafe_profile_file(
+    tmp_path, path_kind
+):
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    if path_kind == "parent_symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        target = real_parent / "profile.sqlite"
+        target.write_bytes(b"profile")
+        alias = tmp_path / "parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        path = alias / target.name
+    elif path_kind == "broken_parent_symlink":
+        alias = tmp_path / "broken-parent-alias"
+        alias.symlink_to(tmp_path / "missing-parent", target_is_directory=True)
+        path = alias / "profile.sqlite"
+    elif path_kind == "special_parent":
+        parent = tmp_path / "special-parent"
+        os.mkfifo(parent)
+        path = parent / "profile.sqlite"
+    elif path_kind == "final_symlink":
+        path = tmp_path / "final.sqlite"
+        path.symlink_to(valid.path)
+    elif path_kind == "broken_final_symlink":
+        path = tmp_path / "broken-final.sqlite"
+        path.symlink_to(tmp_path / "missing-target.sqlite")
+    elif path_kind == "canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / Path(valid.path).name
+    elif path_kind == "missing_canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / "missing.sqlite"
+    elif path_kind == "empty":
+        path = tmp_path / "empty.sqlite"
+        path.touch()
+    else:
+        path = tmp_path / "special.sqlite"
+        os.mkfifo(path)
+    invalid = replace(valid, path=str(path))
+    store = SessionStore(tmp_path / "sessions")
+
+    with pytest.raises(ValueError) as create_error:
+        store.create("unsafe-create", before_profile=invalid)
+    assert str(path) not in str(create_error.value)
+
+    store.create("unsafe-publish")
+    with store.writer("unsafe-publish") as writer:
+        with pytest.raises(ValueError):
+            writer.publish_findings(
+                EvidenceReport("unsafe reference"),
+                before_profile=invalid,
+            )
+        with pytest.raises(ValueError):
+            writer.publish_after_profile(invalid)
+
+
+@pytest.mark.parametrize(
+    "path_kind",
+    [
+        "parent_symlink",
+        "broken_parent_symlink",
+        "special_parent",
+        "final_symlink",
+        "broken_final_symlink",
+        "canonical_mismatch",
+        "missing_canonical_mismatch",
+        "empty",
+        "special",
+    ],
+)
+def test_load_rejects_unsafe_existing_profile_file(tmp_path, path_kind):
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("unsafe-load", before_profile=valid)
+    if path_kind == "parent_symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        target = real_parent / "profile.sqlite"
+        target.write_bytes(b"profile")
+        alias = tmp_path / "parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        path = alias / target.name
+    elif path_kind == "broken_parent_symlink":
+        alias = tmp_path / "broken-parent-alias"
+        alias.symlink_to(tmp_path / "missing-parent", target_is_directory=True)
+        path = alias / "profile.sqlite"
+    elif path_kind == "special_parent":
+        parent = tmp_path / "special-parent"
+        os.mkfifo(parent)
+        path = parent / "profile.sqlite"
+    elif path_kind == "final_symlink":
+        path = tmp_path / "final.sqlite"
+        path.symlink_to(valid.path)
+    elif path_kind == "broken_final_symlink":
+        path = tmp_path / "broken-final.sqlite"
+        path.symlink_to(tmp_path / "missing-target.sqlite")
+    elif path_kind == "canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / Path(valid.path).name
+    elif path_kind == "missing_canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / "missing.sqlite"
+    elif path_kind == "empty":
+        path = tmp_path / "empty.sqlite"
+        path.touch()
+    else:
+        path = tmp_path / "special.sqlite"
+        os.mkfifo(path)
+    manifest_path = store.root / "unsafe-load" / "session.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"]["before"]["path"] = str(path)
+
+    with pytest.raises(SessionCorruptError) as deserialize_error:
+        SessionState.from_dict(manifest)
+    assert str(path) not in str(deserialize_error.value)
+
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SessionCorruptError) as rejected:
+        store.load("unsafe-load")
+
+    assert str(path) not in str(rejected.value)
+
+
+def test_load_rejects_profile_path_swapped_during_shared_inspection(
+    tmp_path, monkeypatch
+):
+    import nsys_ai.profile_reference as profile_reference
+
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    replacement = tmp_path / "replacement.sqlite"
+    replacement.write_bytes(b"replacement profile")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("swap-load", before_profile=valid)
+    real_resolve = profile_reference.Path.resolve
+    swapped = False
+
+    def swap_then_resolve(path, *args, **kwargs):
+        nonlocal swapped
+        if path == Path(valid.path) and not swapped:
+            swapped = True
+            os.replace(replacement, valid.path)
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(profile_reference.Path, "resolve", swap_then_resolve)
+
+    with pytest.raises(SessionCorruptError, match="changed while being inspected"):
+        store.load("swap-load")
+
+
+@pytest.mark.parametrize(
+    "path_kind",
+    [
+        "parent_symlink",
+        "broken_parent_symlink",
+        "special_parent",
+        "final_symlink",
+        "broken_final_symlink",
+        "canonical_mismatch",
+        "missing_canonical_mismatch",
+        "empty",
+        "special",
+    ],
+)
+def test_fresh_process_rejects_unsafe_existing_profile_file(tmp_path, path_kind):
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("unsafe-restart", before_profile=valid)
+    if path_kind == "parent_symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        target = real_parent / "profile.sqlite"
+        target.write_bytes(b"profile")
+        alias = tmp_path / "parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        path = alias / target.name
+    elif path_kind == "broken_parent_symlink":
+        alias = tmp_path / "broken-parent-alias"
+        alias.symlink_to(tmp_path / "missing-parent", target_is_directory=True)
+        path = alias / "profile.sqlite"
+    elif path_kind == "special_parent":
+        parent = tmp_path / "special-parent"
+        os.mkfifo(parent)
+        path = parent / "profile.sqlite"
+    elif path_kind == "final_symlink":
+        path = tmp_path / "final.sqlite"
+        path.symlink_to(valid.path)
+    elif path_kind == "broken_final_symlink":
+        path = tmp_path / "broken-final.sqlite"
+        path.symlink_to(tmp_path / "missing-target.sqlite")
+    elif path_kind == "canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / Path(valid.path).name
+    elif path_kind == "missing_canonical_mismatch":
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        path = nested / ".." / "missing.sqlite"
+    elif path_kind == "empty":
+        path = tmp_path / "empty.sqlite"
+        path.touch()
+    else:
+        path = tmp_path / "special.sqlite"
+        os.mkfifo(path)
+    manifest_path = store.root / "unsafe-restart" / "session.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"]["before"]["path"] = str(path)
+    manifest_path.write_text(json.dumps(manifest))
+    script = """
+from nsys_ai.session_store import SessionCorruptError, SessionStore
+try:
+    SessionStore(__import__('sys').argv[1]).load('unsafe-restart')
+except SessionCorruptError:
+    print('rejected')
+else:
+    raise SystemExit(2)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(store.root)],
+        cwd=tmp_path,
+        env=_subprocess_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "rejected"
+    assert str(path) not in result.stdout + result.stderr
+
+
+def test_fresh_process_rejects_noncanonical_persisted_profile_identity(tmp_path):
+    store = SessionStore(tmp_path / "sessions")
+    valid = _profile_reference(tmp_path / "valid.sqlite", "valid")
+    store.create("restart-invalid", before_profile=valid)
+    manifest_path = store.root / "restart-invalid" / "session.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["profiles"]["before"]["profile_id"] = "nsys1:sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
+    script = """
+from nsys_ai.session_store import SessionCorruptError, SessionStore
+try:
+    SessionStore(__import__('sys').argv[1]).load('restart-invalid')
+except SessionCorruptError:
+    print('rejected')
+else:
+    raise SystemExit(2)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(store.root)],
+        cwd=tmp_path,
+        env=_subprocess_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "rejected"
+
+
+def test_profile_reference_allows_truly_missing_path_across_restart(tmp_path):
+    profile = _profile_reference(tmp_path / "profile.sqlite", "profile")
     store = SessionStore(tmp_path / "sessions")
     store.create("local", before_profile=profile)
     Path(profile.path).unlink()
     assert store.load("local").state.before_profile == profile
+
+    script = """
+from nsys_ai.session_store import SessionStore
+reference = SessionStore(__import__('sys').argv[1]).load('local').state.before_profile
+print(reference.profile_id)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(store.root)],
+        cwd=tmp_path,
+        env=_subprocess_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == profile.profile_id
 
     manifest_path = store.root / "local" / "session.json"
     manifest = json.loads(manifest_path.read_text())

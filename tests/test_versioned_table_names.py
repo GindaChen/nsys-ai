@@ -131,9 +131,8 @@ def test_get_region_kernels_agrees_across_both_table_names(runtime_v3):
 # ── The check that stops it coming back ─────────────────────────────────────
 
 
-# An escape hatch for the rare query that must keep the literal. It suppresses
-# the line that follows it, and it costs a written reason — see fingerprint.py,
-# where resolving the name would silently change a stable content hash.
+# An escape hatch for a rare query that must keep a literal. It suppresses the
+# line that follows it and costs a written reason at the call site.
 EXEMPTION = "literal-table-ok:"
 
 

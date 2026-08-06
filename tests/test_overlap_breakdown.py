@@ -238,7 +238,7 @@ def test_findings_note_includes_same_stream_pct(minimal_nsys_conn):
 def test_low_overlap_finding_has_v01_evidence_shape():
     findings = SKILL.to_findings_fn(
         [_overlap_row()],
-        context={"profile_id": "nsys1:sha256:test"},
+        context={"profile_id": "nsys2:sha256:test"},
     )
     low = [f for f in findings if f.id and f.id.startswith("overlap_low_gpu2_")]
     assert low, f"expected low-overlap finding, got {[f.label for f in findings]}"
@@ -259,7 +259,7 @@ def test_low_overlap_finding_has_v01_evidence_shape():
     assert f.provenance == {"skill": "overlap_breakdown", "row_kind": "low_overlap"}
 
     assert isinstance(f.selection, TraceSelection)
-    assert f.selection.profile_id == "nsys1:sha256:test"
+    assert f.selection.profile_id == "nsys2:sha256:test"
     assert f.selection.source == "skill:overlap_breakdown"
     assert f.selection.start_ns == 1_000
     assert f.selection.end_ns == 9_000

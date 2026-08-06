@@ -52,7 +52,7 @@ def test_tag_round_trip(tmp_path, profile_a):
 
     # meta shape
     assert meta["name"] == "v1"
-    assert meta["profile_id"].startswith("nsys1:")
+    assert meta["profile_id"].startswith("nsys2:")
     assert meta["reason"] == "known good"
     assert meta["runspec"] is None
     assert meta["tagger"]
