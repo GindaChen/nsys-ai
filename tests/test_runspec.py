@@ -9,6 +9,7 @@ from nsys_ai.runspec import (
     RunSpecError,
     UnsupportedRunSpecVersionError,
     build_nsys_profile_argv,
+    validate_secret_boundaries,
 )
 
 
@@ -68,6 +69,18 @@ def test_runspec_copies_mutable_constructor_inputs():
     assert spec.canonical_json_bytes() == before
 
 
+def test_public_environment_is_immutable_after_construction():
+    spec = _full_spec()
+    before_bytes = spec.canonical_json_bytes()
+    before_key = spec.compatibility_key()
+
+    with pytest.raises(TypeError):
+        spec.environment.public["PROFILE_STEPS"] = "99"
+
+    assert spec.canonical_json_bytes() == before_bytes
+    assert spec.compatibility_key() == before_key
+
+
 def test_canonical_json_normalizes_environment_order():
     first = _full_spec(
         environment=EnvironmentSpec(
@@ -82,6 +95,22 @@ def test_canonical_json_normalizes_environment_order():
         )
     )
 
+    assert first.canonical_json_bytes() == second.canonical_json_bytes()
+    assert first.compatibility_key() == second.compatibility_key()
+
+
+def test_trace_order_and_repo_relative_cwd_are_semantically_canonical():
+    first = _full_spec(
+        cwd="./training//jobs",
+        trace_options=NsysTraceOptions(trace=("nccl", "cuda", "nvtx")),
+    )
+    second = _full_spec(
+        cwd="training/jobs",
+        trace_options=NsysTraceOptions(trace=("cuda", "nvtx", "nccl")),
+    )
+
+    assert first.cwd == second.cwd == "training/jobs"
+    assert first.trace_options.trace == second.trace_options.trace
     assert first.canonical_json_bytes() == second.canonical_json_bytes()
     assert first.compatibility_key() == second.compatibility_key()
 
@@ -102,6 +131,7 @@ def test_unknown_schema_version_has_stated_reason():
         ({"argv": ("",)}, r"argv\[0\].*must not be empty"),
         ({"cwd": "/absolute"}, "repository-relative"),
         ({"cwd": "../outside"}, "repository-relative"),
+        ({"cwd": r"training\jobs"}, "repository-relative"),
         ({"warmup_steps": -1}, "non-negative"),
         ({"profile_steps": 0}, "positive"),
         ({"seed": -1}, "non-negative"),
@@ -166,6 +196,49 @@ def test_environment_persists_names_but_never_resolved_secret_values(monkeypatch
         "VISIBLE_SETTING": "enabled",
     }
     assert spec.to_dict()["environment"]["secrets"] == ["HF_TOKEN"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "public", "location"),
+    [
+        (("python", "train.py", "--token=private-value"), {}, r"argv\[2\]"),
+        (("python", "train.py", "private-value"), {}, r"argv\[2\]"),
+        (
+            ("python", "train.py"),
+            {"TRAINING_ENDPOINT": "https://host/private-value/data"},
+            r"environment.public\['TRAINING_ENDPOINT'\]",
+        ),
+    ],
+)
+def test_secret_preflight_rejects_persisted_fields_without_echoing_value(
+    argv, public, location
+):
+    spec = _full_spec(
+        argv=argv,
+        environment=EnvironmentSpec(public=public, secrets=("HF_TOKEN",)),
+    )
+
+    with pytest.raises(RunSpecError, match=location) as exc_info:
+        validate_secret_boundaries(spec, {"HF_TOKEN": "private-value"})
+
+    assert "HF_TOKEN" in str(exc_info.value)
+    assert "private-value" not in str(exc_info.value)
+
+
+def test_secret_preflight_accepts_clean_fields_and_empty_values():
+    spec = _full_spec()
+    validate_secret_boundaries(spec, {"HF_TOKEN": "private-value"})
+    validate_secret_boundaries(spec, {"HF_TOKEN": ""})
+
+
+def test_secret_preflight_requires_exact_declared_names_without_values_in_errors():
+    spec = _full_spec()
+    with pytest.raises(RunSpecError, match="missing declared name.*HF_TOKEN"):
+        validate_secret_boundaries(spec, {})
+    with pytest.raises(RunSpecError, match="undeclared name.*OTHER_TOKEN"):
+        validate_secret_boundaries(
+            spec, {"HF_TOKEN": "private-value", "OTHER_TOKEN": "other-value"}
+        )
 
 
 def test_environment_validation_rejects_ambiguous_or_invalid_names():
@@ -270,7 +343,7 @@ def test_nsys_profile_argv_is_token_preserving_and_has_no_shell_interpolation():
         "/tmp/profile with spaces",
     ]
     assert argv[-len(workload) :] == list(workload)
-    assert "--trace=cuda,nvtx,nccl" in argv
+    assert "--trace=cuda,nccl,nvtx" in argv
     assert "--discard-environment=true" in argv
     assert "--capture-range=cudaProfilerApi" in argv
     assert "--cuda-memory-usage=true" in argv

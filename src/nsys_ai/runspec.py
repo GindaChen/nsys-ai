@@ -1,9 +1,11 @@
-"""Versioned, secret-safe specification for reproducible profile runs.
+"""Versioned specification for reproducible profile runs.
 
 ``RunSpec`` records the workload and capture configuration without resolving
-the environment or invoking a shell.  Execution is deliberately owned by the
-local runner (issue #269); this module only defines its input contract and the
-pure ``nsys profile`` argv construction it will consume.
+declared environment secrets or invoking a shell.  Raw argv and public
+environment overrides are persisted verbatim and must not contain secrets.
+Execution is deliberately owned by the local runner (issue #269); this module
+defines its input contract, secret-boundary preflight, and the pure
+``nsys profile`` argv construction it will consume.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 from .exceptions import NsysAiError
@@ -75,13 +78,14 @@ class EnvironmentSpec:
     """Environment inputs without persisted secret values.
 
     ``inherit`` starts from the runner's environment; ``clean`` starts empty.
-    ``public`` values are persisted and participate in comparability.  Entries
-    in ``secrets`` are names only: the runner will resolve their values at
-    execution time and must never add those values to an artifact or log.
+    ``public`` values are persisted verbatim and participate in comparability;
+    callers must treat them as public. Entries in ``secrets`` are names only:
+    the runner resolves their values at execution time and validates the
+    boundary before persisting the RunSpec or starting a process.
     """
 
     policy: str = "inherit"
-    public: dict[str, str] = field(default_factory=dict)
+    public: Mapping[str, str] = field(default_factory=dict)
     secrets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -114,7 +118,9 @@ class EnvironmentSpec:
                 + ", ".join(overlap)
             )
 
-        object.__setattr__(self, "public", dict(sorted(public.items())))
+        object.__setattr__(
+            self, "public", MappingProxyType(dict(sorted(public.items())))
+        )
         object.__setattr__(self, "secrets", tuple(sorted(secrets)))
 
     @staticmethod
@@ -180,7 +186,7 @@ class NsysTraceOptions:
             raise RunSpecError("unsupported trace_options.capture_range")
         if not isinstance(self.cuda_memory_usage, bool):
             raise RunSpecError("trace_options.cuda_memory_usage must be a boolean")
-        object.__setattr__(self, "trace", trace)
+        object.__setattr__(self, "trace", tuple(sorted(trace)))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -245,13 +251,14 @@ class RunSpec:
         object.__setattr__(self, "argv", argv)
 
         cwd = _validate_string(self.cwd, "cwd")
+        posix_cwd = PurePosixPath(cwd)
         if self.repository is not None:
             _validate_string(self.repository, "repository")
-            posix_cwd = PurePosixPath(cwd)
             if posix_cwd.is_absolute() or ".." in posix_cwd.parts or "\\" in cwd:
                 raise RunSpecError(
                     "cwd must be a repository-relative POSIX path when repository is set"
                 )
+            object.__setattr__(self, "cwd", str(posix_cwd))
         if self.commit is not None:
             _validate_string(self.commit, "commit")
         if not isinstance(self.environment, EnvironmentSpec):
@@ -424,3 +431,55 @@ def build_nsys_profile_argv(
         argv.append("--cuda-memory-usage=true")
     argv.extend(spec.argv)
     return argv
+
+
+def validate_secret_boundaries(
+    spec: RunSpec, resolved_secrets: Mapping[str, str]
+) -> None:
+    """Reject declared secret values placed in fields persisted verbatim.
+
+    This is an execution-boundary check for the local runner. It can only
+    protect values whose environment-variable names were declared in
+    :attr:`EnvironmentSpec.secrets`; arbitrary strings cannot be identified as
+    secrets. Secret command-line arguments are unsupported in RunSpec v0.1.
+    The caller must run this check before writing ``runspec.json`` or logging
+    argv. Error messages name the declaration and location, never its value.
+    """
+    if not isinstance(spec, RunSpec):
+        raise RunSpecError("spec must be a RunSpec")
+    values = _require_mapping(resolved_secrets, "resolved_secrets")
+    for name in values:
+        EnvironmentSpec._validate_name(name)
+    declared = set(spec.environment.secrets)
+    provided = set(values)
+    undeclared = sorted(provided - declared)
+    if undeclared:
+        raise RunSpecError(
+            "resolved_secrets contains undeclared name(s): " + ", ".join(undeclared)
+        )
+    missing = sorted(declared - provided)
+    if missing:
+        raise RunSpecError(
+            "resolved_secrets is missing declared name(s): " + ", ".join(missing)
+        )
+
+    for secret_name in sorted(declared):
+        secret_value = values[secret_name]
+        if not isinstance(secret_value, str):
+            raise RunSpecError(
+                f"resolved secret {secret_name} must be a string"
+            )
+        if not secret_value:
+            continue
+        for index, argument in enumerate(spec.argv):
+            if secret_value in argument:
+                raise RunSpecError(
+                    f"declared secret {secret_name} appears in argv[{index}]; "
+                    "secret command-line arguments are unsupported"
+                )
+        for public_name, public_value in spec.environment.public.items():
+            if secret_value in public_value:
+                raise RunSpecError(
+                    f"declared secret {secret_name} appears in "
+                    f"environment.public[{public_name!r}]"
+                )
