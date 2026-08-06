@@ -49,7 +49,7 @@ from .diff_decision import (
     write_diff_json_from_diff_dict,
 )
 from .exceptions import NsysAiError
-from .profile_runner import LocalProfileReference
+from .profile_reference import LocalProfileReference, validate_local_profile_reference
 from .proposal import (
     PROPOSAL_SCHEMA_VERSION,
     Proposal,
@@ -341,7 +341,7 @@ class SessionStore:
         """Atomically create the exact v0 session directory layout."""
         _validate_session_id(session_id)
         if before_profile is not None:
-            _validate_profile_reference(before_profile, require_file=True)
+            validate_local_profile_reference(before_profile, require_file=True)
         self._ensure_roots()
         with self._lock(session_id, "writer", exclusive=True, blocking=False):
             destination = self._session_dir(session_id)
@@ -680,7 +680,7 @@ class SessionWriter:
         if not isinstance(findings, EvidenceReport):
             raise TypeError("findings must be an EvidenceReport")
         if before_profile is not None:
-            _validate_profile_reference(before_profile, require_file=True)
+            validate_local_profile_reference(before_profile, require_file=True)
 
         try:
             payload = findings.to_dict()
@@ -720,7 +720,7 @@ class SessionWriter:
 
     def publish_after_profile(self, profile: LocalProfileReference) -> SessionState:
         self._ensure_open()
-        _validate_profile_reference(profile, require_file=True)
+        validate_local_profile_reference(profile, require_file=True)
         return self._update_state(phase="reprofile", after_profile=profile)
 
     def publish_proposal(self, proposal: Proposal) -> SessionState:
@@ -1117,7 +1117,7 @@ def _profile_reference_to_dict(
 ) -> dict[str, Any] | None:
     if reference is None:
         return None
-    _validate_profile_reference(reference, require_file=False)
+    validate_local_profile_reference(reference, require_file=False)
     return {
         "kind": "local",
         "path": reference.path,
@@ -1154,35 +1154,10 @@ def _profile_reference_from_dict(value: Any) -> LocalProfileReference | None:
             product_version=payload["product_version"],
             kernel_count=payload["kernel_count"],
         )
-        _validate_profile_reference(reference, require_file=False)
+        validate_local_profile_reference(reference, require_file=False)
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionCorruptError(f"invalid local profile reference: {exc}") from exc
     return reference
-
-
-def _validate_profile_reference(
-    reference: LocalProfileReference, *, require_file: bool
-) -> None:
-    if not isinstance(reference, LocalProfileReference):
-        raise TypeError("profile reference must be a LocalProfileReference")
-    if not isinstance(reference.path, str) or not Path(reference.path).is_absolute():
-        raise ValueError("local profile reference path must be absolute")
-    if require_file and not Path(reference.path).is_file():
-        raise ValueError(f"local profile reference does not exist: {reference.path}")
-    if not isinstance(reference.profile_id, str) or not reference.profile_id:
-        raise ValueError("local profile reference profile_id must be non-empty")
-    for name, value in (
-        ("schema_version", reference.schema_version),
-        ("product_version", reference.product_version),
-    ):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(f"local profile reference {name} must be a string or null")
-    if isinstance(reference.kernel_count, bool) or not isinstance(
-        reference.kernel_count, int
-    ) or reference.kernel_count < 0:
-        raise ValueError("local profile reference kernel_count must be non-negative")
-
-
 def _diff_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be an object")

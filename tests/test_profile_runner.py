@@ -199,6 +199,27 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
         assert stat.S_IMODE(Path(private_path).stat().st_mode) == 0o600
 
 
+def test_runner_reuses_public_profile_reference_factory(
+    tmp_path, fake_nsys, monkeypatch
+):
+    import nsys_ai.profile_runner as profile_runner
+
+    calls = []
+    real_factory = profile_runner.build_local_profile_reference
+
+    def recording_factory(path, *, resolved_secrets=None):
+        calls.append((Path(path), dict(resolved_secrets or {})))
+        return real_factory(path, resolved_secrets=resolved_secrets)
+
+    monkeypatch.setattr(
+        profile_runner, "build_local_profile_reference", recording_factory
+    )
+    result = _run(tmp_path, fake_nsys)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert calls == [(Path(result.sqlite_path), {})]
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
