@@ -21,6 +21,65 @@ from .profile_db_tool import TOOL_QUERY_PROFILE_DB
 
 logger = logging.getLogger(__name__)
 
+TOOL_REQUEST_CLARIFICATION = {
+    "type": "function",
+    "function": {
+        "name": "request_clarification",
+        "description": (
+            "Ask the user for information required before analysis can continue. "
+            "Use this instead of emitting an ordinary assistant answer when profile "
+            "evidence is not yet available. Do not include a diagnosis."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "missing_information": {
+                    "type": "string",
+                    "enum": [
+                        "model_flops_per_step",
+                        "region_name",
+                        "peak_tflops",
+                        "iteration_index",
+                    ],
+                    "description": "The specific input required to continue.",
+                },
+            },
+            "required": ["missing_information"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TOOL_ANSWER_FROM_UI_CONTEXT = {
+    "type": "function",
+    "function": {
+        "name": "answer_from_ui_context",
+        "description": (
+            "Answer only from values already supplied in CURRENT UI CONTEXT. Use this for "
+            "the selected kernel, visible rows, or current viewport without querying the full "
+            "profile. context_paths must identify every UI field supporting the answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "context_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "description": (
+                        "Exact dotted paths in CURRENT UI CONTEXT, for example "
+                        "selected_kernel.name and selected_kernel.duration_ms. The backend "
+                        "renders the cited values; do not supply answer prose."
+                    ),
+                },
+            },
+            "required": ["context_paths"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # Pure MFU tool: one step_time_s per call. Same tool in single-profile and diff; diff compares by calling twice.
 TOOL_COMPUTE_MFU = {
     "type": "function",
@@ -399,6 +458,8 @@ def _tools_openai() -> list[dict]:
                 },
             },
         },
+        TOOL_REQUEST_CLARIFICATION,
+        TOOL_ANSWER_FROM_UI_CONTEXT,
         TOOL_QUERY_PROFILE_DB,
         TOOL_GET_GPU_PEAK_TFLOPS,
         TOOL_COMPUTE_MFU,
@@ -484,7 +545,12 @@ def _build_system_prompt(
         logger.warning("Using fallback system prompt because prompt files could not be loaded.")
         base_prompt = (
             "You are an AI assistant helping users analyze performance profiles and MFU.\n"
-            "Respond with clear, concise, and technically accurate guidance.\n"
+            "Use only facts present in UI context or successful tool results. Never guess "
+            "profile measurements, diagnoses, or confidence. If required profile data is "
+            "missing or a tool fails, explicitly say you cannot answer and give the reason. "
+            "Use request_clarification with a supported missing-information identifier for "
+            "missing user input. Use answer_from_ui_context only with exact context_paths; "
+            "the backend renders both responses and no response prose is accepted.\n"
             f"{schema_block}"
             "=== UI CONTEXT (JSON) ===\n"
             f"{ctx_json}\n"

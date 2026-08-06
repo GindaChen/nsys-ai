@@ -142,6 +142,17 @@ def test_build_system_prompt_no_skill_docs():
     assert "SESSION SKILL CONTEXT" not in out
 
 
+def test_fallback_system_prompt_forbids_ungrounded_answers(monkeypatch):
+    from nsys_ai.ai.backend import chat_tools
+
+    monkeypatch.setattr(chat_tools, "_load_prompt_files", lambda: (None, None))
+
+    out = chat_tools._build_system_prompt({"view_state": {}})
+
+    assert "Never guess profile measurements" in out
+    assert "explicitly say you cannot answer" in out
+
+
 def test_build_system_prompt_existing_strings_preserved():
     """Existing test assertions still hold after skill_docs addition."""
     from nsys_ai.ai.backend.chat_tools import _build_system_prompt

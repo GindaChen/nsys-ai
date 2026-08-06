@@ -19,6 +19,23 @@ from ..skills.registry import get_skill, run_skill
 log = logging.getLogger(__name__)
 
 
+def _is_usable_evidence_row(row) -> bool:
+    return (
+        isinstance(row, dict)
+        and bool(row)
+        and not is_abstention_row(row)
+        and not bool(row.get("error"))
+    )
+
+
+def _unavailable_evidence_reason(row: dict) -> str | None:
+    if is_abstention_row(row):
+        return str(row.get("reason") or "could not run")
+    if row.get("error"):
+        return str(row["error"])
+    return None
+
+
 class Agent:
     """GPU profile analysis agent.
 
@@ -388,7 +405,15 @@ class Agent:
         verify_skill = self._choose_verify_skill(evidence, selected_skills)
         verify_command = self._verify_command(verify_skill)
 
-        summary = self._answer_summary(selected_skills, llm_summary)
+        has_usable_evidence = any(
+            any(_is_usable_evidence_row(row) for row in rows)
+            for rows in evidence.values()
+        )
+        summary = self._answer_summary(
+            selected_skills,
+            llm_summary,
+            has_usable_evidence=has_usable_evidence,
+        )
 
         lines = [
             "## Summary",
@@ -432,8 +457,15 @@ class Agent:
         self,
         selected_skills: list[str],
         llm_summary: str | None,
+        *,
+        has_usable_evidence: bool,
     ) -> str:
         """Return model synthesis when available, otherwise a deterministic summary."""
+        if not has_usable_evidence:
+            return (
+                "I cannot answer this profile question because no selected skill "
+                "returned usable evidence. See the unavailable reasons below."
+            )
         if llm_summary:
             lines = [line.strip() for line in str(llm_summary).strip().splitlines()]
             if lines and lines[0].lower().lstrip("#").strip() == "summary":
@@ -463,6 +495,8 @@ class Agent:
 
     def _first_actionable_row(self, rows: list[dict]) -> dict | None:
         for row in rows:
+            if not _is_usable_evidence_row(row):
+                continue
             pattern = str(row.get("pattern", ""))
             if pattern and pattern != "No Known Anti-Patterns Detected":
                 return row
@@ -481,10 +515,10 @@ class Agent:
         for skill_name, rows in evidence.items():
             if rows:
                 row = rows[0]
-                if is_abstention_row(row):
-                    # abstain() takes arbitrary detail kwargs, so one call
-                    # passing name= would otherwise make "could not run" the
-                    # headline diagnosis.
+                if not _is_usable_evidence_row(row):
+                    # Unavailable rows are not workload facts. In particular,
+                    # abstain() accepts arbitrary detail kwargs and error rows
+                    # can carry names from failed lookups.
                     continue
                 label = row.get("label") or row.get("name") or row.get("kernel_name")
                 if label:
@@ -502,11 +536,11 @@ class Agent:
         )
 
     def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
-        # Abstentions are excluded: a skill that could not run is not evidence,
-        # and counting it lifted confidence from 0.20 (no usable evidence) to
-        # 0.60 (skill output exists) on a profile where nothing had run.
+        # Unavailable rows are excluded: a skill that could not run is not
+        # evidence. Counting abstention/error rows lifted confidence from 0.20
+        # to 0.60 on profiles where no analysis had succeeded.
         row_count = sum(
-            len([r for r in rows if not is_abstention_row(r)])
+            len([row for row in rows if _is_usable_evidence_row(row)])
             for rows in evidence.values()
         )
         if diagnosis_row and row_count:
@@ -541,15 +575,18 @@ class Agent:
                     continue
                 if row.get("_summary") and len(rows) > 1:
                     continue
-                if is_abstention_row(row):
+                unavailable_reason = _unavailable_evidence_reason(row)
+                if unavailable_reason is not None:
                     # A skill that could not run is not evidence for anything.
                     # Rendering it through the metric path produced
                     # "metric=row_present=true", which dresses an absence up as
                     # a measurement — the ungrounded-claim failure the answer
                     # contract exists to prevent. Say plainly that the skill
                     # was unavailable, and why.
-                    reason = str(row.get("reason") or "no reason given").strip()
-                    lines.append(f"- source_skill={skill_name}; unavailable: {reason}")
+                    lines.append(
+                        f"- source_skill={skill_name}; unavailable: "
+                        f"{unavailable_reason.strip()}"
+                    )
                     if len(lines) >= 5:
                         return lines
                     continue
@@ -622,9 +659,8 @@ class Agent:
         selected_skills: list[str],
     ) -> str | None:
         def _usable(rows) -> bool:
-            # An abstaining skill is truthy but has nothing to verify — a
-            # verify command pointing at it would verify nothing.
-            return bool(rows) and not is_abstention_row(rows[0])
+            # An unavailable skill is truthy but has nothing to verify.
+            return any(_is_usable_evidence_row(row) for row in (rows or []))
 
         for skill_name in selected_skills:
             if _usable(evidence.get(skill_name)):
@@ -694,27 +730,24 @@ class Agent:
                 log.debug("Failed to load persona prompt", exc_info=True)
                 return "You are an expert GPU profiling assistant."
 
-        # Abstentions are separated out rather than serialised alongside real
-        # rows. Handed a row under a header that calls it analysis data, a model
-        # can reasonably narrate "could not run" as a property of the workload —
-        # the ungrounded claim the deterministic paths already had to be taught
-        # to avoid, arriving through the one path a type check cannot fix.
+        # Unavailable rows are separated out rather than serialised alongside
+        # real rows. A model can otherwise narrate an abstention or query error
+        # as a property of the workload.
         usable, unavailable = {}, {}
         for skill_name, rows in evidence.items():
-            if rows and is_abstention_row(rows[0]):
-                unavailable[skill_name] = rows[0].get("reason") or "could not run"
+            real_rows = [row for row in rows if _is_usable_evidence_row(row)]
+            if real_rows:
+                usable[skill_name] = real_rows
+            elif rows and _unavailable_evidence_reason(rows[0]) is not None:
+                unavailable[skill_name] = _unavailable_evidence_reason(rows[0])
             else:
-                usable[skill_name] = rows
+                unavailable[skill_name] = "returned no rows"
         evidence_json = json.dumps(usable, indent=2, default=str)
         if not usable:
-            # Every skill abstained. Serialising `{}` under a header that calls
-            # it analysis data invites the model to answer anyway from priors —
-            # the ungrounded claim this split exists to prevent, merely moved.
-            evidence_json = (
-                "{}\n\nNO ANALYSIS DATA WAS PRODUCED. Do not diagnose. State "
-                "that this profile could not be analysed and why, using the "
-                "list below."
-            )
+            # Do not ask a provider to obey a grounding instruction when there
+            # is no evidence. The deterministic caller can state why analysis
+            # was unavailable without giving a model an opportunity to guess.
+            return None
         unavailable_note = ""
         if unavailable:
             listed = "\n".join(f"- {k}: {v}" for k, v in unavailable.items())

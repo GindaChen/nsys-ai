@@ -1590,7 +1590,9 @@ def _load_diff_system_prompt() -> str:
     """Load the diff system prompt, falling back to a minimal prompt if file is missing."""
     _fallback = (
         "You are a performance analysis assistant for Nsight Systems profile diffs. "
-        "Provide concise, technically accurate analysis based solely on the supplied tool outputs."
+        "Provide concise, technically accurate analysis based solely on successful tool outputs. "
+        "If a required tool fails or no profile evidence is available, explicitly say that you "
+        "cannot answer and give the reason; never guess profile facts."
     )
     prompt_path = _PROMPTS_DIR / "diff_system.txt"
     try:

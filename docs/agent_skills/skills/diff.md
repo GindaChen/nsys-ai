@@ -118,6 +118,8 @@ Step 6  Use `compute_mfu` for both before and after profiles
 | `is_aligned=false` | Warn user; use `get_global_diff` instead |
 | `get_region_diff` returns "No NVTX region matching" | Call `search_nvtx_regions` first |
 | `get_launch_config_diff` returns "not available" | Skip; check `uses_tensor_core_likely` |
+| Required tool fails and no other result supports the answer | Say that you cannot answer and include the failure reason; never guess profile facts |
+| Required user input or region name is missing | Call `request_clarification` with only the supported `missing_information` identifier; the backend renders the question |
 | `workload_warning=true` | Do not draw performance conclusions; tell user |
 | `Hardware_Warning=true` | Thermal throttle likely; prefer re-run before concluding |
 | `JIT_Compilation_Warning=true` | Use iteration index > 0 |
