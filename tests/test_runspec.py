@@ -9,6 +9,7 @@ from nsys_ai.runspec import (
     RunSpecError,
     UnsupportedRunSpecVersionError,
     build_nsys_profile_argv,
+    validate_persisted_secret_strings,
     validate_secret_boundaries,
 )
 
@@ -291,6 +292,33 @@ def test_secret_preflight_checks_public_mapping_keys_without_echoing_them():
     message = str(exc_info.value)
     assert secret_value not in message
     assert public_name not in message
+
+
+def test_persisted_secret_string_scanner_never_echoes_payload_keys():
+    secret_value = "private-key-fragment"
+    user_key = f"prefix-{secret_value}-suffix"
+
+    with pytest.raises(RunSpecError) as exc_info:
+        validate_persisted_secret_strings(
+            {user_key: "safe"}, {"HF_TOKEN": secret_value}
+        )
+
+    message = str(exc_info.value)
+    assert "HF_TOKEN" in message
+    assert secret_value not in message
+    assert user_key not in message
+
+
+def test_persisted_secret_string_scanner_ignores_numeric_coincidence():
+    validate_persisted_secret_strings(
+        {"count": 1, "enabled": True, "missing": None},
+        {"HF_TOKEN": "1"},
+    )
+
+
+def test_persisted_secret_string_scanner_rejects_non_string_keys():
+    with pytest.raises(RunSpecError, match="mapping keys must be strings"):
+        validate_persisted_secret_strings({1: "safe"}, {"HF_TOKEN": "private"})
 
 
 def test_public_value_error_does_not_echo_its_user_controlled_key():
