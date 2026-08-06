@@ -37,8 +37,10 @@ uv.lock
 # Local baseline snapshot store (nsys-ai baseline tag)
 .nsys-ai-baselines/
 
-# Claude Code: .claude/skills/ is checked in — these two are not.
-# worktrees/ holds live git worktrees (currently ~85 MB, including checked-out
-# profiles); settings.local.json is a per-machine permission allowlist.
-.claude/worktrees/
-.claude/settings.local.json
+# Agent tool state — contributor-local, not part of the repo.
+# .claude/ holds per-machine permission allowlists and live git worktrees
+# (~85 MB of checked-out profiles) alongside any local skills; .agent/ is the
+# same for other agent tooling. Repo-level guidance lives in AGENTS.md and
+# CLAUDE.md. Note .claude-plugin/ is a published artifact and stays tracked.
+.claude/
+.agent/
