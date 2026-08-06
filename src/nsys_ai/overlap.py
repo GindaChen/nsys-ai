@@ -480,6 +480,39 @@ def _flag_real_iterations(results: list[dict]) -> list[dict]:
     return results
 
 
+def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
+    """Yield kernels contained in each ordered, non-overlapping CPU window."""
+    previous_end = None
+    for index, iteration in enumerate(iterations):
+        start, end = iteration["start"], iteration["end"]
+        if end <= start:
+            raise ValueError(f"iteration {index} has a non-positive time range")
+        if previous_end is not None and start < previous_end:
+            raise ValueError(f"iteration {index} overlaps or precedes the previous iteration")
+        previous_end = end
+
+    rows = iter(runtime_rows)
+    current = next(rows, None)
+    for index, iteration in enumerate(iterations):
+        cpu_start, cpu_end = iteration["start"], iteration["end"]
+        next_start = iterations[index + 1]["start"] if index + 1 < len(iterations) else None
+
+        while current is not None and current["start"] < cpu_start:
+            current = next(rows, None)
+
+        kernels = []
+        while current is not None and current["start"] <= cpu_end:
+            if current["end"] <= cpu_end:
+                kernel = kernel_map.get(current["correlationId"])
+                if kernel:
+                    kernels.append(kernel)
+            elif next_start is not None and current["start"] >= next_start:
+                break
+            current = next(rows, None)
+
+        yield kernels
+
+
 def detect_iterations(
     prof: Profile, device: int, trim: tuple[int, int] | None = None, marker: str = "sample_0"
 ) -> list[dict]:
@@ -619,7 +652,13 @@ def detect_iterations(
                 boundaries.append(entry["rt_start"])
             last_k_end = max(last_k_end, k["end"])
 
-        boundaries.append(kernel_entries[-1]["rt_end"])
+        # GPU execution order can differ from CPU launch order across streams.
+        # Correlation below advances through CPU runtime rows exactly once, so
+        # make its ordered, non-overlapping window invariant explicit here.
+        boundaries = sorted(set(boundaries))
+        final_runtime_end = max(entry["rt_end"] for entry in kernel_entries)
+        if final_runtime_end > boundaries[-1]:
+            boundaries.append(final_runtime_end)
 
         # Construct synthetic iterations from these boundaries
         for i in range(len(boundaries) - 1):
@@ -644,19 +683,8 @@ def detect_iterations(
     )
 
     results = []
-    for i, it in enumerate(iterations):
-        cpu_start, cpu_end = it["start"], it["end"]
-
-        # Find correlated kernels
-        kernels_in_iter = []
-        for rt in rt_all:
-            if rt["start"] > cpu_end:
-                break
-            if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
-                k = kmap.get(rt["correlationId"])
-                if k:
-                    kernels_in_iter.append(k)
-
+    correlated = _correlate_iteration_kernels(iterations, rt_all, kmap)
+    for i, (it, kernels_in_iter) in enumerate(zip(iterations, correlated)):
         if not kernels_in_iter:
             continue
 
