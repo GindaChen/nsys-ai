@@ -61,6 +61,7 @@ def show_help():
     print("  Skills & Agent:")
     print("    nsys-ai skill list                       List analysis skills")
     print("    nsys-ai skill run <name> <profile>       Run a specific skill")
+    print("    nsys-ai propose findings.json --finding-id ID   Generate proposal.json")
     print("    nsys-ai agent analyze <profile>           Full auto-analysis")
     print('    nsys-ai agent ask <profile> "question"   Ask about a profile')
     print("    nsys-ai agent-guide                      Print agent System Prompt")

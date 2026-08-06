@@ -40,6 +40,7 @@ def test_subcommands():
         "export",
         "agent",
         "agent-guide",
+        "propose",
         "info",
         "warm",
         "skill",
@@ -188,6 +189,20 @@ def test_loop_subcommand_help():
     assert "--after" in result.stdout
     assert "--surface" in result.stdout
     assert "--h100-preset" in result.stdout
+
+
+def test_propose_subcommand_help():
+    """propose should expose strict artifact inputs without session mutation."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "propose", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "findings" in result.stdout
+    assert "--finding-id" in result.stdout
+    assert "--runspec" in result.stdout
+    assert "--output" in result.stdout
 
 
 def test_loop_missing_profile_has_friendly_error(tmp_path):

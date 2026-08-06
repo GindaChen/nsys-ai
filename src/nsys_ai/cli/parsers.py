@@ -38,6 +38,7 @@ from .handlers import (
     _cmd_overlap,
     _cmd_perfetto,
     _cmd_profile,
+    _cmd_propose,
     _cmd_report,
     _cmd_root_cause,
     _cmd_search,
@@ -406,12 +407,35 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
-            "profile,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "profile,propose,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
             "root-cause,help}"
         ),
     )
 
     _register_profile_parser(sub)
+
+    p = sub.add_parser(
+        "propose",
+        help="Generate a deterministic proposal artifact from one finding",
+    )
+    p.add_argument("findings", help="Path to a v0.1 findings.json artifact")
+    p.add_argument(
+        "--finding-id",
+        required=True,
+        help="Stable Finding.id to select",
+    )
+    p.add_argument(
+        "--runspec",
+        default=None,
+        help="Optional RunSpec artifact used as the verification path",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        default="proposal.json",
+        help="Proposal artifact path (default: proposal.json)",
+    )
+    p.set_defaults(handler=_cmd_propose)
 
     # Public commands (simplified)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
