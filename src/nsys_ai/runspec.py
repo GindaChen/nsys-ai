@@ -436,12 +436,13 @@ def build_nsys_profile_argv(
 def validate_secret_boundaries(
     spec: RunSpec, resolved_secrets: Mapping[str, str]
 ) -> None:
-    """Reject declared secret values placed in fields persisted verbatim.
+    """Reject declared secret values placed in any persisted RunSpec string.
 
     This is an execution-boundary check for the local runner. It can only
     protect values whose environment-variable names were declared in
     :attr:`EnvironmentSpec.secrets`; arbitrary strings cannot be identified as
-    secrets. Secret command-line arguments are unsupported in RunSpec v0.1.
+    secrets. The persisted declaration-name list itself is excluded. Secret
+    command-line arguments are unsupported in RunSpec v0.1.
     The caller must run this check before writing ``runspec.json`` or logging
     argv. Error messages name the declaration and location, never its value.
     """
@@ -463,6 +464,28 @@ def validate_secret_boundaries(
             "resolved_secrets is missing declared name(s): " + ", ".join(missing)
         )
 
+    def persisted_strings(value: Any, path: str = ""):
+        if isinstance(value, Mapping):
+            if path == "environment.public":
+                for index, (public_name, public_value) in enumerate(value.items()):
+                    yield f"environment.public.key[{index}]", public_name
+                    yield from persisted_strings(
+                        public_value, f"environment.public.value[{index}]"
+                    )
+                return
+            for key, nested in value.items():
+                if path == "environment" and key == "secrets":
+                    # These persisted strings are declarations, not values.
+                    continue
+                nested_path = f"{path}.{key}" if path else str(key)
+                yield from persisted_strings(nested, nested_path)
+        elif isinstance(value, (list, tuple)):
+            for index, nested in enumerate(value):
+                yield from persisted_strings(nested, f"{path}[{index}]")
+        elif isinstance(value, str):
+            yield path, value
+
+    persisted = tuple(persisted_strings(spec.to_dict()))
     for secret_name in sorted(declared):
         secret_value = values[secret_name]
         if not isinstance(secret_value, str):
@@ -471,15 +494,13 @@ def validate_secret_boundaries(
             )
         if not secret_value:
             continue
-        for index, argument in enumerate(spec.argv):
-            if secret_value in argument:
-                raise RunSpecError(
-                    f"declared secret {secret_name} appears in argv[{index}]; "
-                    "secret command-line arguments are unsupported"
+        for location, persisted_value in persisted:
+            if secret_value in persisted_value:
+                suffix = (
+                    "; secret command-line arguments are unsupported"
+                    if location.startswith("argv[")
+                    else ""
                 )
-        for public_name, public_value in spec.environment.public.items():
-            if secret_value in public_value:
                 raise RunSpecError(
-                    f"declared secret {secret_name} appears in "
-                    f"environment.public[{public_name!r}]"
+                    f"declared secret {secret_name} appears in {location}{suffix}"
                 )

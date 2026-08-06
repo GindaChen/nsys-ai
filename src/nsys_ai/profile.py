@@ -948,7 +948,9 @@ class Profile:
         self.close()
 
 
-def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
+def resolve_profile_path(
+    path: str, *, backend: str = "sqlite", nsys_executable: str = "nsys"
+) -> str:
     """
     Resolve a profile path for the selected backend.
 
@@ -965,7 +967,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     if not os.path.exists(path):
         raise ProfileNotFoundError(f"profile not found: {path}")
     if backend == "parquetdir":
-        return _resolve_parquetdir_path(path)
+        return _resolve_parquetdir_path(path, nsys_executable=nsys_executable)
     if not path.lower().endswith(".nsys-rep"):
         return path
 
@@ -982,7 +984,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
             return out
         # Missing NVTX payload blobs: re-export only when nsys is available so we
         # do not regress users with a valid sidecar .sqlite but no Nsight install.
-        if not shutil.which("nsys"):
+        if not shutil.which(nsys_executable):
             logging.getLogger(__name__).warning(
                 "Reusing existing SQLite export at %r without NVTX payload blobs; "
                 "communicator-aware analysis and other payload-dependent features may be incomplete. "
@@ -992,7 +994,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
             )
             return out
 
-    nsys_exe = shutil.which("nsys")
+    nsys_exe = shutil.which(nsys_executable)
     if not nsys_exe:
         raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
@@ -1045,7 +1047,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     return out
 
 
-def _resolve_parquetdir_path(path: str) -> str:
+def _resolve_parquetdir_path(path: str, *, nsys_executable: str = "nsys") -> str:
     """Return a path to an Nsight `parquetdir` export."""
     if os.path.isdir(path):
         parquet_files = [name for name in os.listdir(path) if name.endswith(".parquet")]
@@ -1065,7 +1067,7 @@ def _resolve_parquetdir_path(path: str) -> str:
     ):
         return out
 
-    nsys_exe = shutil.which("nsys")
+    nsys_exe = shutil.which(nsys_executable)
     if not nsys_exe:
         raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
