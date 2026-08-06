@@ -5,12 +5,12 @@ diff_decision.py - Persist auditable user decisions for profile diffs.
 from __future__ import annotations
 
 import copy
-import json
 import os
 import subprocess  # nosec B404
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .artifact_io import atomic_write_json
 from .diff import MIN_COMPARABILITY_CONFIDENCE, ProfileDiffSummary
 from .diff_render import to_diff_dict
 
@@ -33,7 +33,11 @@ def resolve_decider_identity(cwd: str | os.PathLike[str] | None = None) -> str:
         if email:
             return email
 
-    return os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    for name in ("USER", "USERNAME"):
+        identity = os.environ.get(name, "").strip()
+        if identity:
+            return identity
+    return "unknown"
 
 
 def _utc_now_iso() -> str:
@@ -63,6 +67,13 @@ def build_diff_decision_record_from_diff_dict(
     if not normalized_reason:
         raise ValueError("--reason is required with --accept/--reject")
 
+    resolved_decider = decider if decider is not None else resolve_decider_identity()
+    if not isinstance(resolved_decider, str) or not resolved_decider.strip():
+        raise ValueError("decider must be a non-empty string when provided")
+    resolved_decided_at = decided_at if decided_at is not None else _utc_now_iso()
+    if not isinstance(resolved_decided_at, str) or not resolved_decided_at.strip():
+        raise ValueError("decided_at must be a non-empty string when provided")
+
     before_id = (diff_dict.get("before") or {}).get("profile_id")
     after_id = (diff_dict.get("after") or {}).get("profile_id")
     if not before_id or not after_id:
@@ -88,8 +99,8 @@ def build_diff_decision_record_from_diff_dict(
     payload["decision"] = {
         "status": normalized_decision,
         "reason": normalized_reason,
-        "decider": decider or resolve_decider_identity(),
-        "decided_at": decided_at or _utc_now_iso(),
+        "decider": resolved_decider,
+        "decided_at": resolved_decided_at,
     }
     return payload, advisory_warnings
 
@@ -113,14 +124,16 @@ def build_diff_decision_record(
 
 
 def _write_decision_payload(payload: dict, path: str | os.PathLike[str]) -> Path:
-    """Serialize a decision payload deterministically and write it to ``path``."""
-    out_path = Path(path)
-    if out_path.parent != Path("."):
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    return out_path
+    """Serialize a decision payload deterministically and publish it atomically."""
+    return atomic_write_json(path, payload)
+
+
+def write_diff_json_from_diff_dict(
+    diff_dict: dict, *, path: str | os.PathLike[str] = "diff.json"
+) -> tuple[Path, dict]:
+    """Publish a canonical diff payload without changing its shape."""
+    payload = copy.deepcopy(diff_dict)
+    return _write_decision_payload(payload, path), payload
 
 
 def write_diff_decision_json(

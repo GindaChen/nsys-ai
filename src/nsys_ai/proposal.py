@@ -539,7 +539,7 @@ def generate_proposal(
     # Resolved values are never stored. Scan all persisted user-controlled
     # string keys and values without textualizing numeric measurements.
     validate_persisted_secret_strings(_secret_scan_identity(identity), resolved)
-    return Proposal(
+    proposal = Proposal(
         proposal_id=_proposal_id(identity),
         source_finding_id=fields["source_finding_id"],
         source_profile_id=fields["source_profile_id"],
@@ -553,3 +553,26 @@ def generate_proposal(
         abstained=fields["abstained"],
         abstention_reason=fields["abstention_reason"],
     )
+    validate_proposal_against_finding(proposal, finding)
+    return proposal
+
+
+def validate_proposal_against_finding(
+    proposal: Proposal, finding: Finding
+) -> None:
+    """Require ``proposal`` to equal the deterministic projection of ``finding``.
+
+    The Proposal's own verification RunSpec is the verification input. This
+    semantic check does not resolve secrets or persist any additional data.
+    """
+    if not isinstance(proposal, Proposal):
+        raise ProposalError("proposal must be a Proposal")
+    if not isinstance(finding, Finding):
+        raise ProposalError("finding must be a Finding")
+    fields = _derive_fields(finding, proposal.verification)
+    identity = _identity(fields, proposal.verification)
+    expected = {"proposal_id": _proposal_id(identity), **identity}
+    if proposal.to_dict() != expected:
+        raise ProposalError(
+            "Proposal is not deterministically derived from the identified Finding"
+        )

@@ -24,6 +24,8 @@ tools can detect format compatibility.
 """
 
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from functools import cache
 from importlib.metadata import PackageNotFoundError
@@ -422,6 +424,249 @@ class DiffLineage:
     def from_dict(cls, d: dict) -> "DiffLineage":
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in d.items() if k in valid_keys})
+
+
+_FINDING_FIELDS = {item.name for item in fields(Finding)}
+_FINDING_REQUIRED_FIELDS = {"type", "label", "start_ns", "color", "severity", "note"}
+_SELECTION_FIELDS = {item.name for item in fields(TraceSelection)}
+_SELECTION_REQUIRED_FIELDS = {"id", "profile_id", "source"}
+_EVIDENCE_ROW_FIELDS = {item.name for item in fields(EvidenceRow)}
+_EVIDENCE_ROW_REQUIRED_FIELDS = {"id", "source_skill", "values", "units", "provenance"}
+_DIFF_LINEAGE_FIELDS = {item.name for item in fields(DiffLineage)}
+_REPORT_FIELDS = {
+    "schema_version",
+    "producer",
+    "producer_version",
+    "title",
+    "profile_id",
+    "profile_path",
+    "findings",
+    "skipped",
+}
+
+
+def _artifact_object(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{label} keys must be strings")
+    return value
+
+
+def _artifact_exact_keys(
+    value: Mapping[str, Any], allowed: set[str], required: set[str], label: str
+) -> None:
+    actual = set(value)
+    missing = required - actual
+    unknown = actual - allowed
+    if missing or unknown:
+        raise ValueError(
+            f"{label} fields do not match schema; "
+            f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+
+
+def _artifact_string(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        qualifier = "a string" if allow_empty else "a non-empty string"
+        raise ValueError(f"{label} must be {qualifier}")
+    return value
+
+
+def _artifact_int(value: Any, label: str, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{label} must be at least {minimum}")
+    return value
+
+
+def _artifact_number(
+    value: Any,
+    label: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"{label} must be a finite number")
+    number = float(value)
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{label} must be at least {minimum}")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"{label} must be at most {maximum}")
+    return number
+
+
+def _artifact_string_list(value: Any, label: str) -> None:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{label} must be an array of strings")
+
+
+def validate_trace_selection_payload(
+    payload: Any, *, label: str = "selection"
+) -> TraceSelection:
+    value = _artifact_object(payload, label)
+    _artifact_exact_keys(value, _SELECTION_FIELDS, _SELECTION_REQUIRED_FIELDS, label)
+    _artifact_string(value["id"], f"{label}.id")
+    _artifact_string(value["profile_id"], f"{label}.profile_id", allow_empty=True)
+    _artifact_string(value["source"], f"{label}.source")
+    for field_name in ("start_ns", "end_ns"):
+        if field_name in value:
+            _artifact_int(value[field_name], f"{label}.{field_name}", minimum=0)
+    if (
+        "start_ns" in value
+        and "end_ns" in value
+        and value["end_ns"] < value["start_ns"]
+    ):
+        raise ValueError(f"{label}.end_ns must not precede start_ns")
+    for field_name in ("gpu_ids", "rank_ids", "stream_ids"):
+        if field_name not in value:
+            continue
+        numbers = value[field_name]
+        if not isinstance(numbers, list):
+            raise ValueError(f"{label}.{field_name} must be an array")
+        for index, item in enumerate(numbers):
+            _artifact_int(item, f"{label}.{field_name}[{index}]", minimum=0)
+    for field_name in ("nvtx_path", "event_ids"):
+        if field_name in value:
+            _artifact_string_list(value[field_name], f"{label}.{field_name}")
+    if "label" in value:
+        _artifact_string(value["label"], f"{label}.label", allow_empty=True)
+    return TraceSelection.from_dict(dict(value))
+
+
+def validate_evidence_row_payload(
+    payload: Any, *, label: str = "evidence row"
+) -> EvidenceRow:
+    value = _artifact_object(payload, label)
+    _artifact_exact_keys(
+        value, _EVIDENCE_ROW_FIELDS, _EVIDENCE_ROW_REQUIRED_FIELDS, label
+    )
+    _artifact_string(value["id"], f"{label}.id")
+    _artifact_string(value["source_skill"], f"{label}.source_skill")
+    for field_name in ("values", "units", "provenance"):
+        _artifact_object(value[field_name], f"{label}.{field_name}")
+    if any(
+        not isinstance(key, str) or not isinstance(unit, str)
+        for key, unit in value["units"].items()
+    ):
+        raise ValueError(f"{label}.units must map strings to strings")
+    if "selection_id" in value:
+        _artifact_string(value["selection_id"], f"{label}.selection_id")
+    return EvidenceRow.from_dict(dict(value))
+
+
+def validate_finding_payload(payload: Any, *, label: str = "finding") -> Finding:
+    value = _artifact_object(payload, label)
+    _artifact_exact_keys(value, _FINDING_FIELDS, _FINDING_REQUIRED_FIELDS, label)
+    if value["type"] not in {"highlight", "region", "marker"}:
+        raise ValueError(f"{label}.type must be highlight, region, or marker")
+    _artifact_string(value["label"], f"{label}.label", allow_empty=True)
+    _artifact_int(value["start_ns"], f"{label}.start_ns", minimum=0)
+    if "end_ns" in value:
+        _artifact_int(value["end_ns"], f"{label}.end_ns", minimum=0)
+        if value["end_ns"] < value["start_ns"]:
+            raise ValueError(f"{label}.end_ns must not precede start_ns")
+    for field_name in ("stream", "color", "note"):
+        if field_name in value:
+            _artifact_string(value[field_name], f"{label}.{field_name}", allow_empty=True)
+    if "gpu_id" in value:
+        _artifact_int(value["gpu_id"], f"{label}.gpu_id", minimum=0)
+    if value["severity"] not in {"critical", "warning", "info"}:
+        raise ValueError(f"{label}.severity is invalid")
+    if "id" in value:
+        _artifact_string(value["id"], f"{label}.id", allow_empty=True)
+    if "category" in value and value["category"] not in {
+        "compute",
+        "communication",
+        "launch_overhead",
+        "idle",
+        "memory",
+        "sync",
+        "nvtx",
+        "profile_quality",
+        "kernel_internal",
+        "framework",
+    }:
+        raise ValueError(f"{label}.category is invalid")
+    if "confidence" in value:
+        _artifact_number(value["confidence"], f"{label}.confidence", minimum=0, maximum=1)
+    if "evidence" in value:
+        rows = value["evidence"]
+        if not isinstance(rows, list):
+            raise ValueError(f"{label}.evidence must be an array")
+        for index, row in enumerate(rows):
+            validate_evidence_row_payload(row, label=f"{label}.evidence[{index}]")
+    if "selection" in value:
+        validate_trace_selection_payload(value["selection"], label=f"{label}.selection")
+    for field_name in ("explanation", "headroom_basis"):
+        if field_name in value:
+            _artifact_string(value[field_name], f"{label}.{field_name}", allow_empty=True)
+    for field_name in ("suggested_actions", "false_positive_notes"):
+        if field_name in value:
+            _artifact_string_list(value[field_name], f"{label}.{field_name}")
+    if "provenance" in value:
+        _artifact_object(value["provenance"], f"{label}.provenance")
+    if "diff_lineage" in value:
+        lineage = _artifact_object(value["diff_lineage"], f"{label}.diff_lineage")
+        _artifact_exact_keys(
+            lineage,
+            _DIFF_LINEAGE_FIELDS,
+            _DIFF_LINEAGE_FIELDS,
+            f"{label}.diff_lineage",
+        )
+        for field_name in ("diff_id", "baseline_profile_id"):
+            _artifact_string(
+                lineage[field_name], f"{label}.diff_lineage.{field_name}"
+            )
+        if lineage["role"] not in {"regression", "improvement", "stable"}:
+            raise ValueError(f"{label}.diff_lineage.role is invalid")
+        _artifact_int(lineage["rank"], f"{label}.diff_lineage.rank", minimum=0)
+    if "headroom_ms" in value:
+        _artifact_number(value["headroom_ms"], f"{label}.headroom_ms", minimum=0)
+    return Finding.from_dict(dict(value))
+
+
+def validate_evidence_report_payload(payload: Any) -> EvidenceReport:
+    """Validate and rehydrate the current evidence artifact contract."""
+    value = _artifact_object(payload, "evidence report")
+    _artifact_exact_keys(value, _REPORT_FIELDS, _REPORT_FIELDS, "evidence report")
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise ValueError(f"evidence report schema_version must be {SCHEMA_VERSION!r}")
+    if value["producer"] != PRODUCER:
+        raise ValueError(f"evidence report producer must be {PRODUCER!r}")
+    _artifact_string(value["producer_version"], "evidence report.producer_version")
+    for field_name in ("title", "profile_id", "profile_path"):
+        _artifact_string(
+            value[field_name], f"evidence report.{field_name}", allow_empty=True
+        )
+    findings = value["findings"]
+    if not isinstance(findings, list):
+        raise ValueError("evidence report.findings must be an array")
+    for index, finding in enumerate(findings):
+        validate_finding_payload(finding, label=f"findings[{index}]")
+    skipped = value["skipped"]
+    if not isinstance(skipped, list):
+        raise ValueError("evidence report.skipped must be an array")
+    for index, item in enumerate(skipped):
+        entry = _artifact_object(item, f"skipped[{index}]")
+        _artifact_exact_keys(
+            entry, {"analyzer", "skill", "reason"}, {"analyzer", "skill", "reason"}, f"skipped[{index}]"
+        )
+        for field_name in ("analyzer", "skill", "reason"):
+            _artifact_string(entry[field_name], f"skipped[{index}].{field_name}")
+
+    report = EvidenceReport.from_dict(dict(value))
+    regenerated = report.to_dict()
+    regenerated["producer_version"] = value["producer_version"]
+    if regenerated != dict(value):
+        raise ValueError("evidence report changes when rehydrated")
+    return report
 
 
 @dataclass

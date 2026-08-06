@@ -67,6 +67,30 @@ def test_deciding_adds_only_the_decision(undecided):
     assert decided["decision"]["status"] == "accepted"
 
 
+def test_whitespace_environment_identity_falls_back_before_building_decision(
+    monkeypatch,
+):
+    import nsys_ai.diff_decision as diff_decision
+
+    def unavailable_git(*_args, **_kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(diff_decision.subprocess, "run", unavailable_git)
+    monkeypatch.setenv("USER", "   ")
+    monkeypatch.setenv("USERNAME", "\t")
+    payload, _warnings = diff_decision.build_diff_decision_record_from_diff_dict(
+        {
+            "before": {"profile_id": "before"},
+            "after": {"profile_id": "after"},
+            "warnings": [],
+        },
+        decision="accepted",
+        reason="verified",
+    )
+
+    assert payload["decision"]["decider"] == "unknown"
+
+
 def test_the_envelope_is_pinned(undecided):
     """A write-only artifact has no reader to reject a bad version, so the
     envelope is pinned here instead.
@@ -101,6 +125,12 @@ def test_it_is_json_serialisable(undecided):
     """The artifact is written to disk; a value that cannot serialise is a bug
     that would only surface at write time."""
     assert json.loads(json.dumps(undecided, default=str))["decision"] is None
+
+
+def test_canonical_diff_passes_the_session_artifact_validator(undecided):
+    from nsys_ai.session_store import _validate_diff_payload
+
+    _validate_diff_payload(undecided, require_undecided=True)
 
 
 # ── The two version constants are separate on purpose ───────────────────────
