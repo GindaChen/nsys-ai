@@ -358,7 +358,6 @@ class Profile:
                     # open_profile_readonly reach it without a Profile.
                     self.db = parquet_cache.open_auto_db(path)
             except Exception as e:
-
                 self.cache_error = e
                 # Losing the Parquet cache must not cost the DuckDB engine.
                 # The raw-sqlite3 fallback below is a third tier, not a
