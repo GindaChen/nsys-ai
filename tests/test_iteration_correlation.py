@@ -1,5 +1,7 @@
 """Correctness and complexity guards for iteration/runtime correlation."""
 
+from itertools import permutations
+
 import pytest
 
 from nsys_ai.overlap import _correlate_iteration_kernels, detect_iterations
@@ -53,21 +55,24 @@ class _OneShotRuntimeProfile:
         return rows
 
 
-def _adjacent_nvtx_profile(conn, correlation_id, runtime_start, runtime_end):
+def _adjacent_nvtx_profile(conn, runtime_rows):
     conn.execute(
         "INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) "
         "VALUES (100, 4500000, 8500000, 'train_step', 59, 2)"
     )
-    conn.execute(
+    conn.executemany(
         "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME "
         "(globalTid, correlationId, start, end, nameId) VALUES (100, ?, ?, ?, 24)",
-        (correlation_id, runtime_start, runtime_end),
+        runtime_rows,
     )
-    conn.execute(
+    conn.executemany(
         "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
         "(globalPid, deviceId, streamId, correlationId, start, end, shortName, demangledName) "
-        "VALUES (100, 0, 9, ?, 6000000, 6100000, 1, 1)",
-        (correlation_id,),
+        "VALUES (100, 0, 9, ?, ?, ?, 1, 1)",
+        [
+            (correlation_id, 6_000_000 + index * 200_000, 6_100_000 + index * 200_000)
+            for index, (correlation_id, _, _) in enumerate(runtime_rows)
+        ],
     )
     return _OneShotRuntimeProfile(Profile._from_conn(conn))
 
@@ -110,6 +115,36 @@ def test_multiple_iterations_retain_the_first_row_for_the_next_window():
         [1],
         [2, 3],
     ]
+
+
+def test_equal_start_group_matches_restart_semantics_in_every_row_order():
+    iterations = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
+    kernels = {i: _kernel(i) for i in range(1, 5)}
+    boundary_rows = [
+        _runtime(1, 10, 11),
+        _runtime(2, 10, 10),
+        _runtime(3, 10, 12),
+    ]
+
+    repro = list(_correlate_iteration_kernels(iterations, boundary_rows[:2], kernels))
+    assert [[kernel["correlation_id"] for kernel in group] for group in repro] == [
+        [2],
+        [1, 2],
+    ]
+
+    def legacy(rows):
+        return [
+            [
+                kernels[row["correlationId"]]
+                for row in rows
+                if row["start"] >= window["start"] and row["end"] <= window["end"]
+            ]
+            for window in iterations
+        ]
+
+    for same_start_order in permutations(boundary_rows):
+        rows = list(same_start_order) + [_runtime(4, 12, 13)]
+        assert list(_correlate_iteration_kernels(iterations, rows, kernels)) == legacy(rows)
 
 
 def test_runtime_rows_are_iterated_once_without_rewind():
@@ -158,7 +193,7 @@ def test_detect_iterations_correlates_multiple_nvtx_windows(minimal_nsys_conn):
 def test_detect_iterations_retains_a_spanning_row_for_the_next_nvtx_window(
     minimal_nsys_conn,
 ):
-    prof = _adjacent_nvtx_profile(minimal_nsys_conn, 200, 4_500_000, 4_600_000)
+    prof = _adjacent_nvtx_profile(minimal_nsys_conn, [(200, 4_500_000, 4_600_000)])
 
     rows = detect_iterations(prof, 0, marker="train_step")
 
@@ -169,11 +204,28 @@ def test_detect_iterations_retains_a_spanning_row_for_the_next_nvtx_window(
 def test_detect_iterations_keeps_zero_duration_row_in_both_adjacent_windows(
     minimal_nsys_conn,
 ):
-    prof = _adjacent_nvtx_profile(minimal_nsys_conn, 200, 4_500_000, 4_500_000)
+    prof = _adjacent_nvtx_profile(minimal_nsys_conn, [(200, 4_500_000, 4_500_000)])
 
     rows = detect_iterations(prof, 0, marker="train_step")
 
     assert [row["kernel_count"] for row in rows] == [5, 2]
+    assert prof.runtime_rows.iterations == 1
+
+
+def test_detect_iterations_handles_spanning_then_zero_row_at_the_same_boundary(
+    minimal_nsys_conn,
+):
+    prof = _adjacent_nvtx_profile(
+        minimal_nsys_conn,
+        [
+            (200, 4_500_000, 4_600_000),
+            (201, 4_500_000, 4_500_000),
+        ],
+    )
+
+    rows = detect_iterations(prof, 0, marker="train_step")
+
+    assert [row["kernel_count"] for row in rows] == [5, 3]
     assert prof.runtime_rows.iterations == 1
 
 

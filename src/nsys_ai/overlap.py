@@ -491,34 +491,42 @@ def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
             raise ValueError(f"iteration {index} overlaps or precedes the previous iteration")
         previous_end = end
 
-    rows = iter(runtime_rows)
-    current = next(rows, None)
-    carried_kernels = []
+    def grouped_rows():
+        rows = iter(runtime_rows)
+        current = next(rows, None)
+        while current is not None:
+            start = current["start"]
+            group = [current]
+            current = next(rows, None)
+            while current is not None and current["start"] == start:
+                group.append(current)
+                current = next(rows, None)
+            yield group
+
+    groups = iter(grouped_rows())
+    current_group = next(groups, None)
     for index, iteration in enumerate(iterations):
         cpu_start, cpu_end = iteration["start"], iteration["end"]
         next_start = iterations[index + 1]["start"] if index + 1 < len(iterations) else None
 
-        while current is not None and current["start"] < cpu_start:
-            current = next(rows, None)
+        while current_group is not None and current_group[0]["start"] < cpu_start:
+            current_group = next(groups, None)
 
-        kernels = carried_kernels
-        carried_kernels = []
-        while current is not None and current["start"] <= cpu_end:
-            if current["end"] <= cpu_end:
-                kernel = kernel_map.get(current["correlationId"])
+        kernels = []
+        while current_group is not None and current_group[0]["start"] <= cpu_end:
+            for runtime in current_group:
+                if runtime["end"] > cpu_end:
+                    continue
+                kernel = kernel_map.get(runtime["correlationId"])
                 if kernel:
                     kernels.append(kernel)
-                    # Containment is inclusive: a zero-duration row at a
-                    # shared boundary belongs to both adjacent windows.
-                    if (
-                        next_start == cpu_end
-                        and current["start"] == cpu_end
-                        and current["end"] == cpu_end
-                    ):
-                        carried_kernels.append(kernel)
-            elif next_start is not None and current["start"] >= next_start:
+
+            # Containment is inclusive. Keep the whole equal-start group at a
+            # shared boundary: zero-duration rows belong to both windows, while
+            # rows spanning the boundary belong only to the following one.
+            if next_start == cpu_end == current_group[0]["start"]:
                 break
-            current = next(rows, None)
+            current_group = next(groups, None)
 
         yield kernels
 
