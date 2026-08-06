@@ -504,3 +504,43 @@ def validate_secret_boundaries(
                 raise RunSpecError(
                     f"declared secret {secret_name} appears in {location}{suffix}"
                 )
+
+
+def validate_persisted_secret_strings(
+    payload: Any, resolved_secrets: Mapping[str, str]
+) -> None:
+    """Reject resolved secrets in persisted string keys and string values.
+
+    Diagnostics identify only the validated secret declaration. They never
+    include the secret value or keys from the user-controlled payload.
+    Callers must remove secret-name declaration fields before invoking this
+    scanner because declaration names are intentionally persistable. Numeric,
+    boolean, and null measurements are not converted to text: a secret such as
+    ``"1"`` does not make an unrelated integer measurement unsafe.
+    """
+    values = _require_mapping(resolved_secrets, "resolved_secrets")
+    for name in values:
+        EnvironmentSpec._validate_name(name)
+
+    def strings(value: Any):
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if not isinstance(key, str):
+                    raise RunSpecError("persisted payload mapping keys must be strings")
+                yield key
+                yield from strings(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                yield from strings(nested)
+        elif isinstance(value, str):
+            yield value
+
+    persisted = tuple(strings(payload))
+    for secret_name in sorted(values):
+        secret_value = values[secret_name]
+        if not isinstance(secret_value, str):
+            raise RunSpecError(f"resolved secret {secret_name} must be a string")
+        if secret_value and any(secret_value in value for value in persisted):
+            raise RunSpecError(
+                f"declared secret {secret_name} appears in a persisted string"
+            )
