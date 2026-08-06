@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - nsys-ai profiling is supported on Linu
 
 from .annotation import (
     PRODUCER,
+    DiffLineage,
     EvidenceReport,
     validate_evidence_report_payload,
     validate_trace_selection_payload,
@@ -140,6 +141,13 @@ _DIFF_KERNEL_FIELDS = {
     "after_share",
     "delta_share",
     "selection",
+    "diff_lineage",
+}
+_DIFF_LINEAGE_FIELDS = {
+    "diff_id",
+    "role",
+    "rank",
+    "baseline_profile_id",
 }
 _DIFF_NVTX_FIELDS = {
     "text",
@@ -1371,10 +1379,42 @@ def _validate_directional_diff_entry(
         )
 
 
+def _validate_diff_lineage(
+    value: Any,
+    *,
+    label: str,
+    diff_id: str,
+    role: str,
+    rank: int,
+    baseline_profile_id: str,
+) -> None:
+    lineage_payload = _diff_mapping(value, label)
+    _diff_exact_fields(lineage_payload, _DIFF_LINEAGE_FIELDS, label)
+    for field in ("diff_id", "baseline_profile_id"):
+        _diff_string(lineage_payload[field], f"{label}.{field}")
+    if lineage_payload["role"] not in {"regression", "improvement", "stable"}:
+        raise ValueError(f"{label}.role is invalid")
+    _diff_integer(lineage_payload["rank"], f"{label}.rank", non_negative=True)
+
+    lineage = DiffLineage.from_dict(dict(lineage_payload))
+    expected = {
+        "diff_id": diff_id,
+        "role": role,
+        "rank": rank,
+        "baseline_profile_id": baseline_profile_id,
+    }
+    if lineage.to_dict() != expected:
+        raise ValueError(f"{label} does not match its parent diff entry")
+
+
 def _validate_diff_kernel_entries(payload: Mapping[str, Any]) -> None:
     after_profile_id = payload["after"]["profile_id"]
+    baseline_profile_id = payload["before"]["profile_id"]
     seen_keys: set[str] = set()
     for field_name in ("top_regressions", "top_improvements"):
+        expected_role = (
+            "regression" if field_name == "top_regressions" else "improvement"
+        )
         for index, item in enumerate(payload[field_name]):
             label = f"diff {field_name}[{index}]"
             entry = _diff_mapping(item, label)
@@ -1401,6 +1441,14 @@ def _validate_diff_kernel_entries(payload: Mapping[str, Any]) -> None:
                 label=f"{label}.selection",
                 expected_profile_id=after_profile_id,
                 expected_source="diff",
+            )
+            _validate_diff_lineage(
+                entry["diff_lineage"],
+                label=f"{label}.diff_lineage",
+                diff_id=payload["diff_id"],
+                role=expected_role,
+                rank=index,
+                baseline_profile_id=baseline_profile_id,
             )
 
 

@@ -580,6 +580,45 @@ def test_diff_without_top_regressions_has_empty_selection_lists(tmp_path):
     assert payload["top_improvements"] == []
 
 
+def test_diff_json_lineage_covers_regressions_and_improvements(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_render import to_diff_dict
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(
+        str(before),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2),
+            (20_000_000, 50_000_000, 0, 7, 2, 3, 4),
+        ],
+    )
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 30_000_000, 0, 7, 1, 1, 2),
+            (40_000_000, 50_000_000, 0, 7, 2, 3, 4),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        payload = to_diff_dict(diff_profiles(b, a, gpu=0, limit=10))
+
+    for field_name, role in (
+        ("top_regressions", "regression"),
+        ("top_improvements", "improvement"),
+    ):
+        assert payload[field_name]
+        for rank, entry in enumerate(payload[field_name]):
+            assert entry["diff_lineage"] == {
+                "diff_id": payload["diff_id"],
+                "role": role,
+                "rank": rank,
+                "baseline_profile_id": payload["before"]["profile_id"],
+            }
+
+
 def test_diff_cli_json_output(tmp_path):
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"
