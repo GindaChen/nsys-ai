@@ -22,10 +22,12 @@ if typing.TYPE_CHECKING:
 
 
 from nsys_ai import parquet_cache
+from nsys_ai.connection import DB_ERRORS
 from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
     ExportToolMissingError,
+    ProfileNotFoundError,
     SchemaError,
 )
 
@@ -53,15 +55,33 @@ class NsightSchema:
     and exposes canonical table choices (e.g., kernel activity table).
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, meta_conn=None):
         self._conn = conn
         from .connection import wrap_connection
 
         self._adapter = wrap_connection(conn)
+        # ``META_DATA_*`` lives only in the SQLite export — the Parquet/DuckDB
+        # cache materializes the analysis tables and not the metadata ones. When
+        # the schema is built on the cache (the normal path), those lookups must
+        # fall back to the original SQLite connection or every metadata field
+        # silently reads as absent.
+        self._meta_adapter = (
+            wrap_connection(meta_conn) if meta_conn is not None and meta_conn is not conn else None
+        )
 
         self.tables = list(self._adapter.get_table_names())
 
+        # Read the metadata tables once; both version fields derive from it.
+        self._meta: dict[str, str] = {}
+        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
+            self._meta.update(self._read_kv_table(table))
+
         self.version: str | None = self._detect_version()
+        # The export schema version is what actually changes shape between
+        # releases — NVIDIA documents that the SQLite schema "can and will
+        # change" — so this, not the product version, is what compatibility
+        # handling should key off.
+        self.schema_version: str | None = self._meta.get("EXPORT_SCHEMA_VERSION") or None
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
 
@@ -72,47 +92,75 @@ class NsightSchema:
         Best-effort reader for META_DATA_* style tables which may use
         slightly different column names across Nsight versions.
         """
+        adapter = self._adapter
         if table not in self.tables:
-            return {}
+            # Not in the primary connection — try the metadata source before
+            # giving up (see the note in __init__).
+            if self._meta_adapter is None:
+                return {}
+            try:
+                if table not in self._meta_adapter.get_table_names():
+                    return {}
+            except DB_ERRORS:
+                return {}
+            adapter = self._meta_adapter
 
-        cols = self._adapter.get_table_columns(table)
+        try:
+            cols = adapter.get_table_columns(table)
+        except DB_ERRORS:
+            return {}
         key_col = None
         val_col = None
 
-        # Common patterns seen in Nsight exports
-        for cand in ("key", "Key", "NAME", "Name"):
-            if cand in cols:
-                key_col = cand
+        # Common patterns seen in Nsight exports. Matching is case-insensitive
+        # because the real exports use lowercase ``name``/``value`` while older
+        # probes only listed ``NAME``/``Name`` — the omission silently produced
+        # an empty mapping, so every consumer of these tables (version
+        # detection, GPU clock) degraded to None on every real profile.
+        lowered = {str(c).lower(): c for c in cols}
+        for cand in ("name", "key"):
+            if cand in lowered:
+                key_col = lowered[cand]
                 break
-        for cand in ("value", "Value", "VAL", "Val"):
-            if cand in cols:
-                val_col = cand
+        for cand in ("value", "val"):
+            if cand in lowered:
+                val_col = lowered[cand]
                 break
 
         if not key_col or not val_col:
             return {}
 
         kv: dict[str, str] = {}
-        cur = self._adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")
-        for k, v in cur.fetchall():
+        try:
+            cur = adapter.execute(f"SELECT {key_col}, {val_col} FROM {table}")  # noqa: S608
+            rows = cur.fetchall()
+        except DB_ERRORS:
+            return {}
+        for k, v in rows:
             if k is not None and v is not None:
                 kv[str(k)] = str(v)
         return kv
 
     def _detect_version(self) -> str | None:
-        """Try to infer Nsight Systems version from META_DATA tables."""
-        meta: dict[str, str] = {}
-        for table in ("META_DATA_EXPORT", "META_DATA_CAPTURE"):
-            meta.update(self._read_kv_table(table))
+        """Infer the Nsight Systems version from the metadata tables."""
+        meta = self._meta
+
+        # The canonical key in current exports. Checked first and by exact name
+        # so the product *name* ("NVIDIA Nsight Systems") can never be mistaken
+        # for the version, which the old value-substring fallback allowed.
+        for key in ("EXPORT_PRODUCT_VERSION", "PRODUCT_VERSION"):
+            if meta.get(key):
+                return meta[key]
 
         # Heuristic keys that might carry version information
         for key in meta:
             lk = key.lower()
             if "nsight systems version" in lk or "exporter version" in lk:
                 return meta[key]
-        # Fallback: sometimes the value itself contains 'Nsight Systems X.Y'
+        # Fallback: a value carrying 'Nsight Systems X.Y'. Require a digit so a
+        # bare product name is not returned as a version.
         for val in meta.values():
-            if "Nsight Systems" in val:
+            if "Nsight Systems" in val and any(ch.isdigit() for ch in val):
                 return val
         return None
 
@@ -124,10 +172,30 @@ class NsightSchema:
 
         Today this is usually CUPTI_ACTIVITY_KIND_KERNEL, but we keep
         the detection logic resilient to future renames.
+
+        Variants of the canonical name are chosen by the shared resolver, never
+        here. This used to be its own "exact name, else sorted(candidates)[0]"
+        scan, which picks the *oldest* variant: on a profile carrying both
+        ``..._KERNEL_V2`` and ``..._KERNEL_V3`` it returned ``_V2`` while
+        ``resolve_activity_tables()["kernel"]`` returned ``_V3``, so
+        ``launch_overhead_ms`` — whose SQL joins ``kernel_table`` against the
+        resolved runtime table — read two tables that did not describe the same
+        window. Measured on a fixture with all three activity tables doubled and
+        the ``_V2`` copies truncated to a quarter: 0.0 ms / 0 iterations against
+        the ``_V3``-only control's 0.05 ms / 28.
+
+        The substring sweep below stays as a last resort for a rename the
+        resolver cannot see (a name that does not start with the canonical
+        prefix at all). Its ``sorted`` is only for determinism between such
+        unrelated names — by then there is no version ordering left to get wrong.
         """
-        # Preferred legacy/known name
-        if "CUPTI_ACTIVITY_KIND_KERNEL" in self.tables:
-            return "CUPTI_ACTIVITY_KIND_KERNEL"
+        from .connection import resolve_table_variant
+
+        resolved = resolve_table_variant(
+            set(self.tables), "CUPTI_ACTIVITY_KIND_KERNEL", allow_other_suffixes=True
+        )
+        if resolved:
+            return resolved
 
         # Fallback: any non-enum table with KERNEL in the name
         candidates = [
@@ -139,6 +207,64 @@ class NsightSchema:
             return candidates[0]
 
         return None
+
+    # ── Schema contract ────────────────────────────────────────────────
+    # Columns the core analysis path selects by name. Their absence is not a
+    # graceful degradation but a crash or a silently-wrong number, so a future
+    # Nsight export that drops or renames one should fail loudly and by name
+    # rather than surface as a user bug report (issue #237). NVIDIA documents
+    # that the SQLite export schema "can and will change". Optional surface —
+    # NVTX_EVENTS, META_DATA_* — is deliberately excluded: skills degrade around
+    # it, so a --trace=cuda capture with no NVTX must not trip the contract.
+    _REQUIRED_KERNEL_COLUMNS = (
+        "deviceId",
+        "streamId",
+        "start",
+        "end",
+        "shortName",
+        "demangledName",
+        "correlationId",
+    )
+    _REQUIRED_STRINGIDS_COLUMNS = ("id", "value")
+
+    def _resolve_table(self, name: str) -> str | None:
+        """Actual table name matching ``name`` case-insensitively, or None."""
+        lname = name.lower()
+        for t in self.tables:
+            if t.lower() == lname:
+                return t
+        return None
+
+    def _missing_columns(self, table: str, required) -> list[str]:
+        try:
+            present = {str(c).lower() for c in self._adapter.get_table_columns(table)}
+        except DB_ERRORS:
+            return [f"{table} (columns unreadable)"]
+        return [f"{table}.{c}" for c in required if c.lower() not in present]
+
+    def missing_required_columns(self) -> list[str]:
+        """Descriptors of hard-required tables/columns absent from this export.
+
+        Empty when the schema is compatible with the core analysis path. Each
+        entry names exactly what is missing (``CUPTI_ACTIVITY_KIND_KERNEL.start``,
+        or a table name) so a diagnostic points straight at the drift.
+        """
+        missing: list[str] = []
+
+        if not self.kernel_table:
+            missing.append(
+                "kernel activity table (CUPTI_ACTIVITY_KIND_KERNEL or a *KERNEL* table)"
+            )
+        else:
+            missing += self._missing_columns(self.kernel_table, self._REQUIRED_KERNEL_COLUMNS)
+
+        stringids = self._resolve_table("StringIds")
+        if not stringids:
+            missing.append("StringIds")
+        else:
+            missing += self._missing_columns(stringids, self._REQUIRED_STRINGIDS_COLUMNS)
+
+        return missing
 
 
 @dataclass
@@ -180,6 +306,14 @@ class Profile:
 
     _log = logging.getLogger(__name__)
 
+    #: The exception that sent this Profile down the SQLite fallback, or None.
+    #: ``db is None`` says only *that* the cache is unavailable; commands whose
+    #: job is the cache itself (``warm``) need to say *why*, and re-running the
+    #: build to find out would repeat an ETL that can take minutes. Set only in
+    #: the fallback branch below; every other construction path leaves the class
+    #: default in place.
+    cache_error: Exception | None = None
+
     def __init__(self, path: str, *, cache_mode: str = "auto", backend: str = "sqlite"):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
@@ -191,6 +325,11 @@ class Profile:
             raise ValueError(
                 "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
             )
+        # Guard before sqlite3.connect, which would otherwise create an empty
+        # stub + cache for a missing path. Covers every entry path, including
+        # direct Profile(...) construction that bypasses resolve_profile_path.
+        if not os.path.exists(path):
+            raise ProfileNotFoundError(f"profile not found: {path}")
         self.path = path
         self.backend = backend
         self._lock = threading.Lock()
@@ -229,13 +368,20 @@ class Profile:
                             self.db = parquet_cache.open_cached_db(path)
             except Exception as e:
                 self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
+                self.cache_error = e
                 self.db = None  # type: ignore[assignment]
         from .connection import wrap_connection
 
         self.adapter = wrap_connection(self.db if self.db is not None else self.conn)
-        self.schema = NsightSchema(self.db if self.db is not None else self.conn)
+        self.schema = NsightSchema(
+            self.db if self.db is not None else self.conn,
+            # The SQLite export is the only place META_DATA_* exists.
+            meta_conn=self.conn,
+        )
         self.meta = self._discover()
         self._nvtx_has_text_id = self.adapter.detect_nvtx_text_id()
+        self._owner_thread = threading.get_ident()
+        self._thread_handles = threading.local()
 
     @classmethod
     def _from_conn(cls, conn: sqlite3.Connection) -> "Profile":
@@ -261,6 +407,8 @@ class Profile:
         obj.schema = NsightSchema(conn)
         obj.meta = obj._discover()
         obj._nvtx_has_text_id = obj.adapter.detect_nvtx_text_id()
+        obj._owner_thread = threading.get_ident()
+        obj._thread_handles = threading.local()
         return obj
 
     def _discover(self) -> ProfileMeta:
@@ -278,49 +426,101 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        devices = [
-            r[0]
-            for r in self.adapter.execute(
-                f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
-            ).fetchall()
-        ]
-
+        # Single pass over the kernel table for devices, per-device streams,
+        # time range, total kernel count, and per-device kernel counts. These
+        # were five separate full scans; in direct-SQLite mode (large profiles)
+        # each scan is seconds, so collapsing them noticeably speeds up open.
+        # ORDER BY preserves the previous device/stream ordering exactly.
+        devices: list[int] = []
         streams: dict[int, list[int]] = {}
-        for r in self.adapter.execute(
-            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
+        kcounts: dict[int, int] = {}
+        kernel_count = 0
+        min_start = None
+        max_end = None
+        for dev, stream, mn, mx, cnt in self.adapter.execute(
+            f"SELECT deviceId, streamId, MIN(start), MAX([end]), COUNT(*) "
+            f"FROM {kernel_table} GROUP BY deviceId, streamId ORDER BY deviceId, streamId"
         ).fetchall():
-            streams.setdefault(r[0], []).append(r[1])
+            if dev not in streams:
+                streams[dev] = []
+                kcounts[dev] = 0
+                devices.append(dev)
+            streams[dev].append(stream)
+            kcounts[dev] += cnt
+            kernel_count += cnt
+            if mn is not None:
+                min_start = mn if min_start is None else min(min_start, mn)
+            if mx is not None:
+                max_end = mx if max_end is None else max(max_end, mx)
 
-        tr = self.adapter.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
-
-        kc = self.adapter.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
+        _meta_nvtx = self.adapter.resolve_activity_tables().get("nvtx")
         nc = (
-            self.adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
-            if "NVTX_EVENTS" in tables
+            self.adapter.execute(f"SELECT COUNT(*) FROM {_meta_nvtx}").fetchone()[0]  # noqa: S608
+            if _meta_nvtx
             else 0
         )
 
         return ProfileMeta(
             devices=devices,
             streams=streams,
-            time_range=(tr[0] or 0, tr[1] or 0),
-            kernel_count=kc,
+            time_range=(min_start or 0, max_end or 0),
+            kernel_count=kernel_count,
             nvtx_count=nc,
             tables=tables,
-            gpu_info=self._gpu_info(devices, streams, tables),
+            gpu_info=self._gpu_info(devices, streams, tables, kcounts),
         )
 
-    def _gpu_info(self, devices, streams, tables) -> dict[int, GpuInfo]:
-        """Query hardware metadata per GPU."""
-        info: dict[int, GpuInfo] = {}
+    def query_conn(self):
+        """The connection this thread should run queries through.
 
-        # Kernel counts per device
-        kcounts = {}
+        Two things in one accessor, because they are the same decision.
+
+        Which connection: DuckDB when a cache or direct attach is in use, the
+        SQLite connection when it is not. That choice was spelled out in eleven
+        places across eight modules, in three different spellings including an
+        inverted one, while ``__init__`` had already made it.
+
+        Which handle: DuckDB keeps the pending result set on the connection, so
+        ``execute`` and ``fetch`` are individually atomic but not atomic as a
+        pair. Two threads sharing one handle therefore clobber each other and
+        return wrong rows with nothing raised — measured wrong in 6 of 6 trials
+        against a plain DuckDB connection. The documented remedy is one
+        ``.cursor()`` per thread, so worker threads get a thread-local cursor,
+        reused across calls rather than created per query.
+
+        The thread that opened the profile keeps the connection object itself.
+        That leaves every existing single-threaded caller on exactly the path it
+        was on, and confines the new behaviour to threads that did not exist
+        before. It also matters for correctness: scratch tables created with
+        ``CREATE TEMP TABLE`` are visible only to the handle that made them.
+
+        SQLite needs none of this — the connection is opened with
+        ``check_same_thread=False`` and serialises internally.
+        """
+        if self.db is None:
+            return self.conn
+        # During __init__ the owner is not recorded yet, and _discover() queries
+        # through here. Construction is single-threaded, so the raw handle is
+        # the right answer and there is nothing to guard.
+        owner = getattr(self, "_owner_thread", None)
+        if owner is None or threading.get_ident() == owner:
+            return self.db
+        handle = getattr(self._thread_handles, "conn", None)
+        if handle is None:
+            handle = self._thread_handles.conn = self.db.cursor()
+            # Point the per-connection caches at the owning connection's bag.
+            # Without this each worker thread starts with an empty bag and
+            # re-executes every memoized skill once per thread.
+            from .connection import register_derived_handle
+
+            register_derived_handle(handle, self.db)
+        return handle
+
+    def _gpu_info(self, devices, streams, tables, kcounts) -> dict[int, GpuInfo]:
+        """Build per-GPU metadata. Per-device kernel counts come from the
+        single scan in :meth:`_discover`; only hardware metadata is queried here."""
+        info: dict[int, GpuInfo] = {}
         query_conn = self.db if self.db is not None else self.conn
-        for r in query_conn.execute(
-            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
-        ).fetchall():
-            kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
         hw = {}
@@ -362,7 +562,7 @@ class Profile:
     def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device (or all devices if None), optionally trimmed to a time window."""
         sql = """
-            SELECT k.start, k.[end], k.streamId, k.correlationId,
+            SELECT k.start, k.[end], k.deviceId, k.streamId, k.correlationId,
                    s.value as name, d.value as demangled
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
@@ -416,7 +616,9 @@ class Profile:
             sql += " AND k.start >= ? AND k.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY s.value, d.value"
-        sql += " ORDER BY total_ns DESC"
+        # Group keys complete the order: paired with LIMIT, a tie at the
+        # cut-off changes which rows survive, not merely their order.
+        sql += " ORDER BY total_ns DESC, name ASC, demangled ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -436,29 +638,35 @@ class Profile:
         Returns rows sorted by total_ns descending:
           {text, total_ns, count, avg_ns}
         """
-        if "NVTX_EVENTS" not in self.schema.tables:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table:
             return []
 
         if self._nvtx_has_text_id:
-            sql = """
+            sql = f"""
                 SELECT
                     COALESCE(n.text, s.value) AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count,
                     AVG(n.[end] - n.start) AS avg_ns
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
             """
         else:
-            sql = """
+            sql = f"""
                 SELECT
                     n.text AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count,
                     AVG(n.[end] - n.start) AS avg_ns
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 WHERE n.text IS NOT NULL
                   AND n.[end] > n.start
             """
@@ -468,7 +676,7 @@ class Profile:
             sql += " AND n.start >= ? AND n.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY COALESCE(n.text, s.value)" if self._nvtx_has_text_id else " GROUP BY text"
-        sql += " ORDER BY total_ns DESC"
+        sql += " ORDER BY total_ns DESC, text ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -488,7 +696,13 @@ class Profile:
         pattern: substring to match; for LIKE we wrap with %; for GLOB pass a full pattern.
         Returns rows: {text, total_ns, count} sorted by total_ns descending.
         """
-        if "NVTX_EVENTS" not in self.schema.tables:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table:
             return []
         match_val = (
             pattern
@@ -498,12 +712,12 @@ class Profile:
             else f"*{pattern}*"
         )
         if self._nvtx_has_text_id:
-            sql = """
+            sql = f"""
                 SELECT
                     COALESCE(n.text, s.value) AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
@@ -511,12 +725,12 @@ class Profile:
             sql += "GLOB ?" if use_glob else "LIKE ?"
             params: list = [match_val]
         else:
-            sql = """
+            sql = f"""
                 SELECT
                     n.text AS text,
                     SUM(n.[end] - n.start) AS total_ns,
                     COUNT(*) AS count
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 WHERE n.text IS NOT NULL AND n.[end] > n.start
                   AND n.text """
             sql += "GLOB ?" if use_glob else "LIKE ?"
@@ -525,7 +739,7 @@ class Profile:
             sql += " AND n.start >= ? AND n.[end] <= ?"
             params += list(trim)
         sql += " GROUP BY COALESCE(n.text, s.value)" if self._nvtx_has_text_id else " GROUP BY text"
-        sql += " ORDER BY total_ns DESC"
+        sql += " ORDER BY total_ns DESC, text ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
@@ -533,25 +747,29 @@ class Profile:
 
     def memcpy_in_window(
         self,
-        device: int,
+        device: int | None,
         trim: tuple[int, int],
     ) -> dict:
         """
         Sum memcpy time in window by direction (H2D=1, D2H=2, D2D=8).
+        ``device=None`` aggregates across all devices (matches ``kernels``).
         Returns {h2d_ns, d2h_ns, d2d_ns, total_ns}; 0 when table or window empty.
         """
         out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
-        if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
+        memcpy_table = self.adapter.resolve_activity_tables().get("memcpy")
+        if not memcpy_table:
             return out
-        rows = self._duckdb_query(
-            """
+        sql = f"""
             SELECT copyKind, SUM([end] - start) AS total_ns
-            FROM CUPTI_ACTIVITY_KIND_MEMCPY
-            WHERE deviceId = ? AND start >= ? AND [end] <= ?
-            GROUP BY copyKind
-            """,
-            [device, trim[0], trim[1]],
-        )
+            FROM {memcpy_table}
+            WHERE start >= ? AND [end] <= ?
+        """
+        params: list = [trim[0], trim[1]]
+        if device is not None:
+            sql += " AND deviceId = ?"
+            params.append(device)
+        sql += " GROUP BY copyKind"
+        rows = self._duckdb_query(sql, params)
         for r in rows:
             kind = int(r["copyKind"])
             ns = int(r["total_ns"] or 0)
@@ -589,12 +807,15 @@ class Profile:
 
     def gpu_threads(self, device: int) -> set[int]:
         """Find all CPU threads (globalTid) that launch kernels on this device."""
+        runtime_table = self.adapter.resolve_activity_tables().get("runtime")
+        if not runtime_table:
+            return set()
         return {
             r["globalTid"]
             for r in self._duckdb_query(
                 f"""
             SELECT DISTINCT r.globalTid
-            FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+            FROM {runtime_table} r
             JOIN {self.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
         """,
@@ -604,11 +825,14 @@ class Profile:
 
     def runtime_index(self, threads: set[int], window: tuple[int, int]) -> dict[int, list]:
         """Load CUDA runtime calls for threads, indexed by globalTid."""
+        runtime_table = self.adapter.resolve_activity_tables().get("runtime")
+        if not runtime_table:
+            return {}
         idx = {}
         for tid in threads:
             idx[tid] = self._duckdb_query(
-                """
-                SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+                f"""
+                SELECT start, [end], correlationId FROM {runtime_table}
                 WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
             """,
                 [tid, window[0], window[1]],
@@ -622,7 +846,13 @@ class Profile:
           - Legacy: NVTX_EVENTS.text holds the annotation string inline.
           - Newer:  NVTX_EVENTS.textId references StringIds; text may be NULL.
         """
-        if "NVTX_EVENTS" not in self.schema.tables or not threads:
+        # Resolve rather than hardcode: Nsight suffixes this table _V2/_V3 on
+        # newer exports. The check this replaced named the table literally, so a
+        # _V2 export reported no ranges on a fully annotated profile — silence
+        # rather than an error, and the harder failure to notice. An absent
+        # table is the other case, and there the empty answer is the true one.
+        nvtx_table = self.adapter.resolve_activity_tables().get("nvtx")
+        if not nvtx_table or not threads:
             return []
         tids = ",".join(map(str, threads))
         if self._nvtx_has_text_id:
@@ -630,7 +860,7 @@ class Profile:
                 f"""
                 SELECT COALESCE(n.text, s.value) AS text,
                        n.globalTid, n.start, n.[end]
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 LEFT JOIN StringIds s ON n.textId = s.id
                 WHERE (n.text IS NOT NULL OR s.value IS NOT NULL)
                   AND n.[end] > n.start
@@ -643,7 +873,7 @@ class Profile:
         else:
             return self._duckdb_query(
                 f"""
-                SELECT text, globalTid, start, [end] FROM NVTX_EVENTS
+                SELECT text, globalTid, start, [end] FROM {nvtx_table}
                 WHERE text IS NOT NULL AND [end] > start
                   AND start >= ? AND start <= ?
                   AND globalTid IN ({tids})
@@ -683,6 +913,15 @@ class Profile:
                 return [dict(r) for r in cur.fetchall()]
 
     def close(self):
+        # Drop the per-thread cursors first. They are handles on self.db, so
+        # after it closes they raise "Connection already closed" — and being
+        # held in a thread-local, a worker thread that outlives the profile
+        # would be handed the dead one instead of an error or a fresh handle.
+        # Replacing the container clears every thread's slot, not just this
+        # thread's, which is the point: the owner is usually the one closing.
+        if getattr(self, "_thread_handles", None) is not None:
+            self._thread_handles = threading.local()
+
         # Close the primary connection only if we own it.
         if getattr(self, "_owns_conn", True):
             try:
@@ -709,7 +948,9 @@ class Profile:
         self.close()
 
 
-def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
+def resolve_profile_path(
+    path: str, *, backend: str = "sqlite", nsys_executable: str = "nsys"
+) -> str:
     """
     Resolve a profile path for the selected backend.
 
@@ -719,9 +960,14 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
 
     Exports always pass `--include-blobs=true` so NVTX payload-dependent
     analysis (for example communicator-aware NCCL diagnostics) remains available.
+
+    Raises ProfileNotFoundError when *path* does not exist (e.g. a missing
+    `.nsys-rep`, before any export is attempted).
     """
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
     if backend == "parquetdir":
-        return _resolve_parquetdir_path(path)
+        return _resolve_parquetdir_path(path, nsys_executable=nsys_executable)
     if not path.lower().endswith(".nsys-rep"):
         return path
 
@@ -738,7 +984,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
             return out
         # Missing NVTX payload blobs: re-export only when nsys is available so we
         # do not regress users with a valid sidecar .sqlite but no Nsight install.
-        if not shutil.which("nsys"):
+        if not shutil.which(nsys_executable):
             logging.getLogger(__name__).warning(
                 "Reusing existing SQLite export at %r without NVTX payload blobs; "
                 "communicator-aware analysis and other payload-dependent features may be incomplete. "
@@ -748,7 +994,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
             )
             return out
 
-    nsys_exe = shutil.which("nsys")
+    nsys_exe = shutil.which(nsys_executable)
     if not nsys_exe:
         raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "
@@ -801,7 +1047,7 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
     return out
 
 
-def _resolve_parquetdir_path(path: str) -> str:
+def _resolve_parquetdir_path(path: str, *, nsys_executable: str = "nsys") -> str:
     """Return a path to an Nsight `parquetdir` export."""
     if os.path.isdir(path):
         parquet_files = [name for name in os.listdir(path) if name.endswith(".parquet")]
@@ -821,7 +1067,7 @@ def _resolve_parquetdir_path(path: str) -> str:
     ):
         return out
 
-    nsys_exe = shutil.which("nsys")
+    nsys_exe = shutil.which(nsys_executable)
     if not nsys_exe:
         raise ExportToolMissingError(
             "Profile is .nsys-rep; conversion requires 'nsys' (NVIDIA Nsight Systems) on PATH. "

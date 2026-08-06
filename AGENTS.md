@@ -11,9 +11,8 @@ nsys-ai/
 ├── src/nsys_ai/          # Main Python package
 │   ├── __main__.py        # CLI entry point (argparse-based)
 │   ├── profile.py         # SQLite profile loader
-│   ├── tui.py             # Tree TUI (curses)
-│   ├── tui_timeline.py    # Timeline TUI (curses)
-│   ├── tree.py            # NVTX tree data model
+│   ├── tree/              # Tree TUI (Textual) + NVTX tree model
+│   ├── timeline/          # Timeline TUI (Textual)
 │   ├── search.py          # Kernel/NVTX search
 │   ├── overlap.py         # Compute/NCCL overlap analysis
 │   ├── summary.py         # Profile summary stats
@@ -25,7 +24,7 @@ nsys-ai/
 │   ├── skills/            # 🧩 Analysis skill system
 │   │   ├── base.py        # Skill dataclass + execution
 │   │   ├── registry.py    # Auto-discovery + lookup
-│   │   └── builtins/      # 29 built-in analysis skills
+│   │   └── builtins/      # 37 built-in analysis skills
 │   ├── agent/             # 🤖 AI agent
 │   │   ├── persona.py     # System prompt + identity
 │   │   └── loop.py        # Analysis loop + skill selection
@@ -204,8 +203,8 @@ Before raising a PR, verify:
 ## Key Design Decisions
 
 - **Internal module = `nsys_ai`**, external package = `nsys-ai` (historical rename)
-- **No runtime dependencies** for core TUI — only stdlib (`curses`, `sqlite3`, `json`)
-- **Optional deps**: `anthropic` for AI features (`pip install nsys-ai[ai]`), `pytest` for dev
+- **Core runtime deps**: `duckdb` + `pyarrow` (Parquet cache) and `rich` + `textual` (TUI). SQL analysis and the web server stay on the stdlib (`sqlite3`, `http.server`)
+- **Optional deps**: `litellm` (+ `anthropic`) for AI features (`pip install 'nsys-ai[agent]'`), `pytest` for dev
 - **Profiles are `.sqlite` files** exported from NVIDIA Nsight Systems (`.nsys-rep` → `.sqlite`)
 - **Two TUI modes**: tree (hierarchical NVTX browser) and timeline (horizontal kernel view)
 

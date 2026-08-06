@@ -7,10 +7,17 @@ a slow iteration.
 
 import statistics
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, requires_nvtx
 
 
 def _execute(conn, **kwargs):
+
+    # Plain requires_nvtx, NOT requires_pushpop_nvtx, on purpose: detect_iterations
+    # reads NVTX rows as bare intervals and never filters eventType, so it works
+    # unchanged on a Start/End-only profile. See requires_pushpop_nvtx.
+    guard = requires_nvtx(conn, needs="Per-iteration breakdown")
+    if guard:
+        return guard
     from ...overlap import detect_iterations
     from ...profile import Profile
 
@@ -71,8 +78,11 @@ def _execute(conn, **kwargs):
             }
         )
 
-    # 3. Compute vs_median
-    durs = [it["duration_ms"] for it in iters]
+    # 3. Compute vs_median over real iterations only — a loose NVTX marker can
+    #    match many sub-ms op ranges whose contaminated median otherwise yields
+    #    absurd vs_median figures.
+    real = [it for it in iters if it.get("is_real_iteration", True)]
+    durs = [it["duration_ms"] for it in (real or iters)]
     median = statistics.median(durs)
     vs_median = round((target["duration_ms"] - median) / median * 100, 1) if median > 0 else 0
 

@@ -33,7 +33,7 @@ from collections import defaultdict
 
 from nsys_ai.connection import DB_ERRORS, wrap_connection
 
-from ..base import Skill
+from ..base import Skill, abstain, resolve_nvtx_table
 
 _log = logging.getLogger(__name__)
 
@@ -182,7 +182,11 @@ def _execute(conn, **kwargs) -> list[dict]:
     adapter = wrap_connection(conn)
     schemas = _load_schemas(adapter)
     if not schemas:
-        return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
+        return abstain(
+            "This profile has no NVTX payload schemas, so NCCL typed payloads "
+            "were not captured. Re-capture with NCCL payload tracing enabled to "
+            "use this skill."
+        )
 
     # Probe for the two "no data" cases:
     #   (a) capture-time misconfiguration: schemas declared but binaryData
@@ -194,9 +198,18 @@ def _execute(conn, **kwargs) -> list[dict]:
     #       profile that DOES have binaryData. Without this branch we'd
     #       misreport (b) as (a) and tell the user to re-profile when the
     #       fix is "use the parquet cache instead".
+    # The name, not just the guard — the decoder below queries the table. Both
+    # come from skills.base so this module never re-inlines the lookup.
+    nvtx_table = resolve_nvtx_table(conn)
+    if not nvtx_table:
+        return abstain(
+            "This profile has no NVTX_EVENTS table, so it carries no NCCL "
+            "typed payloads. Re-capture with NVTX enabled to use this skill."
+        )
+
     try:
         (has_any,) = adapter.execute(
-            "SELECT EXISTS(SELECT 1 FROM NVTX_EVENTS WHERE binaryData IS NOT NULL)"
+            f"SELECT EXISTS(SELECT 1 FROM {nvtx_table} WHERE binaryData IS NOT NULL)"  # noqa: S608
         ).fetchone()
         probe_failed = False
     except DB_ERRORS as exc:
@@ -206,7 +219,9 @@ def _execute(conn, **kwargs) -> list[dict]:
         # backend — not actually empty.
         probe_failed = False
         try:
-            (nvtx_rows,) = adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()
+            (nvtx_rows,) = adapter.execute(
+                f"SELECT COUNT(*) FROM {nvtx_table}"  # noqa: S608
+            ).fetchone()
             if nvtx_rows > 0:
                 probe_failed = True
                 probe_error_msg = str(exc)
@@ -280,7 +295,8 @@ def _execute(conn, **kwargs) -> list[dict]:
     skipped = 0
 
     for (bd,) in adapter.execute(
-        f"SELECT binaryData FROM NVTX_EVENTS WHERE binaryData IS NOT NULL{trim_clause}",
+        f"SELECT binaryData FROM {nvtx_table} "  # noqa: S608
+        f"WHERE binaryData IS NOT NULL{trim_clause}",
         trim_params,
     ).fetchall():
         row = _decode_row(bd, schemas)

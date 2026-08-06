@@ -22,6 +22,8 @@ Layout:
 
 from __future__ import annotations
 
+import os
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -29,6 +31,7 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input
 
 from .. import tui_actions
+from ..loop_state import DiffLoopState
 from ..tui_models import TreeNode
 from .chat import ChatPanel
 from .logic import (
@@ -83,6 +86,11 @@ class NsysTreeApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("A", "toggle_chat", "AI Chat", priority=True),
+        Binding("f5", "loop_diagnose", "Loop diagnose", show=False),
+        Binding("f6", "loop_propose", "Loop propose", show=False),
+        Binding("f7", "loop_reprofile", "Loop reprofile", show=False),
+        Binding("f8", "loop_diff", "Loop diff", show=False),
+        Binding("f9", "loop_accept", "Loop accept", show=False),
         Binding("v", "toggle_view", "View mode"),
         Binding("e", "expand_node", "Expand"),
         Binding("c", "collapse_node", "Collapse"),
@@ -122,6 +130,7 @@ class NsysTreeApp(App):
     show_bubbles: reactive[bool] = reactive(False, layout=False)
     bubble_threshold_us: reactive[float] = reactive(10, layout=False)
     live_filter: reactive[bool] = reactive(False, layout=False)
+    analysis_phase: reactive[str] = reactive("diagnose", layout=False)
 
     # -------------------------------------------------------------------------
     # Constructor
@@ -134,11 +143,14 @@ class NsysTreeApp(App):
         max_depth: int = -1,
         min_ms: float = 0,
         json_roots: list[dict] | None = None,
+        loop_after: str | None = None,
     ) -> None:
         super().__init__()
         self._db_path = db_path
         self._device = device
         self._trim = trim or (0, 0)
+        self._loop_state = DiffLoopState(before_path=db_path, after_path=loop_after or "")
+        self.analysis_phase = self._loop_state.phase
         self.max_depth = max_depth
         self.min_dur_us = min_ms * 1000  # convert ms → µs
 
@@ -309,7 +321,7 @@ class NsysTreeApp(App):
         self.title = (
             f"nsys-ai  GPU {self._device}  {trim_s}  |  "
             f"{self._total_nvtx} NVTX  {self._total_kernels} kernels  "
-            f"[{self.view_mode.upper()}]"
+            f"[{self.view_mode.upper()}]  [LOOP:{self.analysis_phase.upper()}]"
         )
 
     def _update_detail_bar(self) -> None:
@@ -664,6 +676,77 @@ class NsysTreeApp(App):
         self._update_title()
         self.notify(f"AI zoom → {start_s:.2f}s–{end_s:.2f}s", timeout=3)
 
+    def set_analysis_phase(self, phase: str) -> None:
+        self._loop_state.set_phase(phase)
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+
+    def action_loop_diagnose(self) -> None:
+        self.set_analysis_phase("diagnose")
+        self.notify("Loop: diagnose", timeout=2)
+
+    def action_loop_propose(self) -> None:
+        self.set_analysis_phase("propose")
+        self.notify("Loop: propose", timeout=2)
+
+    def action_loop_reprofile(self) -> None:
+        self.set_analysis_phase("reprofile")
+        self.notify("Loop: re-profile", timeout=2)
+
+    def action_loop_diff(self) -> None:
+        try:
+            trim = None if self._trim == (0, 0) else self._trim
+            self._loop_state.run_diff(gpu=self._device, trim=trim)
+            self.analysis_phase = self._loop_state.phase
+            self._update_title()
+            self.notify(f"Loop diff verdict: {self._loop_state.verdict}", timeout=3)
+        except Exception as e:
+            self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
+
+    def action_loop_accept(self) -> None:
+        self._record_loop_decision("accept", "accepted in tree TUI")
+
+    def set_loop_decision(self, decision: str, reason: str = "") -> None:
+        self._record_loop_decision(decision, reason)
+
+    def _loop_decision_dir(self) -> str:
+        """Directory the shared diff.json decision record is written to.
+
+        The record lands next to the candidate ('after') profile so it is
+        discoverable alongside the run it describes rather than dropped into
+        the process CWD.
+        """
+        after = self._loop_state.after_path
+        directory = os.path.dirname(after) if after else ""
+        return directory or "."
+
+    def _record_loop_decision(self, decision: str, reason: str) -> None:
+        """Persist a loop accept/reject decision, guarding TUI-side edge cases.
+
+        set_decision requires a completed diff and a non-empty reason and
+        writes diff.json as a side effect, so guard both and surface any
+        failure through a notification instead of crashing the app.
+        """
+        if self._loop_state.diff_summary is None:
+            self.notify(
+                "Run loop diff before recording a decision", severity="warning", timeout=4
+            )
+            return
+        reason = (reason or "").strip() or f"{decision}ed in tree TUI"
+        try:
+            _payload, warnings = self._loop_state.set_decision(
+                decision, reason=reason, decision_dir=self._loop_decision_dir()
+            )
+        except Exception as e:
+            self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
+            return
+        self.analysis_phase = self._loop_state.phase
+        self._update_title()
+        msg = f"Loop decision: {decision} -> {self._loop_state.decision_path}"
+        if warnings:
+            msg += f" ({'; '.join(warnings)})"
+        self.notify(msg, timeout=3)
+
 
 # ---------------------------------------------------------------------------
 # Entry point (replaces tui.run_tui)
@@ -676,7 +759,10 @@ def run_tui(
     trim: tuple[int, int] | None,
     max_depth: int = -1,
     min_ms: float = 0,
+    loop_after: str | None = None,
 ) -> None:
     """Launch the Textual NVTX tree browser."""
-    app = NsysTreeApp(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
+    app = NsysTreeApp(
+        db_path, device, trim, max_depth=max_depth, min_ms=min_ms, loop_after=loop_after
+    )
     app.run()

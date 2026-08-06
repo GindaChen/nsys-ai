@@ -59,7 +59,7 @@ SELECT
     ROUND(CAST(dispatches AS REAL) / (SELECT SUM(dispatches) FROM per_thread) * 100, 1)
         AS pct_of_dispatches
 FROM per_thread
-ORDER BY dispatches DESC
+ORDER BY dispatches DESC, cpu_tid ASC
 LIMIT {limit}""",
     format_fn=lambda rows: _format(rows),
     params=[

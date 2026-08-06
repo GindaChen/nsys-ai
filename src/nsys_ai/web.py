@@ -25,6 +25,7 @@ from urllib.parse import quote
 _log = logging.getLogger(__name__)
 
 _FINDINGS_LOCK = threading.Lock()
+_LOOP_LOCK = threading.Lock()
 
 # Bounded thread pool: fixed worker count, request queue with max size.
 # Workers are released when each request finishes (finish_request + shutdown_request).
@@ -32,6 +33,22 @@ _FINDINGS_LOCK = threading.Lock()
 CHAT_SERVER_POOL_SIZE = 8
 CHAT_SERVER_QUEUE_SIZE = 16
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
+def _template_asset_version() -> str:
+    """Cache-bust token from template mtimes (changes when timeline UI is edited)."""
+    latest = 0.0
+    for name in ("timeline.html", "timeline.css", "timeline.js"):
+        path = os.path.join(_TEMPLATE_DIR, name)
+        try:
+            latest = max(latest, os.path.getmtime(path))
+        except OSError:
+            pass
+    return str(int(latest)) if latest else "0"
+
+
+def _versioned_asset_url(path: str) -> str:
+    return f"{path}?v={_template_asset_version()}"
 
 
 class _ThreadPoolMixIn(socketserver.ThreadingMixIn):
@@ -172,8 +189,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     _prebuilt_data: list = []  # pre-built timeline payload per GPU
     _prebuilt_nvtx_mode: str = "full"  # "full" (prebuilt has NVTX) or "tile" (compute per tile)
     _tile_nvtx_cache: dict = {}  # (start_ns, end_ns, devices_tuple) -> {gpu_id: [nvtx_spans]}
-    _asset_cache: dict[str, bytes] = {}
+    _asset_cache: dict[str, tuple[float, bytes]] = {}  # filename -> (mtime, body)
     _findings: list[dict] = []  # mutable findings state for evidence overlay
+    _loop_state = None  # DiffLoopState
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -205,26 +223,35 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             with _FINDINGS_LOCK:
                 self._json_response(list(self._findings))
             return
+        if path == "/api/loop/state":
+            self._handle_loop_state_get()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Content-Length", str(len(self.html_bytes)))
         self.end_headers()
         self.wfile.write(self.html_bytes)
 
     def _serve_asset(self, filename: str, content_type: str):
-        """Serve static timeline assets from package templates directory."""
-        body = self.__class__._asset_cache.get(filename)
-        if body is None:
-            try:
-                path = os.path.join(_TEMPLATE_DIR, filename)
-                with open(path, "rb") as f:
-                    body = f.read()
-                self.__class__._asset_cache[filename] = body
-            except OSError:
-                self.send_error(404)
-                return
+        """Serve static timeline assets; reload when template files change on disk."""
+        path = os.path.join(_TEMPLATE_DIR, filename)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            self.send_error(404)
+            return
+        cache = self.__class__._asset_cache
+        cached = cache.get(filename)
+        if cached is None or cached[0] != mtime:
+            with open(path, "rb") as f:
+                body = f.read()
+            cache[filename] = (mtime, body)
+        else:
+            body = cached[1]
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -406,6 +433,122 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             _log.exception("Error handling POST /api/findings")
             self._json_response({"error": str(e)}, 500)
 
+    def _read_json_body(self) -> dict:
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(content_length) if content_length else b"{}"
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if not isinstance(payload, dict):
+            raise ValueError("JSON object required")
+        return payload
+
+    def _loop_or_error(self):
+        loop_state = self.__class__._loop_state
+        if loop_state is None:
+            self._json_response({"error": "loop state not initialized"}, 500)
+            return None
+        return loop_state
+
+    def _handle_loop_state_get(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            self._json_response(loop_state.to_dict())
+
+    def _handle_loop_phase(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            phase = str(payload.get("phase") or "").strip()
+            if not phase:
+                self._json_response({"error": "phase is required"}, 400)
+                return
+            loop_state.set_phase(phase)  # validated by loop_state.py
+            self._json_response(loop_state.to_dict())
+
+    def _handle_loop_proposal(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            proposal = str(payload.get("proposal") or "").strip()
+            expected = str(payload.get("expected_impact") or "").strip()
+            if not proposal:
+                self._json_response({"error": "proposal is required"}, 400)
+                return
+            loop_state.set_proposal(proposal, expected_impact=expected)
+            self._json_response(loop_state.to_dict())
+
+    def _handle_loop_reprofile(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            after_path = str(payload.get("after_path") or "").strip()
+            if not after_path:
+                self._json_response({"error": "after_path is required"}, 400)
+                return
+            loop_state.record_reprofile_artifact(after_path)
+            self._json_response(loop_state.to_dict())
+
+    def _handle_loop_diagnose(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            trim = None
+            trim_raw = payload.get("trim")
+            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
+                trim = (int(trim_raw[0]), int(trim_raw[1]))
+            device = self.devices[0] if self.devices else 0
+            findings = loop_state.run_diagnose(self.prof, device=device, trim=trim)
+            with _FINDINGS_LOCK:
+                self.__class__._findings = findings
+            self._json_response({"state": loop_state.to_dict(), "findings": findings})
+
+    def _handle_loop_diff(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            gpu_raw = payload.get("gpu")
+            gpu = int(gpu_raw) if gpu_raw is not None else None
+            trim = None
+            trim_raw = payload.get("trim")
+            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
+                trim = (int(trim_raw[0]), int(trim_raw[1]))
+            baseline_prof = self.prof if self.prof is not None else None
+            diff_payload = loop_state.run_diff(gpu=gpu, trim=trim, baseline_prof=baseline_prof)
+            self._json_response({"state": loop_state.to_dict(), "diff": diff_payload})
+
+    def _handle_loop_decision(self):
+        with _LOOP_LOCK:
+            loop_state = self._loop_or_error()
+            if loop_state is None:
+                return
+            payload = self._read_json_body()
+            decision = str(payload.get("decision") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+            loop_state.set_decision(decision, reason=reason)
+            self._json_response(loop_state.to_dict())
+
+    def _handle_loop_server_error(self, path: str, exc: Exception):
+        _log.exception("Error handling POST %s", path)
+        with _LOOP_LOCK:
+            loop_state = self.__class__._loop_state
+            if loop_state is not None:
+                loop_state.last_error = str(exc)
+                state = loop_state.to_dict()
+            else:
+                state = None
+            self._json_response({"error": str(exc), "state": state}, 500)
+
     def do_POST(self):
         path = self.path.split("?")[0]
         if path == "/api/analyze":
@@ -413,6 +556,53 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/findings":
             self._handle_post_finding()
+            return
+        if path == "/api/loop/phase":
+            try:
+                self._handle_loop_phase()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+                self._json_response({"error": str(e)}, 400)
+            return
+        if path == "/api/loop/proposal":
+            try:
+                self._handle_loop_proposal()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+                self._json_response({"error": str(e)}, 400)
+            return
+        if path == "/api/loop/reprofile":
+            try:
+                self._handle_loop_reprofile()
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                ValueError,
+                KeyError,
+                TypeError,
+                FileNotFoundError,
+            ) as e:
+                self._json_response({"error": str(e)}, 400)
+            return
+        if path == "/api/loop/diagnose":
+            try:
+                self._handle_loop_diagnose()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+                self._json_response({"error": str(e)}, 400)
+            except Exception as e:
+                self._handle_loop_server_error(path, e)
+            return
+        if path == "/api/loop/diff":
+            try:
+                self._handle_loop_diff()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+                self._json_response({"error": str(e)}, 400)
+            except Exception as e:
+                self._handle_loop_server_error(path, e)
+            return
+        if path == "/api/loop/decision":
+            try:
+                self._handle_loop_decision()
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+                self._json_response({"error": str(e)}, 400)
             return
         if path != "/api/chat":
             self.send_error(404)
@@ -547,6 +737,9 @@ def serve_timeline(
     open_browser: bool = True,
     findings_path: str | None = None,
     auto_findings: list[dict] | None = None,
+    loop_before: str | None = None,
+    loop_after: str | None = None,
+    loop_h100_preset: bool = False,
 ):
     """Start a local HTTP server serving the horizontal timeline viewer.
 
@@ -573,30 +766,69 @@ def serve_timeline(
     _ViewerHandler.devices = devices
     _ViewerHandler._tile_nvtx_cache = {}
     _ViewerHandler._findings = findings_data or []
+    from .loop_state import (
+        DiffLoopState,
+        detect_h100_replay_preset,
+        normalize_profile_path,
+        reconcile_h100_loop_paths,
+    )
 
-    # Resolve profile path for chat agent DB access
-    _profile_path = prof.path if hasattr(prof, "path") else ""
+    raw_path = prof.path if hasattr(prof, "path") else ""
+    _profile_path = os.fspath(raw_path) if raw_path else ""
 
+    preset = detect_h100_replay_preset() if loop_h100_preset else None
+    if preset:
+        loop_before_path = preset["before_path"]
+        loop_after_path = preset["after_path"]
+    else:
+        loop_before_path = loop_before or _profile_path
+        loop_after_path = loop_after or ""
+    loop_state = DiffLoopState(phase="diagnose")
+    if loop_before_path:
+        loop_state.sync_before_path(loop_before_path)
+    if loop_after_path:
+        loop_state.after_path = normalize_profile_path(loop_after_path, label="after")
+    reconcile_h100_loop_paths(loop_state)
+    _ViewerHandler._loop_state = loop_state
+    _in_loop_mode = bool(loop_before or loop_after or loop_h100_preset)
+
+    _asset_v = _template_asset_version()
+    _css_href = _versioned_asset_url("/assets/timeline.css")
+    _js_src = _versioned_asset_url("/assets/timeline.js")
     if trim is not None:
         # Legacy: render full HTML with all data baked in
         html = generate_timeline_html(
-            prof, devices, trim, findings_data=findings_data, profile_path=_profile_path
+            prof,
+            devices,
+            trim,
+            findings_data=findings_data,
+            profile_path=_profile_path,
+            loop_mode=_in_loop_mode,
+            timeline_css_href=_css_href,
+            timeline_js_src=_js_src,
         )
         _ViewerHandler._prebuilt_nvtx_mode = "full"
     else:
         # Progressive: generate shell HTML, data fetched via /api/data
         html = generate_timeline_html(
-            prof, devices, None, findings_data=findings_data, profile_path=_profile_path
+            prof,
+            devices,
+            None,
+            findings_data=findings_data,
+            profile_path=_profile_path,
+            loop_mode=_in_loop_mode,
+            timeline_css_href=_css_href,
+            timeline_js_src=_js_src,
         )
         _ViewerHandler._prebuilt_nvtx_mode = "tile"
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
+    if _in_loop_mode:
+        print(f"Loop UI loaded (assets v{_asset_v}) — hard-refresh if the panel looks outdated", flush=True)
 
     # Pre-build full kernel-first timeline payload for all GPUs (progressive mode)
     if trim is None:
-        import os
-
-        db_path = prof.path if hasattr(prof, "path") else ""
+        db_path = _profile_path
         cache_path = db_path + ".timeline-cache-v3-kernels.json" if db_path else ""
         cache_valid = False
 
@@ -688,7 +920,7 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
     _prebuilt_data: list = []
     _prebuilt_nvtx_mode: str = "full"
     _tile_nvtx_cache: dict = {}
-    _asset_cache: dict[str, bytes] = {}
+    _asset_cache: dict[str, tuple[float, bytes]] = {}
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -711,18 +943,23 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
         self.wfile.write(self.html_bytes)
 
     def _serve_asset(self, filename: str, content_type: str):
-        body = self.__class__._asset_cache.get(filename)
-        if body is None:
-            try:
-                path = os.path.join(_TEMPLATE_DIR, filename)
-                with open(path, "rb") as f:
-                    body = f.read()
-                self.__class__._asset_cache[filename] = body
-            except OSError:
-                self.send_error(404)
-                return
+        path = os.path.join(_TEMPLATE_DIR, filename)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            self.send_error(404)
+            return
+        cache = self.__class__._asset_cache
+        cached = cache.get(filename)
+        if cached is None or cached[0] != mtime:
+            with open(path, "rb") as f:
+                body = f.read()
+            cache[filename] = (mtime, body)
+        else:
+            body = cached[1]
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

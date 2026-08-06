@@ -21,13 +21,24 @@ _COPY_KINDS = {
 
 
 def _query_memcpy(prof, device, trim):
-    """Query memcpy intervals from CUPTI_ACTIVITY_KIND_MEMCPY."""
-    memcpy_table = None
-    for t in prof.schema.tables:
-        if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
-            memcpy_table = t
-            break
+    """Memcpy intervals for ``device``, or ``[]`` when the profile has none.
+
+    Empty here does not mean the skill could not run, so it is not an
+    abstention: memcpy is one input among several and the matrix is still
+    answerable from the kernel categories alone. A profile with no
+    CUPTI_ACTIVITY_KIND_MEMCPY — including one carrying only
+    CUPTI_ACTIVITY_KIND_MEMCPY2, which is peer-to-peer copy, a different
+    activity kind — simply produces a matrix with no ``memcpy_*`` category in
+    it, exactly as a capture that moved no memory does.
+    """
     import re
+
+    # Through the adapter, like every other memcpy reader (profile.py,
+    # viewer.py, indexing.py), not a local prefix scan: the scan this replaces
+    # walked ``prof.schema.tables``, which is ``list(<set>)``, so on a profile
+    # carrying both CUPTI_ACTIVITY_KIND_MEMCPY and CUPTI_ACTIVITY_KIND_MEMCPY2
+    # which one it read was set-hash order.
+    memcpy_table = prof.adapter.resolve_activity_tables().get("memcpy")
 
     if memcpy_table is None or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", memcpy_table):
         return []

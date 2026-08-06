@@ -40,6 +40,9 @@ nsys-ai diff before.sqlite after.sqlite --format json
 # Fail a CI job on a likely regression verdict
 nsys-ai diff before.sqlite after.sqlite --format json --exit-on-regression
 
+# Same gate with a custom regression threshold (default 5%)
+nsys-ai diff before.sqlite after.sqlite --format json --gate 3.0
+
 # Specific iteration (skip warmup iteration 0)
 nsys-ai diff before.sqlite after.sqlite --iteration 1 --format json
 
@@ -51,7 +54,7 @@ nsys-ai diff before.sqlite after.sqlite --chat
 ```
 
 **Output formats**: `terminal` (default), `markdown`, `json`
-**Key flags**: `--gpu N`, `--trim START END` (seconds), `--iteration N`, `--marker NAME`, `--exit-on-regression`
+**Key flags**: `--gpu N`, `--trim START END` (seconds), `--iteration N`, `--marker NAME`, `--exit-on-regression`, `--gate PCT`
 
 ### Report — Full analysis report
 

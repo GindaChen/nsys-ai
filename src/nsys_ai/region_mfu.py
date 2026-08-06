@@ -179,9 +179,23 @@ def find_nvtx_ranges(
     if not nvtx_name:
         return []
 
-    from .connection import wrap_connection
+    from .connection import is_safe_identifier, wrap_connection
 
     adapter = wrap_connection(conn)
+
+    # Newer Nsight exports suffix the table NVTX_EVENTS_V2 / _V3. This reader is
+    # handed a plain connection, so nothing upstream aliases the unversioned name
+    # for it, and a literal here finds no ranges on such an export — an MFU
+    # region that silently cannot be located.
+    #
+    # The absent-table case is the caller's to report, not this function's:
+    # `region_mfu` checks for the table and returns a NO_NVTX error before
+    # calling here, so the `[]` below is a guard for direct callers rather than
+    # an abstention. Returning it does not mean "this profile has no NVTX".
+    nvtx_table = adapter.resolve_activity_tables().get("nvtx")
+    if not nvtx_table or not is_safe_identifier(nvtx_table):
+        return []
+
     has_text_id = adapter.detect_nvtx_text_id()
     if match_mode not in ("contains", "exact"):
         match_mode = "contains"
@@ -190,7 +204,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT COALESCE(n.text, s.value) AS text, "
             "n.start AS start_ns, n.[end] AS end_ns, n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "LEFT JOIN StringIds s ON n.textId = s.id "
             "WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) "
             "AND n.[end] > n.start "
@@ -199,7 +213,7 @@ def find_nvtx_ranges(
         base_sql = (
             "SELECT n.text AS text, n.start AS start_ns, n.[end] AS end_ns, "
             "n.globalTid AS global_tid "
-            "FROM NVTX_EVENTS n "
+            f"FROM {nvtx_table} n "
             "WHERE n.text IS NOT NULL AND n.[end] > n.start "
         )
 
@@ -216,7 +230,13 @@ def find_nvtx_ranges(
         base_sql += f"AND {text_expr} LIKE ? ESCAPE '\\' "
         params.append(f"%{_escape_like(nvtx_name)}%")
 
-    base_sql += "ORDER BY start_ns"
+    # Total order: `occurrence_index` indexes into these rows, so a tie on
+    # start_ns would select a different region and report a different MFU.
+    # end_ns DESC, matching the rule used for iteration extraction and the NVTX
+    # tree: when a parent and child share a start, the enclosing range is the
+    # one an occurrence index should resolve to. Ascending would report MFU for
+    # the sub-region instead.
+    base_sql += "ORDER BY start_ns, end_ns DESC, text, global_tid"
 
     cur = adapter.execute(base_sql, params)
     rows: list[RowDict] = []
@@ -383,6 +403,15 @@ def get_region_kernels(
 
     kernel_table = schema.kernel_table
 
+    # The kernel table was already resolved; the runtime table beside it in the
+    # same query was not. This reader takes a plain connection, so there is no
+    # alias view to cover a literal — on a _V2 / _V3 export it raised.
+    from .connection import is_safe_identifier, wrap_connection
+
+    runtime_table = wrap_connection(conn).resolve_activity_tables().get("runtime")
+    if not runtime_table or not is_safe_identifier(runtime_table):
+        return []
+
     where_clauses = ["r.start >= ?", "r.[end] <= ?"]
     params: list[Any] = [int(nvtx_start_ns), int(nvtx_end_ns)]
 
@@ -402,7 +431,7 @@ def get_region_kernels(
         "k.start AS start_ns, k.[end] AS end_ns, "
         "(k.[end] - k.start) AS duration_ns, "
         "s.value AS kernel_name "
-        "FROM CUPTI_ACTIVITY_KIND_RUNTIME r "
+        f"FROM {runtime_table} r "
         f"JOIN {kernel_table} k ON r.correlationId = k.correlationId "
         "LEFT JOIN StringIds s ON k.shortName = s.id "
         "WHERE " + " AND ".join(where_clauses) + f" {dev_filter} "
@@ -636,6 +665,17 @@ def compute_region_mfu_from_conn(
     # Branch: source="nvtx" (default) — NVTX range → kernel attribution
     # ---------------------------------------------------------------
     else:
+        # Only this branch needs annotation; source="kernel" above works fine on
+        # an unannotated profile, so the guard sits here rather than at entry.
+        from .connection import wrap_connection
+
+        if not wrap_connection(conn).resolve_activity_tables().get("nvtx"):
+            return _error(
+                "NO_NVTX",
+                "This profile has no NVTX_EVENTS table, so it carries no NVTX "
+                "annotation. Re-capture with NVTX enabled, or pass "
+                "source='kernel' to match kernels by name instead.",
+            )
         matches = find_nvtx_ranges(conn, name, match_mode=match_mode)
         chosen = select_nvtx_occurrence(matches, occurrence_index)
         if "error" in chosen:

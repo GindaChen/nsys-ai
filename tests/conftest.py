@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS NVTX_EVENTS (
     rangeId         INTEGER DEFAULT 0,
     textId          INTEGER DEFAULT NULL
 );
+
+-- Export metadata (name/value shape, as real nsys exports use). Present so
+-- version detection has synthetic coverage — without it NsightSchema.schema_version
+-- read as None in every synthetic test.
+CREATE TABLE IF NOT EXISTS META_DATA_EXPORT (
+    name            TEXT,
+    value           TEXT
+);
 """
 
 _NSYS_SEED_SQL = """\
@@ -110,6 +118,11 @@ INSERT INTO StringIds VALUES
     -- Additional for V3 overlap diagnosis
     (25, 'cudaStreamSynchronize'),
     (11, 'nccl_ReduceScatter_kernel');
+
+INSERT INTO META_DATA_EXPORT (name, value) VALUES
+    ('EXPORT_PRODUCT_NAME', 'NVIDIA Nsight Systems'),
+    ('EXPORT_PRODUCT_VERSION', '2026.1.1.204'),
+    ('EXPORT_SCHEMA_VERSION', '3.24.14');
 
 INSERT INTO TARGET_INFO_GPU VALUES
     (0, 'NVIDIA Test GPU', '0000:00:00.0', 8589934592, 108, 'TestChip', 0);
@@ -250,6 +263,9 @@ CREATE TABLE NVTX_EVENTS (
 CREATE TABLE ThreadNames (
     globalTid INTEGER, nameId INTEGER, priority INTEGER DEFAULT 0
 );
+CREATE TABLE META_DATA_EXPORT (
+    name VARCHAR, value VARCHAR
+);
 """
 
 
@@ -324,6 +340,12 @@ def duckdb_conn():
     """)
     db.execute("""
         INSERT INTO ThreadNames VALUES (100, 24, 1)
+    """)
+    db.execute("""
+        INSERT INTO META_DATA_EXPORT (name, value) VALUES
+            ('EXPORT_PRODUCT_NAME', 'NVIDIA Nsight Systems'),
+            ('EXPORT_PRODUCT_VERSION', '2026.1.1.204'),
+            ('EXPORT_SCHEMA_VERSION', '3.24.14')
     """)
     yield db
     db.close()

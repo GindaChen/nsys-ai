@@ -7,6 +7,8 @@ report the total sync time and event count. Used by Mode 6 to localize
 code via `grep` (PRINCIPLES.md §5.7 Step 1).
 """
 
+from collections import defaultdict
+
 from ...connection import DB_ERRORS, wrap_connection
 from ..base import Skill, SkillParam
 
@@ -15,7 +17,8 @@ from ..base import Skill, SkillParam
 # justified by an observed bottleneck class, not speculative.
 DEFAULT_PATTERNS = "item,_local_scalar_dense,cudaStreamSynchronize"
 
-# Cap on `limit` — guards the O(n²) ancestry self-join on pathological input.
+# Cap on `limit` — the sweep credits every enclosing ancestor, so a deeply
+# nested profile can produce many parent rows; bound what we return.
 _MAX_LIMIT = 1000
 
 
@@ -65,86 +68,33 @@ def _execute(conn, **kwargs):
         like_params.append(f"%{p.lower()}%")
     like_clause = " OR ".join(like_parts)
 
-    # Self-exclusion predicate: parent must cover child strictly (either a
-    # different start or a different end). This keeps same-labeled but
-    # distinct ancestors — e.g. nested `train_step` scopes — while still
-    # preventing a range from matching itself.
-    #
-    # Event-type filter: 59 = PushPop range, 60 = StartEnd range; markers
-    # and counter/payload events are excluded so they don't inflate the
-    # ancestry join or misattribute sync time.
-    #
-    # Performance: we pre-filter sync children into their own CTE so the
-    # ancestry join runs over only the rows that match the sync patterns,
-    # instead of the full NVTX set.
-    sql = f"""
-        WITH resolved AS (
-            SELECT {label_expr} AS label,
-                   n.globalTid   AS tid,
-                   n.start       AS start,
-                   n.[end]       AS end_ns
-            FROM {nvtx_table} n
-            {label_join}
-            WHERE n.[end] > n.start
-              AND n.eventType IN (59, 60)
-              {trim_where}
-        ),
-        sync_children AS (
-            SELECT label, tid, start, end_ns
-            FROM resolved
-            WHERE ({like_clause}) AND label IS NOT NULL
-        ),
-        matched AS (
-            SELECT parent.label                 AS parent_range,
-                   child.label                  AS child_label,
-                   child.end_ns - child.start   AS sync_ns
-            FROM sync_children child
-            JOIN resolved parent
-              ON parent.tid = child.tid
-             AND parent.start <= child.start
-             AND parent.end_ns >= child.end_ns
-             AND (parent.start != child.start OR parent.end_ns != child.end_ns)
-            WHERE parent.label IS NOT NULL
-        ),
-        parent_totals AS (
-            SELECT parent_range,
-                   COUNT(*)     AS n_syncs,
-                   SUM(sync_ns) AS sync_ns
-            FROM matched
-            GROUP BY parent_range
-        ),
-        child_totals AS (
-            SELECT parent_range,
-                   child_label,
-                   COUNT(*)     AS child_n_syncs,
-                   SUM(sync_ns) AS child_sync_ns
-            FROM matched
-            GROUP BY parent_range, child_label
-        ),
-        ranked_children AS (
-            SELECT parent_range,
-                   child_label,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY parent_range
-                       ORDER BY child_sync_ns DESC, child_n_syncs DESC, child_label ASC
-                   ) AS rn
-            FROM child_totals
-        )
-        SELECT pt.parent_range,
-               pt.n_syncs,
-               pt.sync_ns,
-               rc.child_label AS top_child_label
-        FROM parent_totals pt
-        LEFT JOIN ranked_children rc
-          ON rc.parent_range = pt.parent_range
-         AND rc.rn = 1
-        ORDER BY pt.sync_ns DESC
-        LIMIT {int(limit)}
+    # The attribution is a two-sided interval-containment join: a sync child is
+    # credited to every range that covers it (parent.start <= child.start AND
+    # parent.end >= child.end) on the same tid. Neither engine can run that as
+    # SQL here: SQLite's nested-loop-only planner has no range-join operator, so
+    # on an NVTX-heavy profile (~1.25M ranges, a handful of tids) it degrades to
+    # ~n*m and never completes; and DuckDB's sqlite_scanner crashes optimizing
+    # the CTE when the profile is direct-attached (no parquet cache). Both are
+    # the no-cache paths issue #245 is about. So we do the containment ourselves
+    # with a per-tid sweep, fed by two simple pattern/label queries that both
+    # engines run without trouble.
+    base = f"""
+        SELECT {label_expr} AS label, n.globalTid AS tid,
+               n.start AS start, n.[end] AS end_ns
+        FROM {nvtx_table} n
+        {label_join}
+        WHERE n.[end] > n.start AND n.eventType IN (59, 60) {trim_where}
     """
-
     try:
-        cur = adapter.execute(sql, trim_params + like_params)
-        rows = cur.fetchall()
+        parents = adapter.execute(
+            f"SELECT label, tid, start, end_ns FROM ({base}) WHERE label IS NOT NULL",
+            trim_params,
+        ).fetchall()
+        children = adapter.execute(
+            f"SELECT label, tid, start, end_ns FROM ({base}) "
+            f"WHERE ({like_clause}) AND label IS NOT NULL",
+            trim_params + like_params,
+        ).fetchall()
     except DB_ERRORS as exc:
         return [
             {
@@ -155,13 +105,104 @@ def _execute(conn, **kwargs):
             }
         ]
 
-    cols = ["parent_range", "n_syncs", "sync_ns", "top_child_label"]
+    return _aggregate_matched(_sweep_containment(parents, children), limit)
+
+
+def _sweep_containment(parents, children):
+    """Yield ``(parent_label, child_label, sync_ns)`` for every strict containment.
+
+    A child is credited to *every* range that contains it on the same tid
+    (``parent.start <= child.start`` and ``parent.end >= child.end``), matching
+    the SQL's multi-ancestor crediting — a child nested three deep credits all
+    three enclosing ranges. The identical-coordinate pair is excluded, which is
+    how the SQL drops a range matching itself (and, as in the SQL, a distinct
+    range sharing the child's exact ``[start, end]``).
+
+    Containment is decided per candidate by the ``pe >= ce`` check, not by the
+    active set's shape — so this does not assume ranges nest. That matters
+    because eventType-60 (StartEnd) ranges can cross, and treating the active
+    set as a nesting stack (crediting whatever is "open" without re-checking
+    end) would misattribute a child to a range that started before it but ended
+    first. The sort-by-start plus ``end >= cs`` eviction is only there to keep
+    the active set to the ranges spanning the current child, so the per-child
+    scan stays O(depth) and the sweep is O(n log n + matches).
+
+    ``parents`` is every range in the profile and is held in memory (labels are
+    near-unique per instance, so interning does not shrink it): ~1.25M rows
+    measured ~425MB peak on the largest profile in hand. Acceptable — the
+    in-engine SQL this replaces could not process that profile at all — but the
+    reason the input is fetched as plain rows rather than streamed.
+    """
+    p_by_tid = defaultdict(list)
+    c_by_tid = defaultdict(list)
+    for label, tid, start, end_ns in parents:
+        p_by_tid[tid].append((start, end_ns, label))
+    for label, tid, start, end_ns in children:
+        c_by_tid[tid].append((start, end_ns, label))
+
+    matched = []
+    for tid, clist in c_by_tid.items():
+        plist = p_by_tid.get(tid)
+        if not plist:
+            continue
+        plist.sort(key=lambda r: r[0])
+        clist.sort(key=lambda r: r[0])
+        active = []
+        pi = 0
+        npar = len(plist)
+        for cs, ce, clabel in clist:
+            while pi < npar and plist[pi][0] <= cs:
+                active.append(plist[pi])
+                pi += 1
+            if active:
+                # A range with end < the current (and every later) child.start
+                # can contain none of them, so drop it for good.
+                active = [p for p in active if p[1] >= cs]
+            sync_ns = ce - cs
+            for ps, pe, plabel in active:
+                if pe >= ce and not (ps == cs and pe == ce):
+                    matched.append((plabel, clabel, sync_ns))
+    return matched
+
+
+def _aggregate_matched(matched, limit):
+    """Roll matched pairs up into the skill's output rows.
+
+    Same contract as the SQL's parent_totals / child_totals / ranked_children:
+    group by parent label, pick each parent's top child by aggregated sync time
+    (tie-break: count desc, then label asc), order parents by sync_ns desc then
+    label asc, and take the first ``limit``.
+    """
+    parent_n = defaultdict(int)
+    parent_ns = defaultdict(int)
+    child_n = defaultdict(int)
+    child_ns = defaultdict(int)
+    for plabel, clabel, sync_ns in matched:
+        parent_n[plabel] += 1
+        parent_ns[plabel] += sync_ns
+        child_n[(plabel, clabel)] += 1
+        child_ns[(plabel, clabel)] += sync_ns
+
+    # Top child per parent: smallest of (-sync_ns, -count, label) == largest
+    # sync_ns, largest count, alphabetically first — the SQL's rn=1 ordering.
+    top_children = defaultdict(list)
+    for (plabel, clabel), n in child_n.items():
+        top_children[plabel].append((-child_ns[(plabel, clabel)], -n, clabel))
+    top_child = {p: min(cands)[2] for p, cands in top_children.items()}
+
+    ordered = sorted(parent_ns, key=lambda p: (-parent_ns[p], p))
     out = []
-    for r in rows:
-        d = dict(zip(cols, r))
-        d["sync_ns"] = int(d["sync_ns"] or 0)
-        d["sync_ms"] = round(d["sync_ns"] / 1e6, 3)
-        out.append(d)
+    for plabel in ordered[:limit]:
+        sync_ns = int(parent_ns[plabel])
+        out.append(
+            {
+                "parent_range": plabel,
+                "n_syncs": parent_n[plabel],
+                "sync_ns": sync_ns,
+                "sync_ms": round(sync_ns / 1e6, 3),
+                "top_child_label": top_child.get(plabel),
+            }
+        )
     return out
 
 

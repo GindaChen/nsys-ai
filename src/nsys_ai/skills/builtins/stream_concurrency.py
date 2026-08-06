@@ -23,6 +23,7 @@ SKILL = Skill(
     sql="""\
 WITH stream_summary AS (
     SELECT
+        k.deviceId,
         k.streamId,
         COUNT(*) AS kernel_count,
         MIN(k.start) AS first_start,
@@ -33,11 +34,11 @@ WITH stream_summary AS (
     FROM {kernel_table} k
     WHERE 1=1
         {trim_clause}
-    GROUP BY k.streamId
+    GROUP BY k.deviceId, k.streamId
 ),
 global_stats AS (
     SELECT
-        COUNT(DISTINCT streamId) AS active_streams,
+        COUNT(*) AS active_streams,
         SUM(kernel_count) AS total_kernels,
         MIN(first_start) AS global_start,
         MAX(last_end) AS global_end,
@@ -45,6 +46,7 @@ global_stats AS (
     FROM stream_summary
 )
 SELECT
+    s.deviceId,
     s.streamId,
     s.kernel_count,
     s.total_gpu_ms,
@@ -59,7 +61,7 @@ SELECT
     ROUND(g.sum_gpu_ms / NULLIF((g.global_end - g.global_start) / 1e6, 0) * 100, 1)
         AS sum_util_pct
 FROM stream_summary s, global_stats g
-ORDER BY s.total_gpu_ms DESC
+ORDER BY s.total_gpu_ms DESC, s.deviceId, s.streamId
 LIMIT {limit}""",
     format_fn=lambda rows: _format(rows),
     params=[
@@ -80,12 +82,12 @@ def _format(rows):
         f"  Global span:    {r0['global_span_ms']:.2f}ms",
         f"  Sum GPU time:   {r0['sum_util_pct']:.1f}% of span (>100% = true concurrency)",
         "",
-        f"{'Stream':>7s} {'Kernels':>8s} {'GPU(ms)':>10s} {'AvgKern':>10s} {'Util%':>7s}",
-        "─" * 50,
+        f"{'GPU':>3s} {'Stream':>7s} {'Kernels':>8s} {'GPU(ms)':>10s} {'AvgKern':>10s} {'Util%':>7s}",
+        "─" * 54,
     ]
     for r in rows:
         lines.append(
-            f"s{r['streamId']:>5d} {r['kernel_count']:>8d} "
+            f"{r['deviceId']:>3d} s{r['streamId']:>5d} {r['kernel_count']:>8d} "
             f"{r['total_gpu_ms']:>10.2f} {r['avg_kernel_us']:>8.1f}µs "
             f"{r['stream_util_pct']:>6.1f}%"
         )

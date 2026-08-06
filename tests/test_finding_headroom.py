@@ -1,0 +1,555 @@
+"""Tests for Finding.headroom_ms and opportunity-based ranking (#190)."""
+
+import pytest
+
+from nsys_ai.annotation import Finding, rank_findings
+from nsys_ai.loop_state import _normalize_findings
+
+
+def _f(label, *, severity="info", headroom_ms=None, confidence=None, type="region"):
+    return Finding(
+        type=type,
+        label=label,
+        start_ns=0,
+        end_ns=1,
+        severity=severity,
+        headroom_ms=headroom_ms,
+        confidence=confidence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Field round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_serializes_when_set():
+    f = _f("x", headroom_ms=12.5)
+    d = f.to_dict()
+    assert d["headroom_ms"] == 12.5
+    assert Finding.from_dict(d).headroom_ms == 12.5
+
+
+def test_headroom_basis_round_trips_with_headroom():
+    """The basis must survive serialization alongside the value it qualifies —
+    a headroom whose span is lost in transit is not comparable."""
+    f = Finding(type="region", label="x", start_ns=0, end_ns=1,
+                headroom_ms=12.5, headroom_basis="capture_total")
+    d = f.to_dict()
+    assert d["headroom_basis"] == "capture_total"
+    assert Finding.from_dict(d).headroom_basis == "capture_total"
+
+
+def test_headroom_basis_dropped_when_absent():
+    d = Finding(type="region", label="x", start_ns=0, end_ns=1).to_dict()
+    assert "headroom_basis" not in d
+
+
+def test_headroom_dropped_when_none():
+    d = _f("x").to_dict()
+    assert "headroom_ms" not in d  # legacy JSON stays compact
+    assert Finding.from_dict(d).headroom_ms is None
+
+
+# ---------------------------------------------------------------------------
+# rank_findings (Finding objects — the evidence_builder path)
+# ---------------------------------------------------------------------------
+
+
+def test_large_headroom_outranks_high_severity():
+    """The issue's example: a low-severity finding with large headroom beats a
+    dramatic-looking (critical) finding with little room to improve."""
+    dramatic = _f("critical but little upside", severity="critical", headroom_ms=2.0)
+    opportunity = _f("info but big upside", severity="info", headroom_ms=200.0)
+    ranked = rank_findings([dramatic, opportunity])
+    assert [f.label for f in ranked] == [
+        "info but big upside",
+        "critical but little upside",
+    ]
+
+
+def test_findings_without_headroom_sort_last():
+    a = _f("no headroom A")
+    b = _f("has headroom", headroom_ms=50.0)
+    c = _f("no headroom B")
+    ranked = rank_findings([a, b, c])
+    assert ranked[0].label == "has headroom"
+    # The two headroom-less findings keep their original relative order.
+    assert [f.label for f in ranked[1:]] == ["no headroom A", "no headroom B"]
+
+
+def test_no_headroom_anywhere_is_unchanged():
+    """When nothing carries a headroom, ranking is a no-op (stable order)."""
+    items = [_f("first", severity="info"), _f("second", severity="critical")]
+    ranked = rank_findings(items)
+    assert [f.label for f in ranked] == ["first", "second"]
+
+
+def test_rank_findings_empty():
+    assert rank_findings([]) == []
+
+
+def test_rank_findings_stable_on_equal_headroom():
+    """Findings with identical headroom keep their original relative order."""
+    a = _f("a", headroom_ms=50.0)
+    b = _f("b", headroom_ms=50.0)
+    c = _f("c", headroom_ms=50.0)
+    assert [f.label for f in rank_findings([a, b, c])] == ["a", "b", "c"]
+
+
+def test_build_ranks_findings_by_headroom(minimal_nsys_db_path, monkeypatch):
+    """EvidenceBuilder.build() must apply rank_findings so the largest-headroom
+    finding surfaces first — pinning the wiring, not just the primitive."""
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    lo = _f("low headroom / critical", severity="critical", headroom_ms=2.0)
+    hi = _f("high headroom / info", severity="info", headroom_ms=200.0)
+
+    class _FakeSkill:
+        to_findings_fn = staticmethod(lambda rows, context=None: [lo, hi])
+
+        def execute(self, conn, **kwargs):
+            return [{}]
+
+    monkeypatch.setattr("nsys_ai.skills.registry.get_skill", lambda name: _FakeSkill())
+    with Profile(minimal_nsys_db_path) as prof:
+        builder = EvidenceBuilder(prof, device=0)
+        builder._SKILL_PIPELINE = {"fake": ("fake", {})}
+        report = builder.build()
+
+    assert [f.label for f in report.findings] == [
+        "high headroom / info",
+        "low headroom / critical",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _normalize_findings (dict-based — the guided-loop path)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_findings_opportunity_first():
+    findings = [
+        {"label": "crit small", "severity": "critical", "type": "region", "headroom_ms": 3.0},
+        {"label": "info big", "severity": "info", "type": "region", "headroom_ms": 300.0},
+    ]
+    ranked = _normalize_findings(findings)
+    assert [f["label"] for f in ranked] == ["info big", "crit small"]
+
+
+def test_normalize_findings_legacy_when_no_headroom():
+    """No headroom present -> legacy severity heuristic order is preserved."""
+    findings = [
+        {"label": "info", "severity": "info", "type": "region"},
+        {"label": "critical", "severity": "critical", "type": "region"},
+    ]
+    ranked = _normalize_findings(findings)
+    assert [f["label"] for f in ranked] == ["critical", "info"]
+
+
+def test_normalize_findings_largest_first_then_none_last():
+    """Mixed set: largest headroom leads, headroom-less falls last — even when
+    the headroom-less one is more severe."""
+    findings = [
+        {"label": "hr3 crit", "severity": "critical", "type": "region", "headroom_ms": 3.0},
+        {"label": "none crit", "severity": "critical", "type": "region"},
+        {"label": "hr300 info", "severity": "info", "type": "region", "headroom_ms": 300.0},
+    ]
+    ranked = _normalize_findings(findings)
+    assert [f["label"] for f in ranked] == ["hr300 info", "hr3 crit", "none crit"]
+
+
+# ---------------------------------------------------------------------------
+# Producers populate headroom from their existing recoverable-ms evidence
+# ---------------------------------------------------------------------------
+
+
+def test_gpu_idle_gaps_headroom_is_device_level():
+    """Headroom must be the device-level idle, not the per-stream gap sum.
+
+    Gaps are summed per stream, so a stream idling while another keeps the
+    device busy inflates that total without any device time being recoverable —
+    measured at 1.86x on a two-stream vLLM profile.
+    """
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
+
+    rows = [
+        {  # summary row: per-stream sum is 40ms, but the device idled only 25ms
+            "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
+            "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+            "total_idle_ms": 40.0, "device_idle_ms": 25.0, "gap_count": 3,
+        },
+        {  # a single 5ms gap
+            "gap_ns": 5_000_000, "start_ns": 10_000_000, "end_ns": 15_000_000,
+            "deviceId": 0, "streamId": 7,
+        },
+    ]
+    findings = _to_findings(rows, context={"profile_id": "p"})
+    summary = next(f for f in findings if "Summary" in f.label)
+    gap = next(f for f in findings if "Gap" in f.label)
+    assert summary.headroom_ms == 25.0, "must claim device idle, not the 40ms stream sum"
+    assert summary.evidence[0].values["total_idle_ms"] == 40.0  # still reported
+    # Both numbers must appear, or the 40ms in the note reads as the opportunity
+    # while the ranking is driven by a 25ms headroom the reader never sees.
+    assert "40.0ms idle" in summary.note and "25.0ms of that is recoverable" in summary.note
+    assert gap.headroom_ms is None  # per-gap not double-counted against the summary
+
+
+def test_gpu_idle_gaps_headroom_excludes_sub_threshold_slivers():
+    """The per-stream sum bounds the claim from the other side.
+
+    Device idle sweeps up every sliver between kernels; the gap sum only counts
+    gaps above ``min_gap_ns``. On a single-stream profile the device figure is
+    therefore the *larger* of the two, and claiming it would book sub-1ms launch
+    overhead as recoverable — measured at 4.3s on a 3.5GB single-stream profile.
+    """
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
+
+    rows = [{  # one busy stream: device idle exceeds the thresholded gap sum
+        "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
+        "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        "total_idle_ms": 139179.81, "device_idle_ms": 143531.45, "gap_count": 3,
+    }]
+    summary = next(f for f in _to_findings(rows, context={"profile_id": "p"}) if "Summary" in f.label)
+    assert summary.headroom_ms == 139179.81, "must not claim idle below min_gap_ns"
+    assert summary.evidence[0].values["device_idle_ms"] == 143531.45  # still reported
+    assert summary.evidence[0].units["device_idle_ms"] == "ms"
+    # The headroom equals the narrated gap sum here, so the reconciling clause
+    # would just repeat the same number back — and calling it "device" time
+    # would misname it, the device idled 143531.45ms.
+    assert "recoverable" not in summary.note
+
+
+def test_gpu_idle_gaps_declines_to_claim_without_a_device_figure():
+    """If device idle could not be computed, claim nothing rather than fall back
+    to the inflated per-stream sum."""
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _to_findings
+
+    rows = [{
+        "_summary": True, "pct_of_profile": 20, "gpu_id": 0,
+        "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        "total_idle_ms": 40.0, "device_idle_ms": None, "gap_count": 3,
+    }]
+    summary = next(f for f in _to_findings(rows, context={"profile_id": "p"}) if "Summary" in f.label)
+    assert summary.headroom_ms is None
+    assert summary.headroom_basis is None
+
+
+def test_overlap_breakdown_headroom_single_count():
+    """Both findings can fire on one row; the exposed-NCCL headroom must land on
+    exactly one of them, never both (or the ranking double-counts the same ms)."""
+    from nsys_ai.skills.builtins.overlap_breakdown import _to_findings
+
+    rows = [{
+        "nccl_only_ms": 30.0, "overlap_ms": 5.0, "compute_only_ms": 10.0,
+        "overlap_pct": 14, "total_ms": 45.0,
+        "span_start_ns": 0, "span_end_ns": 45_000_000, "device_id": 0,
+    }]
+    findings = _to_findings(rows, context={"profile_id": "p"})
+    assert len(findings) == 2  # low-overlap and comm-dominated both fire
+    headrooms = [f.headroom_ms for f in findings]
+    assert headrooms.count(None) == 1  # exactly one carries it
+    assert sum(h for h in headrooms if h is not None) == 30.0
+
+
+def test_iteration_timing_defers_headroom_to_idle_and_comm():
+    """A slow iteration fires as a variance locator but claims no headroom: its
+    excess over the median is wall-clock whose idle/exposed-comm parts are
+    already owned by gpu_idle_gaps and overlap_breakdown, and any remainder is
+    extra compute, not recoverable. Claiming the slack would double-count."""
+    from nsys_ai.skills.builtins.iteration_timing import _to_findings
+
+    rows = [
+        {"iteration": 1, "duration_ms": 10.0, "gpu_start_ns": 0,
+         "gpu_end_ns": 10_000_000, "kernel_count": 5},
+        {"iteration": 2, "duration_ms": 10.0, "gpu_start_ns": 10_000_000,
+         "gpu_end_ns": 20_000_000, "kernel_count": 5},
+        {"iteration": 3, "duration_ms": 40.0, "gpu_start_ns": 20_000_000,
+         "gpu_end_ns": 60_000_000, "kernel_count": 5},
+    ]
+    findings = _to_findings(rows)
+    assert len(findings) == 1  # only iter 3 exceeds 1.5x median — still located
+    assert findings[0].label.endswith("3")
+    assert findings[0].headroom_ms is None, "slow-iteration slack must not co-rank"
+    assert findings[0].headroom_basis is None
+    assert "median 10" in findings[0].note  # the diagnostic survives
+
+
+def test_iteration_timing_slow_findings_never_claim_headroom():
+    """Every slow iteration defers, not just the worst — none co-rank against
+    the idle/comm pools their slack overlaps."""
+    from nsys_ai.skills.builtins.iteration_timing import _to_findings
+
+    rows = [
+        {"iteration": i, "duration_ms": d, "gpu_start_ns": i * 10_000_000,
+         "gpu_end_ns": i * 10_000_000 + int(d * 1e6), "kernel_count": 5}
+        for i, d in enumerate([10.0, 10.0, 10.0, 40.0, 25.0])
+    ]
+    findings = _to_findings(rows)
+    assert len(findings) == 2  # 40ms and 25ms both exceed 1.5x median(10)
+    assert all(f.headroom_ms is None for f in findings)
+    assert all(f.headroom_basis is None for f in findings)
+
+
+def test_nccl_variability_defers_comm_headroom_to_overlap_breakdown():
+    """The variability finding claims no headroom: the excess it points at lives
+    inside the NCCL kernels, whose recoverable (exposed) portion is the comm
+    bucket overlap_breakdown already owns. Claiming it again would double-count
+    that bucket. The 'if balanced' figure is still reported, as evidence."""
+    from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
+
+    rows = [{
+        "type": "allreduce", "pct": 50.0, "total_ms": 100.0,
+        "avg_ms": 5.0, "min_ms": 2.0, "max_ms": 20.0, "count": 10, "stream_id": 7,
+        "device_id": 0, "span_start_ns": 0, "span_end_ns": 100_000_000,
+    }]
+    findings = _to_findings(rows, context={"profile_id": "p"})
+    var = next(f for f in findings if "Variability" in f.label)
+    assert var.headroom_ms is None, "must not co-rank against the same exposed-comm bucket"
+    assert var.headroom_basis is None
+    # The measurement survives on the evidence row: count(10) * (avg 5 - min 2).
+    assert var.evidence[0].values["recoverable_if_balanced_ms"] == 30.0
+    assert var.evidence[0].units["recoverable_if_balanced_ms"] == "ms"
+
+
+def test_nccl_variability_if_balanced_absent_when_fields_missing():
+    """Without min_ms the 'if balanced' figure cannot be computed honestly, so
+    it is None on the evidence row rather than a guessed value."""
+    from nsys_ai.skills.builtins.nccl_breakdown import _to_findings
+
+    rows = [{
+        "type": "allreduce", "pct": 50.0, "total_ms": 100.0,
+        "avg_ms": 5.0, "max_ms": 20.0, "count": 10, "stream_id": 7,
+        "device_id": 0, "span_start_ns": 0, "span_end_ns": 100_000_000,
+    }]
+    var = next(
+        f for f in _to_findings(rows, context={"profile_id": "p"}) if "Variability" in f.label
+    )
+    assert var.headroom_ms is None
+    assert var.evidence[0].values["recoverable_if_balanced_ms"] is None
+
+
+# ---------------------------------------------------------------------------
+# region_mfu speed-of-light headroom (Phase 3) + formatter fix
+# ---------------------------------------------------------------------------
+
+
+def _mfu_result(mfu_union, union_s=0.1):
+    return {
+        "name": "attn", "matched_text": "attn", "source": "nvtx",
+        "device_id": 0, "device_ids": [0],
+        "wall_time_s": union_s, "gpu_kernel_sum_s": union_s, "gpu_kernel_union_s": union_s,
+        "mfu_pct_kernel_union": mfu_union,
+        "achieved_tflops_kernel_union": 100.0, "peak_tflops": 300.0,
+    }
+
+
+def test_sol_headroom_formula():
+    from nsys_ai.skills.builtins.region_mfu import _sol_headroom_ms
+
+    # 100ms union at 40% MFU -> 60ms recoverable at peak.
+    assert _sol_headroom_ms(_mfu_result(40.0, union_s=0.1)) == 60.0
+    # No MFU (no FLOPs supplied) -> no headroom, not a bogus zero.
+    assert _sol_headroom_ms(_mfu_result(0.0)) is None
+    assert _sol_headroom_ms({"gpu_kernel_union_s": 0.1}) is None
+
+
+def test_region_mfu_emits_headroom_finding():
+    from nsys_ai.skills.builtins.region_mfu import _to_findings
+
+    findings = _to_findings([_mfu_result(30.0, union_s=0.1)], context={"profile_id": "p"})
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.headroom_ms == 70.0  # 100ms * (1 - 0.30)
+    assert f.category == "compute"
+    assert f.severity == "warning"  # low MFU is a real opportunity
+
+
+def test_region_mfu_no_finding_without_flops():
+    from nsys_ai.skills.builtins.region_mfu import _to_findings
+
+    assert _to_findings([_mfu_result(0.0)]) == []
+    assert _to_findings([{"error": {"code": "no_flops"}}]) == []
+
+
+def test_region_mfu_at_peak_has_no_headroom():
+    """MFU at/above 100% leaves nothing recoverable -> None, not a bogus 0, and
+    no finding is emitted."""
+    from nsys_ai.skills.builtins.region_mfu import _sol_headroom_ms, _to_findings
+
+    assert _sol_headroom_ms(_mfu_result(100.0, union_s=0.1)) is None
+    assert _to_findings([_mfu_result(100.0, union_s=0.1)]) == []
+
+
+def test_region_mfu_finding_has_guidance_fields():
+    """Consistency with sibling skills: the SOL finding carries explanation,
+    suggested actions, and false-positive notes for downstream consumers."""
+    from nsys_ai.skills.builtins.region_mfu import _to_findings
+
+    f = _to_findings([_mfu_result(30.0, union_s=0.1)], context={"profile_id": "p"})[0]
+    assert f.explanation
+    assert f.suggested_actions
+    assert f.false_positive_notes
+
+
+def test_region_mfu_format_renders_ms_not_zeros():
+    """Regression: the old formatter read non-existent timing.*/mfu.* keys and
+    printed zeros; it must now render the real flat, seconds-based values."""
+    from nsys_ai.skills.builtins.region_mfu import _format
+
+    text = _format([_mfu_result(40.0, union_s=0.05)])  # 50ms union
+    assert "50.00ms" in text  # kernel union rendered from seconds
+    assert "40.0%" in text  # MFU rendered
+    assert "SOL headroom" in text
+
+
+def test_every_headroom_producer_declares_a_capture_scoped_basis():
+    """Cross-producer invariant (#231): ranking compares raw magnitudes, so a
+    producer that emits a different span silently distorts the ordering. Any
+    finding carrying headroom must declare its basis, and all builtins agree."""
+    import pathlib
+    import re
+
+    builtins = pathlib.Path("src/nsys_ai/skills/builtins")
+    offenders = []
+    for path in sorted(builtins.glob("*.py")):
+        src = path.read_text()
+        # Each headroom_ms assignment must be accompanied by a headroom_basis
+        # within the same Finding(...) construction.
+        n_headroom = len(re.findall(r"\bheadroom_ms=", src))
+        n_basis = len(re.findall(r"\bheadroom_basis=", src))
+        if n_headroom != n_basis:
+            offenders.append(f"{path.name}: {n_headroom} headroom_ms vs {n_basis} headroom_basis")
+    assert not offenders, "every headroom_ms must declare a basis: " + "; ".join(offenders)
+
+
+def test_idle_headroom_is_claimed_by_exactly_one_finding(minimal_nsys_db_path):
+    """Cross-skill single-count invariant (#230).
+
+    Each skill enforces single-counting internally, but the pipeline runs
+    several together and nothing checked them against each other.
+
+    The invariant is stated as a count, not a magnitude. Comparing claimed idle
+    against a device-level idle measurement would be comparing different
+    quantities: gpu_idle_gaps sums gaps per stream, while the device is only
+    idle when *every* stream is. A compute stream idling while an NCCL stream
+    runs is legitimate and would make a magnitude bound fire with no
+    double count anywhere — a false positive on this project's core workload,
+    which is worse in a guard than a missed bug. How many findings claim the
+    same pool is basis-independent and is what double counting actually means.
+
+    Only ``idle`` is asserted, deliberately. A symmetric check on ``communication``
+    would be wrong: overlap_breakdown claims exposed NCCL while nccl_breakdown
+    claims straggler variance, and those are different pools that can legitimately
+    both fire on one profile — the same false positive in a new place.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+
+    with Profile(minimal_nsys_db_path) as prof:
+        report = EvidenceBuilder(prof, device=0).build()
+
+    claimants = [
+        f for f in report.findings if f.category == "idle" and f.headroom_ms is not None
+    ]
+    assert claimants, "fixture produced no idle headroom, so this proves nothing"
+    assert len(claimants) == 1, (
+        "the recoverable idle pool is claimed by "
+        + ", ".join(f"{f.id or f.label}" for f in claimants)
+        + " — it must be attributed to exactly one finding"
+    )
+
+
+def test_bound_class_finding_reaches_a_built_report(minimal_nsys_db_path):
+    """The point of #230: the verdict must actually appear in a report.
+
+    Every other critical_path test drives a raw sqlite connection, while the
+    pipeline runs on the DuckDB-backed one and `EvidenceBuilder.build` swallows
+    per-skill exceptions — so a failure confined to the pipeline path would be
+    silent. This exercises that path end to end. The trim is required because
+    the untrimmed fixture classifies as `mixed`, which emits no finding by
+    design.
+    """
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    # The window spans the fixture's later kernels, where GPU-idle dominates
+    # clearly enough to commit to a class. Untrimmed, the fixture is `mixed` and
+    # correctly emits nothing, so the trim is load-bearing rather than cosmetic.
+    trim = (4_500_000, 9_000_000)
+    with Profile(minimal_nsys_db_path) as prof:
+        conn = prof.db if prof.db is not None else prof.conn
+        classified = get_skill("critical_path").execute(conn, device=0,
+                                                        trim_start_ns=trim[0],
+                                                        trim_end_ns=trim[1])[0]
+        report = EvidenceBuilder(prof, device=0, trim=trim).build()
+
+    # Asserted first so a fixture change that flips the class fails here, saying
+    # why, instead of as an unexplained "verdict missing from the report".
+    assert classified["bound_class"] == "cpu-bound", (
+        f"fixture/trim no longer yields a committed class ({classified['bound_class']}); "
+        "adjust the window rather than the assertion below"
+    )
+
+    cp = [f for f in report.findings if (f.provenance or {}).get("skill") == "critical_path"]
+    assert len(cp) == 1, "the bound-class verdict must reach the report"
+    assert cp[0].headroom_ms is None, "and must not claim time another skill localizes"
+
+
+def test_idle_headroom_not_inflated_by_a_busy_parallel_stream(tmp_path):
+    """End-to-end guard for #240 on the layout that exposed it.
+
+    One stream idles for 49ms while another keeps the device busy throughout.
+    Nothing is recoverable — the GPU never stopped working — but the per-stream
+    gap sum reports 49ms. This is the compute-stream + NCCL-stream shape this
+    project targets, so the inflation appears on real workloads (1.86x measured
+    on a two-stream vLLM profile).
+    """
+    import sqlite3
+
+    from nsys_ai.profile import Profile
+    from nsys_ai.skills.registry import get_skill
+
+    ms = 1_000_000
+    db = tmp_path / "two_stream.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (globalPid INTEGER DEFAULT 0,"
+        " deviceId INTEGER DEFAULT 0, streamId INTEGER DEFAULT 0,"
+        " correlationId INTEGER DEFAULT 0, start INTEGER, end INTEGER,"
+        " shortName INTEGER, demangledName INTEGER DEFAULT 0);"
+    )
+    conn.execute("INSERT INTO StringIds VALUES (1,'compute_kernel')")
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
+        "(deviceId,streamId,correlationId,start,end,shortName,demangledName)"
+        " VALUES (?,?,?,?,?,?,?)",
+        [
+            (0, 7, 1, 0, 1 * ms, 1, 1),          # stream 7 runs, then idles...
+            (0, 8, 3, 1 * ms, 50 * ms, 1, 1),    # ...while stream 8 covers the device
+            (0, 7, 2, 50 * ms, 51 * ms, 1, 1),   # stream 7 resumes
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    skill = get_skill("gpu_idle_gaps")
+    with Profile(str(db)) as prof:
+        c = prof.db if prof.db is not None else prof.conn
+        rows = skill.execute(c, device=0)
+        findings = skill.to_findings_fn(rows, context={"profile_id": "p"})
+
+    summary_row = next(r for r in rows if r.get("_summary"))
+    assert summary_row["total_idle_ms"] == pytest.approx(49.0, abs=0.5), (
+        "precondition: the per-stream sum should see the 49ms gap"
+    )
+    assert summary_row["device_idle_ms"] == pytest.approx(0.0, abs=0.5), (
+        "the device was busy throughout, so no time is recoverable"
+    )
+    claimed = [f.headroom_ms for f in findings if f.headroom_ms is not None]
+    assert all(h == pytest.approx(0.0, abs=0.5) for h in claimed), (
+        f"no recoverable time exists, but {claimed} was claimed"
+    )

@@ -49,6 +49,7 @@ def run_tui(
     trim: tuple[int, int] | None,
     max_depth: int = -1,
     min_ms: float = 0,
+    loop_after: str | None = None,
 ) -> None:
     """Launch the Textual NVTX tree browser.
 
@@ -59,7 +60,7 @@ def run_tui(
         return
     from .app import run_tui as _run
 
-    _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
+    _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms, loop_after=loop_after)
 
 
 def _print_static_tree(

@@ -310,9 +310,14 @@ def open_profile_readonly(path: str):
     the cache-building process performs disk writes.
     """
     from nsys_ai import parquet_cache
+    from nsys_ai.exceptions import ProfileNotFoundError
 
     try:
         return parquet_cache.open_cached_db(path)
+    except ProfileNotFoundError:
+        # A missing file can't be salvaged by the SQLite fallback; surface the
+        # clear not-found error instead of a vague "unable to open database".
+        raise
     except Exception as e:
         _log.warning("Failed to open DuckDB cache for %s, falling back to SQLite: %s", path, e)
 

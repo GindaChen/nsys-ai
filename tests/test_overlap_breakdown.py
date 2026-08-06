@@ -99,6 +99,33 @@ def test_clean_multi_stream_does_not_fire_diagnostic(minimal_nsys_conn):
     assert "same_stream_nccl_pct" not in r
 
 
+def test_stray_kernel_on_nccl_stream_does_not_fire_diagnostic(minimal_nsys_conn):
+    """A few stray compute kernels sharing the NCCL stream must NOT trigger
+    same_stream_diagnosis when they are a tiny fraction of compute.
+
+    Stream 7 keeps its 3 compute + 1 NCCL (the would-be false positive). Adding
+    100 compute kernels on a clean stream drops stream-7's compute share to
+    ~2.9% (3/103) — below the 5% threshold — so the diagnosis must stay silent.
+    """
+    c = minimal_nsys_conn.cursor()
+    for i in range(100):
+        c.execute(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (100, 0, 9, 200 + i, 20_000_000 + i * 100, 20_000_000 + i * 100 + 50,
+             1, 1, 32, 1, 1, 256, 1, 1),  # stream 9, compute (shortName=1), no NCCL
+        )
+    minimal_nsys_conn.commit()
+
+    r = SKILL.execute_fn(minimal_nsys_conn)[0]
+    assert "same_stream_diagnosis" not in r, (
+        f"stray compute on the NCCL stream (~2.9% of compute) should not fire; "
+        f"got {r.get('same_stream_diagnosis')!r}"
+    )
+    assert "same_stream_compute_pct" not in r
+    assert "same_stream_nccl_pct" not in r
+
+
 def test_present_devices_survives_empty_kernel_table():
     """If the kernel table exists but is empty, present_devices should
     either be empty or absent — not crash."""

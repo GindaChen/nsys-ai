@@ -36,6 +36,55 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
 
 
+def _axis_summary_to_dict(axis):
+    if axis is None:
+        return None
+    return {
+        "axis": axis.axis,
+        "title": axis.title,
+        "total_basis": _axis_total_basis(axis.axis),
+        "before_ms": axis.before_ms,
+        "after_ms": axis.after_ms,
+        "delta_ms": axis.delta_ms,
+        "delta_pct": axis.delta_pct,
+        "entries": [
+            {
+                "key": e.key,
+                "label": e.label,
+                "before_ms": e.before_ms,
+                "after_ms": e.after_ms,
+                "delta_ms": e.delta_ms,
+                "delta_pct": e.delta_pct,
+                "before_count": e.before_count,
+                "after_count": e.after_count,
+                "classification": e.classification,
+                "selection": e.selection.to_dict() if e.selection else None,
+                "metadata": dict(e.metadata),
+            }
+            for e in axis.entries
+        ],
+    }
+
+
+def _fmt_ms_delta(ms: float) -> str:
+    sign = "+" if ms > 0 else ""
+    return f"{sign}{ms:.3f}ms"
+
+
+# The axis total and the per-entry values measure different things: the total is
+# the HTA category (exposed communication / wall-clock idle), while entries are
+# raw per-item amounts that can exceed it when work overlaps. Label them so the
+# difference doesn't read as a bug.
+def _axis_total_basis(axis_name: str) -> str:
+    return {"communication": "exposed comm", "idle": "wall-clock idle"}.get(axis_name, "total")
+
+
+_AXIS_ENTRY_FOOTNOTE = (
+    "per-item values are raw component time and can exceed the total above when "
+    "compute, communication, and idle overlap"
+)
+
+
 def format_diff_terminal(
     data: ProfileDiffSummary,
     narrative: DiffNarrative | None = None,
@@ -81,6 +130,30 @@ def format_diff_terminal(
                 f"- {'overlap_pct':<15} {b['overlap_pct']:>8.1f}% → {a['overlap_pct']:>8.1f}%  (Δ {sign}{d}%)"
             )
     lines.append("")
+
+    def add_axis_section(axis):
+        if axis is None:
+            return
+        lines.append(axis.title)
+        lines.append("─" * 60)
+        lines.append(
+            f"Total ({_axis_total_basis(axis.axis)}): "
+            f"{axis.before_ms:.3f}ms → {axis.after_ms:.3f}ms  (Δ {_fmt_ms_delta(axis.delta_ms)})"
+        )
+        if axis.entries:
+            lines.append(f"{'Δ':>11}  | {'Before':>9} | {'After':>9} | Item")
+            lines.append(f"{'-' * 11}--+-{'-' * 9}-+-{'-' * 9}-+-{'-' * 30}")
+            for e in axis.entries:
+                lines.append(
+                    f"{_fmt_ms_delta(e.delta_ms):>11}  | {e.before_ms:>9.3f} | {e.after_ms:>9.3f} | {e.label}"
+                )
+            lines.append(f"({_AXIS_ENTRY_FOOTNOTE})")
+        else:
+            lines.append("(no changed entries)")
+        lines.append("")
+
+    add_axis_section(data.communication_summary)
+    add_axis_section(data.idle_summary)
 
     def add_kernel_section(title: str, rows):
         lines.append(title)
@@ -254,6 +327,33 @@ def format_diff_markdown(
             )
     md.append("")
 
+    def add_axis_table(axis):
+        if axis is None:
+            return
+        md.append(f"### {axis.title}")
+        md.append("")
+        md.append(
+            f"- **Total ({_axis_total_basis(axis.axis)})**: `{axis.before_ms:.3f}ms` → "
+            f"`{axis.after_ms:.3f}ms` (Δ `{_fmt_ms_delta(axis.delta_ms)}`)"
+        )
+        md.append("")
+        if not axis.entries:
+            md.append("_no changed entries_")
+            md.append("")
+            return
+        md.append("| Δ | item | before | after | class |")
+        md.append("|---:|---|---:|---:|---|")
+        for e in axis.entries:
+            md.append(
+                f"| `{_fmt_ms_delta(e.delta_ms)}` | `{e.label}` | `{e.before_ms:.3f}ms` | `{e.after_ms:.3f}ms` | `{e.classification}` |"
+            )
+        md.append("")
+        md.append(f"_{_AXIS_ENTRY_FOOTNOTE}._")
+        md.append("")
+
+    add_axis_table(data.communication_summary)
+    add_axis_table(data.idle_summary)
+
     def add_table(title: str, rows, is_regression: bool):
         md.append(f"### {title}")
         md.append("")
@@ -347,6 +447,33 @@ def format_diff_markdown_multi(
             )
     md.append("")
 
+    def add_global_axis(axis):
+        if axis is None:
+            return
+        md.append(f"### {axis.title}")
+        md.append("")
+        md.append(
+            f"- **Total ({_axis_total_basis(axis.axis)})**: `{axis.before_ms:.3f}ms` → "
+            f"`{axis.after_ms:.3f}ms` (Δ `{_fmt_ms_delta(axis.delta_ms)}`)"
+        )
+        md.append("")
+        if not axis.entries:
+            md.append("_no changed entries_")
+            md.append("")
+            return
+        md.append("| Δ | item | before | after | class |")
+        md.append("|---:|---|---:|---:|---|")
+        for e in axis.entries:
+            md.append(
+                f"| `{_fmt_ms_delta(e.delta_ms)}` | `{e.label}` | `{e.before_ms:.3f}ms` | `{e.after_ms:.3f}ms` | `{e.classification}` |"
+            )
+        md.append("")
+        md.append(f"_{_AXIS_ENTRY_FOOTNOTE}._")
+        md.append("")
+
+    add_global_axis(g.communication_summary)
+    add_global_axis(g.idle_summary)
+
     # 2) Per-GPU breakdown table
     if per_gpu:
         md.append("### 2. Per-GPU Breakdown (Load Balancing)")
@@ -433,10 +560,14 @@ def format_diff_markdown_multi(
     return "\n".join(md).rstrip() + "\n"
 
 
-def to_diff_json(data: ProfileDiffSummary) -> str:
+def to_diff_dict(data: ProfileDiffSummary) -> dict:
     # Keep this relatively stable; tests can snapshot it.
-    payload = {
+    return {
         "schema_version": SCHEMA_VERSION,
+        # Always present, null until decided. The decided record is this same
+        # object plus a populated `decision`, so omitting the key here forced
+        # every consumer to .get() and made one artifact look like two shapes.
+        "decision": None,
         "producer": PRODUCER,
         "producer_version": _producer_version(),
         "diff_id": data.diff_id,
@@ -466,11 +597,14 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             }
             for c in data.category_attribution
         ],
+        "communication_summary": _axis_summary_to_dict(data.communication_summary),
+        "idle_summary": _axis_summary_to_dict(data.idle_summary),
         "before": {
             "path": data.before.path,
             "profile_id": data.before.profile_id,
             "gpu": data.before.gpu,
             "schema_version": data.before.schema_version,
+            "product_version": data.before.product_version,
             "total_gpu_ns": data.before.total_gpu_ns,
         },
         "after": {
@@ -478,6 +612,7 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             "profile_id": data.after.profile_id,
             "gpu": data.after.gpu,
             "schema_version": data.after.schema_version,
+            "product_version": data.after.product_version,
             "total_gpu_ns": data.after.total_gpu_ns,
         },
         "warnings": list(data.warnings),
@@ -495,6 +630,7 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "before_share": k.before_share,
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
+                "selection": k.selection.to_dict() if k.selection else None,
             }
             for k in data.top_regressions
         ],
@@ -512,6 +648,7 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "before_share": k.before_share,
                 "after_share": k.after_share,
                 "delta_share": k.delta_share,
+                "selection": k.selection.to_dict() if k.selection else None,
             }
             for k in data.top_improvements
         ],
@@ -552,4 +689,8 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
             "delta": data.overlap_delta,
         },
     }
+
+
+def to_diff_json(data: ProfileDiffSummary) -> str:
+    payload = to_diff_dict(data)
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"

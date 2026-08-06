@@ -25,11 +25,20 @@ on ``nvtx_path``. The ``nccl_compile_context_breakdown`` skill is the
 canonical example.
 """
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, requires_pushpop_nvtx
 
 
 def _execute(conn, **kwargs):
     """Execute NVTX→Kernel mapping via efficient attribution module."""
+
+    # A profile captured without NVTX ranges cannot be attributed to regions.
+    # Say so rather than raising: callers catch and log, so an exception here
+    # removes the skill from the output with no trace that it was even asked.
+
+    guard = requires_pushpop_nvtx(conn, needs="Region attribution")
+    if guard:
+        return guard
+
     from ...nvtx_attribution import attribute_kernels_to_nvtx
 
     limit = int(kwargs.get("limit", 50))

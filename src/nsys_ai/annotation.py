@@ -11,6 +11,7 @@ surfaces (CLI, GUI, agent, diff) share:
     TraceSelection   — a region in a profile (time, GPU, rank, stream, NVTX)
     DiffLineage      — links a Finding to the diff that surfaced it
     Diagnostic       — an agent's summarized diagnosis with verification command
+    SkippedAnalysis  — an analysis that could not run on this profile, and why
 
 ``Finding`` carries optional v0.1 fields (id, category, confidence,
 evidence rows, selection, diff lineage, etc.) that the new surfaces
@@ -96,6 +97,17 @@ class Finding:
     false_positive_notes: list[str] | None = None
     provenance: dict[str, Any] | None = None
     diff_lineage: "DiffLineage | None" = None
+    # Potential recoverable time (ms) if this finding's inefficiency were
+    # removed — the optimization *opportunity*, used by :func:`rank_findings`
+    # to order findings by upside rather than severity alone.
+    headroom_ms: float | None = None
+    # What span ``headroom_ms`` covers. Ranking compares the raw magnitudes, so
+    # producers must agree on the span or the ordering is meaningless — a
+    # per-instance value loses to a capture-wide one for reasons that have
+    # nothing to do with opportunity. Every producer currently emits
+    # ``"capture_total"``; the field exists so a new one has to state its basis
+    # rather than diverge silently.
+    headroom_basis: str | None = None
 
     def to_dict(self) -> dict:
         # Walk fields() directly for scalar / primitive fields; nested
@@ -146,6 +158,72 @@ class Finding:
         return cls(**filtered)
 
 
+def headroom_sort_prefix(headroom_ms: float | None) -> tuple[int, float]:
+    """Sort-key prefix that orders by optimization opportunity.
+
+    Items with a numeric ``headroom_ms`` come first, largest headroom first;
+    ``None`` (or any non-numeric value that survived deserialization) sorts
+    after. Shared by :func:`rank_findings` (Finding objects) and the guided
+    loop's dict-based ranking so both stay consistent.
+    """
+    hv = headroom_ms if isinstance(headroom_ms, (int, float)) else None
+    return (0 if hv is not None else 1, -(hv or 0.0))
+
+
+def rank_findings(findings: list["Finding"]) -> list["Finding"]:
+    """Order findings by optimization opportunity (largest headroom first).
+
+    Findings carrying a numeric ``headroom_ms`` sort ahead of those without,
+    largest first, so the biggest *recoverable* win surfaces first regardless
+    of how severe a finding merely looks. The sort is stable, so findings
+    without a headroom keep their original relative order and — when **no**
+    finding carries one — the input order is returned unchanged.
+    """
+    return sorted(findings, key=lambda f: headroom_sort_prefix(f.headroom_ms))
+
+
+@dataclass
+class SkippedAnalysis:
+    """One analysis that could not run on this profile, and why.
+
+    A ``Finding`` asserts something about the profile's *performance*; this
+    asserts something about the *analysis's coverage*. They are kept apart
+    deliberately — ranking a "could not run" among headroom-bearing findings
+    would put bookkeeping in the middle of a priority list, which is the same
+    reason ``EvidenceBuilder`` never hands an abstention row to a
+    ``to_findings_fn``.
+
+    Two names, because they are two different handles and a reader needs the
+    one that matches the surface they are on:
+
+    * ``analyzer`` — the key ``EvidenceBuilder._SKILL_PIPELINE`` runs it under,
+      which is what ``evidence build --analyzers`` accepts. This is the name a
+      user can act on.
+    * ``skill`` — the skill that actually abstained, which is what
+      ``skill run`` accepts. Several analyzers can share one skill, so this
+      alone does not say which coverage was lost.
+
+    ``reason`` is the text the skill passed to ``skills.base.abstain``, unless
+    the abstention row carried none — see ``EvidenceBuilder.build``, which
+    substitutes a short placeholder rather than emitting an empty string.
+    """
+
+    analyzer: str
+    skill: str
+    reason: str
+
+    def to_dict(self) -> dict:
+        return {"analyzer": self.analyzer, "skill": self.skill, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SkippedAnalysis":
+        return cls(
+            analyzer=str(d.get("analyzer", "")),
+            skill=str(d.get("skill", "")),
+            reason=str(d.get("reason", "")),
+        )
+
+
 @dataclass
 class EvidenceReport:
     """A collection of findings for a profile, produced by an AI agent.
@@ -170,6 +248,14 @@ class EvidenceReport:
     profile_path: str = ""
     findings: list[Finding] = field(default_factory=list)
     profile_id: str = field(default="", kw_only=True)
+    # Analyses that could not run, beside the findings rather than among
+    # them. Keyword-only by the class convention noted above, which is a
+    # convention and not a fix for a live hazard: appending a positional
+    # field here could not rebind an existing caller, because a fourth
+    # positional argument to ``EvidenceReport`` is a TypeError today. The
+    # convention exists so the *next* field is not inserted before
+    # ``findings``, where it would rebind.
+    skipped: list[SkippedAnalysis] = field(default_factory=list, kw_only=True)
 
     def __post_init__(self) -> None:
         # Callers occasionally hand in ``pathlib.Path`` even though the
@@ -190,19 +276,26 @@ class EvidenceReport:
             "profile_id": self.profile_id,
             "profile_path": self.profile_path,
             "findings": [f.to_dict() for f in self.findings],
+            # Always emitted, empty list included: a consumer can then tell
+            # "nothing was skipped" from "this producer predates the field"
+            # by the key's presence, instead of guessing from its absence.
+            "skipped": [s.to_dict() for s in self.skipped],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "EvidenceReport":
         # Envelope fields (schema_version / producer / producer_version)
         # are informational only — readers ignore them. Pre-profile_id
-        # payloads load with an empty profile_id (additive, not breaking).
+        # payloads load with an empty profile_id (additive, not breaking);
+        # pre-``skipped`` payloads load with an empty skipped list.
         findings = [Finding.from_dict(f) for f in d.get("findings", [])]
+        skipped = [SkippedAnalysis.from_dict(s) for s in d.get("skipped") or []]
         return cls(
             title=d.get("title", "Untitled"),
             profile_id=d.get("profile_id", ""),
             profile_path=d.get("profile_path", ""),
             findings=findings,
+            skipped=skipped,
         )
 
 

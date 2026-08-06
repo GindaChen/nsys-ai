@@ -11,61 +11,6 @@ from ...connection import DB_ERRORS, is_safe_identifier, wrap_connection
 from ..base import Skill, SkillParam, _compute_interval_union
 
 
-def _resolve_table_name(conn, candidate: str) -> str:
-    """Resolve an Nsight table name, allowing for version-suffixed variants."""
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name LIKE ?
-            ORDER BY name DESC LIMIT 1
-            """,
-            (candidate + "%",),
-        )
-        row = cursor.fetchone()
-        if row:
-            return row[0]
-    except Exception:
-        pass
-    return candidate
-
-
-_sync_result_cache: dict[tuple, list[dict]] = {}
-_CACHE_MAX_SIZE = 8  # bounded to prevent unbounded growth / id() reuse
-
-
-def _execute_sync_analysis(conn, **kwargs) -> list[dict]:
-    # Module-level cache keyed by (connection identity, trim window, device).
-    # Avoids redundant re-execution when called by multiple consumer skills
-    # (manifest, root_cause, overlap, bubble) within the same profile session.
-    # Normalize `device` before caching so `device=1` and `device='1'` — which
-    # _impl coerces to the same int — share the cache entry. Invalid values
-    # pass through unchanged so _impl still emits its own error.
-    raw_device = kwargs.get("device")
-    if raw_device is not None:
-        try:
-            raw_device = int(raw_device)
-        except (TypeError, ValueError):
-            pass
-    cache_key = (
-        id(conn),
-        kwargs.get("trim_start_ns"),
-        kwargs.get("trim_end_ns"),
-        raw_device,
-    )
-    cached = _sync_result_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    result = _execute_sync_analysis_impl(conn, **kwargs)
-
-    if len(_sync_result_cache) >= _CACHE_MAX_SIZE:
-        _sync_result_cache.clear()
-    _sync_result_cache[cache_key] = result
-    return result
-
-
 def _has_device_id(adapter, sync_table: str) -> bool:
     """Probe whether the sync table has a `deviceId` column.
 
@@ -81,10 +26,15 @@ def _has_device_id(adapter, sync_table: str) -> bool:
         return False
 
 
-def _execute_sync_analysis_impl(conn, **kwargs) -> list[dict]:
+def _execute_sync_analysis(conn, **kwargs) -> list[dict]:
     adapter = wrap_connection(conn)
-    sync_table = _resolve_table_name(conn, "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
-    type_table = _resolve_table_name(conn, "ENUM_CUPTI_SYNC_TYPE")
+    # Resolve through the shared, per-connection-memoized resolver rather than a
+    # private one: it is the only resolver that works on the Parquet-cache
+    # connection (where every catalog entry is a view) and it agrees with the
+    # names the cache builder copied.
+    tables = adapter.resolve_activity_tables()
+    sync_table = tables.get("sync", "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+    type_table = tables.get("sync_type", "ENUM_CUPTI_SYNC_TYPE")
 
     # Guard against SQL injection from maliciously crafted table names
     if not is_safe_identifier(sync_table) or not is_safe_identifier(type_table):

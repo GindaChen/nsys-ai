@@ -2,6 +2,7 @@
 """Simplified CLI application entrypoint.
 
 Public surface is focused on web UI and AI workflows:
+- profile
 - open
 - web
 - timeline-web
@@ -44,13 +45,18 @@ def show_help():
     print("  Commands:")
     print("  ─────────────────────────────────────────────────────────")
     print("    nsys-ai                       Show this help")
+    print("    nsys-ai <profile>             Open web timeline UI (default)")
     print("    nsys-ai help                  This help text")
     print()
     print("  Analysis:")
     print("    nsys-ai info    <profile>                Profile metadata & GPUs")
+    print("    nsys-ai warm    <profile>                Pre-build cache & NVTX map")
     print("    nsys-ai summary <profile> [--gpu N]      Kernel stats & commentary")
     print("    nsys-ai timeline <profile> --gpu N --trim S E   Timeline TUI")
     print("    nsys-ai tui     <profile> --gpu N --trim S E   Tree TUI")
+    print()
+    print("  Capture:")
+    print("    nsys-ai profile -- <command> [args...]       Capture a local profile")
     print()
     print("  Skills & Agent:")
     print("    nsys-ai skill list                       List analysis skills")
@@ -71,9 +77,8 @@ def show_help():
     print("    nsys-ai web        <profile> --gpu N       Browser UI")
     print()
     print("  Getting Started:")
-    print("    1. Profile:  nsys profile -o report python train.py")
-    print("    2. Export:   nsys export --type sqlite report.nsys-rep")
-    print("    3. Explore:  nsys-ai open <profile.sqlite>")
+    print("    1. Profile:  nsys-ai profile -- python train.py")
+    print("    2. Explore:  nsys-ai open <profile.sqlite>")
     print()
 
 
@@ -82,8 +87,28 @@ def show_help():
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_profile_path(value: str) -> bool:
+    lower_value = value.lower()
+    return (
+        not value.startswith("-")
+        and (
+            lower_value.endswith(".sqlite")
+            or lower_value.endswith(".nsys-rep")
+        )
+    )
+
+
+def _normalize_default_profile_command(argv: list[str]) -> list[str]:
+    """Route ``nsys-ai <profile>`` through the public timeline-web command."""
+    if len(argv) > 1 and _looks_like_profile_path(argv[1]):
+        return [argv[0], "timeline-web", *argv[1:]]
+    return argv
+
+
 def main():
     from .parsers import _build_legacy_parser, _build_parser
+
+    sys.argv = _normalize_default_profile_command(sys.argv)
 
     legacy_commands = {
         "analyze",
@@ -101,7 +126,6 @@ def main():
         "perfetto",
         "tui",
         "timeline",
-        "agent",
     }
     use_legacy_skill_mgmt = (
         len(sys.argv) > 2 and sys.argv[1] == "skill" and sys.argv[2] in {"add", "remove", "save"}
@@ -113,24 +137,6 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
-        # Zero-arg / unknown: if first arg looks like a profile path, open timeline-web;
-        # otherwise show help (intentional: no interactive launcher; see PR/docs for rationale).
-        remaining = sys.argv[1:]
-        if remaining and not remaining[0].startswith("-"):
-            candidate = remaining[0]
-            if (
-                candidate.endswith(".sqlite")
-                or candidate.endswith(".nsys-rep")
-                or candidate.endswith(".nsys-rep.zst")
-            ):
-                from nsys_ai import profile as _profile
-                from nsys_ai.web import serve_timeline
-
-                with _profile.open(candidate) as prof:
-                    devices = prof.meta.devices if prof.meta.devices else [0]
-                    serve_timeline(prof, devices, None, port=8144, open_browser=True)
-                return
-
         show_help()
         return
 

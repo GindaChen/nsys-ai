@@ -26,8 +26,12 @@ WITH launch_gaps AS (
         k.start,
         k.[end],
         (k.[end] - k.start) AS dur_ns,
-        LAG(k.[end]) OVER (PARTITION BY k.streamId ORDER BY k.start) AS prev_end,
-        LEAD(k.start) OVER (PARTITION BY k.streamId ORDER BY k.start) AS next_start
+        LAG(k.[end]) OVER (
+            PARTITION BY k.streamId ORDER BY k.start, k.correlationId
+        ) AS prev_end,
+        LEAD(k.start) OVER (
+            PARTITION BY k.streamId ORDER BY k.start, k.correlationId
+        ) AS next_start
     FROM {kernel_table} k
     WHERE 1=1
         {trim_clause}
@@ -61,7 +65,7 @@ SELECT
     avg_gap_us,
     sync_stalls
 FROM stream_stats
-ORDER BY kernel_count DESC
+ORDER BY kernel_count DESC, streamId ASC
 LIMIT {limit}""",
     format_fn=lambda rows: _format(rows),
     params=[

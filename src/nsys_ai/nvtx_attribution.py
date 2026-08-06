@@ -70,7 +70,15 @@ def _sort_merge_attribute(
     if not kr_rows:
         return []
 
-    # Phase 2: Load NVTX ranges (eventType 59 = NVTX push/pop range)
+    # Phase 2: Load NVTX ranges (eventType 59 = NVTX push/pop range).
+    #
+    # The 59 filter is a deliberate exclusion of Start/End ranges (eventType 60),
+    # not an oversight — do not widen it. The sweep below is a per-thread nesting
+    # stack, which is sound only because NVIDIA keeps push/pop ranges on a
+    # per-thread stack and they are therefore strictly nested. Start/End ranges
+    # may overlap arbitrarily and may start and end on different threads, so
+    # feeding them to this stack would produce wrong parents, not more coverage.
+    # `skills.base.requires_pushpop_nvtx` makes that exclusion visible to users.
     has_textid = adapter.detect_nvtx_text_id()
 
     if has_textid:
@@ -233,6 +241,17 @@ def attribute_kernels_to_nvtx(
         adapter = wrap_connection(conn)
 
         if isinstance(adapter, DuckDBAdapter):
+            # Build nvtx_kernel_map on-demand when absent (issue #257), so the
+            # map-backed path below runs instead of the in-file IEJoin fallback
+            # that hangs sqlite_scanner on a direct-attached profile. Must run
+            # before the cached_nvtx_map_* probes, which memoize per connection.
+            try:
+                from .parquet_cache import ensure_nvtx_kernel_map
+
+                ensure_nvtx_kernel_map(conn)
+            except DB_ERRORS:
+                pass
+
             trim_sql = ""
             params = []
             if trim:
@@ -335,9 +354,9 @@ def attribute_kernels_to_nvtx(
                 ),
                 grouped AS (
                     SELECT
-                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC, nvtx_text ASC) AS nvtx_text,
                         CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                         kernel_name,
                         k_start,
                         k_end,

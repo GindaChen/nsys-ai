@@ -58,7 +58,9 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
             active_devs = adapter.execute(
                 f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
                 f"WHERE 1=1{trim_sql} "
-                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
+                # Symmetric data-parallel runs launch identical kernel counts on
+                # every device, so this tie is the normal case, not an edge case.
+                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC, deviceId ASC LIMIT 1",
                 trim_params,
             ).fetchall()
             if active_devs and active_devs[0][0] != current_device:
@@ -66,6 +68,24 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
     except Exception:
         pass
     return kwargs
+
+
+def _small_kernel_launch_summary(rows: list[dict]) -> tuple[int, int]:
+    """Return (launch occurrences, kernel types) below the 10us threshold."""
+    qualifying = []
+    for row in rows:
+        launch_count = int(row.get("launch_count", 0) or 0)
+        if launch_count <= 0:
+            continue
+        if "avg_kernel_us" in row:
+            avg_kernel_us = float(row.get("avg_kernel_us", 0) or 0)
+        else:
+            avg_kernel_us = (
+                float(row.get("total_kernel_ms", 0) or 0) * 1000.0 / launch_count
+            )
+        if avg_kernel_us < 10.0:
+            qualifying.append(row)
+    return sum(int(row.get("launch_count", 0) or 0) for row in qualifying), len(qualifying)
 
 
 def _execute(conn: sqlite3.Connection, **kwargs):
@@ -331,25 +351,23 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 )
 
     # --- Small Kernel Overhead ---
-    # We deliberately do NOT gate on overhead_pct: k.start - r.start is
-    # CPU-runs-ahead queue depth in any async workload, so overhead_pct is
-    # near-100% for almost every small kernel and adds no discriminating power.
-    # The actual signal is "kernel is small AND launched frequently".
+    # kernel_launch_overhead now returns one aggregate per kernel name. Count
+    # launch occurrences, not aggregate rows: one tiny kernel launched many
+    # times is the same signal the former per-launch result represented.
     if launch_data:
-        high_overhead = [
-            e
-            for e in launch_data
-            if e.get("launch_count", 0) >= 100
-        ]
-        if len(high_overhead) >= 5:
+        small_launches, small_kernel_types = _small_kernel_launch_summary(launch_data)
+        if small_launches >= 5:
             findings.append(
                 {
                     "pattern": "Small Kernel Overhead",
                     "severity": "warning",
-                    "evidence": f"{len(high_overhead)} small-and-frequent kernels (launch_count >= 100)",
+                    "evidence": (
+                        f"{small_launches} launches across {small_kernel_types} "
+                        "kernel type(s) averaging <10us"
+                    ),
                     "recommendation": (
-                        "Use torch.compile() to fuse element-wise ops, "
-                        "enable cudnn.benchmark, or use CUDA graphs."
+                        "Use torch.compile() or a fused Triton/CUDA kernel to "
+                        "combine repeated small operations, or use CUDA graphs."
                     ),
                 }
             )
@@ -971,8 +989,22 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
 
 def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
-    """Execute a skill, returning [] on DB or skill execution errors."""
+    """Execute a skill, returning [] on DB errors, skill errors, or abstention.
+
+    Abstention collapses to [] here rather than at each call site. A skill that
+    could not run is not evidence for any pattern, and every consumer below
+    guards with ``if <rows>:`` — which a one-row abstention passes, because it
+    is a non-empty list.
+
+    Nothing currently misreads one, and the reason is an accident rather than a
+    design: the only sub-skill that can abstain is ``nvtx_layer_breakdown``, and
+    the analysers it feeds sit behind ``len(layer_data) >= 2`` while abstention
+    is exactly one row. Adding a second abstaining skill to a ``len >= 1`` path
+    would end that silently. ``evidence_builder`` filters at its own boundary
+    for the same reason.
+    """
     from ...exceptions import SkillExecutionError
+    from ...skills.base import is_abstention
     from ...skills.registry import get_skill
 
     _safe_errors = DB_ERRORS + (SkillExecutionError,)
@@ -981,10 +1013,19 @@ def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
         skill = get_skill(skill_name)
         if skill is None:
             return []
-        return skill.execute(conn, **kwargs)
+        rows = skill.execute(conn, **kwargs)
     except _safe_errors as e:
         _log.debug("root_cause_matcher (%s): %s", skill_name, e, exc_info=True)
         return []
+
+    if is_abstention(rows):
+        _log.debug(
+            "root_cause_matcher (%s): abstained — %s",
+            skill_name,
+            rows[0].get("reason", ""),
+        )
+        return []
+    return rows
 
 
 def _format(rows):

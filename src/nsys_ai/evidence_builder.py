@@ -10,7 +10,7 @@ import logging
 import os
 from collections.abc import Callable
 
-from .annotation import EvidenceReport, Finding
+from .annotation import EvidenceReport, Finding, SkippedAnalysis, rank_findings
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
@@ -26,7 +26,19 @@ def _invoke_to_findings(fn: Callable, rows: list[dict], context: dict) -> list[F
 
     Legacy skills with the single-argument signature ``(rows)`` are
     invoked unchanged for backward compatibility.
+
+    Abstention rows never reach ``fn``. A skill that could not run has nothing
+    to turn into a finding, and filtering here rather than in each
+    ``to_findings_fn`` makes that true by construction: the skills that are
+    safe today are safe only through unrelated guards (an early return on a
+    row count, a length check), which a refactor could remove without anyone
+    noticing.
     """
+    from .skills.base import is_abstention
+
+    if is_abstention(rows):
+        return []
+
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
@@ -69,11 +81,18 @@ class EvidenceBuilder:
         "idle_gaps": ("gpu_idle_gaps", {"limit": 5, "min_gap_ns": 1000000}),
         "nccl_stalls": ("kernel_instances", {"name": "nccl", "limit": 3}),
         "kernel_hotspots": ("kernel_instances", {"limit": 3}),
+        "top_kernel_aggregates": ("top_kernels", {"limit": 15}),
         "overlap_ratio": ("overlap_breakdown", {}),
         "memory_anomalies": ("memory_bandwidth", {"limit": 5}),
         "h2d_spikes": ("h2d_distribution", {}),
         "kernel_launch_overhead": ("kernel_launch_overhead", {}),
         "nccl_breakdown": ("nccl_breakdown", {}),
+        # Profile-level bound class. Contributes the verdict only and reports
+        # no headroom by design (the reasoning lives in
+        # critical_path._to_findings). It therefore ranks below every
+        # headroom-bearing finding — read the verdict from the finding itself,
+        # not from its position.
+        "bound_class": ("critical_path", {}),
         # Roll-up characterization of the whole profile (comm-bound,
         # sync-bound, idle-dominant, coverage gaps). Reads only the
         # already-assembled manifest dict, so its findings are
@@ -91,6 +110,7 @@ class EvidenceBuilder:
                   If None, run all analyzers.
         """
         from .fingerprint import get_profile_id
+        from .skills.base import is_abstention
         from .skills.registry import get_skill
 
         # Coerce to str up-front: ``Profile.path`` is whatever the caller
@@ -108,6 +128,10 @@ class EvidenceBuilder:
         profile_id = get_profile_id(getattr(self.prof, "conn", None), fallback_path=profile_path)
 
         findings: list[Finding] = []
+        # Analyses that abstained, in pipeline order. An abstention makes no
+        # finding by design, so without this the report is indistinguishable
+        # from one where every skill ran and the profile came out clean.
+        skipped: list[SkippedAnalysis] = []
         # v0.1 context handed to upgraded skills' to_findings_fn for
         # constructing TraceSelection / EvidenceRow with provenance.
         context: dict = {"profile_id": profile_id}
@@ -130,8 +154,23 @@ class EvidenceBuilder:
                     kwargs["trim_end_ns"] = self.trim[1]
 
                 # Use DuckDB if available, fallback to SQLite
-                conn = self.prof.db if self.prof.db is not None else self.prof.conn
+                conn = self.prof.query_conn()
                 rows = skill.execute(conn, **kwargs)
+                if is_abstention(rows):
+                    # One entry per analyzer, not per skill: two pipeline
+                    # entries can share a skill (kernel_instances runs as both
+                    # nccl_stalls and kernel_hotspots), and each of them is a
+                    # separate piece of coverage the report lost. The pipeline
+                    # is a dict, so the analyzer name cannot repeat.
+                    #
+                    # ``reason`` should always be present — ``abstain`` sets
+                    # it — but a hand-rolled abstention row could omit it, and
+                    # an empty reason renders as a dangling "skipped:" line.
+                    reason = str(rows[0].get("reason") or "could not run")
+                    skipped.append(
+                        SkippedAnalysis(analyzer=analyzer_name, skill=skill_name, reason=reason)
+                    )
+                    continue
                 if skill.to_findings_fn:
                     findings.extend(_invoke_to_findings(skill.to_findings_fn, rows, context))
             except Exception as e:
@@ -139,9 +178,12 @@ class EvidenceBuilder:
                     "Analyzer %s (skill %s) failed: %s", analyzer_name, skill_name, e, exc_info=True
                 )
 
+        # Rank by optimization opportunity (headroom) so the biggest
+        # recoverable win surfaces first. No-op when no skill emits a headroom.
         return EvidenceReport(
             title="Auto-Analysis",
             profile_id=profile_id,
             profile_path=profile_path,
-            findings=findings,
+            findings=rank_findings(findings),
+            skipped=skipped,
         )

@@ -13,7 +13,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, is_abstention_row
 
 _log = logging.getLogger(__name__)
 
@@ -47,6 +47,13 @@ _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS = 120 * 10**9   # 120 s
 # to capture at least a few steady-state iterations of any DiT / transformer
 # block, (b) small enough that a 15 M-row NVTX IEJoin completes in seconds.
 _AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
+# Minimum width for an NVTX-derived window to be accepted. Narrower picks
+# typically come from per-op markers (e.g. a 100-µs ``aten::*`` range that
+# happens to repeat ≥ 3 times) rather than a real iteration boundary, and
+# using such a pick collapses sub-skill ratios — overhead-vs-span, NCCL-
+# vs-compute — to meaningless values. Below this floor we fall through to
+# the middle-of-span fallback instead.
+_AUTO_TRIM_MIN_WINDOW_NS = 100 * 10**6               # 100 ms
 
 # Values that turn NSYS_AI_MANIFEST_AUTO_TRIM off. Matches the parsing
 # of NSYS_AI_DEFER_NVTX_KERNEL_MAP in parquet_cache.py so users get
@@ -58,13 +65,30 @@ _AUTO_TRIM_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 # _to_findings (the structured roll-up emitter) so a tweak in one place
 # can't drift from the other. Same constants-at-module-top convention as
 # PR #149 (kernel_launch_overhead) and PR #153 (top_kernels).
-_OVERHEAD_CONTAMINATED_PCT = 1.0
+
+# Profiler-overhead tiers. A few percent of per-event CUPTI cost is normal and
+# expected — at 1% a trace is *clean*, yet the previous 1% threshold flagged such
+# captures as "contaminated" at critical severity. Below _OVERHEAD_NOTABLE_PCT
+# nothing is reported; between the two it is a warning (timings slightly
+# perturbed); above _OVERHEAD_CONTAMINATED_PCT kernel durations are materially
+# distorted. These are calibration judgements, chosen to avoid crying wolf on
+# clean traces.
+_OVERHEAD_NOTABLE_PCT = 5.0
+_OVERHEAD_CONTAMINATED_PCT = 15.0
 _SYNC_BOUND_DENSITY_PCT = 20.0
 _COMM_BOUND_OVERLAP_PCT = 30.0
 _IDLE_DOMINANT_PCT = 15.0
 _KERNEL_HOTSPOT_PCT = 60.0
 _ITER_VARIANCE_SPIKE_RATIO = 1.5
 _MIN_ITERATIONS_FOR_NVTX_COVERAGE = 3
+
+# Upper sanity bound for the profile-overhead finding. ``overhead_pct``
+# greater than 100% is mathematically impossible (the numerator cannot
+# exceed the denominator); when it appears, the value is a symptom of
+# an upstream scope mismatch (numerator and denominator computed over
+# different time windows) rather than a real profiler-overhead problem.
+# Silence the finding instead of surfacing the nonsense value.
+_OVERHEAD_PCT_SANITY_MAX = 100.0
 
 
 def _auto_trim_enabled() -> bool:
@@ -80,17 +104,20 @@ def _resolve_nvtx_table_for_auto_trim(prof) -> str | None:
     Preference order:
       * ``nvtx_high`` view — DuckDB cache, aten::* already filtered.
       * ``nvtx`` view — DuckDB cache, full NVTX with resolved text.
-      * Versioned canonical table — ``NVTX_EVENTS`` / ``NVTX_EVENTS_V2`` /
-        ``NVTX_EVENTS_V3`` (the actual nsys export schema for the version
-        we attached). Resolved via ``prof.schema.tables`` rather than
-        hardcoded so newer Nsight exports without an unversioned alias
-        still work.
+      * Versioned canonical table — ``NVTX_EVENTS``, else the highest
+        ``NVTX_EVENTS_V<n>`` (the actual nsys export schema for the version
+        we attached). Resolved from ``prof.schema.tables`` through the shared
+        ``resolve_table_variant`` rather than hardcoded, so newer Nsight
+        exports without an unversioned alias still work and this site cannot
+        drift from the ordering every other reader uses.
 
     Returns the chosen name or ``None`` when no NVTX source can be opened.
     """
     import sqlite3
 
     import duckdb
+
+    from ...connection import resolve_table_variant
 
     # Cache-view candidates always have resolved text (no StringIds join
     # needed by the caller). Probe each; pick the first that can be
@@ -107,12 +134,7 @@ def _resolve_nvtx_table_for_auto_trim(prof) -> str | None:
         tables = set(prof.schema.tables)
     except Exception:
         tables = set()
-    if "NVTX_EVENTS" in tables:
-        return "NVTX_EVENTS"
-    for t in sorted(tables):
-        if t.startswith("NVTX_EVENTS"):
-            return t
-    return None
+    return resolve_table_variant(tables, "NVTX_EVENTS", allow_other_suffixes=True)
 
 
 def _build_auto_trim_nvtx_sql(prof, nvtx_table: str) -> str:
@@ -224,19 +246,61 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
         chosen = rows[idx]
         c_start = int(chosen["start"])
         c_end = int(chosen["end"])
-        # Trim very wide stage ranges down to a 20 s slice in their middle
-        # so sub-skills still get steady-state behaviour but don't grind.
-        if c_end - c_start > _AUTO_TRIM_TARGET_WINDOW_NS:
-            mid = (c_start + c_end) // 2
-            half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
-            return (mid - half, mid + half)
-        return (c_start, c_end)
+        # Accept the NVTX-derived pick only if it's at least as wide as
+        # ``_AUTO_TRIM_MIN_WINDOW_NS``. A sub-100ms pick is almost always
+        # a per-op marker rather than an iteration boundary, and using
+        # such a window makes downstream ratios (overhead-vs-span,
+        # NCCL-vs-compute) statistically empty.
+        if c_end - c_start >= _AUTO_TRIM_MIN_WINDOW_NS:
+            # Trim very wide stage ranges down to a 20 s slice in their middle
+            # so sub-skills still get steady-state behaviour but don't grind.
+            if c_end - c_start > _AUTO_TRIM_TARGET_WINDOW_NS:
+                mid = (c_start + c_end) // 2
+                half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
+                return (mid - half, mid + half)
+            return (c_start, c_end)
+        # else: fall through to the middle-of-span fallback below.
 
     # No usable NVTX iteration marker — take the middle 20 s of the
     # profile so we at least avoid head-of-trace JIT and tail teardown.
     mid = (start_ns + end_ns) // 2
     half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
     return (mid - half, mid + half)
+
+
+def _summarize_iterations(iter_rows: list[dict]) -> dict:
+    """Iteration count + variance metrics for the manifest, over genuine
+    iterations only.
+
+    A count, a median and a variance verdict are meaningful only over real
+    iterations (not the sub-iteration op ranges a loose NVTX marker matches) that
+    came from a user NVTX marker (not the heuristic gap fallback). On a single
+    inference run the heuristic path synthesises hundreds of inter-kernel pauses
+    whose median/slowest read as a wildly non-uniform loop — a confidently-wrong
+    signal (issue #215). Return an empty summary rather than that.
+    """
+    real = [
+        r
+        for r in iter_rows
+        # The abstention check comes first: such a row carries neither
+        # of the other keys, so it would take both defaults and be counted as
+        # a real 0ms iteration — fabricating a measurement on the very finding
+        # that reports there is no NVTX to measure.
+        if not is_abstention_row(r)
+        and r.get("is_real_iteration", True)
+        and not r.get("heuristic", False)
+    ]
+    if not real:
+        return {}
+    # Skip iter 0 (warm-up) when computing variance metrics.
+    steady = real[1:] if len(real) > 1 else real
+    durs = sorted(r.get("duration_ms", 0) for r in steady)
+    mid = len(durs) // 2
+    return {
+        "iteration_count": len(real),
+        "median_iter_ms": round(durs[mid], 1),
+        "slowest_iter_ms": round(max(durs), 1),
+    }
 
 
 def _execute(conn, **kwargs):
@@ -332,6 +396,21 @@ def _execute(conn, **kwargs):
     )
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
+    # When auto-trim narrows the analysis window, the ``overhead_ns`` value
+    # injected by ``Skill.execute`` was computed against the full profile
+    # range — using it as the numerator over ``profile_span_ns`` (the
+    # narrowed denominator) produces a scope-mismatched ratio (observed
+    # up to 3.5M% on a single-iteration capture). Re-query overhead
+    # clipped to the effective window so numerator and denominator share
+    # the same scope.
+    if auto_trim_meta is not None and profile_span_ns > 0:
+        from ..base import compute_profiler_overhead_ns
+
+        overhead_ns = compute_profiler_overhead_ns(
+            conn,
+            trim_start_ns=effective_start_ns,
+            trim_end_ns=effective_end_ns,
+        )
     overhead_ms = round(overhead_ns / 1e6, 1)
     overhead_pct_raw = (overhead_ns / profile_span_ns * 100) if profile_span_ns > 0 else 0
     overhead_pct = round(overhead_pct_raw, 1)
@@ -366,11 +445,19 @@ def _execute(conn, **kwargs):
         name = r.get("demangled", "?")
         if len(name) > 60:
             name = name[:57] + "..."
+        total_ms = round(r.get("total_ns", 0) / 1e6, 2)
+        count = r.get("count", 0)
         top_kernels.append(
             {
                 "name": name,
-                "total_ms": round(r.get("total_ns", 0) / 1e6, 2),
-                "count": r.get("count", 0),
+                "total_ms": total_ms,
+                "count": count,
+                # Aliases matching the dominant codebase convention used by the
+                # top_kernels skill / planner / tool_dispatch (which read
+                # kernel_name / invocations, not name / count). Additive so
+                # existing manifest consumers of name / count keep working.
+                "kernel_name": name,
+                "invocations": count,
             }
         )
 
@@ -469,15 +556,7 @@ def _execute(conn, **kwargs):
         _log.debug("manifest: aggregate_nvtx_ranges failed: %s", exc)
 
     iter_rows = _safe_skill_run("iteration_timing", conn, device=device, **trim_kwargs)
-    if iter_rows:
-        nvtx_summary["iteration_count"] = len(iter_rows)
-        # Skip iter 0 (warm-up) when computing variance metrics
-        steady = iter_rows[1:] if len(iter_rows) > 1 else iter_rows
-        if steady:
-            durs = sorted(r.get("duration_ms", 0) for r in steady)
-            mid = len(durs) // 2
-            nvtx_summary["median_iter_ms"] = round(durs[mid], 1)
-            nvtx_summary["slowest_iter_ms"] = round(max(durs), 1)
+    nvtx_summary.update(_summarize_iterations(iter_rows))
 
     # ── 7. Root cause findings (count + top severity) ────────────
     # Pass precomputed communicator rows to avoid re-running the expensive
@@ -535,14 +614,14 @@ def _infer_bottleneck(m: dict) -> str:
     if sync_density > _SYNC_BOUND_DENSITY_PCT:
         return f"High CPU Synchronization Blocking ({sync_density:.1f}% of span)"
 
-    dq = m.get("data_quality", {})
-    overhead_pct_val = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
-    if overhead_pct_val > _OVERHEAD_CONTAMINATED_PCT:
-        return f"Profiler Overhead ({dq.get('overhead_pct', overhead_pct_val)}%) contaminated the profile"
-
+    # Profiler overhead is deliberately NOT a candidate bottleneck. It is the
+    # measurement tool's own cost, not a property of the workload, so naming it
+    # the suspected bottleneck is a category error — and because this check ran
+    # near the front, a few percent of instrumentation cost used to preempt every
+    # real bottleneck below (NCCL serialization, idle, hotspots). It remains
+    # reported as a profile-quality signal via its own finding.
     overlap = m.get("overlap", {})
     idle = m.get("idle", {})
-    nccl = m.get("nccl", {})
 
     # Check NCCL serialization first (most impactful)
     if overlap.get("overlap_pct", 100) < _COMM_BOUND_OVERLAP_PCT and overlap.get("nccl_only_ms", 0) > 0:
@@ -560,9 +639,17 @@ def _infer_bottleneck(m: dict) -> str:
         if top_pct > _KERNEL_HOTSPOT_PCT:
             return f"Kernel hotspot: {top_k[0]['name']} ({top_pct:.0f}%)"
 
-    # Check NCCL dominance
-    if nccl.get("total_nccl_ms", 0) > overlap.get("compute_only_ms", float("inf")):
-        return "Communication-bound (NCCL > compute)"
+    # Check NCCL dominance. Compare wall-clock exposed NCCL against wall-clock
+    # compute, mirroring the comm_bound finding below exactly — the two must not
+    # disagree. The per-stream sum ``total_nccl_ms`` used here previously
+    # overcounts when NCCL runs concurrently on multiple streams, and it also
+    # counts overlapped NCCL that ``compute_only_ms`` has already excluded from
+    # compute, so overlap was penalised twice and this headline could claim
+    # "communication-bound" for a run the findings path called healthy.
+    nccl_only_ms = float(overlap.get("nccl_only_ms", 0) or 0)
+    compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
+    if nccl_only_ms > 0 and nccl_only_ms > compute_only_ms:
+        return "Communication-bound (exposed NCCL > compute)"
 
     # Check iteration variance (spike pattern)
     nvtx = m.get("nvtx", {})
@@ -578,11 +665,20 @@ def _infer_bottleneck(m: dict) -> str:
 # Explanation strings interpolate the threshold constants at module load
 # so the prose stays in sync with the thresholds it cites. Hardcoded
 # values would silently drift if a threshold were ever tuned.
-_OVERHEAD_EXPLANATION = (
-    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
-    "profile span, which perturbs kernel durations and launch timings enough to "
-    "mask real regressions. Re-capture with torch.cuda.profiler.start/stop() + "
+_OVERHEAD_RECAPTURE_ADVICE = (
+    "This measures the profiler's own cost — it is a capture-quality caveat, not a "
+    "bottleneck in the workload. Re-capture with torch.cuda.profiler.start/stop() + "
     "--capture-range=cudaProfilerApi to scope nsys to the region of interest."
+)
+_OVERHEAD_WARNING_EXPLANATION = (
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_NOTABLE_PCT}% of profile "
+    "span, enough to perturb kernel durations and launch timings and mask small "
+    f"regressions. {_OVERHEAD_RECAPTURE_ADVICE}"
+)
+_OVERHEAD_CRITICAL_EXPLANATION = (
+    f"Per-event CUPTI instrumentation cost exceeded {_OVERHEAD_CONTAMINATED_PCT}% of "
+    "profile span; at this level the captured kernel durations are no longer "
+    f"trustworthy. {_OVERHEAD_RECAPTURE_ADVICE}"
 )
 _SYNC_EXPLANATION = (
     "Synchronous CPU→GPU waits (cudaStreamSynchronize, cudaMemcpy, .item(), "
@@ -737,25 +833,49 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     # ── 1. Profiler overhead contamination ─────────────────────────
     dq = m.get("data_quality", {}) or {}
     overhead_pct = float(dq.get("overhead_pct_raw", dq.get("overhead_pct", 0)) or 0)
-    if overhead_pct > _OVERHEAD_CONTAMINATED_PCT:
+    # Silence rather than emit a finding when the ratio is impossible
+    # (``overhead_pct > 100``); that value can only come from a scope
+    # mismatch upstream, and surfacing it as a ``critical`` finding does
+    # more harm than good.
+    if _OVERHEAD_NOTABLE_PCT < overhead_pct <= _OVERHEAD_PCT_SANITY_MAX:
         overhead_ms = float(dq.get("profiler_overhead_ms", 0) or 0)
+        # Resolve the tier once, so the label, severity, cited threshold and prose
+        # cannot drift apart — and so the two tiers can be read side by side.
+        if overhead_pct > _OVERHEAD_CONTAMINATED_PCT:
+            label = f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)"
+            severity = "critical"
+            threshold = _OVERHEAD_CONTAMINATED_PCT
+            explanation = _OVERHEAD_CRITICAL_EXPLANATION
+            trust = (
+                f"Above {_OVERHEAD_CONTAMINATED_PCT}% the captured kernel durations are "
+                "no longer trustworthy."
+            )
+        else:
+            label = f"Profiler overhead is elevated ({overhead_pct:.1f}%)"
+            severity = "warning"
+            threshold = _OVERHEAD_NOTABLE_PCT
+            explanation = _OVERHEAD_WARNING_EXPLANATION
+            trust = (
+                "Measurements are usable but slightly perturbed; treat small regressions "
+                "with care."
+            )
         _emit(
             finding_id="profile_overhead_contaminated",
-            label=f"Profiler overhead contaminated profile ({overhead_pct:.1f}%)",
-            severity="critical",
+            label=label,
+            severity=severity,
             category="profile_quality",
             values={
                 "overhead_pct": round(overhead_pct, 2),
                 "overhead_ms": round(overhead_ms, 2),
-                "threshold_pct": _OVERHEAD_CONTAMINATED_PCT,
+                "threshold_pct": threshold,
             },
             units={"overhead_pct": "percent", "overhead_ms": "ms", "threshold_pct": "percent"},
             note=(
                 f"Per-event profiler overhead is {overhead_pct:.1f}% of profile span "
-                f"({overhead_ms:.1f}ms). Above {_OVERHEAD_CONTAMINATED_PCT}% the captured "
-                "kernel durations are no longer trustworthy."
+                f"({overhead_ms:.1f}ms). {trust} This is a property of the capture, "
+                "not a workload bottleneck."
             ),
-            explanation=_OVERHEAD_EXPLANATION,
+            explanation=explanation,
             actions=_OVERHEAD_ACTIONS,
         )
 
@@ -803,7 +923,14 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
     total_nccl_ms = float(nccl.get("total_nccl_ms", 0) or 0)
     compute_only_ms = float(overlap.get("compute_only_ms", 0) or 0)
     low_overlap = overlap_pct < _COMM_BOUND_OVERLAP_PCT and nccl_only_ms > 0
-    nccl_dominates_compute = total_nccl_ms > 0 and total_nccl_ms > compute_only_ms
+    # Compare wall-clock NCCL (``nccl_only_ms`` — the unhidden,
+    # non-overlapped interval from overlap_breakdown) against wall-clock
+    # compute. The earlier per-stream sum ``total_nccl_ms`` overcounts
+    # when NCCL runs concurrently on multiple streams, which makes the
+    # comparison apples-to-oranges versus the wall-clock compute
+    # denominator and produces spurious dominance findings on
+    # multi-stream NCCL workloads.
+    nccl_dominates_compute = nccl_only_ms > 0 and nccl_only_ms > compute_only_ms
     if low_overlap or nccl_dominates_compute:
         # Two distinct triggers can fire this; capture which in provenance
         # so downstream consumers (and Copilot-style reviewers) can tell
@@ -820,7 +947,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         if low_overlap and nccl_dominates_compute:
             label_text = (
                 f"Communication-bound (overlap {overlap_pct:.0f}%, "
-                f"NCCL {total_nccl_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
+                f"NCCL {nccl_only_ms:.0f}ms vs compute {compute_only_ms:.0f}ms)"
             )
         elif low_overlap:
             label_text = (
@@ -830,7 +957,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
         else:
             label_text = (
                 f"Communication-bound: NCCL dominates "
-                f"({total_nccl_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
+                f"({nccl_only_ms:.0f}ms NCCL vs {compute_only_ms:.0f}ms compute)"
             )
         _emit(
             finding_id="profile_comm_bound",
@@ -854,9 +981,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
             },
             note=(
                 f"Compute/NCCL overlap is {overlap_pct:.0f}% (threshold "
-                f"{int(_COMM_BOUND_OVERLAP_PCT)}%); NCCL total {total_nccl_ms:.0f}ms "
-                f"vs compute-only {compute_only_ms:.0f}ms. Dominant collective: "
-                f"{nccl.get('dominant_type', 'unknown')}."
+                f"{int(_COMM_BOUND_OVERLAP_PCT)}%); NCCL unhidden "
+                f"{nccl_only_ms:.0f}ms vs compute-only {compute_only_ms:.0f}ms. "
+                f"Dominant collective: {nccl.get('dominant_type', 'unknown')}."
             ),
             explanation=_COMM_EXPLANATION,
             actions=_COMM_ACTIONS,
@@ -1004,6 +1131,13 @@ def _format(rows):
         dist_str = "Distributed: yes" if fp.get("distributed") else "Distributed: no"
         mn_str = "Multi-node: yes" if fp.get("multi_node") else "Multi-node: no"
         lines.append(f"  Framework:    {fp.get('framework', 'Unknown')} ({dist_str}, {mn_str})")
+        # Show what the framework claim rests on. Framework detection is a
+        # substring match over captured strings, so the evidence is the only way
+        # a reader can tell a real symbol match from an incidental one in a log
+        # line or environment variable.
+        evidence = fp.get("framework_evidence")
+        if evidence:
+            lines.append(f"                └─ matched {evidence}")
 
     lines.append(f"  GPU:          {m.get('gpu', '?')}")
     lines.append(f"  Profile span: {m.get('profile_span_ms', 0):.1f}ms")
@@ -1011,8 +1145,13 @@ def _format(rows):
     dq = m.get("data_quality", {})
     overhead_pct_raw = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
     if overhead_pct_raw >= 0.1:
+        # Only flag the overhead once it is actually notable; a fraction of a
+        # percent is a clean capture and carrying a warning glyph there is the
+        # same over-signalling as calling it a bottleneck.
+        overhead_icon = "⚠️" if overhead_pct_raw > _OVERHEAD_NOTABLE_PCT else "  "
         lines.append(
-            f"  ⚠️ Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms ({dq.get('overhead_pct', overhead_pct_raw)}% of span)"
+            f"  {overhead_icon} Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms "
+            f"({dq.get('overhead_pct', overhead_pct_raw)}% of span)"
         )
 
     # Top kernels
@@ -1116,8 +1255,11 @@ SKILL = Skill(
         "covering GPU info, top kernels, compute/NCCL overlap, NCCL summary, "
         "communicator-aware NCCL hints, idle gaps, root cause findings, and NVTX summary "
         "(top regions + iteration count/median/slowest) — all in a single call. "
-        "If Profiler Overhead is >1%, advise the user to use torch.cuda.profiler.start/stop() "
-        "and --capture-range=cudaProfilerApi instead of full-script profiling. "
+        f"If Profiler Overhead exceeds {_OVERHEAD_NOTABLE_PCT}%, advise the user to use "
+        "torch.cuda.profiler.start/stop() and --capture-range=cudaProfilerApi instead of "
+        "full-script profiling; below that the capture is clean and needs no action. "
+        "Profiler overhead measures the capture, never the workload — never report it as "
+        "a bottleneck. "
         "Use this as the FIRST skill to call on any new profile. "
         "The nvtx.iteration_count, nvtx.median_iter_ms, and nvtx.slowest_iter_ms fields "
         "let you skip the first iteration_timing call for Mode 5 and Mode 9."

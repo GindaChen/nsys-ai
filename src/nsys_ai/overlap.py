@@ -5,6 +5,7 @@ Quantifies how much GPU compute overlaps with NCCL communication,
 detects training iterations, and breaks down collective operations.
 """
 
+import copy
 import logging
 from collections import defaultdict
 
@@ -47,7 +48,35 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         overlap_ms:       Time both compute and NCCL run concurrently
         idle_ms:          Time no kernels are running
         total_ms:         Wall-clock span
+
+    Memoized per connection: the sweep is pure in ``(connection, device,
+    trim)`` and a single ``EvidenceBuilder.build()`` asks for the same triple
+    seven times (gpu_idle_gaps, overlap_breakdown and critical_path, several
+    re-run inside the manifest). One build over a 3.5GB profile without the
+    DuckDB cache spent ~7s of the ~7 identical calls here. The cache is keyed
+    on the underlying connection — not the ``Profile`` — because gpu_idle_gaps
+    calls in through a throwaway ``Profile._from_conn`` wrapper around the same
+    connection, so a per-Profile cache would miss it.
+
+    A deep copy is handed back on every call: callers (overlap_breakdown)
+    mutate the dict, and the cached entry must stay pristine.
     """
+    from .connection import _PROBE_MISS, _probe_cache_get, _probe_cache_set
+
+    conn = prof.query_conn()
+    cache_key = f"overlap_analysis:{device}:{trim}"
+    cached = _probe_cache_get(conn, cache_key)
+    if cached is not _PROBE_MISS:
+        return copy.deepcopy(cached)
+
+    result = _overlap_analysis_uncached(prof, device, trim)
+    _probe_cache_set(conn, cache_key, result)
+    return copy.deepcopy(result)
+
+
+def _overlap_analysis_uncached(
+    prof: Profile, device: int, trim: tuple[int, int] | None
+) -> dict:
     if _has_duckdb(prof):
         from .connection import DB_ERRORS
 
@@ -68,9 +97,94 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
     return _overlap_analysis_python(prof, device, trim)
 
 
+def launch_overhead_ms(
+    prof: Profile, device: int | None, trim: tuple[int, int] | None = None
+) -> float:
+    """Exposed CUDA kernel-launch overhead on a device, in milliseconds.
+
+    This is the slice of GPU-idle time during which the CPU was still inside a
+    kernel-launch API call — the dispatch latency the GPU actually *waited on*.
+    It is deliberately not the full ``kernel_start - api_start`` gap, which is
+    mostly hidden by pipelined launches and would double-count compute (the
+    cartesian-overhead trap). Being a strict subset of ``overlap_analysis``'s
+    ``idle_ms``, it is meant to be *carved out* of idle in the step-time
+    attribution so the four buckets still sum to total.
+
+    Definition: walk kernels on the device by start time, tracking
+    ``prev_end`` = the latest end of any earlier kernel (the GPU-busy
+    boundary). The idle gap before kernel K is ``(prev_end, K.start)``; the part
+    of K's launch window ``(api_start, api_end)`` that falls inside that gap is
+    exposed launch overhead. Per-kernel gaps are disjoint, so nothing is counted
+    twice. Returns 0.0 when the kernel or runtime table is unavailable.
+    """
+    kernel_table = prof.schema.kernel_table
+    if not kernel_table:
+        return 0.0
+    # Via the shared resolver, never a local prefix scan: this used to take
+    # sorted(...)[0] — the *oldest* variant — and so disagreed with every other
+    # reader on a profile carrying both _V2 and _V3. ``prof`` must therefore
+    # carry a real ConnectionAdapter (wrap_connection), not a bare connection.
+    runtime_table = prof.adapter.resolve_activity_tables().get("runtime")
+    if not runtime_table:
+        return 0.0
+
+    # All kernels define the GPU-busy boundary (so idle gaps are correct); the
+    # LEFT JOIN below — not a WHERE filter — gates which kernels have a launch
+    # window to attribute. Seeding with 1=1 keeps the SQL valid when no device/
+    # trim is given.
+    where = ["1=1"]
+    params: list = []
+    if device is not None:
+        where.append("k.deviceId = ?")
+        params.append(device)
+    if trim:
+        where.append("k.start >= ? AND k.[end] <= ?")
+        params.extend(trim)
+    where_sql = " AND ".join(where)
+
+    sql = f"""
+        SELECT k.start AS ks, k.[end] AS ke, r.start AS rs, r.[end] AS re
+        FROM {kernel_table} k
+        LEFT JOIN {runtime_table} r ON k.correlationId = r.correlationId
+        WHERE {where_sql}
+        -- Total order. The kernel keys alone are NOT enough: correlationId is
+        -- the join key, and the runtime side fans out (212k correlationIds carry
+        -- several runtime rows on a real H100 capture), so many rows share all
+        -- three kernel keys. The loop reads rs/re from the runtime side, so
+        -- without the runtime columns the computed launch_ns varied by ~20%
+        -- between runs on identical input.
+        ORDER BY k.start, k.[end], k.correlationId, r.start, r.[end]
+    """  # noqa: S608 — table names are validated schema identifiers, values are bound
+    try:
+        rows = prof.adapter.execute(sql, params).fetchall()
+    except Exception:  # noqa: BLE001 — launch overhead is best-effort enrichment
+        log.debug("launch_overhead_ms query failed", exc_info=True)
+        return 0.0
+
+    launch_ns = 0
+    prev_end: int | None = None
+    for row in rows:
+        ks, ke, rs, re = row[0], row[1], row[2], row[3]
+        if ks is None or ke is None:
+            continue
+        if prev_end is not None and rs is not None and re is not None and ks > prev_end:
+            # exposed = | (prev_end, ks) ∩ (rs, re) |
+            lo = prev_end if prev_end > rs else rs
+            hi = ks if ks < re else re
+            if hi > lo:
+                launch_ns += hi - lo
+        if prev_end is None or ke > prev_end:
+            prev_end = ke
+    return round(launch_ns / 1e6, 2)
+
+
 def _has_duckdb(prof: Profile) -> bool:
     from .connection import DuckDBAdapter, wrap_connection
 
+    # Asks the engine question of ``prof.db`` rather than ``query_conn()``:
+    # this is a type check, and going through the accessor would materialise a
+    # thread-local cursor as a side effect of answering it. Both handles are on
+    # the same database, so the answer is identical either way.
     conn = prof.db if prof.db is not None else prof.conn
     return isinstance(wrap_connection(conn), DuckDBAdapter)
 
@@ -326,6 +440,97 @@ def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = No
 # ── Iteration detection ────────────────────────────────────────────
 
 
+# Rows whose GPU compute is below this fraction of the busiest iteration are
+# treated as noise, not real training iterations. A loose marker substring can
+# match many short op-level ranges, and the heuristic fallback can emit a row
+# spanning a long idle gap with almost no work; real iterations all do a similar,
+# substantial amount of GPU compute, so both kinds of artifact drop out.
+_REAL_ITER_MIN_FRACTION = 0.1
+
+
+def _flag_real_iterations(results: list[dict]) -> list[dict]:
+    """Mark each row ``is_real_iteration`` to separate true iterations from noise.
+
+    Classification is by **GPU compute** (sum of kernel durations), not wall-clock
+    span: a real training iteration does a substantial, similar amount of work,
+    whereas the two artifacts this guards against have little. Op-level ranges a
+    loose NVTX marker matches are orders of magnitude shorter; a heuristic-fallback
+    "ghost" can have a huge span (a long idle gap) but near-zero compute. Flagging
+    by a fraction of the busiest iteration's compute drops both, while a clean
+    profile (uniform compute) keeps every row. Consumers then compute their
+    median/variance over the real rows only — measured on duration (iteration
+    wall-clock time), but selected by compute.
+
+    This is a heuristic, not exact iteration detection: if real iterations vary in
+    compute by more than ``1/_REAL_ITER_MIN_FRACTION``×, a borderline-light one can
+    be dropped. That is acceptable — the goal is a representative median, so losing
+    a marginal data point is harmless, whereas the contaminated median it replaces
+    produced findings off by orders of magnitude. Validated to match a
+    duration-based rule on a dozen real profiles while additionally dropping a
+    real ghost iteration the duration rule kept.
+    """
+    if not results:
+        return results
+    max_compute = max((r.get("compute_ms") or 0.0) for r in results)
+    floor = max_compute * _REAL_ITER_MIN_FRACTION
+    for r in results:
+        r["is_real_iteration"] = (
+            (r.get("compute_ms") or 0.0) >= floor if max_compute > 0 else True
+        )
+    return results
+
+
+def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
+    """Yield kernels contained in each ordered, non-overlapping CPU window."""
+    previous_end = None
+    for index, iteration in enumerate(iterations):
+        start, end = iteration["start"], iteration["end"]
+        if end <= start:
+            raise ValueError(f"iteration {index} has a non-positive time range")
+        if previous_end is not None and start < previous_end:
+            raise ValueError(f"iteration {index} overlaps or precedes the previous iteration")
+        previous_end = end
+
+    def grouped_rows():
+        rows = iter(runtime_rows)
+        current = next(rows, None)
+        while current is not None:
+            start = current["start"]
+            group = [current]
+            current = next(rows, None)
+            while current is not None and current["start"] == start:
+                group.append(current)
+                current = next(rows, None)
+            yield group
+
+    groups = iter(grouped_rows())
+    current_group = next(groups, None)
+    for index, iteration in enumerate(iterations):
+        cpu_start, cpu_end = iteration["start"], iteration["end"]
+        next_start = iterations[index + 1]["start"] if index + 1 < len(iterations) else None
+
+        while current_group is not None and current_group[0]["start"] < cpu_start:
+            current_group = next(groups, None)
+
+        kernels = []
+        while current_group is not None and current_group[0]["start"] <= cpu_end:
+            for runtime in current_group:
+                if runtime["end"] > cpu_end:
+                    continue
+                kernel = kernel_map.get(runtime["correlationId"])
+                if kernel:
+                    kernels.append(kernel)
+
+            # Containment is inclusive. Keep the whole equal-start group at a
+            # shared boundary: zero-duration rows belong to both windows, while
+            # rows spanning the boundary belong only to the following one.
+            if next_start == cpu_end == current_group[0]["start"]:
+                break
+            current_group = next(groups, None)
+
+        yield kernels
+
+
 def detect_iterations(
     prof: Profile, device: int, trim: tuple[int, int] | None = None, marker: str = "sample_0"
 ) -> list[dict]:
@@ -350,24 +555,18 @@ def detect_iterations(
 
     primary_tid = _find_primary_thread(prof, device)
 
-    # Resolve table names dynamically (versioned-table support)
-    # Prefer exact canonical name first, then sorted prefix fallback
-    # (consistent with base._resolve_activity_tables).
-    tables = prof.schema.tables
-
-    nvtx_table = "NVTX_EVENTS"
-    if nvtx_table not in tables:
-        for t in sorted(tables):
-            if t.startswith("NVTX_EVENTS"):
-                nvtx_table = t
-                break
-
-    runtime_table = "CUPTI_ACTIVITY_KIND_RUNTIME"
-    if runtime_table not in tables:
-        for t in sorted(tables):
-            if t.startswith("CUPTI_ACTIVITY_KIND_RUNTIME"):
-                runtime_table = t
-                break
+    # Resolve table names through the shared resolver (versioned-table support).
+    # These two sites used to scan prefixes locally and take sorted(...)[0] — the
+    # *oldest* variant — which is the opposite of what every other reader picks.
+    # The literal fallbacks keep the pre-existing shape for an absent table:
+    # ``has_nvtx`` gates the NVTX query away entirely, and a missing runtime
+    # table still surfaces as "no such table CUPTI_ACTIVITY_KIND_RUNTIME" rather
+    # than as a query reading ``FROM None``.
+    resolved = prof.adapter.resolve_activity_tables()
+    resolved_nvtx = resolved.get("nvtx")
+    has_nvtx = resolved_nvtx is not None
+    nvtx_table = resolved_nvtx or "NVTX_EVENTS"
+    runtime_table = resolved.get("runtime") or "CUPTI_ACTIVITY_KIND_RUNTIME"
 
     # Filter to primary thread's top-level iterations
     # Use COALESCE to handle newer schemas where text is NULL and textId is used
@@ -380,13 +579,20 @@ def detect_iterations(
         text_expr = "n.text"
         text_join = ""
 
-    pri_nvtx = prof._duckdb_query(
+    # Without the table there is nothing to match, but the gap-based heuristic
+    # below needs no annotation — returning early here withheld a result the
+    # profile can genuinely support.
+    pri_nvtx = [] if not has_nvtx else prof._duckdb_query(
         f"""
             SELECT {text_expr} AS text, n.start, n.[end] FROM {nvtx_table} n
             {text_join}
             WHERE {text_expr} LIKE ? AND n.[end] > n.start AND n.globalTid = ?
               AND n.start >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC is semantic, not just deterministic: the greedy
+            -- top-level filter below keeps the first range at a given start,
+            -- and on a tie the longer range is the enclosing one. Ordering
+            -- the shorter one first would let a nested range mask its parent.
+            ORDER BY n.start, n.[end] DESC, text
         """,
         (f"%{marker}%", primary_tid, time_range[0] - pad, time_range[1]),
     )
@@ -399,10 +605,19 @@ def detect_iterations(
             iterations.append(n)
             last_end = n["end"]
 
+    # Whether the iterations came from a matched NVTX marker (a user-declared
+    # boundary) or from the heuristic gap fallback below. Consumers that make
+    # confident claims — an iteration count, a variance verdict, a slow-iteration
+    # finding — trust only the former: with no user marker, the "iterations" are
+    # inferred from inter-kernel pauses and on a non-looping capture are not
+    # iterations at all (issue #215).
+    used_heuristic = False
+
     # --- Heuristic Fallback ---
     # If no NVTX markers match, fall back to detecting iterations by finding
     # large gaps in kernel execution on the primary CPU thread across all streams.
     if not iterations:
+        used_heuristic = True
         rt_all = prof._duckdb_query(
             f"""
             SELECT correlationId, start, [end] FROM {runtime_table}
@@ -444,7 +659,7 @@ def detect_iterations(
         # but boundaries are recorded in runtime timestamps (CPU domain)
         # so the downstream rt-based filter works correctly.
         GAP_THRESHOLD_NS = 2_000_000
-        boundaries = [kernel_entries[0]["rt_start"]]
+        boundaries = [min(entry["rt_start"] for entry in kernel_entries)]
 
         last_k_end = kernel_entries[0]["kernel"]["end"]
         for entry in kernel_entries[1:]:
@@ -455,7 +670,13 @@ def detect_iterations(
                 boundaries.append(entry["rt_start"])
             last_k_end = max(last_k_end, k["end"])
 
-        boundaries.append(kernel_entries[-1]["rt_end"])
+        # GPU execution order can differ from CPU launch order across streams.
+        # Correlation below advances through CPU runtime rows exactly once, so
+        # make its ordered, non-overlapping window invariant explicit here.
+        boundaries = sorted(set(boundaries))
+        final_runtime_end = max(entry["rt_end"] for entry in kernel_entries)
+        if final_runtime_end > boundaries[-1]:
+            boundaries.append(final_runtime_end)
 
         # Construct synthetic iterations from these boundaries
         for i in range(len(boundaries) - 1):
@@ -480,19 +701,8 @@ def detect_iterations(
     )
 
     results = []
-    for i, it in enumerate(iterations):
-        cpu_start, cpu_end = it["start"], it["end"]
-
-        # Find correlated kernels
-        kernels_in_iter = []
-        for rt in rt_all:
-            if rt["start"] > cpu_end:
-                break
-            if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
-                k = kmap.get(rt["correlationId"])
-                if k:
-                    kernels_in_iter.append(k)
-
+    correlated = _correlate_iteration_kernels(iterations, rt_all, kmap)
+    for i, (it, kernels_in_iter) in enumerate(zip(iterations, correlated)):
         if not kernels_in_iter:
             continue
 
@@ -505,6 +715,7 @@ def detect_iterations(
             {
                 "iteration": i,
                 "text": it["text"] if "text" in it else "",
+                "heuristic": used_heuristic,
                 "gpu_start_ns": gpu_start,
                 "gpu_end_ns": gpu_end,
                 "gpu_start_s": round(gpu_start / 1e9, 4),
@@ -516,7 +727,7 @@ def detect_iterations(
             }
         )
 
-    return results
+    return _flag_real_iterations(results)
 
 
 # ── Interval math helpers ──────────────────────────────────────────

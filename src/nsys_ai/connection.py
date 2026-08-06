@@ -37,10 +37,94 @@ _PROBE_MISS = object()
 _duck_probe_bags: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
 # sqlite3.Connection is not weak-referenceable, so we key by the connection
 # object itself (identity hash).  This keeps a strong reference for the
-# lifetime of the process, which is acceptable in a short-lived CLI.  Using
-# the object directly avoids the id()-reuse hazard (id() can be recycled
-# after a connection is closed and GC'd, giving false cache hits).
+# lifetime of the process.  Using the object directly avoids the id()-reuse
+# hazard (id() can be recycled after a connection is closed and GC'd, giving
+# false cache hits).
+#
+# Size note, since this bag now holds more than probe booleans: memoized skill
+# rows live here too, measured at ~570KB for one connection after a full
+# EvidenceBuilder build (one nvtx_layer_breakdown entry is ~477KB of it), and
+# they are not released on close().  That is bounded per connection rather than
+# growing: the CLI is short-lived, and the web server holds a single Profile for
+# the server's lifetime rather than opening one per request.  Caching across a
+# connection's life is safe because a profile is an immutable capture.
 _sqlite_probe_bags: dict[sqlite3.Connection, dict[str, Any]] = {}
+
+# A DuckDB cursor is a second handle on the same database, and a thread that
+# queries through one must not lose the cache the owning connection filled.
+# Keying the bag on the handle would give each worker thread its own empty bag
+# and re-execute every memoized skill once per thread -- measured as four extra
+# executions across four threads for a skill the owner had already run.
+#
+# Sharing the bag is safe because it stores *results*, not handles: the same
+# skill with the same resolved parameters over the same immutable capture has
+# one answer whichever handle asks. Two threads can still both miss and both
+# compute, which costs duplicate work and never correctness.
+#
+# DuckDB exposes no parent pointer on a cursor, and duckdb_databases() names
+# every in-memory database "memory", so neither can identify the owner. The
+# registry is populated where cursors are created, in Profile.query_conn().
+_handle_owner: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+
+
+def register_derived_handle(handle, owner) -> None:
+    """Record that ``handle`` is a second handle on ``owner``'s database.
+
+    Both are held weakly, so neither outlives its natural lifetime.
+    """
+    if handle is owner:
+        return
+    try:
+        _handle_owner[handle] = owner
+    except TypeError:  # not weak-referenceable; fall back to a private bag
+        pass
+
+
+def _cache_owner(conn):
+    """The object whose bag ``conn`` should read and write."""
+    return _handle_owner.get(conn, conn)
+
+
+# Key under which a DuckDB connection remembers the Parquet cache directory it
+# was opened over.  Stored in the probe bag rather than in a second registry so
+# it inherits the ``_cache_owner`` indirection for free: a worker thread holding
+# a ``.cursor()`` handle resolves to the owning connection's entry and finds the
+# same directory, which is what lets the on-demand nvtx_kernel_map build persist
+# from any thread instead of only from the thread that opened the profile.
+_CACHE_DIR_KEY = "parquet_cache_dir"
+
+
+def register_cache_dir(conn, cache_dir) -> None:
+    """Record the Parquet cache directory ``conn`` serves its views from.
+
+    Only ``open_cached_db`` calls this.  A connection with no entry (direct
+    SQLite attach, ``parquetdir`` export, a bare ``duckdb.connect()`` in a test)
+    has nowhere to persist derived artifacts, and callers must degrade to
+    building them in memory rather than guessing a directory.
+    """
+    _probe_cache_set(conn, _CACHE_DIR_KEY, str(cache_dir))
+
+
+def cache_dir_for_connection(conn) -> str | None:
+    """The Parquet cache directory behind ``conn``, or None when there is none."""
+    value = _probe_cache_get(conn, _CACHE_DIR_KEY)
+    return None if value is _PROBE_MISS else value
+
+
+def forget_nvtx_map_probes(conn) -> None:
+    """Drop the memoized ``nvtx_kernel_map`` shape probes for ``conn``.
+
+    Both probes below answer "no" when the map is absent and then cache that
+    answer for the connection's life.  Since the map is now built lazily, an
+    answer taken before the build would outlive the thing it described and route
+    every NVTX skill onto the wrong aggregate.  The build calls this so the next
+    probe re-reads the catalog.
+    """
+    bag = _duck_probe_bags.get(_cache_owner(conn))
+    if bag is None:
+        return
+    bag.pop("nvtx_path_id", None)
+    bag.pop("nvtx_embedded_tc", None)
 
 
 def _probe_cache_get(conn, key: str):
@@ -49,7 +133,7 @@ def _probe_cache_get(conn, key: str):
         if bag is None:
             return _PROBE_MISS
         return bag.get(key, _PROBE_MISS)
-    bag = _duck_probe_bags.get(conn)
+    bag = _duck_probe_bags.get(_cache_owner(conn))
     if bag is None:
         return _PROBE_MISS
     return bag.get(key, _PROBE_MISS)
@@ -60,13 +144,65 @@ def _probe_cache_set(conn, key: str, value) -> None:
         _sqlite_probe_bags.setdefault(conn, {})[key] = value
         return
     try:
-        _duck_probe_bags.setdefault(conn, {})[key] = value
+        _duck_probe_bags.setdefault(_cache_owner(conn), {})[key] = value
     except TypeError:
         pass
 
 
+SKILL_CACHE_MISS = _PROBE_MISS
+
+# Key under which both adapters memoize resolve_activity_tables().
+#
+# What makes this safe is *not* that the catalog stops changing — it does not.
+# ensure_nvtx_kernel_map materializes nvtx_kernel_map and nvtx_path_dict onto a
+# connection well after it is handed out.  The invariant is narrower: the names
+# these prefixes match are all created before the connection is returned, and
+# nothing afterwards adds or drops one.
+#
+# Two halves to that.  Every DuckDB connection comes from open_cached_db /
+# open_parquetdir_db / open_direct_sqlite, each of which creates its parquet
+# views and its alias views before returning — this matters on DuckDB
+# specifically, where SHOW TABLES lists views too, so caching a pre-alias
+# catalog would pin the versioned name (or, in direct mode where the real tables
+# live under src., pin nothing at all).  And the DDL that does run later names
+# lowercase helper tables, which no CUPTI_ACTIVITY_KIND_* / NVTX_EVENTS prefix
+# matches.  Both halves are asserted in tests/test_activity_table_memoization.py;
+# a new post-open table that did collide would break the second one.
+#
+# The lazy nvtx_kernel_map build stretches this further without breaking it: on
+# a cache-backed connection it creates nvtx_kernel_map and nvtx_path_dict as
+# *views* over newly-published Parquet, and on DuckDB SHOW TABLES lists views.
+# Those two names are still lowercase helpers that no CUPTI_ACTIVITY_KIND_* /
+# NVTX_EVENTS prefix matches, so the second half of the invariant holds for
+# views exactly as it does for tables.
+_ACTIVITY_TABLES_KEY = "activity_tables"
+
+
+def cached_skill_rows(conn, key: str):
+    """Rows a skill already produced for ``key`` on ``conn``, or SKILL_CACHE_MISS.
+
+    Reuses the probe bag above rather than adding a second cache, so both share
+    its connection-object keying — deliberately not ``id()``, which is recycled
+    after a connection is closed and would give false hits across profiles.
+    """
+    return _probe_cache_get(conn, key)
+
+
+def set_cached_skill_rows(conn, key: str, rows) -> None:
+    _probe_cache_set(conn, key, rows)
+
+
 def cached_nvtx_map_uses_path_id(conn) -> bool:
-    """True when ``nvtx_kernel_map`` + ``nvtx_path_dict`` expose ``path_id``."""
+    """True when ``nvtx_kernel_map`` + ``nvtx_path_dict`` expose ``path_id``.
+
+    Ordering is load-bearing and no longer incidental.  The map is built lazily
+    (see ``parquet_cache.materialize_cached_nvtx_kernel_map``), so a caller that
+    probes *before* triggering that build pins False for the connection's whole
+    life and silently routes every NVTX skill onto the wrong aggregate.  Both
+    call sites run ``ensure_nvtx_kernel_map`` first, and that function calls
+    ``forget_nvtx_map_probes`` after a successful build so an early probe is
+    recoverable rather than permanent.
+    """
     cached = _probe_cache_get(conn, "nvtx_path_id")
     if cached is not _PROBE_MISS:
         return cached
@@ -124,13 +260,20 @@ class SQLiteAdapter:
         return self.conn.execute(sql, parameters)
 
     def resolve_activity_tables(self) -> dict[str, str]:
+        cached = _probe_cache_get(self.conn, _ACTIVITY_TABLES_KEY)
+        if cached is not _PROBE_MISS:
+            return dict(cached)
         try:
             cur = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {row[0] for row in cur.fetchall()}
         except sqlite3.Error as exc:
             _log.debug("Failed to resolve activity tables (sqlite): %s", exc, exc_info=True)
+            # Deliberately not cached: a failure here should not pin an empty
+            # answer for the rest of the connection's life.
             return {}
-        return _find_activity_tables(tables)
+        resolved = _find_activity_tables(tables)
+        _probe_cache_set(self.conn, _ACTIVITY_TABLES_KEY, resolved)
+        return dict(resolved)
 
     def detect_nvtx_text_id(self) -> bool:
         try:
@@ -171,12 +314,19 @@ class DuckDBAdapter:
         return self.conn.execute(rewritten_sql, list(parameters) if parameters else [])
 
     def resolve_activity_tables(self) -> dict[str, str]:
+        cached = _probe_cache_get(self.conn, _ACTIVITY_TABLES_KEY)
+        if cached is not _PROBE_MISS:
+            return dict(cached)
         try:
             tables = {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
         except DB_ERRORS as exc:
             _log.debug("Failed to resolve activity tables (duckdb): %s", exc, exc_info=True)
+            # Deliberately not cached: a failure here should not pin an empty
+            # answer for the rest of the connection's life.
             return {}
-        return _find_activity_tables(tables)
+        resolved = _find_activity_tables(tables)
+        _probe_cache_set(self.conn, _ACTIVITY_TABLES_KEY, resolved)
+        return dict(resolved)
 
     def detect_nvtx_text_id(self) -> bool:
         try:
@@ -204,12 +354,73 @@ class DuckDBAdapter:
             return set()
 
 
+_VERSION_SUFFIX_RE = re.compile(r"_V(\d+)")
+
+
+def resolve_table_variant(
+    tables: set[str] | frozenset[str],
+    prefix: str,
+    *,
+    allow_other_suffixes: bool = False,
+) -> str | None:
+    """Pick which of ``prefix``'s name variants a profile actually carries.
+
+    Nsight Systems documents only unversioned ``CUPTI_ACTIVITY_KIND_*`` names,
+    but exports in the wild have carried ``_V2``/``_V3`` suffixes, so the choice
+    has to be made somewhere. The order is:
+
+    1. the exact ``prefix``, when present — an unversioned table is the name the
+       exporter documents, so it wins outright;
+    2. otherwise the highest ``_V<n>``, compared as an *integer* so ``_V10``
+       beats ``_V3`` (lexicographic order gets that backwards);
+    3. otherwise, only when ``allow_other_suffixes``, the alphabetically first
+       remaining name that starts with ``prefix`` *whose remainder is not a bare
+       number*, so an unforeseen future suffix still resolves to something rather
+       than to nothing.
+
+    The ``_V<n>`` match is anchored (``fullmatch``) rather than a bare
+    ``startswith``: ``CUPTI_ACTIVITY_KIND_MEMCPY2`` is a real CUPTI activity
+    kind (peer-to-peer memcpy) and must never be mistaken for a newer variant
+    of ``CUPTI_ACTIVITY_KIND_MEMCPY``. Anchoring tier 2 alone did not deliver
+    that: on a profile carrying only ``..._MEMCPY2`` the permissive tier 3
+    returned it anyway. So tier 3 excludes any remainder that *begins* with a
+    digit — every versioning shape this repo has met is ``_V<n>``, which starts
+    with an underscore, while a trailing digit is CUPTI's way of naming a
+    *sibling* activity kind. Testing the whole remainder rather than its first
+    character was not enough: it rejected ``..._MEMCPY2`` but not the versioned
+    peer-to-peer table ``..._MEMCPY2_V2``, whose remainder ``2_V2`` is not all
+    digits — so a P2P-only export that carried the suffix still had its copies
+    counted as ordinary memcpy traffic.
+
+    The consequence is deliberate: a MEMCPY2-only profile resolves ``memcpy`` to
+    ``None`` rather than reporting P2P copies (a different ``copyKind`` domain)
+    as ordinary memcpy traffic. It puts such a profile in the same class as one
+    that carries no memcpy table at all, and each reader answers that the way it
+    already did — ``memory_transfers`` and ``memory_bandwidth`` abstain naming
+    the missing table, ``kernel_overlap_matrix`` reports a matrix with no
+    ``memcpy_*`` category. This function does not itself decide any of that; do
+    not read a guarantee about caller behaviour out of it.
+    """
+    if prefix in tables:
+        return prefix
+    versioned: list[tuple[int, str]] = []
+    others: list[str] = []
+    for name in tables:
+        if not name.startswith(prefix):
+            continue
+        match = _VERSION_SUFFIX_RE.fullmatch(name[len(prefix) :])
+        if match:
+            versioned.append((int(match.group(1)), name))
+        elif allow_other_suffixes and not name[len(prefix) :][:1].isdigit():
+            others.append(name)
+    if versioned:
+        return max(versioned)[1]
+    return sorted(others)[0] if others else None
+
+
 def _find_activity_tables(tables: set[str]) -> dict[str, str]:
     def _find_by_prefix(prefix: str) -> str | None:
-        if prefix in tables:
-            return prefix
-        candidates = sorted(t for t in tables if t.startswith(prefix))
-        return candidates[0] if candidates else None
+        return resolve_table_variant(tables, prefix, allow_other_suffixes=True)
 
     resolved: dict[str, str] = {}
 
@@ -235,6 +446,14 @@ def _find_activity_tables(tables: set[str]) -> dict[str, str]:
         nvtx_table = _find_by_prefix("NVTX_EVENTS")
     if nvtx_table:
         resolved["nvtx"] = nvtx_table
+
+    sync_table = _find_by_prefix("CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+    if sync_table:
+        resolved["sync"] = sync_table
+
+    sync_type_table = _find_by_prefix("ENUM_CUPTI_SYNC_TYPE")
+    if sync_type_table:
+        resolved["sync_type"] = sync_type_table
 
     return resolved
 

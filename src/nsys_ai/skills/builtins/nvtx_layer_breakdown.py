@@ -22,7 +22,7 @@ from nsys_ai.connection import (
     cached_nvtx_map_uses_path_id,
 )
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, requires_pushpop_nvtx
 
 
 def _pick_nvtx_view(conn, fallback: str) -> str:
@@ -95,6 +95,10 @@ def _execute(conn, **kwargs):
     if report_err:
         return [{"error": report_err}]
 
+    guard = requires_pushpop_nvtx(conn, needs="Layer attribution")
+    if guard:
+        return guard
+
     wrapped = wrap_connection(conn)
 
     limit = int(kwargs.get("limit", 20))
@@ -125,6 +129,16 @@ def _execute(conn, **kwargs):
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
+
+    # Build nvtx_kernel_map on-demand when absent, so the map-backed fast path
+    # below is taken instead of the in-file IEJoin that hangs sqlite_scanner on a
+    # direct-attached profile (issue #257). No-op when the map is already present.
+    try:
+        from ...parquet_cache import ensure_nvtx_kernel_map
+
+        ensure_nvtx_kernel_map(conn)
+    except DB_ERRORS:
+        pass
 
     # Check if nvtx_kernel_map exists or can be built
     adapter = None
@@ -193,9 +207,9 @@ def _execute(conn, **kwargs):
                 ),
                 mapped AS (
                     SELECT
-                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
+                        FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC, nvtx_text ASC) AS nvtx_text,
                         CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                        string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                         kernel_name, k_start, k_end, (k_end - k_start) AS k_dur_ns
                     FROM enclosing
                     GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
@@ -734,7 +748,7 @@ def _execute(conn, **kwargs):
                         ),
                         mapped AS (
                             SELECT
-                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                                 kernel_name,
                                 k_start,
                                 k_end,
@@ -793,7 +807,7 @@ def _execute(conn, **kwargs):
                         ),
                         mapped AS (
                             SELECT
-                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
+                                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC, nvtx_text ASC) AS nvtx_path,
                                 kernel_name,
                                 k_start,
                                 k_end,

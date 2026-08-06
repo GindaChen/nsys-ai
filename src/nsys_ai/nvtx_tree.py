@@ -15,6 +15,17 @@ import logging
 _log = logging.getLogger(__name__)
 
 
+def _runtime_table(profile) -> str | None:
+    """Resolve the CUDA runtime table, which newer exports suffix _V2 / _V3.
+
+    The NVTX table beside it is already resolved at every use, and so is the
+    kernel table; the runtime table was the one left literal. Returns None when
+    the profile has no runtime activity at all, which callers treat as "no
+    launches to attribute" rather than an error.
+    """
+    return profile.adapter.resolve_activity_tables().get("runtime")
+
+
 def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int]:
     """Find CPU threads that are significant kernel launchers on this device.
 
@@ -22,13 +33,19 @@ def _find_kernel_threads(profile, device: int, min_pct: float = 0.5) -> list[int
     count.  This filters out cross-GPU NCCL threads that launch a few
     collectives on this device but bring unrelated NVTX context.
     """
+    runtime_table = _runtime_table(profile)
+    if not runtime_table:
+        return []
     rows = profile._duckdb_query(
         f"""
             SELECT r.globalTid, COUNT(*) as cnt
-            FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+            FROM {runtime_table} r
             JOIN {profile.schema.kernel_table} k ON r.correlationId = k.correlationId
             WHERE k.deviceId = ?
-            GROUP BY r.globalTid ORDER BY cnt DESC
+            -- globalTid breaks the tie: _find_primary_thread takes rows[0], so equal
+            -- launch counts (routine for symmetric launcher threads) would
+            -- otherwise retarget the whole tree and the iteration analysis.
+            GROUP BY r.globalTid ORDER BY cnt DESC, r.globalTid ASC
         """,
         (device,),
     )
@@ -53,7 +70,9 @@ def _get_thread_name(profile, tid: int) -> str:
                 SELECT s.value FROM ThreadNames t
                 JOIN StringIds s ON t.nameId = s.id
                 WHERE t.globalTid = ?
-                ORDER BY t.priority DESC LIMIT 1
+                -- A thread may carry several names at equal priority; without
+                -- a tiebreak the displayed one is whichever row comes first.
+                ORDER BY t.priority DESC, s.value ASC LIMIT 1
             """,
             (tid,),
         )
@@ -73,28 +92,42 @@ def _build_single_thread_tree(
     """
     # Load NVTX for this thread only.
     # Support both schemas: (1) only NVTX_EVENTS.text, (2) textId -> StringIds (COALESCE text, s.value).
+    # The tables are resolved, not named: newer exports suffix them _V2/_V3, and
+    # a hardcoded name here raised "no such table" on an annotated profile — the
+    # very symptom this change set out to remove, from the file it edited.
+    #
+    # Resolved once, for both names. resolve_activity_tables() is not memoised
+    # and rescans the schema on every call — 1.6 ms against the DuckDB adapter,
+    # measured — and this function runs per thread, so a second call here would
+    # double a cost the tree build already pays N times.
+    _tables = profile.adapter.resolve_activity_tables()
+    nvtx_table = _tables.get("nvtx", "NVTX_EVENTS")
+    runtime_table = _tables.get("runtime")
     if profile._nvtx_has_text_id:
         nvtx_rows = profile._duckdb_query(
-            """
+            f"""
             SELECT COALESCE(n.text, s.value) AS text, n.start, n.[end]
-            FROM NVTX_EVENTS n
+            FROM {nvtx_table} n
             LEFT JOIN StringIds s ON n.textId = s.id
             WHERE (n.text IS NOT NULL OR s.value IS NOT NULL) AND n.[end] > n.start
               AND n.globalTid = ?
               AND n.[end] >= ? AND n.start <= ?
-            ORDER BY n.start
+            -- end DESC so an enclosing range precedes one that shares its
+            -- start: the nesting stack below depends on this order, and the
+            -- reverse would make a child appear to contain its parent.
+            ORDER BY n.start, n.[end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
     else:
         nvtx_rows = profile._duckdb_query(
-            """
+            f"""
             SELECT text, start, [end]
-            FROM NVTX_EVENTS
+            FROM {nvtx_table}
             WHERE text IS NOT NULL AND [end] > start
               AND globalTid = ?
               AND [end] >= ? AND start <= ?
-            ORDER BY start
+            ORDER BY start, [end] DESC, text
         """,
             (tid, trim[0] - pad, trim[1]),
         )
@@ -104,11 +137,13 @@ def _build_single_thread_tree(
     # Load runtime calls for this thread covering the discovered NVTX span set.
     # Using NVTX-derived bounds keeps GPU projection (start/end/depth/path)
     # stable across adjacent timeline tiles near boundaries.
+    if not runtime_table:
+        return []
     rt_lo = min(int(n["start"]) for n in nvtx_rows)
     rt_hi = max(int(n["end"]) for n in nvtx_rows) + int(2e9)
     rt_rows = profile._duckdb_query(
-        """
-            SELECT start, [end], correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME
+        f"""
+            SELECT start, [end], correlationId FROM {runtime_table}
             WHERE globalTid = ? AND start >= ? AND [end] <= ?  ORDER BY start
         """,
         (tid, rt_lo, rt_hi),
@@ -213,6 +248,14 @@ def build_nvtx_tree(profile, device: int, trim: tuple[int, int], pad: int = int(
 
     Each node: {name, start, end, type: "nvtx"|"kernel", stream?, children: [...]}
     """
+    # A capture taken without NVTX has no table to read. Both callers — the
+    # analyze report's hierarchy summary and export-csv's per-kernel NVTX path —
+    # previously reached the query and died with a raw SQL error naming the
+    # table, on a profile that is perfectly valid. There is simply no hierarchy
+    # to build.
+    if not profile.adapter.resolve_activity_tables().get("nvtx"):
+        return []
+
     kmap = profile.kernel_map(device)
     if not kmap:
         return []

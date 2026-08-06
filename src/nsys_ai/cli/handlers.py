@@ -13,6 +13,19 @@ import os
 import subprocess  # nosec B404
 import sys
 
+
+def _cmd_profile(args, _profile):
+    """Run the public profiling wrapper."""
+    try:
+        from nsys_ai.profile_command import run_profile_command
+
+        exit_code = run_profile_command(args)
+    except KeyboardInterrupt:
+        print("Profile cancelled.", file=sys.stderr)
+        raise SystemExit(130) from None
+    if exit_code:
+        raise SystemExit(exit_code)
+
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------
@@ -380,6 +393,147 @@ def _cmd_info(args, _profile):
             )
 
 
+def _cmd_doctor(args, _profile):
+    """Diagnose the environment and (optionally) a profile's health.
+
+    Exit code follows the brew/npm consensus: warnings are exit 0, failures
+    are non-zero. ``--strict`` promotes warnings to failures for CI use.
+    """
+    import json as _json
+
+    from nsys_ai.doctor import format_doctor_text, run_doctor
+
+    profile_path = getattr(args, "profile", None)
+    report = run_doctor(
+        profile_path,
+        deep=getattr(args, "deep", False),
+    )
+
+    fmt = getattr(args, "format", "text") or "text"
+    if fmt == "json":
+        print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_doctor_text(report, verbose=getattr(args, "verbose", False)))
+
+    if report.has_failures():
+        sys.exit(1)
+    if getattr(args, "strict", False) and report.has_warnings():
+        sys.exit(1)
+
+
+def _cmd_warm(args, _profile):
+    """Build the Parquet cache and the NVTX kernel map before anything reads them.
+
+    Both halves already existed and neither was reachable up front: opening with
+    ``cache_mode="parquet"`` forces the base-table build, and
+    ``materialize_cached_nvtx_kernel_map_outcome`` runs the stack sweep and
+    writes it back into the cache directory. What was missing is a verb that runs
+    them together, so the sweep — seconds on a small capture, around a minute on
+    a multi-gigabyte one — lands here instead of on whoever happens to issue the
+    first NVTX-attribution query.
+
+    Exits non-zero, with the reason, when either half could not be persisted: a
+    warm that silently did not warm defeats the point of running it. That is why
+    the map build is asked for its outcome rather than its bool — the bool
+    cannot tell "this profile has nothing to attribute" from "the cache could
+    not be written", and only the second is a failure.
+    """
+    import time
+    from pathlib import Path
+
+    from nsys_ai import parquet_cache
+    from nsys_ai.connection import cache_dir_for_connection
+
+    path = _profile.resolve_profile_path(args.profile)
+    base_was_valid = parquet_cache.is_cache_valid(path)
+
+    started = time.perf_counter()
+    with _profile.open(path, cache_mode="parquet") as prof:
+        # This spans the whole open — the build when one is needed, plus the
+        # schema probe and metadata discovery Profile.__init__ always runs. It
+        # is reported as such below rather than as a build time.
+        open_s = time.perf_counter() - started
+        profile_path = prof.path
+        if prof.db is None:
+            # Profile swallowed the build failure and fell back to SQLite, which
+            # is right for a command that just wants an answer and wrong for
+            # this one. It records the exception so warm can name it without
+            # re-running an ETL that may have run for minutes before failing.
+            failed = prof.cache_error
+            why = (
+                f"{failed.__class__.__name__}: {failed}"
+                if failed is not None
+                else "no error was recorded"
+            )
+            print(f"cannot warm: the Parquet cache is unavailable ({why})", file=sys.stderr)
+            sys.exit(1)
+        registered = cache_dir_for_connection(prof.db)
+        if registered is None:
+            print(
+                "cannot warm: this profile is not served from a Parquet cache",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cache_dir = Path(registered)
+        map_was_present = (cache_dir / "nvtx_kernel_map.parquet").is_file()
+
+        map_started = time.perf_counter()
+        outcome, detail = parquet_cache.materialize_cached_nvtx_kernel_map_outcome(prof.db)
+        map_s = time.perf_counter() - map_started
+        mapped = outcome == parquet_cache.MAP_MATERIALIZED
+        map_rows = (
+            prof.db.execute("SELECT count(*) FROM nvtx_kernel_map").fetchone()[0] if mapped else 0
+        )
+        map_files = {"nvtx_kernel_map.parquet", "nvtx_path_dict.parquet"}
+        base_count = sum(1 for p in cache_dir.glob("*.parquet") if p.name not in map_files)
+
+    # Confirmed failures only. MAP_NO_ATTRIBUTION and MAP_SOURCES_MISSING mean
+    # the sweep had nothing to write, which is not a failure of `warm`.
+    #
+    # The three below all leave this process unable to serve the map, which is
+    # what `warm` promises and so what it must report. They are not the same on
+    # disk, though: MAP_NOT_WRITABLE and MAP_NO_CACHE_DIR persisted nothing,
+    # while MAP_VIEWS_FAILED wrote both Parquets and only failed to create the
+    # views over them — so a later process finds them by glob and skips the
+    # sweep. Reporting it is still right; describing it as "could not write"
+    # would not be.
+    if outcome in (
+        parquet_cache.MAP_NOT_WRITABLE,
+        parquet_cache.MAP_VIEWS_FAILED,
+        parquet_cache.MAP_NO_CACHE_DIR,
+    ):
+        print(
+            f"cannot warm: the NVTX kernel map could not be persisted ({detail})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Profile: {profile_path}")
+    print(f"Cache:   {cache_dir}")
+    base_state = "already built" if base_was_valid else "built"
+    print(f"  base tables: {base_count} parquet files ({base_state}; opened in {open_s:.2f}s)")
+    if mapped:
+        map_state = "already built" if map_was_present else "built"
+        print(f"  nvtx kernel map: {map_rows} rows ({map_state}, {map_s:.2f}s)")
+    elif outcome == parquet_cache.MAP_SOURCES_MISSING:
+        print(f"  nvtx kernel map: nothing for the sweep to read — {detail} ({map_s:.2f}s)")
+    else:
+        print(
+            "  nvtx kernel map: the sweep found no kernel inside any NVTX range, "
+            f"so there was nothing to cache ({map_s:.2f}s)"
+        )
+
+    if outcome == parquet_cache.MAP_NO_ATTRIBUTION:
+        # The sweep ran to completion and published nothing, so the next caller
+        # pays it again. Claiming "already warm" here would be the one lie this
+        # verb cannot afford.
+        print("partly warm: the empty sweep is not cached, so it runs again on the next call")
+    elif base_was_valid and (map_was_present or outcome == parquet_cache.MAP_SOURCES_MISSING):
+        print("already warm")
+    else:
+        print(f"warmed in {time.perf_counter() - started:.2f}s")
+
+
 def _cmd_analyze(args, _profile):
     fmt = getattr(args, "format", "text") or "text"
     if fmt == "json":
@@ -451,6 +605,27 @@ def _write_evidence_report_or_die(report, out_path: str) -> None:
     )
 
 
+def _print_skipped_section(report, stream) -> None:
+    """Print the analyses that could not run, or nothing when they all ran.
+
+    Beside the findings, never among them: an abstention says the analysis had
+    no coverage, not that the profile has a problem. A report with no
+    abstentions prints exactly what it printed before this section existed.
+    """
+    if not report.skipped:
+        return
+    print(f"── Skipped ({len(report.skipped)}) ──", file=stream, flush=True)
+    for entry in report.skipped:
+        # The analyzer name leads because that is the one the user can act on:
+        # it is what ``evidence build --analyzers`` accepts. The skill follows
+        # in parentheses as the handle for ``skill run``.
+        print(
+            f"  {entry.analyzer} ({entry.skill}) — skipped: {entry.reason}",
+            file=stream,
+            flush=True,
+        )
+
+
 def _cmd_analyze_json(args, _profile):
     """Emit a v0.1 evidence findings report as JSON.
 
@@ -476,6 +651,10 @@ def _cmd_analyze_json(args, _profile):
         # single source of truth.
         payload = report.to_dict()
         print(_json.dumps(payload, indent=2))
+        # stdout stays a single JSON document, so the human-readable notice
+        # goes to stderr — the same split `_write_evidence_report_or_die`
+        # already uses for its "Saved N finding(s)" line.
+        _print_skipped_section(report, sys.stderr)
 
         out = getattr(args, "output", None)
         if out:
@@ -487,8 +666,83 @@ def _cmd_report(args, _profile):
     _cmd_analyze(args, _profile)
 
 
+def _resolve_diff_before(args):
+    """Fill and resolve the diff ``before`` side, including baseline refs.
+
+    ``--against`` (when given) supplies the before side; otherwise the ``before``
+    positional is used. Any ``baseline:<name>`` token on either side is resolved
+    to the stored snapshot path so the rest of ``_cmd_diff`` sees an ordinary
+    profile path.
+    """
+    from nsys_ai.baseline import parse_baseline_ref, resolve_baseline_ref
+
+    against = getattr(args, "against", None)
+    if against:
+        if getattr(args, "before", None):
+            print(
+                "Error: pass the baseline via --against or as the 'before' "
+                "positional, not both",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        args.before = against
+
+    if not getattr(args, "before", None):
+        print(
+            "Error: a 'before' profile is required (positional path or --against)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    for attr in ("before", "after"):
+        ref = getattr(args, attr, None)
+        if parse_baseline_ref(ref) is None:
+            continue
+        try:
+            setattr(args, attr, resolve_baseline_ref(ref))
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+
+def _cmd_baseline_tag(args, _profile):
+    from nsys_ai.baseline import tag_baseline
+
+    try:
+        meta = tag_baseline(args.name, args.profile, args.reason)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Tagged baseline {meta['name']!r} ({meta['profile_id']})")
+
+
+def _cmd_baseline_list(args, _profile):
+    from nsys_ai.baseline import list_baselines
+
+    entries = list_baselines()
+    if not entries:
+        print("No baselines tagged yet.")
+        return
+    for meta in entries:
+        print(f"{meta.get('name')}\t{meta.get('profile_id')}\t{meta.get('tagged_at')}")
+
+
+def _cmd_baseline_show(args, _profile):
+    import json as _json
+
+    from nsys_ai.baseline import show_baseline
+
+    try:
+        meta = show_baseline(args.name)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(_json.dumps(meta, indent=2, sort_keys=True))
+
+
 def _cmd_diff(args, _profile):
-    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
+    from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
         format_diff_markdown,
         format_diff_markdown_multi,
@@ -497,9 +751,40 @@ def _cmd_diff(args, _profile):
         to_diff_json,
     )
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
+    from nsys_ai.sol_gate import (
+        SolGateError,
+        evaluate_sol_gates,
+        parse_sol_gate,
+        resolve_theoretical_flops,
+    )
+
+    _resolve_diff_before(args)
 
     no_ai = getattr(args, "no_ai", False)
     gate_summary = None
+    gate_pct = getattr(args, "gate", None)
+    regression_pct = gate_pct if gate_pct is not None else STEP_TIME_REGRESSION_PCT
+    decision = None
+    if getattr(args, "accept", False):
+        decision = "accepted"
+    elif getattr(args, "reject", False):
+        decision = "rejected"
+    reason = getattr(args, "reason", None)
+    if decision is not None:
+        if getattr(args, "chat", False):
+            print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
+            sys.exit(2)
+        if not reason or not reason.strip():
+            print("Error: --reason is required with --accept/--reject", file=sys.stderr)
+            sys.exit(2)
+        if getattr(args, "output", None) and os.path.abspath(args.output) == os.path.abspath(
+            "diff.json"
+        ):
+            print(
+                "Error: --output diff.json conflicts with the decision record path",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     def _narrative_for(summary):
         if args.format not in ("terminal", "markdown"):
@@ -561,6 +846,7 @@ def _cmd_diff(args, _profile):
                 trim_after=trim_after,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = summary
             narrative = _narrative_for(summary)
@@ -580,6 +866,7 @@ def _cmd_diff(args, _profile):
                 trim=trim,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = summary
             narrative = _narrative_for(summary)
@@ -600,6 +887,7 @@ def _cmd_diff(args, _profile):
                 trim=trim,
                 limit=args.limit,
                 sort=args.sort,
+                regression_pct=regression_pct,
             )
             gate_summary = global_summary
             # For per-GPU we keep top-k small to avoid overwhelming output.
@@ -614,6 +902,7 @@ def _cmd_diff(args, _profile):
                     trim=trim,
                     limit=per_gpu_limit,
                     sort=args.sort,
+                    regression_pct=regression_pct,
                 )
 
             narrative = _narrative_for(global_summary)
@@ -627,6 +916,75 @@ def _cmd_diff(args, _profile):
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
 
+    # Absolute speed-of-light gate. Evaluated on the *after* profile, since that
+    # is the candidate under judgement, and independently of the relative gate —
+    # a run can fail for regressing against its baseline, for sitting below its
+    # hardware ceiling, or for both.
+    sol_results = []
+    sol_specs_raw = getattr(args, "gate_sol", None) or []
+    if sol_specs_raw:
+        try:
+            if len(sol_specs_raw) > 1:
+                # --theoretical-flops describes one region, so a second target
+                # would silently be measured against the first one's FLOPs.
+                raise SolGateError(
+                    "only one --gate-sol target may be given, because "
+                    "--theoretical-flops describes a single region; a second "
+                    "target would be measured against the wrong FLOP count"
+                )
+            sol_specs = [parse_sol_gate(s) for s in sol_specs_raw]
+            sol_flops = resolve_theoretical_flops(getattr(args, "theoretical_flops", None))
+            with _profile.open(args.after) as sol_after:
+                sol_conn = sol_after.query_conn()
+                sol_results = evaluate_sol_gates(
+                    sol_conn,
+                    sol_specs,
+                    theoretical_flops=sol_flops,
+                    peak_tflops=getattr(args, "peak_tflops", None),
+                    source=getattr(args, "gate_sol_source", "nvtx"),
+                    # Match the relative gate's scope on the same command line.
+                    device_id=getattr(args, "gpu", None),
+                    occurrence_index=getattr(args, "gate_sol_occurrence", 1),
+                    num_gpus=getattr(args, "gate_sol_num_gpus", 1),
+                )
+        except SolGateError as exc:
+            # Configuration/measurement problems exit 2, distinct from a gate
+            # failure (1), so CI can tell "misconfigured" from "regressed".
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    sol_failed = [r for r in sol_results if not r.passed]
+
+    if decision is not None and sol_failed:
+        # Refuse to persist a decision that the same invocation contradicts. The
+        # record carries no speed-of-light field, so writing "accepted" here
+        # would leave an auditable artefact saying the run was fine next to a
+        # process that exited 1 because it was not.
+        detail = ", ".join(
+            f"{r.region} at {r.mfu_pct:.1f}% (needs {r.threshold_pct:.1f}%)" for r in sol_failed
+        )
+        print(
+            f"Error: refusing to record '{decision}' because a speed-of-light gate "
+            f"failed: {detail}. Re-run without --accept/--reject, or resolve the gate.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if decision is not None and gate_summary is not None:
+        try:
+            decision_path, _, decision_warnings = write_diff_decision_json(
+                gate_summary,
+                decision=decision,
+                reason=reason or "",
+                path="diff.json",
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        for warning in decision_warnings:
+            print(f"Warning: {warning}", file=sys.stderr)
+        print(f"Diff decision written to {decision_path}", file=sys.stderr)
+
     if args.output:
         out_dir = os.path.dirname(args.output)
         if out_dir:
@@ -637,17 +995,49 @@ def _cmd_diff(args, _profile):
     else:
         print(out, end="")
 
-    if getattr(args, "exit_on_regression", False) and gate_summary is not None:
-        if gate_summary.verdict == "regression_likely":
-            print(
-                "Diff gate failed: "
-                f"verdict={gate_summary.verdict} "
-                f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
-                f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
-                f"comparability_confidence={gate_summary.comparability_confidence:.3f}.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    # Report every speed-of-light target, passing or failing, so the CI log shows
+    # what was actually checked rather than only what broke.
+    for r in sol_results:
+        headroom = f" headroom={r.headroom_ms:.1f}ms" if r.headroom_ms is not None else ""
+        # Echo the scope the MFU was measured over — occurrence, GPU count and
+        # device each move the number, so a bare percentage is not reviewable.
+        scope = (
+            f" [source={getattr(args, 'gate_sol_source', 'nvtx')}"
+            f" occurrence={getattr(args, 'gate_sol_occurrence', 1)}"
+            f" num_gpus={getattr(args, 'gate_sol_num_gpus', 1)}"
+            + (f" gpu={args.gpu}" if getattr(args, "gpu", None) is not None else "")
+            + "]"
+        )
+        print(
+            f"SOL gate {'PASS' if r.passed else 'FAIL'}: region={r.region} "
+            f"mfu={r.mfu_pct:.1f}% threshold={r.threshold_pct:.1f}%{headroom}{scope}",
+            file=sys.stderr,
+        )
+
+    gate_enabled = getattr(args, "exit_on_regression", False) or gate_pct is not None
+    relative_failed = (
+        gate_enabled and gate_summary is not None and gate_summary.verdict == "regression_likely"
+    )
+    if relative_failed:
+        print(
+            "Diff gate failed: "
+            f"verdict={gate_summary.verdict} "
+            f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
+            f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
+            f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+            f"gate_pct={regression_pct:.2f}%.",
+            file=sys.stderr,
+        )
+
+    if sol_failed:
+        detail = ", ".join(
+            f"{r.region} at {r.mfu_pct:.1f}% of speed-of-light (needs {r.threshold_pct:.1f}%)"
+            for r in sol_failed
+        )
+        print(f"SOL gate failed: {detail}.", file=sys.stderr)
+
+    if relative_failed or sol_failed:
+        sys.exit(1)
 
 
 def _run_diff_chat(args, _profile):
@@ -929,7 +1319,90 @@ def _cmd_timeline_web(args, _profile):
             open_browser=not args.no_browser,
             findings_path=getattr(args, "findings", None),
             auto_findings=auto_findings,
+            loop_before=getattr(args, "loop_before", None),
+            loop_after=getattr(args, "loop_after", None),
+            loop_h100_preset=getattr(args, "h100_preset", False),
         )
+
+
+def _cmd_loop(args, _profile):
+    """Run guided loop mode on web or TUI surfaces."""
+    from pathlib import Path
+
+    trim = _parse_trim(args)
+    before_path = getattr(args, "before", None)
+    after_path = getattr(args, "after", None)
+    if getattr(args, "h100_preset", False):
+        from nsys_ai.loop_state import detect_h100_replay_preset
+
+        preset = detect_h100_replay_preset()
+        if preset:
+            before_path = before_path or preset.get("before_path")
+            after_path = after_path or preset.get("after_path")
+        elif not before_path:
+            from nsys_ai.loop_state import h100_preset_download_hint
+
+            print(
+                "Error: --h100-preset was requested, but the H100 replay profiles were not found locally.",
+                file=sys.stderr,
+            )
+            print(h100_preset_download_hint(), file=sys.stderr)
+            sys.exit(1)
+    if not before_path:
+        print("Error: loop requires a before profile, or use --h100-preset.", file=sys.stderr)
+        sys.exit(1)
+    before_path = str(Path(before_path).expanduser())
+    if not Path(before_path).exists():
+        print(f"Error: before profile not found: {before_path}", file=sys.stderr)
+        print(
+            "Pass a real .sqlite/.nsys-rep path. Example: nsys-ai loop data/before.sqlite --after data/after.sqlite",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if after_path:
+        after_path = str(Path(after_path).expanduser())
+        if not Path(after_path).exists():
+            print(f"Error: after profile not found: {after_path}", file=sys.stderr)
+            print("Omit --after to enter the candidate path later in the web UI.", file=sys.stderr)
+            sys.exit(1)
+
+    if args.surface == "timeline-web":
+        from nsys_ai.web import serve_timeline
+
+        try:
+            prof_ctx = _profile.open(before_path)
+        except Exception as exc:
+            print(f"Error: could not open before profile: {before_path}", file=sys.stderr)
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        with prof_ctx as prof:
+            if args.gpu is not None:
+                devices = args.gpu
+            else:
+                devices = prof.meta.devices if prof.meta.devices else [0]
+            serve_timeline(
+                prof,
+                devices,
+                trim,
+                port=args.port,
+                open_browser=not args.no_browser,
+                loop_before=before_path,
+                loop_after=after_path,
+                loop_h100_preset=bool(getattr(args, "h100_preset", False)),
+            )
+        return
+
+    if args.surface == "timeline":
+        from nsys_ai.timeline import run_timeline
+
+        gpu = args.gpu if args.gpu is not None else 0
+        run_timeline(before_path, gpu, trim, min_ms=0, loop_after=after_path)
+        return
+
+    from nsys_ai.tree import run_tui
+
+    gpu = args.gpu if args.gpu is not None else 0
+    run_tui(before_path, gpu, trim, max_depth=-1, min_ms=0, loop_after=after_path)
 
 
 def _cmd_tui(args, _profile):
@@ -1003,6 +1476,7 @@ def _cmd_evidence(args, _profile):
         if fmt == "json":
             payload = report.to_dict()
             print(json.dumps(payload, indent=2))
+            _print_skipped_section(report, sys.stderr)
         else:
             sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
             print(f"── Evidence Findings ({len(report.findings)}) ──")
@@ -1012,6 +1486,7 @@ def _cmd_evidence(args, _profile):
                 print(f"  {icon} [{f.type}] {f.label}  ({dur_ms:.1f}ms)")
                 if f.note:
                     print(f"      {f.note}")
+            _print_skipped_section(report, sys.stdout)
 
         out = getattr(args, "output", None)
         if out:

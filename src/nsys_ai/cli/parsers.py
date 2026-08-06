@@ -7,6 +7,7 @@ Extracted from app.py to reduce file size and improve maintainability.
 from __future__ import annotations
 
 import argparse
+import math
 
 from nsys_ai.cutracer.installer import NVBIT_VERSION
 
@@ -16,21 +17,27 @@ from .handlers import (
     _cmd_agent_guide,
     _cmd_analyze,
     _cmd_ask,
+    _cmd_baseline_list,
+    _cmd_baseline_show,
+    _cmd_baseline_tag,
     _cmd_chat,
     _cmd_cutracer,
     _cmd_diff,
     _cmd_diff_web,
+    _cmd_doctor,
     _cmd_evidence,
     _cmd_export,
     _cmd_export_csv,
     _cmd_export_json,
     _cmd_info,
     _cmd_iters,
+    _cmd_loop,
     _cmd_markdown,
     _cmd_nccl,
     _cmd_open,
     _cmd_overlap,
     _cmd_perfetto,
+    _cmd_profile,
     _cmd_report,
     _cmd_root_cause,
     _cmd_search,
@@ -42,6 +49,7 @@ from .handlers import (
     _cmd_tree,
     _cmd_tui,
     _cmd_viewer,
+    _cmd_warm,
     _cmd_web,
 )
 
@@ -50,11 +58,148 @@ from .handlers import (
 # ---------------------------------------------------------------------------
 
 
+def _positive_pct(value: str) -> float:
+    pct = float(value)
+    # Reject nan/inf too: NaN compares false against everything and inf exceeds
+    # any delta, so either would make the CI gate silently never fire (fail-open).
+    if not math.isfinite(pct) or pct <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive percentage, got {value}")
+    return pct
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+class _WorkloadRemainder(argparse.Action):
+    """Require one workload token while preserving every remaining token."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not values or values == ["--"]:
+            parser.error("a workload command is required")
+        setattr(namespace, self.dest, values)
+
+
+def _register_profile_parser(sub):
+    p = sub.add_parser("profile", help="Capture and validate a local Nsight Systems profile")
+    p.add_argument("-o", "--output", default=None, help="Fresh artifact directory")
+    p.add_argument("--nsys", default="nsys", help="Nsight Systems executable")
+    p.add_argument(
+        "--env",
+        dest="public_env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Persisted public environment override (repeatable)",
+    )
+    p.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Secret environment variable name (repeatable)",
+    )
+    p.add_argument(
+        "--env-policy",
+        choices=("inherit", "clean"),
+        default="inherit",
+        help="Workload environment base (default: inherit)",
+    )
+    p.add_argument("--warmup-steps", type=_nonnegative_int, default=0)
+    p.add_argument("--profile-steps", type=_positive_int, default=1)
+    p.add_argument("--seed", type=_nonnegative_int, default=None)
+    p.add_argument("--expected-gpu-count", type=_positive_int, default=None)
+    p.add_argument("--expected-rank-count", type=_positive_int, default=None)
+    p.add_argument("--timeout", type=_positive_int, default=None, metavar="SECONDS")
+    p.add_argument(
+        "--trace",
+        default="auto",
+        metavar="auto|API,API",
+        help="Trace domains (default: auto)",
+    )
+    p.add_argument(
+        "--sample",
+        choices=("none", "process-tree", "system-wide"),
+        default="none",
+    )
+    p.add_argument(
+        "--cpuctxsw",
+        choices=("none", "process-tree", "system-wide"),
+        default="none",
+    )
+    p.add_argument(
+        "--capture-range",
+        choices=("none", "cudaProfilerApi", "nvtx", "hotkey"),
+        default="none",
+    )
+    p.add_argument("--cuda-memory-usage", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "workload",
+        nargs=argparse.REMAINDER,
+        action=_WorkloadRemainder,
+        help="Workload command and arguments; wrapper options must precede it",
+    )
+    p.set_defaults(handler=_cmd_profile)
+    return p
+
+
 def _register_info_parser(sub):
     """Register the ``info`` subcommand on *sub*."""
     p = sub.add_parser("info", help="Show profile metadata and GPU info")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.set_defaults(handler=_cmd_info)
+    return p
+
+
+def _register_doctor_parser(sub):
+    """Register the ``doctor`` subcommand on *sub*."""
+    p = sub.add_parser(
+        "doctor",
+        help="Diagnose the environment and a profile's health",
+    )
+    p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Optional profile (.sqlite or .nsys-rep) for a health summary",
+    )
+    p.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="Show hints for skipped checks too"
+    )
+    p.add_argument(
+        "--strict", action="store_true", help="Exit non-zero on warnings (for CI)"
+    )
+    p.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run slow checks too (e.g. NCCL eager/inductor split); off by default",
+    )
+    p.set_defaults(handler=_cmd_doctor)
+    return p
+
+
+def _register_warm_parser(sub):
+    """Register the ``warm`` subcommand on *sub*."""
+    p = sub.add_parser(
+        "warm",
+        help="Build the Parquet cache and NVTX kernel map ahead of the first query",
+    )
+    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    p.set_defaults(handler=_cmd_warm)
     return p
 
 
@@ -212,6 +357,41 @@ def _register_root_cause_parser(sub):
     return p
 
 
+def _register_agent_parser(sub):
+    """Register the ``agent`` subcommand tree on *sub*.
+
+    Lives on the public parser only. ``agent`` is not in ``app.main``'s
+    ``legacy_commands`` set, so ``nsys-ai agent ...`` always builds the public
+    parser and a second registration on the legacy parser would be dead.
+    """
+    p = sub.add_parser("agent", help="AI agent for profile analysis")
+    agent_sub = p.add_subparsers(dest="agent_action")
+    sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
+    sp_analyze.add_argument("profile", help="Path to .sqlite file")
+    sp_analyze.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (recommended for large profiles)",
+    )
+    sp_analyze.add_argument(
+        "--evidence", action="store_true", help="Also output evidence findings JSON"
+    )
+    sp_analyze.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output path for findings JSON (default: findings.json)",
+    )
+    sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
+    sp_ask.add_argument("profile", help="Path to .sqlite file")
+    sp_ask.add_argument("question", help="Natural language question")
+    p.set_defaults(handler=_cmd_agent)
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Main parser — public CLI surface visible to ``nsys-ai --help``
 # ---------------------------------------------------------------------------
@@ -225,10 +405,13 @@ def _build_parser():
     sub = parser.add_subparsers(
         dest="command",
         metavar=(
-            "{open,web,timeline-web,chat,ask,agent-guide,"
-            "info,skill,evidence,report,diff,diff-web,export,help}"
+            "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
+            "profile,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "root-cause,help}"
         ),
     )
+
+    _register_profile_parser(sub)
 
     # Public commands (simplified)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
@@ -272,7 +455,45 @@ def _build_parser():
     p.add_argument(
         "--auto-analyze", action="store_true", help="Run AI analysis on startup and show findings"
     )
+    p.add_argument("--loop-before", default=None, help="Loop mode before profile path")
+    p.add_argument("--loop-after", default=None, help="Loop mode after profile path")
+    p.add_argument(
+        "--h100-preset",
+        action="store_true",
+        help="Auto-fill H100 replay before/after paths when available",
+    )
     p.set_defaults(handler=_cmd_timeline_web)
+
+    p = sub.add_parser("loop", help="Guided diagnose->propose->reprofile->diff->accept workflow")
+    p.add_argument(
+        "before",
+        nargs="?",
+        help="Path to baseline profile (.sqlite or .nsys-rep); optional with --h100-preset",
+    )
+    p.add_argument("--after", default=None, help="Path to candidate profile (.sqlite or .nsys-rep)")
+    p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: first GPU)")
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        required=False,
+        metavar=("START_S", "END_S"),
+        help="Time window in seconds",
+    )
+    p.add_argument(
+        "--surface",
+        choices=["timeline-web", "timeline", "tree"],
+        default="timeline-web",
+        help="Workflow surface (default: timeline-web)",
+    )
+    p.add_argument("--port", type=int, default=8144, help="HTTP port for timeline-web")
+    p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser (timeline-web)")
+    p.add_argument(
+        "--h100-preset",
+        action="store_true",
+        help="Auto-fill H100 replay before/after paths when available",
+    )
+    p.set_defaults(handler=_cmd_loop)
 
     p = sub.add_parser("chat", help="AI chat TUI")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
@@ -292,8 +513,21 @@ def _build_parser():
     p.set_defaults(handler=_cmd_report)
 
     p = sub.add_parser("diff", help="Compare two profiles (before/after)")
-    p.add_argument("before", help="Path to baseline profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "before",
+        nargs="?",
+        default=None,
+        help="Path to baseline profile (.sqlite or .nsys-rep), or a "
+        "'baseline:<name>' reference. Optional when --against is given.",
+    )
     p.add_argument("after", help="Path to candidate profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "--against",
+        default=None,
+        metavar="REF",
+        help="Baseline to diff against, supplying the before side "
+        "(e.g. 'baseline:<name>' or a profile path)",
+    )
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: all GPUs)")
     p.add_argument(
         "--trim",
@@ -343,6 +577,82 @@ def _build_parser():
         action="store_true",
         help="Exit with status 1 when the diff verdict is regression_likely (CI gate)",
     )
+    p.add_argument(
+        "--gate",
+        type=_positive_pct,
+        default=None,
+        metavar="PCT",
+        help="Step-time regression threshold in percent for the verdict and CI gate "
+        "(implies --exit-on-regression; default: 5.0)",
+    )
+    p.add_argument(
+        "--gate-sol",
+        action="append",
+        default=None,
+        metavar="REGION:PCT",
+        help="Absolute speed-of-light gate: require REGION to stay at or above PCT "
+        "percent of its hardware ceiling in the after profile (e.g. 'attn:60'). "
+        "Unlike --gate this is an absolute target, so it does not drift when the "
+        "baseline is itself slow. Requires --theoretical-flops, which describes "
+        "this one region, so only a single target may be given",
+    )
+    p.add_argument(
+        "--gate-sol-source",
+        choices=("nvtx", "kernel"),
+        default="nvtx",
+        help="Whether --gate-sol REGION names an NVTX range or a kernel "
+        "(default: nvtx)",
+    )
+    p.add_argument(
+        "--gate-sol-occurrence",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Which occurrence of an NVTX region --gate-sol measures, 1-based "
+        "(default: 1). Occurrence 1 is often a warmup/compile iteration, so a "
+        "steady-state index usually gives a more representative gate",
+    )
+    p.add_argument(
+        "--gate-sol-num-gpus",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of GPUs the --theoretical-flops figure covers (default: 1). "
+        "Use the world size when passing whole-job FLOPs, or the peak is scaled "
+        "wrongly and the MFU is off by that factor",
+    )
+    p.add_argument(
+        "--theoretical-flops",
+        type=float,
+        default=None,
+        metavar="FLOPS",
+        help="Model FLOPs per step, required by --gate-sol. Cannot be derived from a "
+        "trace, so it must be supplied (see the theoretical_flops skill to compute it)",
+    )
+    p.add_argument(
+        "--peak-tflops",
+        type=float,
+        default=None,
+        metavar="TFLOPS",
+        help="GPU peak TFLOPS used as the speed-of-light ceiling for --gate-sol "
+        "(auto-detected from the profile's GPU when omitted)",
+    )
+    decision = p.add_mutually_exclusive_group()
+    decision.add_argument(
+        "--accept",
+        action="store_true",
+        help="Persist an accepted user decision to diff.json (requires --reason)",
+    )
+    decision.add_argument(
+        "--reject",
+        action="store_true",
+        help="Persist a rejected user decision to diff.json (requires --reason)",
+    )
+    p.add_argument(
+        "--reason",
+        default=None,
+        help="Reason text required when using --accept or --reject",
+    )
     p.set_defaults(handler=_cmd_diff)
 
     p = sub.add_parser("diff-web", help="Serve web diff viewer for two profiles")
@@ -360,6 +670,22 @@ def _build_parser():
     p.add_argument("--port", type=int, default=8145, help="HTTP port (default: 8145)")
     p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     p.set_defaults(handler=_cmd_diff_web)
+
+    p = sub.add_parser("baseline", help="Manage named baseline snapshots")
+    bl_sub = p.add_subparsers(dest="baseline_action", required=True)
+
+    sp = bl_sub.add_parser("tag", help="Record a tagged baseline snapshot")
+    sp.add_argument("name", help="Baseline name (e.g. 'main')")
+    sp.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    sp.add_argument("--reason", required=True, help="Why this snapshot is a baseline")
+    sp.set_defaults(handler=_cmd_baseline_tag)
+
+    sp = bl_sub.add_parser("list", help="List tagged baselines")
+    sp.set_defaults(handler=_cmd_baseline_list)
+
+    sp = bl_sub.add_parser("show", help="Show one tagged baseline")
+    sp.add_argument("name", help="Baseline name to inspect")
+    sp.set_defaults(handler=_cmd_baseline_show)
 
     p = sub.add_parser("export", help="Export Perfetto JSON traces")
     _add_gpu_trim(p, gpu_required=False)
@@ -583,7 +909,10 @@ def _build_parser():
 
     # Agent-facing commands (promoted from legacy so --help exposes them)
     _register_info_parser(sub)
+    _register_doctor_parser(sub)
+    _register_warm_parser(sub)
     _register_skill_parser(sub, include_management=False)
+    _register_agent_parser(sub)
     _register_evidence_parser(sub)
     _register_root_cause_parser(sub)
 
@@ -595,6 +924,7 @@ def _build_parser():
 def _register_legacy_commands(sub):
     """Register legacy commands on the provided subparser collection."""
     _register_info_parser(sub)
+    _register_doctor_parser(sub)
 
     p = sub.add_parser(
         "analyze",
@@ -710,32 +1040,6 @@ def _register_legacy_commands(sub):
     p.set_defaults(handler=_cmd_timeline)
 
     _register_skill_parser(sub, include_management=True)
-
-    p = sub.add_parser("agent", help="AI agent for profile analysis")
-    agent_sub = p.add_subparsers(dest="agent_action")
-    sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
-    sp_analyze.add_argument("profile", help="Path to .sqlite file")
-    sp_analyze.add_argument(
-        "--trim",
-        nargs=2,
-        type=float,
-        metavar=("START_S", "END_S"),
-        default=None,
-        help="Time window in seconds (recommended for large profiles)",
-    )
-    sp_analyze.add_argument(
-        "--evidence", action="store_true", help="Also output evidence findings JSON"
-    )
-    sp_analyze.add_argument(
-        "-o",
-        "--output",
-        default=None,
-        help="Output path for findings JSON (default: findings.json)",
-    )
-    sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
-    sp_ask.add_argument("profile", help="Path to .sqlite file")
-    sp_ask.add_argument("question", help="Natural language question")
-    p.set_defaults(handler=_cmd_agent)
 
     # ── evidence ──────────────────────────────────────────────────
     _register_evidence_parser(sub)

@@ -13,6 +13,8 @@ from nsys_ai.skills.builtins.profile_health_manifest import (
     _KERNEL_HOTSPOT_PCT,
     _MIN_ITERATIONS_FOR_NVTX_COVERAGE,
     _OVERHEAD_CONTAMINATED_PCT,
+    _OVERHEAD_NOTABLE_PCT,
+    _OVERHEAD_PCT_SANITY_MAX,
     _SYNC_BOUND_DENSITY_PCT,
     _to_findings,
 )
@@ -92,8 +94,71 @@ class TestOverheadContaminated:
 
     def test_silent_at_threshold(self):
         m = _healthy_manifest()
-        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_NOTABLE_PCT
         assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_low_overhead_is_a_clean_trace_not_a_finding(self):
+        """A trace with ~1% profiler overhead is *clean*; reporting it as a
+        contaminated profile was the over-claim in the original report."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 1.0
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_contaminated_tier_boundary_is_strict(self):
+        """Exactly at the contaminated threshold is still the warning tier —
+        pins the strict `>` so the comparator can't silently drift."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT
+        f = next(f for f in _to_findings([m]) if f.id == "profile_overhead_contaminated")
+        assert f.severity == "warning"
+        assert f.evidence[0].values["threshold_pct"] == _OVERHEAD_NOTABLE_PCT
+
+    def test_critical_tier_cites_its_own_threshold(self):
+        """Label, severity, cited threshold and explanation must agree per tier."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT + 25.0
+        f = next(f for f in _to_findings([m]) if f.id == "profile_overhead_contaminated")
+        assert f.severity == "critical"
+        assert f.evidence[0].values["threshold_pct"] == _OVERHEAD_CONTAMINATED_PCT
+        # Note "15.0" contains "5.0", so compare the rendered percentages.
+        assert f"{_OVERHEAD_CONTAMINATED_PCT}% of profile span" in f.explanation
+        assert f"exceeded {_OVERHEAD_NOTABLE_PCT}%" not in f.explanation
+
+    def test_elevated_overhead_warns_rather_than_criticals(self):
+        """Between the notable and contaminated tiers the capture is usable, so
+        the finding is a warning, not critical."""
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = (
+            _OVERHEAD_NOTABLE_PCT + _OVERHEAD_CONTAMINATED_PCT
+        ) / 2
+        f = next(f for f in _to_findings([m]) if f.id == "profile_overhead_contaminated")
+        assert f.severity == "warning"
+        assert "not a workload bottleneck" in f.note
+
+    def test_silent_when_pct_exceeds_sanity_max(self):
+        # An overhead_pct above 100% can only come from a scope mismatch
+        # upstream (numerator and denominator computed over different
+        # windows). Observed in the wild as a 3.5M% "critical" claim on a
+        # single-iteration capture — silence over nonsense.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_PCT_SANITY_MAX + 1.0
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_silent_when_pct_extreme(self):
+        # Same guard, but at the actual value observed in the original
+        # report — make sure the absurd-large case never sneaks through.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 3_583_749.4
+        assert all(f.id != "profile_overhead_contaminated" for f in _to_findings([m]))
+
+    def test_fires_at_sanity_max_upper_bound(self):
+        # The guard uses <= so an overhead_pct of exactly 100% — the
+        # mathematical upper bound — is still allowed through. This pins
+        # the inclusive boundary so a future refactor can't silently
+        # drop it.
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_PCT_SANITY_MAX
+        assert any(f.id == "profile_overhead_contaminated" for f in _to_findings([m]))
 
 
 class TestSyncBound:
@@ -125,13 +190,26 @@ class TestCommBound:
         assert "low_overlap" in f.provenance["triggers"]
 
     def test_fires_on_nccl_exceeds_compute(self):
+        # The dominance trigger compares wall-clock NCCL (``nccl_only_ms``)
+        # against wall-clock compute, both from overlap_breakdown.
         m = _healthy_manifest()
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
+        m["overlap"]["nccl_only_ms"] = 500.0
         findings = _to_findings([m])
         f = next((f for f in findings if f.id == "profile_comm_bound"), None)
         assert f is not None
         assert "nccl_exceeds_compute" in f.provenance["triggers"]
+
+    def test_high_total_nccl_ms_alone_does_not_fire(self):
+        # ``total_nccl_ms`` is a per-stream sum and overcounts when NCCL
+        # runs concurrently on multiple streams. A wall-clock-dominant
+        # comparison (``nccl_only_ms`` vs ``compute_only_ms``) avoids the
+        # false positive that the per-stream sum used to trigger.
+        m = _healthy_manifest()
+        m["overlap"]["nccl_only_ms"] = 50.0          # wall-clock, well under compute
+        m["overlap"]["compute_only_ms"] = 200.0
+        m["nccl"]["total_nccl_ms"] = 5000.0          # huge per-stream sum
+        assert all(f.id != "profile_comm_bound" for f in _to_findings([m]))
 
     def test_low_overlap_with_no_nccl_does_not_fire(self):
         # Single-rank profile: overlap_pct is meaningless when nccl_only_ms=0.
@@ -159,14 +237,12 @@ class TestCommBound:
     def test_label_reflects_only_active_trigger(self):
         # When only nccl_exceeds_compute fires (overlap healthy), the label
         # must not cite "overlap 100%" because that's a non-signal. Same the
-        # other way for low_overlap with compute dominant. Regression for
-        # Copilot review MED #5.
+        # other way for low_overlap with compute dominant.
         m = _healthy_manifest()
-        # Trigger only nccl_dominates: overlap healthy, nccl > compute
+        # Trigger only nccl_dominates: overlap healthy, nccl_only > compute
         m["overlap"]["overlap_pct"] = 80
-        m["overlap"]["nccl_only_ms"] = 0
+        m["overlap"]["nccl_only_ms"] = 500.0
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "NCCL dominates" in f.label
         assert "overlap" not in f.label.lower()
@@ -176,17 +252,15 @@ class TestCommBound:
         m["overlap"]["overlap_pct"] = 10
         m["overlap"]["nccl_only_ms"] = 200.0
         m["overlap"]["compute_only_ms"] = 1000.0
-        m["nccl"]["total_nccl_ms"] = 200.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "low overlap" in f.label
         assert "dominates" not in f.label.lower()
 
-        # Both triggers: combined label
+        # Both triggers: combined label cites wall-clock NCCL vs compute.
         m = _healthy_manifest()
         m["overlap"]["overlap_pct"] = 10
-        m["overlap"]["nccl_only_ms"] = 200.0
+        m["overlap"]["nccl_only_ms"] = 500.0
         m["overlap"]["compute_only_ms"] = 100.0
-        m["nccl"]["total_nccl_ms"] = 500.0
         f = next(f for f in _to_findings([m]) if f.id == "profile_comm_bound")
         assert "overlap 10%" in f.label
         assert "NCCL 500ms vs compute 100ms" in f.label
@@ -299,7 +373,7 @@ class TestStructuralInvariants:
     def test_all_findings_have_required_envelope(self):
         # Trigger every finding type at once.
         m = _healthy_manifest()
-        m["data_quality"]["overhead_pct_raw"] = 5.0
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT + 1.0
         m["sync"]["sync_density_pct"] = 30.0
         m["overlap"]["overlap_pct"] = 10
         m["overlap"]["nccl_only_ms"] = 200.0
@@ -353,11 +427,145 @@ class TestStructuralInvariants:
         # Ensures the Finding/EvidenceRow/TraceSelection round-trip cleanly
         # for downstream JSON consumption (the agent + diff CLI consume to_dict()).
         m = _healthy_manifest()
-        m["data_quality"]["overhead_pct_raw"] = 5.0
+        m["data_quality"]["overhead_pct_raw"] = _OVERHEAD_CONTAMINATED_PCT + 1.0
         findings = _to_findings([m])
+        assert findings, "fixture must actually produce findings or the loop below is vacuous"
         for f in findings:
             d = f.to_dict()
             assert "id" in d
             assert "evidence" in d
             assert "selection" in d
             assert "suggested_actions" in d
+
+
+class TestBottleneckNeverProfilerOverhead:
+    """Regression (#216): profiler overhead is the measurement tool's own cost,
+    not a workload bottleneck, and must never be named as the suspected one —
+    nor preempt the real bottleneck checks that follow it."""
+
+    def test_overhead_is_not_a_suspected_bottleneck(self):
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 40.0  # extreme overhead
+        # Healthy on every real axis, so the honest answer is no bottleneck at all.
+        assert _infer_bottleneck(m) == ""
+
+    def test_real_bottleneck_still_surfaces_despite_high_overhead(self):
+        """High overhead used to short-circuit the inference and mask the real
+        finding; the genuine bottleneck must still win."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = _healthy_manifest()
+        m["data_quality"]["overhead_pct_raw"] = 40.0
+        m["overlap"]["overlap_pct"] = 5
+        m["overlap"]["nccl_only_ms"] = 500.0
+        bottleneck = _infer_bottleneck(m)
+        assert "NCCL" in bottleneck
+
+
+class TestFormatRendering:
+    """The text report is the surface a human reads; these pin the parts that
+    #216 changed, none of which were covered before."""
+
+    def _render(self, **manifest_overrides):
+        from nsys_ai.skills.builtins.profile_health_manifest import _format
+
+        m = _healthy_manifest()
+        m.update(manifest_overrides)
+        return _format([m])
+
+    def test_framework_evidence_line_is_shown(self):
+        out = self._render(
+            fingerprint={
+                "framework": "PyTorch",
+                "distributed": False,
+                "multi_node": False,
+                "framework_evidence": "'forward' in StringIds: aten::_flash_attention_forward",
+            }
+        )
+        assert "Framework:" in out
+        assert "matched 'forward' in StringIds: aten::_flash_attention_forward" in out
+
+    def test_no_evidence_line_when_ungrounded(self):
+        out = self._render(
+            fingerprint={
+                "framework": "Generic CUDA",
+                "distributed": False,
+                "multi_node": False,
+                "framework_evidence": "",
+            }
+        )
+        assert "matched" not in out
+
+    def test_overhead_warning_glyph_gated_on_notable_threshold(self):
+        clean = self._render(
+            data_quality={"overhead_pct_raw": 1.0, "overhead_pct": 1.0, "profiler_overhead_ms": 5.0}
+        )
+        noisy = self._render(
+            data_quality={
+                "overhead_pct_raw": _OVERHEAD_NOTABLE_PCT + 5.0,
+                "overhead_pct": _OVERHEAD_NOTABLE_PCT + 5.0,
+                "profiler_overhead_ms": 500.0,
+            }
+        )
+        assert "Profiler Overhead" in clean and "⚠️" not in clean
+        assert "Profiler Overhead" in noisy and "⚠️" in noisy
+
+
+class TestCommBoundConventionIsConsistent:
+    """Regression (#232): the manifest headline and its own comm_bound finding
+    used opposite overlap conventions, so the same profile could be called
+    communication-bound by one and healthy by the other."""
+
+    def _comm_manifest(self, compute_only, nccl_only, overlap_ms, total_nccl):
+        m = _healthy_manifest()
+        m["overlap"]["compute_only_ms"] = compute_only
+        m["overlap"]["nccl_only_ms"] = nccl_only
+        m["overlap"]["overlap_ms"] = overlap_ms
+        m["overlap"]["overlap_pct"] = 75  # healthy, so low_overlap does not fire
+        m["nccl"]["total_nccl_ms"] = total_nccl
+        return m
+
+    def test_heavily_overlapped_run_is_not_called_communication_bound(self):
+        """Overlapped NCCL is hidden behind compute. Counting it as comm *and*
+        excluding it from compute penalised overlap twice: this profile has
+        400ms of well-overlapped NCCL and used to be reported comm-bound."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = self._comm_manifest(
+            compute_only=100.0, nccl_only=0.0, overlap_ms=400.0, total_nccl=400.0
+        )
+        assert "ommunication-bound" not in _infer_bottleneck(m)
+
+    def test_genuinely_exposed_comm_is_still_reported(self):
+        """The fix must not silence a real comm-bound run."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        m = self._comm_manifest(
+            compute_only=100.0, nccl_only=500.0, overlap_ms=0.0, total_nccl=500.0
+        )
+        assert "ommunication-bound" in _infer_bottleneck(m)
+
+    def test_headline_and_finding_never_disagree(self):
+        """The two paths must agree across the overlap spectrum."""
+        from nsys_ai.skills.builtins.profile_health_manifest import _infer_bottleneck
+
+        for compute_only, nccl_only, overlap_ms in [
+            (100.0, 0.0, 400.0),    # fully hidden
+            (100.0, 50.0, 200.0),   # partly exposed, compute still dominant
+            (100.0, 500.0, 0.0),    # clearly exposed
+            (0.0, 500.0, 0.0),      # comm present, no compute recorded
+            (0.0, 0.0, 0.0),        # no data
+        ]:
+            m = self._comm_manifest(compute_only, nccl_only, overlap_ms, nccl_only + overlap_ms)
+            headline_comm = "ommunication-bound" in _infer_bottleneck(m)
+            finding_comm = any(
+                f.id == "profile_comm_bound"
+                and "nccl_exceeds_compute" in f.provenance.get("triggers", "")
+                for f in _to_findings([m])
+            )
+            assert headline_comm == finding_comm, (
+                f"headline={headline_comm} finding={finding_comm} for "
+                f"compute_only={compute_only} nccl_only={nccl_only} overlap={overlap_ms}"
+            )

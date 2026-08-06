@@ -15,7 +15,7 @@ Classifies by **leaf** label, not ancestor-path containment. See
 containment).
 """
 
-from ..base import Skill
+from ..base import Skill, requires_pushpop_nvtx
 
 _INDUCTOR_LEAF_MARKERS = ("## Call CompiledFxGraph",)
 _EAGER_LEAF_PREFIXES = ("c10d::", "nccl")
@@ -36,7 +36,15 @@ def _is_nccl_kernel(name: str) -> bool:
 
 
 def _execute(conn, **kwargs):
+    # A profile captured without NVTX ranges cannot be attributed to regions.
+    # Say so rather than raising: callers catch and log, so an exception here
+    # removes the skill from the output with no trace that it was even asked.
     from ...nvtx_attribution import attribute_kernels_to_nvtx
+
+    guard = requires_pushpop_nvtx(conn, needs="Call-mode classification")
+    if guard:
+        return guard
+
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")

@@ -67,13 +67,18 @@ def all_skills() -> list[Skill]:
     return sorted(_SKILLS.values(), key=lambda s: s.name)
 
 
-def run_skill(name: str, conn: sqlite3.Connection, **kwargs) -> str:
-    """Look up and run a skill, returning formatted text."""
-    skill = get_skill(name)
+def run_skill(skill_name: str, conn: sqlite3.Connection, **kwargs) -> str:
+    """Look up and run a skill, returning formatted text.
+
+    The first parameter is ``skill_name`` (not ``name``) so it never collides
+    with a skill that exposes its own ``name`` parameter (e.g. ``region_mfu``),
+    which would otherwise raise "got multiple values for argument 'name'".
+    """
+    skill = get_skill(skill_name)
     if not skill:
         available = list_skills()
         raise SkillNotFoundError(
-            f"Unknown skill '{name}'. Available: {', '.join(available)}",
+            f"Unknown skill '{skill_name}'. Available: {', '.join(available)}",
             available=available,
         )
     return skill.run(conn, **kwargs)

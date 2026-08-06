@@ -1,0 +1,32 @@
+{
+  "id": "eval-healthy-judged-1pct-001",
+  "profile": "tests/fixtures/healthy_judged_1pct.sqlite",
+  "device": 0,
+  "description": "Negative fixture that tests the JUDGEMENT rather than the filter (#282). 20 kernels of 200ms separated by 19 gaps of 2ms: 38.00ms idle across a 4038.00ms span, 0.9411% (measured, not derived \u2014 an earlier version of this label stated the intended 40ms/4040ms/0.99% and was wrong). The gaps exceed the 1ms min_gap_ns floor, so unlike healthy_1pct.sqlite the pipeline actually sees and weighs them. The correct answer is still that ~1% is not recoverable.",
+  "source": "Generated so the gap size clears the reporting floor while the idle share stays near one percent. The sibling healthy_1pct.sqlite measures 0.9876%; this one 0.9411%. They are close but NOT identical \u2014 19 gaps between 20 kernels rather than a round 20 \u2014 so the pair isolates gap size, not a fixed share.",
+  "why_this_matters": "healthy_1pct.sqlite passes partly because its 10us gaps are below min_gap_ns and never reach a threshold at all. That guards against the floor drifting down, but it does not prove the tool declines to call a small-but-visible idle share a bottleneck. This fixture does.",
+  "expect": [
+    {
+      "category": "compute",
+      "required": false,
+      "note": "Compute-bound, as with its sibling. Not gated."
+    }
+  ],
+  "must_not": [
+    {
+      "category": "communication",
+      "note": "No NCCL activity exists here; any communication finding is a false positive."
+    },
+    {
+      "category": "idle",
+      "min_severity": "critical",
+      "note": "0.99% idle must never reach critical. Warning-level idle findings ARE currently emitted here \u2014 see known_gaps \u2014 so the gate is set at critical to assert the real boundary rather than encode behaviour we think is wrong."
+    }
+  ],
+  "known_gaps": [
+    {
+      "observation": "This profile produces 5 warning-severity 'GPU Idle Gap (2.00ms)' findings while claiming 0ms recoverable time. Severity is judged per gap against min_gap_ns, with no reference to what share of the run the gaps represent. So a healthy pipeline at 0.94% idle emits five warnings, which is the noise that buries real signal elsewhere in the corpus. Headroom is correctly zero, so the ROI ranking is unaffected \u2014 this is a severity calibration question, not a wrong number.",
+      "ref": "#284"
+    }
+  ]
+}

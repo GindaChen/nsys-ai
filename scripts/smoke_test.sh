@@ -118,7 +118,10 @@ check_json_key() {
 
 check_field_conditional() {
   # Run check_regex but SKIP when JSON has no real data rows.
-  # Skips rows with: empty list, _metadata, _summary, _diagnostic, or top-level 'error' key.
+  # Skips rows with: empty list, _metadata, _summary, _diagnostic, _abstained,
+  # or top-level 'error' key. _abstained is how a skill reports it could not run
+  # at all (skills/base.py abstain()) — it carries a reason, never the fields a
+  # caller would grep for.
   local label="$1"; local file="$2"; local pattern="$3"; local skip_msg="$4"
   printf "  %-55s " "$label"
   EMPTY=$(python3 -c "
@@ -127,7 +130,8 @@ try:
     d = json.load(open('$file'))
     rows = d if isinstance(d, list) else [d]
     data = [r for r in rows if not r.get('_metadata') and not r.get('_summary')
-            and not r.get('_diagnostic') and 'error' not in r]
+            and not r.get('_diagnostic') and not r.get('_abstained')
+            and 'error' not in r]
     print('yes' if not data else 'no')
 except Exception:
     print('yes')

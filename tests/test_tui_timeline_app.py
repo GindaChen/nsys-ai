@@ -154,3 +154,62 @@ async def test_zoom_to_time_range_api(timeline_app):
         timeline_app.zoom_to_time_range(0.01, 0.05)  # 10ms–50ms
         await pilot.pause()
         assert timeline_app.cursor_ns == 10_000_000  # start_s * 1e9
+
+
+# ---------------------------------------------------------------------------
+# Loop accept/reject decision recording
+# ---------------------------------------------------------------------------
+
+
+def _comparable_diff_summary(confidence: float = 0.9) -> dict:
+    """Minimal diff payload (to_diff_dict shape) sufficient to record a decision."""
+    return {
+        "verdict": "neutral",
+        "comparability_confidence": confidence,
+        "warnings": [],
+        "before": {"path": "/tmp/before.sqlite", "profile_id": "before-id"},
+        "after": {"path": "/tmp/after.sqlite", "profile_id": "after-id"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_loop_accept_before_diff_warns_without_crashing(timeline_app, tmp_path, monkeypatch):
+    """Pressing accept before a diff has run notifies instead of crashing or writing."""
+    monkeypatch.chdir(tmp_path)
+    async with timeline_app.run_test(size=(120, 40)) as pilot:
+        notes: list[tuple] = []
+        timeline_app.notify = lambda *a, **k: notes.append((a, k))  # type: ignore[method-assign]
+        timeline_app.action_loop_accept()
+        await pilot.pause()
+        assert timeline_app.is_running
+        assert timeline_app._loop_state.decision is None
+        assert not (tmp_path / "diff.json").exists()
+        assert notes and any("diff" in str(a).lower() for a, _ in notes)
+
+
+@pytest.mark.asyncio
+async def test_loop_accept_after_diff_writes_next_to_candidate(timeline_app, tmp_path):
+    """Accept after a diff persists diff.json next to the candidate profile."""
+    async with timeline_app.run_test(size=(120, 40)) as pilot:
+        timeline_app._loop_state.after_path = str(tmp_path / "after.sqlite")
+        timeline_app._loop_state.diff_summary = _comparable_diff_summary()
+        timeline_app.action_loop_accept()
+        await pilot.pause()
+        assert timeline_app._loop_state.decision == "accept"
+        written = tmp_path / "diff.json"
+        assert written.exists()
+        assert timeline_app._loop_state.decision_path == str(written)
+
+
+@pytest.mark.asyncio
+async def test_loop_set_decision_empty_reason_uses_fallback(timeline_app, tmp_path):
+    """An agent set_decision action with the default empty reason does not crash."""
+    async with timeline_app.run_test(size=(120, 40)) as pilot:
+        timeline_app._loop_state.after_path = str(tmp_path / "after.sqlite")
+        timeline_app._loop_state.diff_summary = _comparable_diff_summary()
+        timeline_app.set_loop_decision("reject", "")
+        await pilot.pause()
+        assert timeline_app.is_running
+        assert timeline_app._loop_state.decision == "reject"
+        assert timeline_app._loop_state.decision_reason.strip()
+        assert (tmp_path / "diff.json").exists()
