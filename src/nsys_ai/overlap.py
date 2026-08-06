@@ -480,6 +480,57 @@ def _flag_real_iterations(results: list[dict]) -> list[dict]:
     return results
 
 
+def _correlate_iteration_kernels(iterations, runtime_rows, kernel_map):
+    """Yield kernels contained in each ordered, non-overlapping CPU window."""
+    previous_end = None
+    for index, iteration in enumerate(iterations):
+        start, end = iteration["start"], iteration["end"]
+        if end <= start:
+            raise ValueError(f"iteration {index} has a non-positive time range")
+        if previous_end is not None and start < previous_end:
+            raise ValueError(f"iteration {index} overlaps or precedes the previous iteration")
+        previous_end = end
+
+    def grouped_rows():
+        rows = iter(runtime_rows)
+        current = next(rows, None)
+        while current is not None:
+            start = current["start"]
+            group = [current]
+            current = next(rows, None)
+            while current is not None and current["start"] == start:
+                group.append(current)
+                current = next(rows, None)
+            yield group
+
+    groups = iter(grouped_rows())
+    current_group = next(groups, None)
+    for index, iteration in enumerate(iterations):
+        cpu_start, cpu_end = iteration["start"], iteration["end"]
+        next_start = iterations[index + 1]["start"] if index + 1 < len(iterations) else None
+
+        while current_group is not None and current_group[0]["start"] < cpu_start:
+            current_group = next(groups, None)
+
+        kernels = []
+        while current_group is not None and current_group[0]["start"] <= cpu_end:
+            for runtime in current_group:
+                if runtime["end"] > cpu_end:
+                    continue
+                kernel = kernel_map.get(runtime["correlationId"])
+                if kernel:
+                    kernels.append(kernel)
+
+            # Containment is inclusive. Keep the whole equal-start group at a
+            # shared boundary: zero-duration rows belong to both windows, while
+            # rows spanning the boundary belong only to the following one.
+            if next_start == cpu_end == current_group[0]["start"]:
+                break
+            current_group = next(groups, None)
+
+        yield kernels
+
+
 def detect_iterations(
     prof: Profile, device: int, trim: tuple[int, int] | None = None, marker: str = "sample_0"
 ) -> list[dict]:
@@ -608,7 +659,7 @@ def detect_iterations(
         # but boundaries are recorded in runtime timestamps (CPU domain)
         # so the downstream rt-based filter works correctly.
         GAP_THRESHOLD_NS = 2_000_000
-        boundaries = [kernel_entries[0]["rt_start"]]
+        boundaries = [min(entry["rt_start"] for entry in kernel_entries)]
 
         last_k_end = kernel_entries[0]["kernel"]["end"]
         for entry in kernel_entries[1:]:
@@ -619,7 +670,13 @@ def detect_iterations(
                 boundaries.append(entry["rt_start"])
             last_k_end = max(last_k_end, k["end"])
 
-        boundaries.append(kernel_entries[-1]["rt_end"])
+        # GPU execution order can differ from CPU launch order across streams.
+        # Correlation below advances through CPU runtime rows exactly once, so
+        # make its ordered, non-overlapping window invariant explicit here.
+        boundaries = sorted(set(boundaries))
+        final_runtime_end = max(entry["rt_end"] for entry in kernel_entries)
+        if final_runtime_end > boundaries[-1]:
+            boundaries.append(final_runtime_end)
 
         # Construct synthetic iterations from these boundaries
         for i in range(len(boundaries) - 1):
@@ -644,19 +701,8 @@ def detect_iterations(
     )
 
     results = []
-    for i, it in enumerate(iterations):
-        cpu_start, cpu_end = it["start"], it["end"]
-
-        # Find correlated kernels
-        kernels_in_iter = []
-        for rt in rt_all:
-            if rt["start"] > cpu_end:
-                break
-            if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
-                k = kmap.get(rt["correlationId"])
-                if k:
-                    kernels_in_iter.append(k)
-
+    correlated = _correlate_iteration_kernels(iterations, rt_all, kmap)
+    for i, (it, kernels_in_iter) in enumerate(zip(iterations, correlated)):
         if not kernels_in_iter:
             continue
 
