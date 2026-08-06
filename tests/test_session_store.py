@@ -164,6 +164,35 @@ def _nested_diff(before: LocalProfileReference, after: LocalProfileReference) ->
             "after_share": 0.6,
             "delta_share": 0.6 - 0.5,
             "selection": kernel_selection,
+            "diff_lineage": {
+                "diff_id": payload["diff_id"],
+                "role": "regression",
+                "rank": 0,
+                "baseline_profile_id": before.profile_id,
+            },
+        }
+    ]
+    payload["top_improvements"] = [
+        {
+            "key": "kernel-improved",
+            "name": "kernel-improved",
+            "demangled": "kernel-improved",
+            "before_total_ns": 2,
+            "after_total_ns": 1,
+            "delta_ns": -1,
+            "before_count": 1,
+            "after_count": 1,
+            "classification": "improvement",
+            "before_share": 0.6,
+            "after_share": 0.5,
+            "delta_share": 0.5 - 0.6,
+            "selection": kernel_selection,
+            "diff_lineage": {
+                "diff_id": payload["diff_id"],
+                "role": "improvement",
+                "rank": 0,
+                "baseline_profile_id": before.profile_id,
+            },
         }
     ]
     payload["nvtx_regressions"] = [
@@ -921,6 +950,134 @@ def test_diff_canonical_top_level_shape_is_revalidated_on_restart(tmp_path, shap
 
     with pytest.raises(SessionCorruptError, match="canonical to_diff_dict shape"):
         store.load("diff-shape-load")
+
+
+def test_diff_lineage_survives_publish_decision_and_restart(tmp_path):
+    store, before, after, _finding_value, _spec, _proposal = _reprofiled_session(
+        tmp_path, "diff-lineage-round-trip"
+    )
+    payload = _nested_diff(before, after)
+    expected = {
+        field_name: [dict(entry["diff_lineage"]) for entry in payload[field_name]]
+        for field_name in ("top_regressions", "top_improvements")
+    }
+
+    with store.writer("diff-lineage-round-trip") as writer:
+        writer.publish_diff(payload)
+        _state, decided, _warnings = writer.publish_decision(
+            "accept",
+            "lineage stays attached to the measured diff",
+            decider="test@example.com",
+            decided_at="2026-08-06T00:00:00Z",
+        )
+
+    for field_name, lineages in expected.items():
+        assert [entry["diff_lineage"] for entry in decided[field_name]] == lineages
+
+    restarted = SessionStore(store.root).load("diff-lineage-round-trip")
+    assert restarted.diff["decision"]["status"] == "accepted"
+    for field_name, lineages in expected.items():
+        assert [entry["diff_lineage"] for entry in restarted.diff[field_name]] == lineages
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "not_object",
+        "missing_field",
+        "unknown_field",
+        "diff_id_type",
+        "diff_id_mismatch",
+        "role_type",
+        "role_mismatch",
+        "rank_type",
+        "rank_mismatch",
+        "baseline_type",
+        "baseline_mismatch",
+    ],
+)
+def test_diff_lineage_requires_exact_shape_types_and_parent_context(
+    tmp_path, mutation
+):
+    store, before, after, _finding_value, _spec, _proposal = _reprofiled_session(
+        tmp_path, "diff-lineage-shape"
+    )
+    payload = _nested_diff(before, after)
+    lineage = payload["top_regressions"][0]["diff_lineage"]
+    if mutation == "not_object":
+        payload["top_regressions"][0]["diff_lineage"] = []
+    elif mutation == "missing_field":
+        lineage.pop("baseline_profile_id")
+    elif mutation == "unknown_field":
+        lineage["unknown"] = "value"
+    elif mutation == "diff_id_type":
+        lineage["diff_id"] = 1
+    elif mutation == "diff_id_mismatch":
+        lineage["diff_id"] = "another-diff"
+    elif mutation == "role_type":
+        lineage["role"] = 1
+    elif mutation == "role_mismatch":
+        lineage["role"] = "improvement"
+    elif mutation == "rank_type":
+        lineage["rank"] = True
+    elif mutation == "rank_mismatch":
+        lineage["rank"] = 1
+    elif mutation == "baseline_type":
+        lineage["baseline_profile_id"] = 1
+    else:
+        lineage["baseline_profile_id"] = "nsys1:not-the-before-profile"
+
+    with store.writer("diff-lineage-shape") as writer:
+        with pytest.raises(ValueError, match="diff_lineage"):
+            writer.publish_diff(payload)
+    assert store.load("diff-lineage-shape").state.phase == "reprofile"
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("diff_id", "another-diff"),
+        ("role", "improvement"),
+        ("rank", 1),
+        ("baseline_profile_id", "nsys1:not-the-before-profile"),
+    ],
+)
+def test_diff_lineage_context_is_revalidated_after_tamper_and_redigest(
+    tmp_path, field, wrong_value
+):
+    store, before, after, _finding_value, _spec, _proposal = _reprofiled_session(
+        tmp_path, "diff-lineage-tamper"
+    )
+    with store.writer("diff-lineage-tamper") as writer:
+        writer.publish_diff(_nested_diff(before, after))
+
+    session_dir = store.root / "diff-lineage-tamper"
+    diff_path = session_dir / "diff.json"
+    payload = json.loads(diff_path.read_text())
+    payload["top_regressions"][0]["diff_lineage"][field] = wrong_value
+    diff_path.write_text(json.dumps(payload))
+    manifest_path = session_dir / "session.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"]["diff"]["sha256"] = hashlib.sha256(
+        diff_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SessionCorruptError, match="diff_lineage"):
+        SessionStore(store.root).load("diff-lineage-tamper")
+
+
+def test_diff_lineage_validator_accepts_empty_top_lists(tmp_path):
+    store, before, after, _finding_value, _spec, _proposal = _reprofiled_session(
+        tmp_path, "diff-lineage-empty"
+    )
+    payload = _diff(before, after)
+    with store.writer("diff-lineage-empty") as writer:
+        writer.publish_diff(payload)
+
+    restarted = SessionStore(store.root).load("diff-lineage-empty")
+    assert restarted.diff["top_regressions"] == []
+    assert restarted.diff["top_improvements"] == []
 
 
 @pytest.mark.parametrize(
