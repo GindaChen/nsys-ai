@@ -295,7 +295,9 @@ first query that needs it, which is the "first NVTX query" column. Both are paid
 once per profile.
 
 On this workload the first run is never slower end to end than querying the
-export directly, and always lighter on memory, so the build is the default. The
+export directly, and lighter on memory at all four sizes, so the build is the
+default — "this workload" being the eight skills above; a one-shot is a
+different trade, see below. The
 middle two sizes are a clear win on time (23% and 26%); at 93 MB and 3.7 GB the
 time difference is 2-5%, inside run-to-run variance, and what those sizes gain
 is memory — 7.1 GB against 10.2 GB on the largest. Every command after the

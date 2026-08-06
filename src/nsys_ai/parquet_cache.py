@@ -1074,27 +1074,21 @@ def open_auto_db(
     table carries one.
 
     Total against total, a cold build is never *worse* than direct on the first
-    run, and never heavier on peak RSS. How much better splits in two, and
-    saying so is the point:
-
-    - 235 MB and 924 MB are real wins -- 23% and 26% on total, 2% and 21% on
-      peak RSS.
-    - 93 MB and 3734 MB are a **wash on time**: 5.1% and 2.7%, which is inside
-      run-to-run variance on a loaded box. What they do win is memory, and the
-      3734 MB row wins it decisively: 7.14 GB against 10.18 GB, a 30% cut on
-      the size where running out is a real outcome.
-
-    So the argument for building by default is not "always faster on the first
-    run". It is "never slower, sometimes much faster, and materially lighter on
-    the large profiles" -- plus the warm row, which is the one a user meets on
-    every command after the first.
+    run, and never heavier on peak RSS over this battery. So the argument for
+    building by default is not "always faster on the first run" -- it is "never
+    slower, sometimes much faster, and materially lighter on the large
+    profiles", plus the warm row, which is the one a user meets on every command
+    after the first.
 
     An earlier version of this docstring quoted a "runs-to-repay" ratio derived
     from the open/query split, which the #322 deferral made meaningless because
     the cold query now contains a build.
     Note also that the margins at 93 MB (6.17 vs 6.50) and 3734 MB (93.57 vs
     96.18) are 3-5%, and run-to-run spread on a loaded box is 15-25% — those
-    two sizes are a wash, not a win. The decisive gaps are in the middle.
+    two sizes are a wash on *time*, not a win. The decisive gaps are in the
+    middle. What the two ends win instead is memory, and at 3734 MB decisively:
+    7.14 GB against 10.18 GB, a 30% cut on the size where running out is a real
+    outcome.
 
     None of this is a property of the profile size: both sides of the trade
     scale together, which is exactly why size was the wrong axis. What does
