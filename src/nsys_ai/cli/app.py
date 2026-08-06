@@ -2,6 +2,7 @@
 """Simplified CLI application entrypoint.
 
 Public surface is focused on web UI and AI workflows:
+- profile
 - open
 - web
 - timeline-web
@@ -54,6 +55,9 @@ def show_help():
     print("    nsys-ai timeline <profile> --gpu N --trim S E   Timeline TUI")
     print("    nsys-ai tui     <profile> --gpu N --trim S E   Tree TUI")
     print()
+    print("  Capture:")
+    print("    nsys-ai profile -- <command> [args...]       Capture a local profile")
+    print()
     print("  Skills & Agent:")
     print("    nsys-ai skill list                       List analysis skills")
     print("    nsys-ai skill run <name> <profile>       Run a specific skill")
@@ -73,9 +77,8 @@ def show_help():
     print("    nsys-ai web        <profile> --gpu N       Browser UI")
     print()
     print("  Getting Started:")
-    print("    1. Profile:  nsys profile -o report python train.py")
-    print("    2. Export:   nsys export --type sqlite report.nsys-rep")
-    print("    3. Explore:  nsys-ai open <profile.sqlite>")
+    print("    1. Profile:  nsys-ai profile -- python train.py")
+    print("    2. Explore:  nsys-ai open <profile.sqlite>")
     print()
 
 

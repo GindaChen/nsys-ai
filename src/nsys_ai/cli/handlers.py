@@ -13,6 +13,19 @@ import os
 import subprocess  # nosec B404
 import sys
 
+
+def _cmd_profile(args, _profile):
+    """Run the public profiling wrapper."""
+    try:
+        from nsys_ai.profile_command import run_profile_command
+
+        exit_code = run_profile_command(args)
+    except KeyboardInterrupt:
+        print("Profile cancelled.", file=sys.stderr)
+        raise SystemExit(130) from None
+    if exit_code:
+        raise SystemExit(exit_code)
+
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from .handlers import (
     _cmd_open,
     _cmd_overlap,
     _cmd_perfetto,
+    _cmd_profile,
     _cmd_report,
     _cmd_root_cause,
     _cmd_search,
@@ -64,6 +65,93 @@ def _positive_pct(value: str) -> float:
     if not math.isfinite(pct) or pct <= 0:
         raise argparse.ArgumentTypeError(f"must be a positive percentage, got {value}")
     return pct
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+class _WorkloadRemainder(argparse.Action):
+    """Require one workload token while preserving every remaining token."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not values or values == ["--"]:
+            parser.error("a workload command is required")
+        setattr(namespace, self.dest, values)
+
+
+def _register_profile_parser(sub):
+    p = sub.add_parser("profile", help="Capture and validate a local Nsight Systems profile")
+    p.add_argument("-o", "--output", default=None, help="Fresh artifact directory")
+    p.add_argument("--nsys", default="nsys", help="Nsight Systems executable")
+    p.add_argument(
+        "--env",
+        dest="public_env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Persisted public environment override (repeatable)",
+    )
+    p.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Secret environment variable name (repeatable)",
+    )
+    p.add_argument(
+        "--env-policy",
+        choices=("inherit", "clean"),
+        default="inherit",
+        help="Workload environment base (default: inherit)",
+    )
+    p.add_argument("--warmup-steps", type=_nonnegative_int, default=0)
+    p.add_argument("--profile-steps", type=_positive_int, default=1)
+    p.add_argument("--seed", type=_nonnegative_int, default=None)
+    p.add_argument("--expected-gpu-count", type=_positive_int, default=None)
+    p.add_argument("--expected-rank-count", type=_positive_int, default=None)
+    p.add_argument("--timeout", type=_positive_int, default=None, metavar="SECONDS")
+    p.add_argument(
+        "--trace",
+        default="auto",
+        metavar="auto|API,API",
+        help="Trace domains (default: auto)",
+    )
+    p.add_argument(
+        "--sample",
+        choices=("none", "process-tree", "system-wide"),
+        default="none",
+    )
+    p.add_argument(
+        "--cpuctxsw",
+        choices=("none", "process-tree", "system-wide"),
+        default="none",
+    )
+    p.add_argument(
+        "--capture-range",
+        choices=("none", "cudaProfilerApi", "nvtx", "hotkey"),
+        default="none",
+    )
+    p.add_argument("--cuda-memory-usage", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "workload",
+        nargs=argparse.REMAINDER,
+        action=_WorkloadRemainder,
+        help="Workload command and arguments; wrapper options must precede it",
+    )
+    p.set_defaults(handler=_cmd_profile)
+    return p
 
 
 def _register_info_parser(sub):
@@ -318,10 +406,12 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
-            "info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "profile,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
             "root-cause,help}"
         ),
     )
+
+    _register_profile_parser(sub)
 
     # Public commands (simplified)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
