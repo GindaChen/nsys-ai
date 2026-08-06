@@ -206,7 +206,7 @@ def test_environment_persists_names_but_never_resolved_secret_values(monkeypatch
         (
             ("python", "train.py"),
             {"TRAINING_ENDPOINT": "https://host/private-value/data"},
-            r"environment.public\['TRAINING_ENDPOINT'\]",
+            r"environment.public.value\[0\]",
         ),
     ],
 )
@@ -274,6 +274,40 @@ def test_secret_preflight_checks_every_persisted_string_value(
         validate_secret_boundaries(spec, {"HF_TOKEN": secret_value})
 
     assert secret_value not in str(exc_info.value)
+
+
+def test_secret_preflight_checks_public_mapping_keys_without_echoing_them():
+    secret_value = "PRIVATE_KEY_FRAGMENT"
+    public_name = f"PREFIX_{secret_value}_SUFFIX"
+    spec = _full_spec(
+        environment=EnvironmentSpec(
+            public={public_name: "safe-value"}, secrets=("HF_TOKEN",)
+        )
+    )
+
+    with pytest.raises(RunSpecError, match=r"environment.public.key\[0\]") as exc_info:
+        validate_secret_boundaries(spec, {"HF_TOKEN": secret_value})
+
+    message = str(exc_info.value)
+    assert secret_value not in message
+    assert public_name not in message
+
+
+def test_public_value_error_does_not_echo_its_user_controlled_key():
+    secret_value = "private_value"
+    public_name = "SENSITIVE_LOOKING_PUBLIC_NAME"
+    spec = _full_spec(
+        environment=EnvironmentSpec(
+            public={public_name: f"prefix-{secret_value}"}, secrets=("HF_TOKEN",)
+        )
+    )
+
+    with pytest.raises(RunSpecError, match=r"environment.public.value\[0\]") as exc_info:
+        validate_secret_boundaries(spec, {"HF_TOKEN": secret_value})
+
+    message = str(exc_info.value)
+    assert secret_value not in message
+    assert public_name not in message
 
 
 def test_environment_validation_rejects_ambiguous_or_invalid_names():

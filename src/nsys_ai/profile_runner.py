@@ -430,19 +430,22 @@ class LocalProfileRunner:
     ) -> tuple[int | None, RunStatus | None, subprocess.Popen[bytes] | None]:
         """Launch and poll capture, resolving exit-versus-stop races explicitly."""
 
-        def requested_stop() -> RunStatus | None:
+        deadline = (
+            capture_started + spec.timeout_seconds
+            if spec.timeout_seconds is not None
+            else None
+        )
+
+        def cancellation_status() -> RunStatus | None:
             if cls._cancelled(cancellation):
                 return RunStatus.CANCELLED
-            if (
-                spec.timeout_seconds is not None
-                and time.monotonic() - capture_started >= spec.timeout_seconds
-            ):
-                return RunStatus.TIMED_OUT
             return None
 
         # This check is intentionally adjacent to Popen. A progress callback
         # may have requested cancellation immediately before this helper.
-        stop_status = requested_stop()
+        stop_status = cancellation_status()
+        if stop_status is None and deadline is not None and time.monotonic() >= deadline:
+            stop_status = RunStatus.TIMED_OUT
         if stop_status is not None:
             return None, stop_status, None
 
@@ -461,23 +464,36 @@ class LocalProfileRunner:
             raise _CaptureLaunchError(exc) from exc
         try:
             while True:
-                stop_status = requested_stop()
-                return_code = process.poll()
-                if return_code is not None:
-                    # The leader may exit between the loop condition and an
-                    # already-due cancellation/deadline. Recheck before accepting
-                    # its exit so surviving children cannot escape the process group.
-                    stop_status = requested_stop() or stop_status
-                    if stop_status is not None:
-                        cls._terminate_process_group(process)
-                    return process.poll(), stop_status, process
+                stop_status = cancellation_status()
                 if stop_status is not None:
                     cls._terminate_process_group(process)
                     return process.poll(), stop_status, process
-                time.sleep(_POLL_SECONDS)
-        except Exception:
+
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    cls._terminate_process_group(process)
+                    return process.poll(), RunStatus.TIMED_OUT, process
+                wait_seconds = (
+                    _POLL_SECONDS
+                    if remaining is None
+                    else min(_POLL_SECONDS, remaining)
+                )
+                try:
+                    return_code = process.wait(timeout=wait_seconds)
+                except subprocess.TimeoutExpired:
+                    continue
+
+                # wait() returning proves the leader completed inside the
+                # bounded interval, so completion wins over a later clock read.
+                # Cancellation is still rechecked because it is independent of
+                # the deadline and may have won while wait() was blocked.
+                stop_status = cancellation_status()
+                cls._terminate_process_group(process)
+                return return_code, stop_status, process
+        except BaseException:
             # Cancellation callables are control inputs, not observers. Their
-            # failures propagate, but never leave the capture tree running.
+            # failures (including KeyboardInterrupt) propagate, but never leave
+            # the capture tree running.
             cls._terminate_process_group(process)
             raise
 

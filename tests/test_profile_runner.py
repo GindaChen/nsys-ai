@@ -69,14 +69,29 @@ if sys.argv[1] == 'profile':
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         while True:
             time.sleep(1)
-    if mode in {'race_cancel', 'race_timeout'}:
+    if mode == 'race_cancel':
         child = subprocess.Popen([
             sys.executable,
             '-c',
             'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)',
         ])
         output.with_suffix('.child.pid').write_text(str(child.pid))
-        time.sleep(0.15 if mode == 'race_cancel' else 0.9)
+        time.sleep(0.15)
+        sys.exit(17)
+    if mode == 'leader_exit_child':
+        child = subprocess.Popen([
+            sys.executable,
+            '-c',
+            'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)',
+        ])
+        output.with_suffix('.child.pid').write_text(str(child.pid))
+        time.sleep(0.1)
+        sys.exit(17)
+    if mode == 'exit_094':
+        time.sleep(0.94)
+        sys.exit(17)
+    if mode == 'exit_070':
+        time.sleep(0.70)
         sys.exit(17)
     if mode == 'env':
         ok = (
@@ -499,29 +514,66 @@ def test_timeout_and_cancellation_kill_the_process_tree(
     assert not _process_is_running(child_pid)
 
 
-@pytest.mark.parametrize("stop_kind", ["timeout", "cancel"])
-def test_due_stop_beats_leader_exit_and_kills_surviving_child(
-    tmp_path, fake_nsys, monkeypatch, stop_kind
+def test_due_cancellation_beats_leader_exit_and_kills_surviving_child(
+    tmp_path, fake_nsys, monkeypatch
 ):
     monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", 0.25)
     monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
     cancellation = threading.Event()
-    mode = "race_timeout" if stop_kind == "timeout" else "race_cancel"
-    timeout = 1 if stop_kind == "timeout" else None
-    if stop_kind == "cancel":
-        threading.Timer(0.08, cancellation.set).start()
+    threading.Timer(0.08, cancellation.set).start()
 
     result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
-        _spec(mode, timeout_seconds=timeout), cancellation=cancellation
+        _spec("race_cancel"), cancellation=cancellation
     )
 
-    expected = RunStatus.TIMED_OUT if stop_kind == "timeout" else RunStatus.CANCELLED
-    assert result.status is expected
+    assert result.status is RunStatus.CANCELLED
     child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
     deadline = time.monotonic() + 2
     while _process_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not _process_is_running(child_pid)
+
+
+def test_leader_exit_always_cleans_surviving_process_group(
+    tmp_path, fake_nsys, monkeypatch
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
+
+    result = _run(tmp_path, fake_nsys, "leader_exit_child")
+
+    assert result.status is RunStatus.NSYS_FAILED
+    assert result.nsys_return_code == 17
+    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(child_pid)
+
+
+@pytest.mark.parametrize(
+    ("mode", "poll_seconds"),
+    [("exit_094", 2.0), ("exit_070", 5.0)],
+)
+def test_completion_before_deadline_wins_over_coarse_polling(
+    tmp_path, fake_nsys, monkeypatch, mode, poll_seconds
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", poll_seconds)
+
+    result = _run(tmp_path, fake_nsys, mode, timeout_seconds=1)
+
+    assert result.status is RunStatus.NSYS_FAILED
+    assert result.nsys_return_code == 17
+
+
+def test_true_timeout_with_coarse_polling_is_still_timed_out(
+    tmp_path, fake_nsys, monkeypatch
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", 5.0)
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
+
+    result = _run(tmp_path, fake_nsys, "hang", timeout_seconds=1)
+
+    assert result.status is RunStatus.TIMED_OUT
 
 
 def test_cancellation_callable_failure_propagates_after_process_tree_cleanup(
@@ -538,6 +590,29 @@ def test_cancellation_callable_failure_propagates_after_process_tree_cleanup(
     with pytest.raises(OSError, match="cancellation source failed"):
         LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
             _spec("hang"), cancellation=broken_cancellation
+        )
+
+    child_pid = int(pid_path.read_text())
+    deadline = time.monotonic() + 2
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(child_pid)
+
+
+def test_keyboard_interrupt_from_cancellation_cleans_process_tree(
+    tmp_path, fake_nsys, monkeypatch
+):
+    monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
+    pid_path = tmp_path / "artifacts" / "profile.child.pid"
+
+    def interrupted_cancellation():
+        if pid_path.exists():
+            raise KeyboardInterrupt
+        return False
+
+    with pytest.raises(KeyboardInterrupt):
+        LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
+            _spec("hang"), cancellation=interrupted_cancellation
         )
 
     child_pid = int(pid_path.read_text())

@@ -466,14 +466,18 @@ def validate_secret_boundaries(
 
     def persisted_strings(value: Any, path: str = ""):
         if isinstance(value, Mapping):
+            if path == "environment.public":
+                for index, (public_name, public_value) in enumerate(value.items()):
+                    yield f"environment.public.key[{index}]", public_name
+                    yield from persisted_strings(
+                        public_value, f"environment.public.value[{index}]"
+                    )
+                return
             for key, nested in value.items():
                 if path == "environment" and key == "secrets":
                     # These persisted strings are declarations, not values.
                     continue
-                if path == "environment.public":
-                    nested_path = f"environment.public[{key!r}]"
-                else:
-                    nested_path = f"{path}.{key}" if path else str(key)
+                nested_path = f"{path}.{key}" if path else str(key)
                 yield from persisted_strings(nested, nested_path)
         elif isinstance(value, (list, tuple)):
             for index, nested in enumerate(value):
