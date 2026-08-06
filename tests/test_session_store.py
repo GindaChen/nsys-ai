@@ -1025,7 +1025,7 @@ def test_diff_lineage_requires_exact_shape_types_and_parent_context(
     elif mutation == "baseline_type":
         lineage["baseline_profile_id"] = 1
     else:
-        lineage["baseline_profile_id"] = "nsys1:not-the-before-profile"
+        lineage["baseline_profile_id"] = "nsys2:sha256:" + "f" * 64
 
     with store.writer("diff-lineage-shape") as writer:
         with pytest.raises(ValueError, match="diff_lineage"):
@@ -1039,7 +1039,7 @@ def test_diff_lineage_requires_exact_shape_types_and_parent_context(
         ("diff_id", "another-diff"),
         ("role", "improvement"),
         ("rank", 1),
-        ("baseline_profile_id", "nsys1:not-the-before-profile"),
+        ("baseline_profile_id", "nsys2:sha256:" + "f" * 64),
     ],
 )
 def test_diff_lineage_context_is_revalidated_after_tamper_and_redigest(

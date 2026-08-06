@@ -1004,8 +1004,8 @@ def test_diff_cli_accept_writes_stable_decision_json(tmp_path):
     assert record["verdict"] == stdout_payload["verdict"]
     assert record["comparability_confidence"] == stdout_payload["comparability_confidence"]
     assert record["category_attribution"] == stdout_payload["category_attribution"]
-    assert record["before"]["profile_id"].startswith("nsys1:")
-    assert record["after"]["profile_id"].startswith("nsys1:")
+    assert record["before"]["profile_id"].startswith("nsys2:")
+    assert record["after"]["profile_id"].startswith("nsys2:")
     assert record["decision"]["status"] == "accepted"
     assert record["decision"]["reason"] == "candidate is faster"
     assert record["decision"]["decider"] == "fallback-user"
@@ -1340,7 +1340,7 @@ def test_diff_tools_global_diff_payload_includes_selection(tmp_path):
     selection = payload["top_regressions"][0]["selection"]
     assert selection["id"].startswith("sel_diff_")
     assert selection["source"] == "diff"
-    assert selection["profile_id"].startswith("nsys1:")
+    assert selection["profile_id"].startswith("nsys2:")
     assert selection["gpu_ids"] == [0]
     assert "kA" in selection["label"]
 
@@ -2623,8 +2623,8 @@ def test_v01_diff_json_envelope_and_verdict(tmp_path):
     assert len(payload["diff_id"]) == len("diff1:sha256:") + 64
 
     # profile_id in each side, content-derived
-    assert payload["before"]["profile_id"].startswith("nsys1:")
-    assert payload["after"]["profile_id"].startswith("nsys1:")
+    assert payload["before"]["profile_id"].startswith("nsys2:")
+    assert payload["after"]["profile_id"].startswith("nsys2:")
 
     # Verdict + confidence
     assert payload["verdict"] in {

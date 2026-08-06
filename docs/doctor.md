@@ -100,7 +100,7 @@ and profile health in one place.
   "producer": "nsys-ai",
   "producer_version": "0.2.3",
   "profile_path": "profile.sqlite",
-  "profile_id": "nsys1:sha256:...",
+  "profile_id": "nsys2:sha256:...",
   "sections": [
     {"name": "System", "checks": [{"name": "Python", "status": "ok", "detail": "3.12.3", "hint": null, "sub": false}]}
   ],

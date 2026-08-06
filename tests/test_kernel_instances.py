@@ -95,7 +95,7 @@ class TestKernelInstanceFindings:
     def test_compute_hotspot_has_v01_evidence_shape(self, ki_skill):
         findings = ki_skill.to_findings_fn(
             [_kernel_row()],
-            context={"profile_id": "nsys1:sha256:test"},
+            context={"profile_id": "nsys2:sha256:test"},
         )
         assert len(findings) == 1
         f = findings[0]
@@ -116,7 +116,7 @@ class TestKernelInstanceFindings:
         assert f.provenance == {"skill": "kernel_instances", "row_kind": "kernel_hotspot"}
 
         assert isinstance(f.selection, TraceSelection)
-        assert f.selection.profile_id == "nsys1:sha256:test"
+        assert f.selection.profile_id == "nsys2:sha256:test"
         assert f.selection.source == "skill:kernel_instances"
         assert f.selection.start_ns == 1_000
         assert f.selection.end_ns == 6_001_000

@@ -175,7 +175,7 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
     assert result.application_return_code is None
     assert result.profile is not None
     assert result.profile.kernel_count == 1
-    assert result.profile.profile_id.startswith("nsys1:sha256:")
+    assert result.profile.profile_id.startswith("nsys2:sha256:")
     assert result.profile.schema_version == "3.25.0"
     assert result.profile.product_version == "2026.2.1.106"
     assert Path(result.report_path).is_file()

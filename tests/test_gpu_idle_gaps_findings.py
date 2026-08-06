@@ -264,7 +264,7 @@ class TestSerialization:
 class TestEvidenceBuilderIntegration:
     def test_builder_passes_profile_id_to_idle_gaps(self, minimal_nsys_db_path):
         """Real DB integration: TraceSelections produced under EvidenceBuilder
-        carry the content-derived ``profile_id`` (``nsys1:sha256:...``)
+        carry the content-derived ``profile_id`` (``nsys2:sha256:...``)
         from ``fingerprint.get_profile_id``, *not* the filesystem path."""
         from nsys_ai.evidence_builder import EvidenceBuilder
         from nsys_ai.profile import Profile
@@ -275,7 +275,7 @@ class TestEvidenceBuilderIntegration:
 
         # The envelope must always be stamped with a content-derived id,
         # regardless of whether the fixture happened to produce findings.
-        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        assert report.profile_id.startswith("nsys2:"), report.profile_id
         assert report.profile_id != str(minimal_nsys_db_path), (
             "profile_id must be a hash, not the filesystem path"
         )
@@ -323,7 +323,7 @@ class TestEvidenceBuilderIntegration:
         # builder coerces and ``EvidenceReport.__post_init__`` coerces
         # again as a belt-and-braces guarantee.
         assert isinstance(report.profile_path, str)
-        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        assert report.profile_id.startswith("nsys2:"), report.profile_id
         # JSON-dumpable end-to-end (this is the failure mode if either
         # coercion regresses).
         json.dumps(report.to_dict())

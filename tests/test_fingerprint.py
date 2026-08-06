@@ -1,6 +1,7 @@
 """Tests for framework fingerprinting logic."""
 
 import re
+import shutil
 import sqlite3
 
 from nsys_ai.fingerprint import (
@@ -192,8 +193,8 @@ def test_distributed_payload_schema_takes_precedence_over_fallback():
 # ---------------------------------------------------------------------------
 
 
-_SHA256_RE = re.compile(r"^nsys1:sha256:[0-9a-f]{64}$")
-_PATH_RE = re.compile(r"^nsys1:path:[0-9a-f]{64}$")
+_SHA256_RE = re.compile(r"^nsys2:sha256:[0-9a-f]{64}$")
+_PATH_RE = re.compile(r"^nsys2:path:[0-9a-f]{64}$")
 
 
 def _nsight_meta_db(
@@ -233,11 +234,50 @@ def _nsight_meta_db(
 
 
 def test_get_profile_id_format():
-    """Default-shaped result is ``nsys1:sha256:<64-hex>``."""
+    """Default-shaped result is ``nsys2:sha256:<64-hex>``."""
     conn = _nsight_meta_db()
     pid = get_profile_id(conn)
     assert _SHA256_RE.match(pid), pid
     assert pid.startswith(f"{PROFILE_ID_VERSION}:sha256:")
+
+
+def test_get_profile_id_resolves_canonical_and_versioned_kernel_tables(
+    minimal_nsys_db_path, tmp_path
+):
+    identities = []
+    for suffix in ("", "_V2", "_V3"):
+        profile_path = tmp_path / f"kernel-table{suffix or '-canonical'}.sqlite"
+        shutil.copyfile(minimal_nsys_db_path, profile_path)
+        with sqlite3.connect(profile_path) as connection:
+            if suffix:
+                connection.execute(
+                    "ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+                    f"RENAME TO CUPTI_ACTIVITY_KIND_KERNEL{suffix}"
+                )
+            identities.append(get_profile_id(connection, fallback_path=str(profile_path)))
+
+    assert len(set(identities)) == 1
+
+
+def test_get_profile_id_changes_with_versioned_kernel_content(
+    minimal_nsys_db_path, tmp_path
+):
+    identities = []
+    for kernel_rows in (1, 2):
+        profile_path = tmp_path / f"kernels-v3-{kernel_rows}.sqlite"
+        shutil.copyfile(minimal_nsys_db_path, profile_path)
+        with sqlite3.connect(profile_path) as connection:
+            connection.execute(
+                "ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+                "RENAME TO CUPTI_ACTIVITY_KIND_KERNEL_V3"
+            )
+            connection.execute(
+                "DELETE FROM CUPTI_ACTIVITY_KIND_KERNEL_V3 WHERE rowid > ?",
+                (kernel_rows,),
+            )
+            identities.append(get_profile_id(connection, fallback_path=str(profile_path)))
+
+    assert identities[0] != identities[1]
 
 
 def test_get_profile_id_deterministic():
@@ -271,7 +311,7 @@ def test_get_profile_id_path_independent():
 
 
 def test_get_profile_id_missing_tables_falls_back_to_path():
-    """Empty conn (no Nsight tables) + fallback_path → nsys1:path:..."""
+    """Empty conn (no Nsight tables) + fallback_path → nsys2:path:..."""
     conn = sqlite3.connect(":memory:")
     pid = get_profile_id(conn, fallback_path="/some/profile.sqlite")
     assert _PATH_RE.match(pid), pid
@@ -288,7 +328,7 @@ def test_get_profile_id_missing_tables_without_fallback_is_null_sentinel():
     )
     # And they must both be the well-known empty-string SHA-256.
     empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    assert pid == f"nsys1:sha256:{empty_sha}"
+    assert pid == f"nsys2:sha256:{empty_sha}"
 
 
 def test_get_profile_id_partial_metadata_still_content_path():
@@ -339,7 +379,7 @@ def test_get_profile_id_none_conn_without_fallback_is_null_sentinel():
     # The well-known SHA-256 of the empty string. If this constant ever
     # changes, hashlib has changed, not our algorithm.
     empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    assert pid == f"nsys1:sha256:{empty_sha}"
+    assert pid == f"nsys2:sha256:{empty_sha}"
 
 
 def test_get_profile_id_no_separator_collision():

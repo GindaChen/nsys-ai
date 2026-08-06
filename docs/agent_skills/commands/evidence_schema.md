@@ -108,7 +108,7 @@ Findings should encode **conclusions**, not raw data. The agent must reason abou
   "producer": "nsys-ai",
   "producer_version": "0.2.2",
   "title": "Human-readable title for the report",
-  "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
+  "profile_id": "nsys2:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
   "profile_path": "path/to/profile.sqlite",
   "findings": [ ... ],
   "skipped": [
@@ -125,7 +125,7 @@ Findings should encode **conclusions**, not raw data. The agent must reason abou
 - `producer`: Always `"nsys-ai"` for reports emitted by this tool.
 - `producer_version`: Version of the `nsys-ai` package that wrote the report.
 - `title`: Displayed at the top of the evidence sidebar.
-- `profile_id`: Content-derived stable identifier produced by `fingerprint.get_profile_id`. Format: `nsys1:sha256:<64-hex>` (or `nsys1:path:<64-hex>` fallback when the source carries no Nsight metadata, e.g. a parquetdir-only backend). Two surfaces looking at the same profile agree on this value without depending on the filesystem path. **Every `TraceSelection.profile_id` produced during the same build carries the same value** — readers can join across surfaces by equality.
+- `profile_id`: Content-derived stable identifier produced by `fingerprint.get_profile_id`. Format: `nsys2:sha256:<64-hex>` (or `nsys2:path:<64-hex>` fallback when the source carries no Nsight metadata, e.g. a parquetdir-only backend). Two surfaces looking at the same profile agree on this value without depending on the filesystem path. **Every `TraceSelection.profile_id` produced during the same build carries the same value** — readers can join across surfaces by equality.
 - `profile_path`: Filesystem path the producer opened. Reference only — not an identifier.
 - `findings`: Array of Finding objects (see above).
 - `skipped`: Array of analyses that could not run on this profile, and why. A Finding says something about the profile's performance; an entry here says something about the analysis's *coverage*, which is why the two are separate arrays rather than one ranked list. Each entry carries `analyzer` (the name `evidence build --analyzers` accepts), `skill` (the name `skill run` accepts — several analyzers can share one skill), and `reason` (the text the skill passed to `abstain`). **The key is always emitted, empty array included**: `"skipped": []` means nothing was skipped, while a missing key means the producer predates the field. Do not read an empty array as a clean bill of health without checking that the key was present.
@@ -178,7 +178,7 @@ A region of a profile. All location fields are optional — a selection may be t
 ```json
 {
   "id": "sel_idle_gap_gpu0_stream7_500",
-  "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
+  "profile_id": "nsys2:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
   "source": "skill:gpu_idle_gaps",
   "start_ns": 500,
   "end_ns": 12500500,
@@ -190,7 +190,7 @@ A region of a profile. All location fields are optional — a selection may be t
 ```
 
 - `id`: Stable id for this selection.
-- `profile_id`: Content-derived stable identifier — matches the enclosing `EvidenceReport.profile_id` and is sourced from `fingerprint.get_profile_id`. Format: `nsys1:sha256:<64-hex>` (or `nsys1:path:<64-hex>` fallback when no Nsight metadata is reachable). Treated by readers as an equality key — two surfaces looking at the same profile agree on the value without depending on the filesystem path.
+- `profile_id`: Content-derived stable identifier — matches the enclosing `EvidenceReport.profile_id` and is sourced from `fingerprint.get_profile_id`. Format: `nsys2:sha256:<64-hex>` (or `nsys2:path:<64-hex>` fallback when no Nsight metadata is reachable). Treated by readers as an equality key — two surfaces looking at the same profile agree on the value without depending on the filesystem path.
 - `source`: Who produced the selection — `"skill:<name>"`, `"gui"`, `"user"`, or `"diff"`.
 - `start_ns` / `end_ns`: Time window (nanoseconds, absolute from profile epoch).
 - `gpu_ids` / `rank_ids` / `stream_ids`: Location lists. Empty list (`[]`) means "no GPUs/ranks/streams" — distinct from omission, which means "unspecified".
@@ -207,7 +207,7 @@ Set on findings that originated from a before/after diff comparison.
   "diff_id": "diff_20260512",
   "role": "regression",
   "rank": 1,
-  "baseline_profile_id": "nsys1:sha256:6b1f9a0e0b3e2c7a8b8d5f0e1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+  "baseline_profile_id": "nsys2:sha256:6b1f9a0e0b3e2c7a8b8d5f0e1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
 }
 ```
 
@@ -250,7 +250,7 @@ Same finding as the [Quick Example](#quick-example-minimal--legacy-fields-only) 
   "producer": "nsys-ai",
   "producer_version": "0.2.2",
   "title": "Pipeline Parallelism Bubble Analysis",
-  "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
+  "profile_id": "nsys2:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
   "profile_path": "fastvideo.sqlite",
   "findings": [
     {
@@ -274,7 +274,7 @@ Same finding as the [Quick Example](#quick-example-minimal--legacy-fields-only) 
       ],
       "selection": {
         "id": "sel_pp_bubble_iter142",
-        "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
+        "profile_id": "nsys2:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
         "source": "skill:gpu_idle_gaps",
         "start_ns": 89000000000,
         "end_ns": 110000000000,

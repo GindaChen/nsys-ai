@@ -14,7 +14,7 @@ import re
 import typing
 from dataclasses import dataclass, field
 
-from .connection import DB_ERRORS, wrap_connection
+from .connection import DB_ERRORS, is_safe_identifier, wrap_connection
 
 # Characters kept when trace-derived text is placed into prompt context or a
 # report: word characters, whitespace and light punctuation. Anything else
@@ -263,8 +263,8 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
 # profile_id — stable content-derived identifier
 # ---------------------------------------------------------------------------
 
-PROFILE_ID_VERSION = "nsys1"
-"""Algorithm tag for :func:`get_profile_id`. Bump (``nsys2``, …) if the
+PROFILE_ID_VERSION = "nsys2"
+"""Algorithm tag for :func:`get_profile_id`. Bump (``nsys3``, …) if the
 contributing columns or the canonical serialisation change."""
 
 
@@ -285,7 +285,7 @@ def get_profile_id(
         ``TARGET_INFO_CUDA_DEVICE`` and that contribution degrades to
         empty rather than failing
       - distinct ``ANALYSIS_FILE.globalPid`` values
-      - ``CUPTI_ACTIVITY_KIND_KERNEL`` row count
+      - resolved ``CUPTI_ACTIVITY_KIND_KERNEL[_Vn]`` row count
 
     Each contribution is JSON-encoded as a ``(label, value)`` pair before
     hashing, so values containing ``|`` / ``;`` / ``\\n`` can never collide
@@ -293,8 +293,8 @@ def get_profile_id(
 
     Format::
 
-        nsys1:sha256:<64-hex>   # preferred — content-derived
-        nsys1:path:<64-hex>     # fallback — when no Nsight metadata is reachable
+        nsys2:sha256:<64-hex>   # preferred — content-derived
+        nsys2:path:<64-hex>     # fallback — when no Nsight metadata is reachable
 
     The fallback fires for backends that expose only the parquet cache
     (``backend='parquetdir'``) where META_DATA / TARGET_INFO tables were
@@ -307,7 +307,7 @@ def get_profile_id(
 
     .. note::
        When *both* ``conn`` is None / empty and ``fallback_path`` is
-       None, the function returns ``nsys1:sha256:<sha256 of empty>``.
+       None, the function returns ``nsys2:sha256:<sha256 of empty>``.
        That is a recognisable null-id sentinel: every such caller
        collapses to the same value. Always pass ``fallback_path`` if
        cross-call distinguishability matters.
@@ -356,6 +356,18 @@ def get_profile_id(
             return [list(r) for r in adapter.execute(sql).fetchall() if r]
         except DB_ERRORS:
             return []
+
+    def _kernel_count() -> int | None:
+        """Count the kernel table selected by the shared schema resolver."""
+        try:
+            table = adapter.resolve_activity_tables().get("kernel")
+        except DB_ERRORS:
+            return None
+        if not table or not is_safe_identifier(table):
+            return None
+        # ``table`` is schema-derived and passed through the shared strict
+        # identifier validator immediately above.
+        return _scalar(f'SELECT COUNT(*) FROM "{table}"')  # nosec B608
 
     # NULLS LAST: SQLite defaults to NULLS FIRST, DuckDB to NULLS LAST —
     # pin it so two engine adapters on the same data hash identically.
@@ -416,12 +428,7 @@ def get_profile_id(
                 "ORDER BY globalPid NULLS LAST"
             ),
         ),
-        # literal-table-ok: this is a hash input, not a reader. Resolving the
-        # name would make a _V2 / _V3 export hash differently than it does
-        # today, and get_profile_id is a stable content identifier — that is an
-        # algorithm change, which the _PROFILE_ID_ALGO tag exists to version.
-        # Tracked separately; do not "fix" this without bumping the tag.
-        ("kernel_count", _scalar("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")),
+        ("kernel_count", _kernel_count()),
     ]
 
     # If every contribution is missing/empty the conn carries no Nsight

@@ -779,15 +779,15 @@ class TestEvidenceReportEnvelope:
 
     def test_envelope_carries_profile_id(self):
         """When set, profile_id is serialized verbatim in the envelope."""
-        report = EvidenceReport(title="T", profile_id="nsys1:sha256:abc", profile_path="/p")
+        report = EvidenceReport(title="T", profile_id="nsys2:sha256:abc", profile_path="/p")
         d = report.to_dict()
-        assert d["profile_id"] == "nsys1:sha256:abc"
+        assert d["profile_id"] == "nsys2:sha256:abc"
 
     def test_from_dict_preserves_profile_id(self):
         restored = EvidenceReport.from_dict(
-            {"title": "T", "profile_id": "nsys1:sha256:deadbeef", "profile_path": "/p"}
+            {"title": "T", "profile_id": "nsys2:sha256:deadbeef", "profile_path": "/p"}
         )
-        assert restored.profile_id == "nsys1:sha256:deadbeef"
+        assert restored.profile_id == "nsys2:sha256:deadbeef"
 
     def test_from_dict_defaults_profile_id_when_missing(self):
         """Pre-profile_id payloads (no key) load with profile_id=''."""
@@ -826,7 +826,7 @@ class TestEvidenceReportEnvelope:
 
         # Positional binding of ``profile_id`` is forbidden:
         with pytest.raises(TypeError):
-            EvidenceReport("T", "/p", [], "nsys1:sha256:abc")  # type: ignore[misc]
+            EvidenceReport("T", "/p", [], "nsys2:sha256:abc")  # type: ignore[misc]
 
         # Old positional usage (title, profile_path[, findings]) still
         # binds to the same fields it always did.

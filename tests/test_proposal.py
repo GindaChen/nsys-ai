@@ -31,7 +31,7 @@ def _finding(**overrides):
         "headroom_basis": "capture_total",
         "selection": TraceSelection(
             id="selection-0",
-            profile_id="nsys1:sha256:profile",
+            profile_id="nsys2:sha256:profile",
             source="skill:overlap_breakdown",
             start_ns=100,
             end_ns=200,
@@ -345,7 +345,7 @@ def test_suggested_actions_reject_non_string_members():
 def test_malformed_trace_selection_shape_is_rejected():
     selection = TraceSelection(
         id="selection-0",
-        profile_id="nsys1:sha256:profile",
+        profile_id="nsys2:sha256:profile",
         source="skill:test",
         nvtx_path="iteration",
     )
@@ -357,8 +357,8 @@ def test_malformed_trace_selection_shape_is_rejected():
 @pytest.mark.parametrize(
     ("finding_id", "profile_id", "message"),
     [
-        (" finding-0", "nsys1:sha256:profile", "source finding id"),
-        ("finding-0", "nsys1:sha256: profile", "selection.profile_id"),
+        (" finding-0", "nsys2:sha256:profile", "source finding id"),
+        ("finding-0", "nsys2:sha256: profile", "selection.profile_id"),
     ],
 )
 def test_provenance_ids_with_whitespace_are_rejected(finding_id, profile_id, message):

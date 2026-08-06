@@ -54,7 +54,7 @@ class TestAnalyzeFormatJson:
         assert isinstance(payload["findings"], list)
         # v0.1 content-derived profile id
         assert isinstance(payload["profile_id"], str)
-        assert payload["profile_id"].startswith("nsys1:"), payload["profile_id"]
+        assert payload["profile_id"].startswith("nsys2:"), payload["profile_id"]
 
     def test_profile_path_present(self, minimal_nsys_db_path):
         """Envelope contains a profile_path string sourced from the opened Profile."""
@@ -74,7 +74,7 @@ class TestAnalyzeFormatJson:
         """Single source of truth: envelope profile_id matches every
         Finding.selection.profile_id inside the same payload.
 
-        ``profile_id`` is the content-derived hash (``nsys1:sha256:...``)
+        ``profile_id`` is the content-derived hash (``nsys2:sha256:...``)
         from ``fingerprint.get_profile_id`` — both the envelope and every
         ``TraceSelection`` produced during the same build must carry it.
         """
@@ -86,7 +86,7 @@ class TestAnalyzeFormatJson:
         payload = json.loads(stdout)
 
         envelope_id = payload["profile_id"]
-        assert envelope_id.startswith("nsys1:"), envelope_id
+        assert envelope_id.startswith("nsys2:"), envelope_id
         for f in payload["findings"]:
             sel = f.get("selection")
             if sel is None:
