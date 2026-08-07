@@ -1022,19 +1022,39 @@ def _cmd_diff(args, _profile):
         from nsys_ai.profile_runner import build_local_profile_reference
         from nsys_ai.session_cli import publish_session_diff, resolve_session_id
 
-        before_path = session_before_path or os.path.abspath(
-            os.path.expanduser(args.before)
+        # Absolute either way. ``session_before_path`` is the opened profile's
+        # own ``path``, which keeps the caller's spelling -- relative when the
+        # user typed a relative one, which is the normal way to invoke a CLI.
+        # The store requires absolute paths in the diff payload
+        # (session_store._validate_diff_references), so leaving that branch
+        # un-absolutised made `nsys-ai diff before.sqlite after.sqlite --session`
+        # fail with "diff before path must be absolute" from the directory the
+        # profiles were in. The `or` used to skip the absolutising for exactly
+        # the case that needed it.
+        before_path = os.path.abspath(
+            os.path.expanduser(session_before_path or args.before)
         )
-        after_path = session_after_path or os.path.abspath(
-            os.path.expanduser(args.after)
+        after_path = os.path.abspath(
+            os.path.expanduser(session_after_path or args.after)
         )
         try:
             before_ref = build_local_profile_reference(before_path)
             after_ref = build_local_profile_reference(after_path)
             session_id = resolve_session_id(session or None, before=before_ref)
+            # to_diff_dict carries each profile's ``path`` straight from
+            # Profile.path, which is the caller's spelling -- "before.sqlite"
+            # when that is what was typed. The store requires absolute paths
+            # (session_store._validate_diff_references) and compares them against
+            # the session's own references, so publish the same absolute spelling
+            # those references were built from rather than the raw argument.
+            diff_payload = to_diff_dict(gate_summary)
+            for side, resolved in (("before", before_path), ("after", after_path)):
+                entry = diff_payload.get(side)
+                if isinstance(entry, dict):
+                    entry["path"] = resolved
             publish_session_diff(
                 session_id=session_id,
-                diff=to_diff_dict(gate_summary),
+                diff=diff_payload,
                 after_profile=after_ref,
             )
         except (TypeError, ValueError, ProfileError) as exc:

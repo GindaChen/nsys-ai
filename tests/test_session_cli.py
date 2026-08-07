@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -339,3 +340,47 @@ def test_session_adopted_secret_runspec_succeeds(tmp_path: Path):
     assert second.returncode == 0, second.stderr
     assert "Proposal published to session " in second.stdout
     assert "MY_TOKEN" not in second.stderr
+
+
+def test_cli_session_accepts_relative_profile_paths(tmp_path: Path):
+    """The whole sequence, invoked the way a shell user actually types it.
+
+    Every other test in this file passes ``.resolve()``d paths, which is why
+    none of them caught that ``diff --session`` rejected relative ones: the
+    diff payload carries ``Profile.path``, i.e. the caller's spelling, and the
+    store requires absolute paths in it. Running from the directory holding the
+    profiles failed with "diff before path must be absolute".
+    """
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    shutil.copy(BEFORE, tmp_path / "before.sqlite")
+    shutil.copy(AFTER, tmp_path / "after.sqlite")
+    runspec_path = tmp_path / "runspec.json"
+    runspec_path.write_bytes(RunSpec(argv=("true",)).canonical_json_bytes())
+    session_id = "cli-session-relative"
+
+    evidence = _run_cli(
+        tmp_path, "evidence", "build", "before.sqlite", "--format", "json",
+        "--gpu", "0", "--session", session_id, "--analyzers", "overlap_ratio",
+    )
+    assert evidence.returncode == 0, evidence.stderr
+    finding_id = _finding_id_from_evidence_stdout(evidence.stdout)
+
+    propose = _run_cli(
+        tmp_path, "propose", "--session", session_id, "--finding-id", finding_id,
+        "--runspec", "runspec.json",
+    )
+    assert propose.returncode == 0, propose.stderr
+
+    diff = _run_cli(
+        tmp_path, "diff", "before.sqlite", "after.sqlite", "--gpu", "0",
+        "--format", "json", "--no-ai", "--session", session_id,
+    )
+    assert diff.returncode == 0, diff.stderr
+
+    directory = session_dir(session_id, root=tmp_path / ".nsys-ai" / "sessions")
+    published = json.loads((directory / "diff.json").read_text())
+    for side in ("before", "after"):
+        assert os.path.isabs(published[side]["path"]), (
+            f"{side} path published as {published[side]['path']!r}; the store requires an absolute one"
+        )
