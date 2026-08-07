@@ -52,6 +52,18 @@ Environment (large profiles / DuckDB tuning):
 
   ``NSYS_AI_DUCKDB_TEMP_DIRECTORY`` — optional spill directory for large aggregations
   (DuckDB ``temp_directory`` pragma).
+
+  ``NSYS_AI_CACHE_MODE=direct|parquet`` — read by ``open_auto_db``, i.e. by every
+  caller that does not ask for a specific mode. ``direct`` skips the build and
+  queries the SQLite export in place (instant open, slower queries); ``parquet``
+  forces the build even when the affordability check would have declined it.
+  Every entry point honours it, including ``skill run`` — which is the point of
+  the variable, since the TUI, the timeline, the web server and the one-shot
+  subcommands expose no cache flag at all. ``skill run`` is the only one that
+  also takes ``--no-cache``.
+
+  Note it is consulted only when no valid cache exists yet:
+  ``direct`` skips *building* one, it does not refuse an existing one.
 """
 
 from __future__ import annotations
@@ -61,10 +73,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -165,6 +178,60 @@ def _cache_dir_for(sqlite_path: str) -> Path:
     return Path(sqlite_path).with_suffix(".nsys-cache")
 
 
+# Headroom the affordability check demands, as a fraction of the SQLite size.
+# Measured cache/profile ratios (re-measured 2026-08-05 after #322; unchanged from
+# the 2026-08-03 figures, because deferring nvtx_kernel_map moves *when* it is
+# written, not whether):
+#   92.7 MB -> 16.7 MB (0.18), 235 MB -> 21.8 MB (0.093),
+#   924 MB -> 84.1 MB (0.091), 3734 MB -> 276.6 MB (0.074).
+# 0.25 is 1.4x the worst of those and 3.4x the large-profile ratio.
+#
+# Peak disk is *not* simply the final size, though it is close enough to sit
+# inside that margin. build_cache writes into a sibling temp dir and renames, so
+# the export itself never doubles; but since #322 the deferred map is staged in a
+# .nvtx_map_build_* directory *inside* the published cache dir before os.replace,
+# so peak = final + one copy of the map. On the 93 MB capture that is 3.3 MB of
+# 16.7 MB — the cache is 13.4 MB until an NVTX skill runs, measured — i.e. ~20%
+# of a ratio that already has 40% of slack above it.
+_CACHE_SIZE_FRACTION = 0.25
+_CACHE_MIN_FREE_BYTES = 128 * 1024 * 1024
+
+
+def cache_is_affordable(sqlite_path: str) -> tuple[bool, str]:
+    """Can a Parquet cache be built alongside this profile?
+
+    Returns ``(True, "")`` when the cache directory's parent is writable and has
+    room for the estimated cache, else ``(False, reason)`` with a reason short
+    enough to log verbatim.
+
+    This is the test ``open_auto_db`` uses in place of the old "profile is
+    larger than 50 MB" rule. Size is the wrong axis: build cost and query
+    speedup both scale with the profile, so a cold build comes out cheaper than
+    direct on the very first run at every size from 93 MB to 3.7 GB (see the
+    table in ``open_auto_db``). What actually stops a build is having nowhere to
+    put it, which is what this measures.
+
+    Estimates are deliberately generous — see ``_CACHE_SIZE_FRACTION``. A build
+    that overruns the estimate anyway fails inside ``build_cache``, which
+    discards its temp dir, and the caller falls back to direct SQLite.
+    """
+    cache_dir = _cache_dir_for(sqlite_path)
+    parent = cache_dir.parent
+    if not os.access(parent, os.W_OK):
+        return False, f"{parent} is not writable"
+    try:
+        needed = max(int(os.path.getsize(sqlite_path) * _CACHE_SIZE_FRACTION), _CACHE_MIN_FREE_BYTES)
+    except OSError as exc:
+        return False, f"size of {sqlite_path} could not be determined ({exc})"
+    try:
+        free = shutil.disk_usage(parent).free
+    except OSError as exc:
+        return False, f"free space on {parent} could not be determined ({exc})"
+    if free < needed:
+        return False, f"{parent} has {free / 1e6:.0f}MB free, cache needs ~{needed / 1e6:.0f}MB"
+    return True, ""
+
+
 def is_cache_valid(sqlite_path: str) -> bool:
     """Check whether the Parquet cache is up-to-date.
 
@@ -214,15 +281,18 @@ def is_cache_valid(sqlite_path: str) -> bool:
 
 def invalidate_cache(sqlite_path: str) -> None:
     """Remove the Parquet cache for a profile, forcing rebuild on next open."""
-    import shutil
-
     cache_dir = _cache_dir_for(sqlite_path)
     if cache_dir.exists():
         shutil.rmtree(cache_dir)
         log.info("Removed cache: %s", cache_dir)
 
 
-def build_cache(sqlite_path: str) -> Path:
+def build_cache(
+    sqlite_path: str,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> Path:
     """Build a Parquet cache from a SQLite profile (first-run ETL).
 
     Attaches the SQLite DB via DuckDB and exports the base tables to Parquet
@@ -244,9 +314,18 @@ def build_cache(sqlite_path: str) -> Path:
     read-only profile directories (NFS / read-only mounts) where the
     cache is readable but the lock file cannot be created.
 
+    ``env_escape`` is passed straight to :func:`_build_banner` and only picks
+    which escape hatch that banner names; it changes nothing about the build.
+
+    ``progress``, when supplied, is called as ``progress(label, step, total)``
+    after each export step and suppresses all build writes to ``sys.stderr``
+    (banner, ``\\r`` redraws, and the final "Cache ready" line). Callers that
+    are not a terminal — notably a Textual app, whose ``sys.stderr.isatty()``
+    is unconditionally True — must pass one; without it the tty gate alone
+    cannot tell them apart from a real CLI tty.
+
     Returns the cache directory path.
     """
-    import shutil
     import tempfile
 
     cache_dir = _cache_dir_for(sqlite_path)
@@ -270,7 +349,9 @@ def build_cache(sqlite_path: str) -> Path:
             )
         )
         try:
-            _build_cache_into(sqlite_path, tmp_dir)
+            _build_cache_into(
+                sqlite_path, tmp_dir, env_escape=env_escape, progress=progress
+            )
         except BaseException:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
@@ -518,10 +599,102 @@ def _order_clause_for(
     return f"ORDER BY {cast}"
 
 
-def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
+# Build throughput measured on this repo's reference captures (2026-08-05, 12 cores):
+# 50 MB/s at 92.7 MB, 89 at 235 MB, 110 at 924 MB, 136 at 3734 MB. Throughput climbs with
+# size because a small build is dominated by fixed setup cost.
+#
+# Fitted to the >=500 MB end deliberately: _build_banner is the only consumer and it does
+# not fire below _BUILD_BANNER_MIN_MB, so the 50 and 89 MB/s rows are outside the range
+# this constant is ever asked about. 110 predicts 8 s at 924 MB (actual 8.4) and 34 s at
+# 3734 MB (actual 27.4) — i.e. it errs towards over-stating the wait, which is the right
+# direction for an ETA.
+#
+# These figures postdate #322, which moved nvtx_kernel_map out of the build and onto
+# first use. Any throughput number measured before that split described a build that also
+# produced the map and is 2-3x too pessimistic; re-measure rather than reconciling.
+_BUILD_MB_PER_S = 110.0
+# Below this the build is a few seconds and an ETA banner is just noise.
+_BUILD_BANNER_MIN_MB = 500.0
+# Throughput of the *deferred* nvtx_kernel_map sweep, which since #322 is no longer part
+# of the build and is paid by the first NVTX-attributing query instead. Measured the same
+# day, as cold-minus-warm time for nvtx_layer_breakdown: 11.2 s at 924 MB (82 MB/s) and
+# 49.7 s at 3734 MB (75 MB/s). Only the banner's size range matters here and it is tight
+# across it, so one constant is honest. Used solely to say how long the *second* wait is;
+# a profile with no NVTX data never pays it at all.
+_MAP_BUILD_MB_PER_S = 80.0
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _build_banner(sqlite_path: str, *, env_escape: bool = True) -> None:
+    """Announce a long build before it starts, with the way out.
+
+    The per-step progress line already exists, but it says nothing until the
+    first step completes and nothing about how long the whole thing will take.
+    On a 3.7 GB profile that is ~27 s of a user not knowing whether to wait.
+
+    The ETA covers *this* build only, which since #322 is the Parquet export
+    and not the ``nvtx_kernel_map`` sweep — that is deferred to the first NVTX
+    query and costs a further 3.7 / 3.4 / 11.2 / 49.7 s at 93 MB / 235 MB /
+    924 MB / 3.7 GB. Naming the second wait is the point of the third line:
+    without it the banner promises ~34 s on the 3.7 GB capture and the user
+    then sits through another ~50 s of silence inside a skill, because
+    ``materialize_cached_nvtx_kernel_map`` prints nothing at all. Instrumenting
+    that build is the real fix and belongs with issue #300; saying it out loud
+    is the floor.
+
+    ``env_escape`` picks which way out the last line names, because the two
+    callers do not have the same one. Reached through ``open_auto_db`` — every
+    entry point in this project — ``NSYS_AI_CACHE_MODE=direct`` genuinely skips
+    the build, including from its own ``=parquet`` branch. Reached through
+    ``open_cached_db`` directly, i.e. ``Profile(cache_mode="parquet")``, the
+    variable is never consulted and printing it would be advice that does
+    nothing; there the way out is the argument, so that is what it says.
+    Advertising an inert escape hatch is the exact defect #317 set out to fix
+    on ``skill run`` — narrowing it to one path is not fixing it.
+    """
+    try:
+        size_mb = os.path.getsize(sqlite_path) / 1e6
+    except OSError:
+        return
+    if size_mb < _BUILD_BANNER_MIN_MB:
+        return
+    escape = "Set NSYS_AI_CACHE_MODE=direct" if env_escape else 'Pass cache_mode="direct"'
+    # "4-5x" rather than the 3-9x range the docstring quotes: this banner only
+    # fires at >=500 MB, and in that region direct-vs-warm-cached query time
+    # measured 3.9x (924 MB) and 5.1x (3.7 GB). Quoting the whole-range figure
+    # here would promise the small-profile speedup to the one audience that
+    # cannot get it.
+    sys.stderr.write(
+        f"[nsys-ai] Building analysis cache for a {size_mb:.0f}MB profile "
+        f"(~{size_mb / _BUILD_MB_PER_S:.0f}s, once per profile; "
+        f"queries afterwards are 4-5x faster).\n"
+        f"[nsys-ai] The first NVTX-attributing query then builds the kernel map "
+        f"(~{size_mb / _MAP_BUILD_MB_PER_S:.0f}s more, also once per profile).\n"
+        f"[nsys-ai] {escape} to skip the build and query "
+        f"the SQLite export in place.\n"
+    )
+    sys.stderr.flush()
+
+
+def _build_cache_into(
+    sqlite_path: str,
+    cache_dir: Path,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> Path:
     """Internal: build the Parquet cache into the given directory."""
 
     log.info("Building analysis cache (first run only)...")
+    # A supplied progress callback owns reporting; do not also paint stderr.
+    if progress is None:
+        _build_banner(sqlite_path, env_escape=env_escape)
     t0 = time.monotonic()
 
     db = duckdb.connect()
@@ -579,13 +752,36 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             total_steps += 1
         step = [0]
 
-        def _progress(name: str) -> None:
-            step[0] += 1
+        label = [""]
+
+        # \r redraws are only legible on a terminal; piped or redirected, they
+        # arrive as one long line of fragments. Off a tty the banner and the
+        # final "Cache ready" line carry the whole story.
+        #
+        # When a progress callback is supplied it owns reporting and stderr
+        # stays quiet — required inside Textual, where sys.stderr.isatty() is
+        # True unconditionally (#332).
+        #
+        # Single-threaded by construction: every caller is the build's own
+        # thread, between DuckDB statements, so no write+flush pair can
+        # interleave with another on the same fd.
+        def _draw() -> None:
+            if not _stderr_is_tty():
+                return
             elapsed = time.monotonic() - t0
             sys.stderr.write(
-                f"\r[nsys-ai] Building cache [{step[0]}/{total_steps}] {name} ({elapsed:.0f}s)"
+                f"\r[nsys-ai] Building cache [{step[0]}/{total_steps}] "
+                f"{label[0]} ({elapsed:.0f}s)" + " " * 8
             )
             sys.stderr.flush()
+
+        def _progress(name: str) -> None:
+            step[0] += 1
+            label[0] = name
+            if progress is not None:
+                progress(name, step[0], total_steps)
+            else:
+                _draw()
 
         # ── Export pre-joined kernels table ────────────────────────────────
         # ORDER BY (deviceId, start) is critical: it lets DuckDB's parquet
@@ -711,10 +907,20 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                 "(set NSYS_AI_ALWAYS_BUILD_NVTX_KERNEL_MAP=1 to build it now)"
             )
 
-        # Clear progress line
+        # The CR and the padding exist only to overwrite the progress line
+        # _draw left on screen, so they belong to the same condition _draw does.
+        # Emitted unconditionally they put a bare CR and 40 spaces into every
+        # piped or redirected run — litter in exactly the case the tty gate was
+        # added to clean up. A progress callback replaces the whole stderr
+        # channel, so skip this line too.
         elapsed = time.monotonic() - t0
-        sys.stderr.write(f"\r[nsys-ai] Cache ready ({elapsed:.1f}s)" + " " * 40 + "\n")
-        sys.stderr.flush()
+        if progress is None:
+            ready = f"[nsys-ai] Cache ready ({elapsed:.1f}s)"
+            if _stderr_is_tty():
+                sys.stderr.write("\r" + ready + " " * 40 + "\n")
+            else:
+                sys.stderr.write(ready + "\n")
+            sys.stderr.flush()
 
         # ── Write version stamp ───────────────────────────────────────────
         meta = {
@@ -741,10 +947,23 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
     return cache_dir
 
 
-def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
+def open_cached_db(
+    sqlite_path: str,
+    *,
+    env_escape: bool = True,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection with views over the Parquet cache.
 
     If the cache doesn't exist or is stale, builds it first.
+
+    ``env_escape=False`` says the caller reached here without consulting
+    ``NSYS_AI_CACHE_MODE``, so the build banner must not advertise it. Only
+    :class:`~nsys_ai.profile.Profile` with an explicit ``cache_mode="parquet"``
+    passes it; ``open_auto_db`` leaves it at the default because on that path
+    the variable really does work.
+
+    ``progress`` is forwarded to :func:`build_cache` when a build is needed.
 
     Returns a DuckDB connection with views named after each cached table:
       ``kernels``, ``nvtx``, ``runtime``, ``memcpy``, ``memset``,
@@ -757,7 +976,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     """
     _require_profile_exists(sqlite_path)
     if not is_cache_valid(sqlite_path):
-        build_cache(sqlite_path)
+        build_cache(sqlite_path, env_escape=env_escape, progress=progress)
 
     cache_dir = _cache_dir_for(sqlite_path)
 
@@ -788,6 +1007,212 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     register_cache_dir(db, cache_dir)
 
     return db
+
+
+def open_auto_db(
+    sqlite_path: str,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> duckdb.DuckDBPyConnection:
+    """Open a profile under the ``auto`` cache policy: cache if one can be had.
+
+    Order: an existing valid cache, then the ``NSYS_AI_CACHE_MODE`` override,
+    then "can a cache be written here at all", then build.
+
+    ``progress`` is forwarded to :func:`open_cached_db` / :func:`build_cache`
+    when a build runs.
+
+    It lives here rather than on ``Profile`` because it is not only
+    ``Profile``'s decision. ``nsys-ai skill run`` and ``open_profile_readonly``
+    (chat, region_mfu) open a connection with no ``Profile`` involved, and they
+    used to call ``open_cached_db`` directly — so the build banner advertised
+    ``NSYS_AI_CACHE_MODE=direct`` on a subcommand where setting it changed
+    nothing. One policy, one function, one place to change it.
+
+    Raises whatever ``open_cached_db`` and ``open_direct_sqlite`` raise; a
+    caller that wants a raw-``sqlite3`` last resort catches it itself.
+
+    Why the default is to build
+    ---------------------------
+
+    This used to send any profile over 50 MB to ``open_direct_sqlite``. That
+    was correct when it was written — the old interval-join map builder ran
+    past fifteen minutes on a 3.5 GB capture and OOM'd a 175 GB pod (#143) —
+    and it stopped being correct when the stack sweep replaced that join.
+
+    Measured on this machine (12 cores, 15 GB RAM, DuckDB 1.5.0, one process
+    per row, cache deleted before every cold run, 2026-08-05) over the
+    **eight-skill battery** named in ``scripts/bench_cache.py`` as
+    ``AUTO_POLICY_SKILLS`` — top_kernels, gpu_idle_gaps, overlap_breakdown,
+    memory_transfers, kernel_launch_overhead, stream_concurrency,
+    tensor_core_usage, nvtx_layer_breakdown. The basket is part of the result:
+    a different one moves these numbers a lot (see the light workload below),
+    so quoting them without it is not reproducible.
+
+    =========  =======  ==============  ========  =========  =======  ========
+    profile    SQLite   mode            open      query      total    peak RSS
+    =========  =======  ==============  ========  =========  =======  ========
+    nano_vllm    93MB   direct           0.75 s     5.75 s    6.50 s   1.03 GB
+                        parquet (cold)   1.86 s     4.31 s    6.17 s   0.96 GB
+                        parquet (warm)   0.04 s     0.63 s    0.67 s   0.33 GB
+    perf_sp1    235MB   direct           1.36 s    11.21 s   12.57 s   1.11 GB
+                        parquet (cold)   2.64 s     7.07 s    9.71 s   1.09 GB
+                        parquet (warm)   0.04 s     3.72 s    3.76 s   0.77 GB
+    mfu_l40s2   924MB   direct           4.68 s    33.17 s   37.85 s   2.67 GB
+                        parquet (cold)   8.37 s    19.66 s   28.03 s   2.12 GB
+                        parquet (warm)   0.05 s     8.49 s    8.54 s   1.39 GB
+    perf       3734MB   direct          12.75 s    83.43 s   96.18 s  10.18 GB
+                        parquet (cold)  27.44 s    66.13 s   93.57 s   7.14 GB
+                        parquet (warm)   0.06 s    16.27 s   16.33 s   1.78 GB
+    =========  =======  ==============  ========  =========  =======  ========
+
+    Read the cold row's ``query`` column carefully: since #322 the build no
+    longer produces ``nvtx_kernel_map``, so part of what used to be ``open``
+    now sits inside the first NVTX-attributing skill. Cold ``query`` minus warm
+    ``query`` for ``nvtx_layer_breakdown`` alone is 3.7 / 3.4 / 11.2 / 49.7 s
+    at the four sizes. The total is what the user experiences, which is why the
+    table carries one.
+
+    Total against total, a cold build is never *worse* than direct on the first
+    run, and never heavier on peak RSS over this battery. So the argument for
+    building by default is not "always faster on the first run" -- it is "never
+    slower, sometimes much faster, and materially lighter on the large
+    profiles", plus the warm row, which is the one a user meets on every command
+    after the first.
+
+    An earlier version of this docstring quoted a "runs-to-repay" ratio derived
+    from the open/query split, which the #322 deferral made meaningless because
+    the cold query now contains a build.
+    Note also that the margins at 93 MB (6.17 vs 6.50) and 3734 MB (93.57 vs
+    96.18) are 3-5%, and run-to-run spread on a loaded box is 15-25% — those
+    two sizes are a wash on *time*, not a win. The decisive gaps are in the
+    middle. What the two ends win instead is memory, and at 3734 MB decisively:
+    7.14 GB against 10.18 GB, a 30% cut on the size where running out is a real
+    outcome.
+
+    None of this is a property of the profile size: both sides of the trade
+    scale together, which is exactly why size was the wrong axis. What does
+    discriminate is how much querying follows, and every consumer of this
+    project bar a one-shot skill is multi-query — the direct path re-pays its
+    cost on every later run forever, a build is paid once (warm total is 0.67 /
+    3.76 / 8.54 / 16.33 s). Two cases where that reasoning does not hold:
+
+    * **One cheap skill and nothing else.** On the 3.7 GB capture that is
+      ~19 s direct (12.75 open + 5.84 for ``top_kernels``) against ~27 s with a
+      build (27.44 + 0.04). Direct still wins, but by 1.5x — before the #322
+      deferral this comparison was 18.7 s against 79.2 s, so the advice is much
+      weaker than it used to be.
+
+      Say plainly which callers those are, because the eight-skill basket did
+      not measure them and they inherit this default anyway: nothing in this
+      project passes ``cache_mode``, so the TUI, the timeline, the web server
+      and the one-shot subcommands (``info``, ``kernels``, ``export``) all land
+      on ``auto``. A TUI that used to open a 3.7 GB profile in ~13 s now waits
+      ~27 s at startup. That is a real regression for a one-shot user and a
+      real win for anyone who then queries, and the trade was chosen for the
+      latter. ``_build_banner`` is the mitigation, not a refutation: at
+      >=500 MB it says the wait is coming and how to opt out. If someone wants
+      this reversed for the interactive entry points, the honest fix is to
+      measure a TUI-shaped basket and let those callers pass ``cache_mode``,
+      not to put the size rule back.
+    * **A light workload on a small profile, when RAM is tight.** The same
+      93 MB capture queried with four cheap skills that never touch NVTX
+      attribution (``top_kernels``, ``gpu_idle_gaps``, ``memory_transfers``,
+      ``kernel_launch_overhead``) is 0.73 + 1.65 s at 0.36 GB peak direct,
+      against 1.79 + 0.56 s at 0.74 GB cold. Wall clock is a dead heat
+      (2.38 vs 2.34 s) and the build costs twice the peak RSS, because its
+      working set is a fixed price a light run never earns back. So do *not*
+      read the table above as an unconditional peak-RSS win; issue #300 cares
+      about that ceiling.
+
+    Both are what ``NSYS_AI_CACHE_MODE=direct``, ``cache_mode="direct"`` and
+    ``skill run --no-cache`` are for.
+
+    If those numbers no longer hold, re-measure before nudging anything:
+    ``scripts/bench_cache.py --basket auto-policy`` is the harness and
+    reproduces this basket. Its *default* basket is a different, twelve-skill
+    one, which will not reproduce these rows.
+    """
+    if is_cache_valid(sqlite_path):
+        return open_cached_db(sqlite_path, progress=progress)
+
+    env_mode = os.environ.get("NSYS_AI_CACHE_MODE", "").strip().lower()
+    if env_mode == "direct":
+        log.info("NSYS_AI_CACHE_MODE=direct — querying the SQLite export in place.")
+        return open_direct_sqlite(sqlite_path)
+    if env_mode == "parquet":
+        return open_cached_db(sqlite_path, progress=progress)
+    if env_mode:
+        log.warning("Ignoring NSYS_AI_CACHE_MODE=%r; expected 'direct' or 'parquet'.", env_mode)
+
+    affordable, reason = cache_is_affordable(sqlite_path)
+    if not affordable:
+        # WARNING, not INFO, and the level is the whole mechanism. Nothing under
+        # src/nsys_ai/ ever calls basicConfig/dictConfig/addHandler, so the only
+        # sink for this record is logging.lastResort, a StreamHandler pinned at
+        # WARNING. At INFO the line was dropped: measured on a profile in a
+        # chmod 500 directory, `nsys-ai skill run top_kernels` wrote 2059 bytes
+        # to stdout and *zero* to stderr while silently taking the 3-9x slower
+        # path. Raising the level makes the same command print it.
+        #
+        # It also deserves the level on its merits: this is a silently degraded
+        # run, not a routine note. The `NSYS_AI_CACHE_MODE=direct` branch above
+        # stays at INFO on purpose — there the user asked for it, so silence is
+        # the correct outcome.
+        log.warning(
+            "Not building an analysis cache (%s); querying the SQLite export directly. "
+            "Queries will be several times slower.",
+            reason,
+        )
+        return open_direct_sqlite(sqlite_path)
+    return open_cached_db(sqlite_path, progress=progress)
+
+
+def open_with_direct_fallback(
+    sqlite_path: str,
+    primary,
+    *,
+    log: logging.Logger | None = None,
+) -> tuple[duckdb.DuckDBPyConnection | None, BaseException | None]:
+    """Open via ``primary``, then ``open_direct_sqlite``, then give up.
+
+    Shared three-tier policy used by ``Profile.__init__``,
+    ``open_profile_readonly`` (chat / region_mfu), and ``skill run``. Losing
+    the Parquet cache must not cost the DuckDB engine: a failed primary open
+    falls back to a direct SQLite attach (enriched ``kernels`` view intact)
+    and reaches raw ``sqlite3`` only when that fails too.
+
+    Returns ``(conn, primary_error)``:
+      - primary succeeded → ``(duckdb_conn, None)``
+      - primary failed, direct attach recovered → ``(duckdb_conn, primary_error)``
+      - both DuckDB paths failed → ``(None, primary_error)``; caller opens
+        raw ``sqlite3`` (read-only or not is the caller's choice)
+
+    ``ProfileNotFoundError`` is re-raised: a missing file cannot be salvaged.
+    ``open_direct_sqlite`` attaches ``READ_ONLY``, so the middle tier stays
+    compatible with read-only callers.
+    """
+    _log = log if log is not None else logging.getLogger(__name__)
+    try:
+        return primary(sqlite_path), None
+    except ProfileNotFoundError:
+        raise
+    except Exception as e:
+        try:
+            db = open_direct_sqlite(sqlite_path)
+            _log.warning(
+                "Parquet cache unavailable (%s); querying the SQLite export directly "
+                "through DuckDB.",
+                e,
+            )
+            return db, e
+        except Exception as direct_err:
+            _log.warning(
+                "DuckDB unavailable (cache: %s; direct: %s), falling back to sqlite3.",
+                e,
+                direct_err,
+            )
+            return None, e
 
 
 def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
@@ -2227,12 +2652,22 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     """Open DuckDB with SQLite directly attached — zero ETL latency.
 
     Uses DuckDB's sqlite_scanner to query the original SQLite file
-    in-place.  Analytical queries on large scans are slower than cached
-    Parquet, but startup is instant.  Best for:
+    in-place.  Analytical queries on large scans are slower than a warm cache
+    (3-9x on the four captures measured for issue #317, from 93 MB to 3.7 GB:
+    3.0x at 235 MB, 3.9x at 924 MB, 5.1x at 3.7 GB, 9.1x at 93 MB), but startup
+    is instant.  Used for:
 
-      - First access to large profiles (>50MB)
-      - One-off queries that only touch 1-2 tables
-      - ``--no-cache`` mode for quick diagnostics
+      - One-off queries that only touch 1-2 tables, where the build would not
+        repay itself: on a 3.7 GB profile one cheap skill costs ~19 s direct
+        against ~27 s including a build. That margin used to be 18.7 s against
+        79.2 s; #322 deferred nvtx_kernel_map out of the build, so direct now
+        wins this case by 1.5x rather than 4x
+      - ``cache_mode="direct"``, ``--no-cache`` and ``NSYS_AI_CACHE_MODE=direct``
+      - the fallback when a cache cannot be built or read — an unwritable
+        profile directory, no disk space, or a failed build
+
+    It is *not* the default for large profiles any more. That rule predated the
+    stack-sweep map builder and is gone; see ``open_auto_db``.
     """
     _require_profile_exists(sqlite_path)
     db = duckdb.connect()

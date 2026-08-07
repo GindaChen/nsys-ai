@@ -369,3 +369,35 @@ async def test_a_stale_worker_with_no_worker_handle_stops_at_the_stream_loop(
         f"a stale worker kept pulling the stream: produced {produced}. Only the "
         "first chunk is unavoidable — the loop checks cancelled() after it."
     )
+
+
+@pytest.mark.asyncio
+async def test_cache_build_inside_textual_writes_no_cr_to_piped_stderr(profile_copy, tmp_path):
+    """Inside Textual, stderr.isatty() is True even when fd 2 is a pipe (#332).
+
+    Measured before the progress callback: a cold open painted thirteen
+    ``\\r`` redraws onto the redirected descriptor. The apps pass a callback
+    so ``build_cache`` writes nothing to stderr; this pins that, not merely
+    that the callback was invoked.
+    """
+    import os
+
+    from nsys_ai.tui_textual import NsysChatApp
+
+    err_path = tmp_path / "stderr.bin"
+    err_fd = os.open(str(err_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    saved = os.dup(2)
+    try:
+        os.dup2(err_fd, 2)
+        os.close(err_fd)
+        app = NsysChatApp(profile_copy)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+
+    data = err_path.read_bytes()
+    assert b"\r" not in data, (
+        f"carriage returns reached piped stderr during a Textual cache build: {data!r}"
+    )

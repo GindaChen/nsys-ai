@@ -34,9 +34,15 @@ direct / skills   6.62 MB   7.4 MB  dict instead of tuple buckets in
 direct / attrib   0.44 MB   0.9 MB  drop the ``LIMIT`` push-down -> 1.69 MB
 ===============  ========  =======  ==================================================
 
-``cache_mode="direct"`` is the second case because it is the path a real
-tens-of-GB capture takes: ``Profile.__init__`` sends anything over 50 MB to
-``open_direct_sqlite``, which does no ETL at all.
+``cache_mode="direct"`` is the second case because it is the path a run takes
+whenever no cache is built: the explicit opt-out (``cache_mode="direct"``,
+``--no-cache``, ``NSYS_AI_CACHE_MODE=direct``) and the fallback when the
+profile's directory is read-only or out of disk. It reaches
+``open_direct_sqlite``, which does no ETL at all. It stopped being the
+*default* for large captures in issue #317 — over an eight-skill run the cache
+came out cheaper on wall clock and on peak RSS at every size — but it is still
+the path a one-shot query on a tens-of-GB capture should take, so its ceilings
+still matter.
 
 The two cases used to be mirror images — the cached path spent its memory
 opening and almost none running skills, the direct path the reverse. They are

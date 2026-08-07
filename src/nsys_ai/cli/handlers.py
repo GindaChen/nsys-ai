@@ -1592,24 +1592,23 @@ def _cmd_skill(args, _profile):
 
         import duckdb
 
-        from nsys_ai.parquet_cache import open_cached_db
+        from nsys_ai.parquet_cache import (
+            open_auto_db,
+            open_direct_sqlite,
+            open_with_direct_fallback,
+        )
 
         fmt = getattr(args, "format", "text")
         no_cache = getattr(args, "no_cache", False)
-        try:
-            if no_cache:
-                from nsys_ai.parquet_cache import open_direct_sqlite
-
-                conn = open_direct_sqlite(args.profile)
-            else:
-                conn = open_cached_db(args.profile)
-        except (duckdb.Error, RuntimeError, OSError) as exc:
-            # Fallback to raw SQLite if DuckDB/Parquet cache fails
-            import logging
-
-            logging.getLogger("nsys_ai").warning(
-                "DuckDB cache unavailable (%s), falling back to raw SQLite", exc
-            )
+        # Same three-tier chain as Profile and open_profile_readonly: cache
+        # (or --no-cache direct), then open_direct_sqlite, then raw sqlite3.
+        # open_auto_db, not open_cached_db: this handler builds no Profile, and
+        # calling the builder directly made it the one subcommand where
+        # NSYS_AI_CACHE_MODE=direct did nothing — while the build banner
+        # printed that very instruction at the user.
+        primary = open_direct_sqlite if no_cache else open_auto_db
+        conn, _err = open_with_direct_fallback(args.profile, primary)
+        if conn is None:
             conn = sqlite3.connect(args.profile)
 
         # Build trim kwargs if --trim was provided

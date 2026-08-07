@@ -8,9 +8,13 @@ Designed for the multi-phase cache-optimization plan. Measures:
 
 Usage:
   python scripts/bench_cache.py <profile.sqlite> [--no-rebuild] [--trim S E] [--out FILE]
+                                                 [--basket default|auto-policy]
 
 --no-rebuild reuses the existing cache (only measures query time).
 --trim narrows the analysis window for the skills (default: 400 420).
+--basket picks the skill set. ``auto-policy`` is the eight-skill battery that every
+figure in ``parquet_cache.open_auto_db`` and the README's cache table was measured
+over; the default basket is a different twelve and will not reproduce them.
 
 What the build column covers has changed, and comparing across that change is a
 mistake. ``nvtx_kernel_map`` is no longer produced by ``build_cache`` — it is
@@ -48,6 +52,33 @@ DEFAULT_SKILLS = [
     ("tensor_core_usage", [], "compute"),
     ("kernel_launch_pattern", [], "launch"),
 ]
+
+# The exact basket behind every number in ``parquet_cache.open_auto_db``'s decision
+# table and the README's "Analysis cache" table. It is NOT DEFAULT_SKILLS: this one
+# is eight skills, that one is twelve, and the two do not produce comparable rows.
+#
+# Named here rather than left implicit because the auto policy's whole argument is a
+# measurement, and a measurement whose workload is unstated cannot be reproduced or
+# challenged. Select it with ``--basket auto-policy``.
+#
+# The two ``-p device=0`` arguments are part of the definition: both skills abstain
+# without a device, so passing these names through bare ``--skills`` measures
+# something else entirely.
+AUTO_POLICY_SKILLS = [
+    ("top_kernels", [], "compute"),
+    ("gpu_idle_gaps", ["-p", "device=0"], "idle"),
+    ("overlap_breakdown", ["-p", "device=0"], "compute"),
+    ("memory_transfers", [], "mem"),
+    ("kernel_launch_overhead", [], "launch"),
+    ("stream_concurrency", [], "comms"),
+    ("tensor_core_usage", [], "compute"),
+    # Last on purpose: it is the only one that reaches nvtx_kernel_map, so on a cold
+    # cache it absorbs the deferred map build (3.7 / 3.4 / 11.2 / 49.7 s at 93 MB /
+    # 235 MB / 924 MB / 3.7 GB) and the ordering keeps that cost in one place.
+    ("nvtx_layer_breakdown", [], "nvtx"),
+]
+
+BASKETS = {"default": DEFAULT_SKILLS, "auto-policy": AUTO_POLICY_SKILLS}
 
 
 def _run(cmd: list[str], capture: bool = True, timeout: int = 900) -> tuple[int, str, str, float]:
@@ -132,7 +163,10 @@ def main() -> int:
     p.add_argument("--trim", nargs=2, type=float, default=(400.0, 420.0),
                    help="trim window (start end) in seconds; default 400 420")
     p.add_argument("--skills", nargs="*", default=None,
-                   help="override skill set; default = built-in basket")
+                   help="override skill set; default = the --basket selection")
+    p.add_argument("--basket", choices=sorted(BASKETS), default="default",
+                   help="named skill basket; 'auto-policy' is the eight skills behind "
+                        "the table in parquet_cache.open_auto_db")
     p.add_argument("--out", type=Path, default=None, help="JSON output path")
     p.add_argument("--label", default=None, help="label for this run (e.g. baseline / phase1)")
     args = p.parse_args()
@@ -145,7 +179,7 @@ def main() -> int:
     if args.skills:
         skills = [(s, [], "user") for s in args.skills]
     else:
-        skills = DEFAULT_SKILLS
+        skills = BASKETS[args.basket]
 
     report = {
         "label": args.label,

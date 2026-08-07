@@ -308,20 +308,27 @@ def open_profile_readonly(path: str):
     a ``<profile_basename>.nsys-cache`` directory next to the profile before
     returning the connection.  While the query connection itself is read-only,
     the cache-building process performs disk writes.
+
+    That build goes through ``parquet_cache.open_auto_db``, so it obeys
+    ``NSYS_AI_CACHE_MODE`` and declines on a read-only or full disk rather than
+    failing into the ``sqlite3`` fallback below.  Calling ``open_cached_db``
+    here instead would silently exempt chat and region_mfu from the only
+    cache switch those entry points expose.
+
+    A failed cache build falls back to ``open_direct_sqlite`` (DuckDB attached
+    read-only to the export — same middle tier as ``Profile`` and ``skill
+    run``) before raw ``sqlite3``. The direct attach keeps the enriched
+    ``kernels`` view; raw sqlite3 does not.
     """
     from nsys_ai import parquet_cache
-    from nsys_ai.exceptions import ProfileNotFoundError
 
-    try:
-        return parquet_cache.open_cached_db(path)
-    except ProfileNotFoundError:
-        # A missing file can't be salvaged by the SQLite fallback; surface the
-        # clear not-found error instead of a vague "unable to open database".
-        raise
-    except Exception as e:
-        _log.warning("Failed to open DuckDB cache for %s, falling back to SQLite: %s", path, e)
+    db, _err = parquet_cache.open_with_direct_fallback(
+        path, parquet_cache.open_auto_db, log=_log
+    )
+    if db is not None:
+        return db
 
-    # Fallback to SQLite
+    # Tier 3: raw SQLite, still read-only.
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row

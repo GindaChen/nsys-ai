@@ -2,12 +2,32 @@
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from nsys_ai import parquet_cache
+
+
+def _reads_sqlite_in_place(prof) -> bool:
+    """True when ``prof.db`` is DuckDB with the SQLite export attached directly.
+
+    The discriminator for "the cache was refused". Before issue #317 that state
+    was observable as ``prof.db is None`` — the fallback dropped to raw
+    ``sqlite3`` and lost the DuckDB engine with it. It now lands on
+    ``open_direct_sqlite``, which attaches the export as ``src``; a cached open
+    has no ``src`` in its catalog, and a raw-``sqlite3`` fallback has no
+    ``prof.db`` at all. All three are distinguishable, which is why the tests
+    below assert on this rather than on ``is None``.
+    """
+    if prof.db is None:
+        return False
+    rows = prof.db.execute("SELECT database_name FROM duckdb_databases()").fetchall()
+    return "src" in {r[0] for r in rows}
+
 
 # Minimal schema reused by tests that need to seed custom NVTX rows. Mirrors
 # the production CUPTI/NVTX layout; intentionally narrow — just enough for
@@ -353,7 +373,7 @@ class TestUnrecognisedKernelTable:
     def test_unrecognised_kernel_table_falls_back_instead_of_poisoning_cache(
         self, minimal_nsys_db_path
     ):
-        """A non-`_V` kernel suffix must leave no cache and open via sqlite3."""
+        """A non-`_V` kernel suffix must leave no cache and read the export in place."""
         from nsys_ai.profile import Profile
 
         conn = sqlite3.connect(minimal_nsys_db_path)
@@ -367,7 +387,7 @@ class TestUnrecognisedKernelTable:
         for _ in range(2):
             prof = Profile(minimal_nsys_db_path, cache_mode="auto")
             try:
-                assert prof.db is None  # sqlite3 fallback engaged
+                assert _reads_sqlite_in_place(prof)  # fallback engaged, cache refused
                 assert prof.schema.kernel_table == "CUPTI_ACTIVITY_KIND_KERNEL_X1"
                 assert prof.meta.kernel_count > 0
             finally:
@@ -465,7 +485,7 @@ class TestDamagedInput:
     def test_a_corrupt_kernels_parquet_falls_back_instead_of_failing(
         self, minimal_nsys_db_path
     ):
-        """A damaged cache file must degrade to sqlite3, not take the profile down.
+        """A damaged cache file must degrade, not take the profile down.
 
         Silent otherwise in the loudest possible way: the cache is an
         optimisation the user never asked for, so a byte-level fault inside it
@@ -484,20 +504,22 @@ class TestDamagedInput:
         (cache_dir / "kernels.parquet").write_bytes(b"NOTAPARQUET" * 100)
 
         with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
-            assert prof.db is None, "a corrupt cache file was accepted as a cache"
+            assert _reads_sqlite_in_place(prof), "a corrupt cache file was accepted as a cache"
             rows = get_skill("top_kernels").execute(prof.query_conn(), limit=3)
-        assert rows, "falling back to sqlite3 lost the kernel data"
+        assert rows, "falling back lost the kernel data"
 
     def test_a_corrupt_cache_is_never_repaired(self, minimal_nsys_db_path):
         """Pinned defect, not a virtue: the damage is permanent and invisible.
 
         ``is_cache_valid()`` checks for the cache directory and its manifest, not
         for readable Parquet, so a corrupt cache stays "valid" forever. Every
-        subsequent open pays the fallback and gets the degraded answer — the
-        sqlite3 path returns fewer columns than the cached one (``top_kernels``
-        loses ``tc_eligible``/``uses_tc``, ``nvtx_kernel_map`` loses demangled
-        names), so the user silently gets a thinner analysis on every run until
-        someone deletes the directory by hand.
+        subsequent open pays the fallback — since #317 that is DuckDB reading the
+        export in place, which keeps the enriched ``kernels`` view but loses the
+        precomputed ``nvtx_kernel_map``, so NVTX attribution is rebuilt from
+        scratch on every run until someone deletes the directory by hand. (Before
+        #317 the fallback was raw ``sqlite3`` and the loss was larger: no
+        ``kernels`` view at all, so ``top_kernels`` shed
+        ``tc_eligible``/``uses_tc`` and ``tensor_core_usage`` could not run.)
 
         This test exists so that fixing it — discard and rebuild on the first
         unreadable read — is a visible change to a stated behaviour rather than
@@ -516,7 +538,9 @@ class TestDamagedInput:
 
         for attempt in range(3):
             with Profile(minimal_nsys_db_path, cache_mode="auto") as prof:
-                assert prof.db is None, f"open #{attempt + 1} unexpectedly used the cache"
+                assert _reads_sqlite_in_place(prof), (
+                    f"open #{attempt + 1} unexpectedly used the cache"
+                )
 
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True, (
             "is_cache_valid now rejects a corrupt cache — good, but this test "
@@ -682,7 +706,12 @@ class TestConcurrentBuild:
         count_lock = threading.Lock()
         original_build_into = parquet_cache._build_cache_into
 
-        def counting_build_into(sqlite_path: str, tmp_dir: Path) -> None:
+        # **kwargs, so this double keeps tracking _build_cache_into's real
+        # signature instead of pinning today's. It grew a keyword-only
+        # `env_escape` in #317 and a stub with a fixed parameter list turns
+        # that into a TypeError inside a worker thread, which surfaces here as
+        # "runners raised" rather than as anything to do with concurrency.
+        def counting_build_into(sqlite_path: str, tmp_dir: Path, **kwargs) -> None:
             nonlocal call_count
             with count_lock:
                 call_count += 1
@@ -691,7 +720,7 @@ class TestConcurrentBuild:
             # ETL on the minimal fixture is ~50ms; 0.5s sleep gives a
             # ~10× safety margin.
             time.sleep(0.5)
-            original_build_into(sqlite_path, tmp_dir)
+            original_build_into(sqlite_path, tmp_dir, **kwargs)
 
         monkeypatch.setattr(parquet_cache, "_build_cache_into", counting_build_into)
 
@@ -1277,3 +1306,155 @@ def test_an_empty_sweep_is_told_apart_from_a_missing_source(tmp_path, monkeypatc
         outcome, detail = parquet_cache.materialize_cached_nvtx_kernel_map_outcome(prof.db)
         assert outcome == parquet_cache.MAP_SOURCES_MISSING
         assert "runtime.parquet" in detail
+# ── Build-time terminal output (issue #317) ──────────────────────────
+#
+# Everything below exists because none of it was reachable under test.
+# `_build_banner` returns early below _BUILD_BANNER_MIN_MB = 500 and the
+# largest fixture in this repo is 2.2 MB; `_draw` returns early unless
+# stderr is a tty *and* no progress callback was supplied. Plain pytest is
+# not a tty, so the body is unreachable there — but a Textual app (see
+# tests/test_tui_chat_app.py) wraps stderr in `_PrintCapture` whose
+# `isatty()` is always True, so without a progress callback the redraws
+# *do* fire under pytest. Both bodies were verified unreachable by
+# mutating each to `raise AssertionError` — the whole cache-test suite
+# stayed green. So the size and the tty have to be faked, or three lines
+# of user-facing output and an ETA formula ship unpinned.
+
+
+class TestBuildBanner:
+    """The >=500 MB announcement: when it fires, and what it promises."""
+
+    def test_it_fires_for_a_large_profile_and_names_both_waits(self, capsys):
+        """Both ETAs, the size, and the way out.
+
+        The numbers are pinned as literals rather than recomputed from
+        _BUILD_MB_PER_S / _MAP_BUILD_MB_PER_S on purpose. Recomputing would
+        pin the formula but let a constant drift silently, and those constants
+        are measured values carrying a provenance comment that says to
+        re-measure rather than reconcile. If a re-measurement moves them, this
+        test should go red and be updated deliberately.
+
+        3734 MB is the real `perf.sqlite` size from the decision table, chosen
+        over 500 so neither quotient lands on a .5 tie: 3734/110 = 33.9 -> 34,
+        3734/80 = 46.7 -> 47.
+        """
+        with mock.patch("os.path.getsize", return_value=3734.0 * 1e6):
+            parquet_cache._build_banner("/does/not/need/to/exist.sqlite")
+
+        err = capsys.readouterr().err
+        assert "Building analysis cache for a 3734MB profile" in err
+        assert "~34s" in err, f"build ETA is not 3734/{parquet_cache._BUILD_MB_PER_S}: {err!r}"
+        assert "~47s more" in err, (
+            f"map ETA is not 3734/{parquet_cache._MAP_BUILD_MB_PER_S}: {err!r}"
+        )
+        # The second wait is the whole reason the banner has a second line:
+        # without it the user is promised ~34s and then sits through ~47s more
+        # of silence inside a skill.
+        assert "first NVTX-attributing query" in err
+        assert "NSYS_AI_CACHE_MODE=direct" in err
+
+    def test_it_fires_exactly_at_the_threshold(self, capsys):
+        with mock.patch("os.path.getsize", return_value=500.0 * 1e6):
+            parquet_cache._build_banner("/x.sqlite")
+        assert "Building analysis cache" in capsys.readouterr().err
+
+    def test_it_is_silent_just_below_the_threshold(self, capsys):
+        """499 MB: a few seconds of build, and an ETA banner would be noise."""
+        with mock.patch("os.path.getsize", return_value=499.0 * 1e6):
+            parquet_cache._build_banner("/x.sqlite")
+        assert capsys.readouterr().err == "", "the banner fired below _BUILD_BANNER_MIN_MB"
+
+    def test_a_missing_file_is_not_an_error(self, capsys):
+        """getsize raises on a vanished path; announcing is never worth a crash."""
+        parquet_cache._build_banner("/nonexistent/profile.sqlite")
+        assert capsys.readouterr().err == ""
+
+    def test_it_names_the_escape_hatch_the_caller_actually_has(self, capsys):
+        """`Profile(cache_mode="parquet")` never reads NSYS_AI_CACHE_MODE.
+
+        Telling that caller's user to set it is advice that does nothing — the
+        same defect #317 fixed on `skill run`, which had a banner advertising a
+        variable the subcommand ignored. Narrowing it to one remaining path is
+        not fixing it, so the banner names the argument there instead.
+        """
+        with mock.patch("os.path.getsize", return_value=3734.0 * 1e6):
+            parquet_cache._build_banner("/x.sqlite", env_escape=False)
+
+        err = capsys.readouterr().err
+        assert 'Pass cache_mode="direct"' in err
+        assert "NSYS_AI_CACHE_MODE" not in err, (
+            "the banner advertised an environment variable on the one path that "
+            "never consults it"
+        )
+
+    def test_profile_parquet_mode_is_wired_to_that_branch(self, minimal_nsys_db_path, tmp_path):
+        """The wiring, not just the formatting: cache_mode="parquet" passes it.
+
+        Asserted on the call rather than on stderr because the fixture is 2.2 MB
+        and no real build in this repo can clear the 500 MB guard.
+        """
+        from nsys_ai.profile import Profile
+
+        db_path = tmp_path / "banner_wiring.sqlite"
+        db_path.write_bytes(Path(minimal_nsys_db_path).read_bytes())
+
+        with mock.patch.object(
+            parquet_cache, "_build_banner", wraps=parquet_cache._build_banner
+        ) as spy:
+            with Profile(str(db_path), cache_mode="parquet"):
+                pass
+
+        spy.assert_called_once()
+        assert spy.call_args.kwargs.get("env_escape") is False, (
+            "Profile(cache_mode='parquet') let the banner advertise NSYS_AI_CACHE_MODE, "
+            "which that path never reads"
+        )
+
+
+class TestBuildProgressOutput:
+    """The \\r-redrawn progress line, and what replaces it off a tty."""
+
+    def test_the_progress_line_renders_on_a_tty(self, minimal_nsys_db_path, tmp_path, capsys):
+        """Pins the f-string _draw's tty gate made unreachable under pytest.
+
+        Before the gate existed this was executed by every cache-building test;
+        gating it without adding this test would have been a net coverage loss
+        on the renderer.
+        """
+        db_path = tmp_path / "progress_tty.sqlite"
+        db_path.write_bytes(Path(minimal_nsys_db_path).read_bytes())
+
+        with mock.patch.object(parquet_cache, "_stderr_is_tty", return_value=True):
+            parquet_cache.build_cache(str(db_path))
+
+        err = capsys.readouterr().err
+        assert "\r[nsys-ai] Building cache [" in err, (
+            f"no progress line was drawn on a tty: {err!r}"
+        )
+        # "[n/total]" — the counter is the only part that says progress is
+        # being made at all, so pin its shape, not just the prefix.
+        assert re.search(r"\r\[nsys-ai\] Building cache \[\d+/\d+\] \S+ \(\d+s\)", err), (
+            f"the progress line lost its step counter or elapsed clock: {err!r}"
+        )
+        assert err.rstrip().endswith("s)"), "the final line should be 'Cache ready (…s)'"
+
+    def test_off_a_tty_nothing_draws_cursor_control(self, minimal_nsys_db_path, tmp_path, capsys):
+        """Piped or redirected, stderr must be plain lines.
+
+        `_draw` is gated on the tty, but the final "Cache ready" line used to
+        carry the \\r and the 40 spaces unconditionally — padding whose only job
+        is to erase a progress line that, off a tty, was never drawn. Measured
+        before the fix: a build with stderr redirected to a file produced
+        exactly b'\\r[nsys-ai] Cache ready (0.3s)' + 40 spaces + b'\\n'.
+        """
+        db_path = tmp_path / "progress_pipe.sqlite"
+        db_path.write_bytes(Path(minimal_nsys_db_path).read_bytes())
+
+        with mock.patch.object(parquet_cache, "_stderr_is_tty", return_value=False):
+            parquet_cache.build_cache(str(db_path))
+
+        err = capsys.readouterr().err
+        assert "\r" not in err, f"a carriage return reached a non-tty stderr: {err!r}"
+        assert "Cache ready" in err, "the one line that carries the story off a tty is missing"
+        for line in err.splitlines():
+            assert line == line.rstrip(), f"trailing erase-padding survived off a tty: {line!r}"

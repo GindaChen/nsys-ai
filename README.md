@@ -270,6 +270,54 @@ via `--against` or as the `before` positional.
 
 Run `nsys-ai <command> --help` for flags.
 
+## Analysis cache
+
+The first command run against a profile builds a `<profile>.nsys-cache` directory
+next to it: the tables analysis needs, exported to Parquet and queried through
+DuckDB. Later commands reuse it and open in well under a second. The cache is
+rebuilt automatically when the profile changes; deleting the directory is safe.
+
+Measured on the reference captures (12 cores, 15 GB RAM), running eight skills:
+`top_kernels`, `gpu_idle_gaps`, `overlap_breakdown`, `memory_transfers`,
+`kernel_launch_overhead`, `stream_concurrency`, `tensor_core_usage`,
+`nvtx_layer_breakdown`. Reproduce with
+`python scripts/bench_cache.py <profile> --basket auto-policy`.
+
+| Profile | Build | First NVTX query | Cache size | Eight skills: direct query → cached query |
+|---------|-------|------------------|------------|-------------------------------------------|
+| 93 MB | 1.9 s | +3.7 s | 17 MB | 5.8 s → 0.6 s |
+| 235 MB | 2.6 s | +3.4 s | 22 MB | 11.2 s → 3.7 s |
+| 924 MB | 8.4 s | +11.2 s | 84 MB | 33.2 s → 8.5 s |
+| 3.7 GB | 27.4 s | +49.7 s | 277 MB | 83.4 s → 16.3 s |
+
+The build exports Parquet; the kernel-to-NVTX map is built separately by the
+first query that needs it, which is the "first NVTX query" column. Both are paid
+once per profile.
+
+On this workload the first run is never slower end to end than querying the
+export directly, and lighter on memory at all four sizes, so the build is the
+default — "this workload" being the eight skills above; a one-shot is a
+different trade, see below. The
+middle two sizes are a clear win on time (23% and 26%); at 93 MB and 3.7 GB the
+time difference is 2-5%, inside run-to-run variance, and what those sizes gain
+is memory — 7.1 GB against 10.2 GB on the largest. Every command after the
+first is the warm row, which is where the cache pays for itself outright.
+
+Two cases where it is not what you want:
+
+- **One command against a very large profile, and no follow-up.** Set
+  `NSYS_AI_CACHE_MODE=direct` to query the SQLite export in place — instant
+  start, slower queries, and no cache written. `nsys-ai skill run` also takes
+  `--no-cache` for the same effect. A light one-shot workload is also the case
+  where the build costs more memory than it saves, so prefer direct if you are
+  tight on RAM.
+- **A read-only or full disk.** No setting needed: nsys-ai checks before it
+  builds, says why it declined, and queries the export directly.
+
+`NSYS_AI_CACHE_MODE=parquet` forces the build in the other direction. Both
+values only decide whether a cache gets *built*: an existing valid cache is
+still used, so delete the directory if you want the export read in place.
+
 ## Skills
 
 Skills are self-contained analysis units that run without an LLM. nsys-ai ships

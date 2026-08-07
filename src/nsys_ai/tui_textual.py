@@ -62,6 +62,15 @@ from textual.worker import NoActiveWorker, get_current_worker
 # ---------------------------------------------------------------------------
 
 
+def _suppress_cache_progress(label: str, step: int, total: int) -> None:
+    """Drop cache-build progress so Textual does not paint it on stderr.
+
+    Passing any callback silences the ``\\r`` redraw path inside ``build_cache``.
+    This one does nothing else: the build still runs synchronously on the
+    message loop, so the UI cannot update between steps (#332).
+    """
+
+
 def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
     """Return top kernels by total GPU duration as a list of dicts.
 
@@ -71,7 +80,7 @@ def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
     try:
         from .profile import open as open_profile
 
-        with open_profile(sqlite_path) as prof:
+        with open_profile(sqlite_path, progress=_suppress_cache_progress) as prof:
             aggs = prof.aggregate_kernels(device=None, limit=limit)
             return [
                 {

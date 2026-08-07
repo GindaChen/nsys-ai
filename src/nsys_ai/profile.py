@@ -314,7 +314,14 @@ class Profile:
     #: default in place.
     cache_error: Exception | None = None
 
-    def __init__(self, path: str, *, cache_mode: str = "auto", backend: str = "sqlite"):
+    def __init__(
+        self,
+        path: str,
+        *,
+        cache_mode: str = "auto",
+        backend: str = "sqlite",
+        progress: typing.Callable[[str, int, int], None] | None = None,
+    ):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
                 f"Unknown cache_mode: {cache_mode!r}. Expected 'auto', 'parquet', or 'direct'."
@@ -340,36 +347,34 @@ class Profile:
         else:
             self.conn = sqlite3.connect(path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
-            try:
-                if cache_mode == "direct":
-                    # Force direct SQLite via DuckDB — zero ETL, instant startup
-                    self.db = parquet_cache.open_direct_sqlite(path)
-                elif cache_mode == "parquet":
-                    # Original behaviour: block until cache is built
-                    self.db = parquet_cache.open_cached_db(path)
-                else:
-                    # "auto" mode: use cache if valid, else smart fallback
-                    if parquet_cache.is_cache_valid(path):
-                        self.db = parquet_cache.open_cached_db(path)
-                    else:
-                        size_mb = os.path.getsize(path) / 1e6
-                        if size_mb > 50:
-                            self._log.info(
-                                "Large profile (%.0fMB), using direct query mode (instant startup).",
-                                size_mb,
-                            )
-                            self._log.info(
-                                "To build a Parquet cache for faster repeated queries, re-run with "
-                                "cache_mode='parquet' or pre-build the cache."
-                            )
-                            self.db = parquet_cache.open_direct_sqlite(path)
-                        else:
-                            # Small file — build cache now (seconds)
-                            self.db = parquet_cache.open_cached_db(path)
-            except Exception as e:
-                self._log.warning("DuckDB cache unavailable, falling back to SQLite: %s", e)
-                self.cache_error = e
-                self.db = None  # type: ignore[assignment]
+            # Three-tier open (cache / direct attach / raw sqlite3) lives in
+            # parquet_cache.open_with_direct_fallback — also used by
+            # open_profile_readonly and skill run, so a failed build cannot
+            # drop only some entry points onto raw sqlite3 (issue #333).
+            if cache_mode == "direct":
+                # Force direct SQLite via DuckDB — zero ETL, instant startup
+                primary = parquet_cache.open_direct_sqlite
+            elif cache_mode == "parquet":
+                # Original behaviour: block until cache is built.
+                # env_escape=False: this branch never reads
+                # NSYS_AI_CACHE_MODE, so the build banner must not tell the
+                # user to set it — on this path it does nothing. It names
+                # cache_mode="direct" instead, which is the way out here.
+                primary = functools.partial(
+                    parquet_cache.open_cached_db, env_escape=False, progress=progress
+                )
+            else:
+                # auto: cache when one can be had, direct SQLite when it
+                # cannot. The policy (and the measurements behind it) lives
+                # in parquet_cache.open_auto_db, because `skill run` and
+                # open_profile_readonly reach it without a Profile.
+                primary = functools.partial(parquet_cache.open_auto_db, progress=progress)
+            self.db, err = parquet_cache.open_with_direct_fallback(
+                path, primary, log=self._log
+            )
+            if err is not None:
+                self.cache_error = err
+            # self.db is None → keep self.conn (raw sqlite3); already opened above
         from .connection import wrap_connection
 
         self.adapter = wrap_connection(self.db if self.db is not None else self.conn)
@@ -1166,7 +1171,13 @@ def get_first_gpu_name(conn) -> str:
     return (row[0] or "").strip() if row else ""
 
 
-def open(path: str, *, backend: str = "sqlite", cache_mode: str = "auto") -> Profile:
+def open(
+    path: str,
+    *,
+    backend: str = "sqlite",
+    cache_mode: str = "auto",
+    progress: typing.Callable[[str, int, int], None] | None = None,
+) -> Profile:
     """Open an Nsight Systems profile using the requested backend."""
     path = resolve_profile_path(path, backend=backend)
     # Heuristic: if the given path is an empty .sqlite stub but a sibling
@@ -1178,4 +1189,4 @@ def open(path: str, *, backend: str = "sqlite", cache_mode: str = "auto") -> Pro
         if os.path.exists(base) and os.path.getsize(base) > 0:
             path = base
 
-    return Profile(path, cache_mode=cache_mode, backend=backend)
+    return Profile(path, cache_mode=cache_mode, backend=backend, progress=progress)

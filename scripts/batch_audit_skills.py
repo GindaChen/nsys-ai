@@ -2,8 +2,11 @@
 # ruff: noqa: E501
 """Run all built-in skills once against an Nsight profile (single DB connection).
 
-Uses the same ``open_cached_db()`` path as ``nsys-ai skill run`` (DuckDB/Parquet
-with SQLite fallback). Writes per-skill JSON, logs, and ``_batch_summary.json``.
+Uses the same ``open_with_direct_fallback(open_auto_db)`` path as
+``nsys-ai skill run`` (cache when one can be written, direct DuckDB-over-SQLite
+when the build fails or cannot be afforded, raw ``sqlite3`` only if both DuckDB
+paths fail), so ``NSYS_AI_CACHE_MODE`` reaches this script exactly as it reaches
+the CLI. Writes per-skill JSON, logs, and ``_batch_summary.json``.
 
 Usage: python scripts/batch_audit_skills.py <profile.sqlite> [output_dir]
 
@@ -48,17 +51,21 @@ PRIORITY_FIRST = [
 
 
 def _open_skill_connection(profile_path: str):
-    """Match ``nsys-ai skill run`` connection setup (cached DuckDB, else SQLite)."""
-    try:
-        import duckdb
+    """Match ``nsys-ai skill run`` connection setup (three-tier auto policy).
 
-        from nsys_ai.parquet_cache import open_cached_db
+    Same chain as the handler: ``open_auto_db`` → ``open_direct_sqlite`` → raw
+    ``sqlite3``, via ``open_with_direct_fallback``. Calling ``open_cached_db``
+    directly would silently ignore ``NSYS_AI_CACHE_MODE``; dropping straight to
+    raw ``sqlite3`` on a failed build would lose the enriched ``kernels`` view.
+    """
+    try:
+        from nsys_ai.parquet_cache import open_auto_db, open_with_direct_fallback
     except ImportError:
         return sqlite3.connect(profile_path)
-    try:
-        return open_cached_db(profile_path)
-    except (duckdb.Error, RuntimeError, OSError):
+    conn, _err = open_with_direct_fallback(profile_path, open_auto_db)
+    if conn is None:
         return sqlite3.connect(profile_path)
+    return conn
 
 
 def main() -> int:
