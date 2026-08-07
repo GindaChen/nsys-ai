@@ -95,7 +95,8 @@ def _session_web_server(tmp_path: Path, profile_path: Path, session_id: str):
             # Bind handler state the same way serve_timeline does in session mode,
             # without starting the blocking serve_forever used by serve_timeline.
             from nsys_ai.profile_runner import build_local_profile_reference
-            from nsys_ai.session_cli import project_loop_state, resolve_session_id, session_dir as sdir
+            from nsys_ai.session_cli import project_loop_state, resolve_session_id
+            from nsys_ai.session_cli import session_dir as sdir
             from nsys_ai.session_store import SessionStore as Store
 
             handler.prof = prof
