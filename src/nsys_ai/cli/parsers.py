@@ -526,6 +526,18 @@ def _build_parser():
         action="store_true",
         help="Auto-fill H100 replay before/after paths when available",
     )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Open a SessionStore session for read/render/decide. Omit ID to "
+            "derive it from the before profile content id. Root is always "
+            ".nsys-ai/sessions under the working directory."
+        ),
+    )
     p.set_defaults(handler=_cmd_timeline_web)
 
     p = sub.add_parser("loop", help="Guided diagnose->propose->reprofile->diff->accept workflow")
@@ -556,6 +568,17 @@ def _build_parser():
         "--h100-preset",
         action="store_true",
         help="Auto-fill H100 replay before/after paths when available",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Open a SessionStore session for read/render/decide (timeline-web). "
+            "Omit ID to derive it from the before profile content id."
+        ),
     )
     p.set_defaults(handler=_cmd_loop)
 

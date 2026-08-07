@@ -25,7 +25,9 @@ def _running_loop_server(loop_state):
     """Start a real _ViewerHandler HTTP server bound to an ephemeral port."""
     handler = web._ViewerHandler
     saved_state, saved_prof = handler._loop_state, handler.prof
+    saved_session = handler._session_id
     handler._loop_state, handler.prof = loop_state, None
+    handler._session_id = None
     server = web._ThreadedHTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -37,6 +39,7 @@ def _running_loop_server(loop_state):
         server.server_close()
         thread.join(timeout=5)
         handler._loop_state, handler.prof = saved_state, saved_prof
+        handler._session_id = saved_session
 
 
 def _post(port, path, payload):

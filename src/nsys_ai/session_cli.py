@@ -15,7 +15,12 @@ from .annotation import EvidenceReport
 from .profile_reference import LocalProfileReference
 from .proposal import Proposal
 from .runspec import RunSpec
-from .session_store import SessionExistsError, SessionState, SessionStore
+from .session_store import (
+    SessionExistsError,
+    SessionSnapshot,
+    SessionState,
+    SessionStore,
+)
 
 
 def session_id_from_profile_id(profile_id: str) -> str:
@@ -108,6 +113,19 @@ def publish_session_diff(
     snapshot = store.load(session_id)
     with store.writer(session_id) as writer:
         if snapshot.state.phase in {"propose", "reprofile"}:
+            if snapshot.proposal is None or snapshot.proposal.abstained:
+                reason = (
+                    snapshot.proposal.abstention_reason
+                    if snapshot.proposal is not None
+                    and snapshot.proposal.abstention_reason
+                    else "no non-abstained proposal is present"
+                )
+                raise ValueError(
+                    f"session proposal abstained ({reason}); supply a "
+                    "verification RunSpec via nsys-ai propose --session "
+                    "... --runspec <path> before publishing a diff with "
+                    "--session"
+                )
             writer.publish_after_profile(after_profile)
         elif snapshot.state.phase == "diagnose":
             raise ValueError(
@@ -124,3 +142,86 @@ def publish_session_diff(
 def session_dir(session_id: str, root: str | os.PathLike[str] = ".nsys-ai/sessions") -> Path:
     """Return the on-disk directory for ``session_id`` under ``root``."""
     return SessionStore(root).root / session_id
+
+
+def project_loop_state(
+    snapshot: SessionSnapshot,
+    *,
+    session_dir_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Project a SessionSnapshot into the LOOP_STATE shape timeline.js reads.
+
+    Field dispositions follow docs/notes/session-wiring-design.md Deliverable 6.
+    DERIVED fields come from artifacts at read time; DROP fields are omitted or
+    empty. ``decision_path`` is emitted only when ``diff["decision"]`` is set.
+    """
+    from .loop_state import profile_display_name
+
+    if not isinstance(snapshot, SessionSnapshot):
+        raise TypeError("snapshot must be a SessionSnapshot")
+
+    before = snapshot.state.before_profile
+    after = snapshot.state.after_profile
+    before_path = before.path if before is not None else ""
+    after_path = after.path if after is not None else ""
+
+    findings = snapshot.findings
+    diagnose_ran = findings is not None
+    diagnose_findings_count = len(findings.findings) if findings is not None else 0
+
+    proposal_payload: dict[str, Any] | None = None
+    expected_impact: dict[str, Any] | str | None = None
+    if snapshot.proposal is not None:
+        proposal_payload = snapshot.proposal.to_dict()
+        impact = snapshot.proposal.expected_impact
+        if impact is not None:
+            expected_impact = {
+                "headroom_ms": impact.headroom_ms,
+                "headroom_basis": impact.headroom_basis,
+            }
+
+    diff_summary: dict[str, Any] | None = (
+        dict(snapshot.diff) if snapshot.diff is not None else None
+    )
+    decision = None
+    decision_reason = ""
+    decision_path = ""
+    verdict = "neutral"
+    comparability_confidence = None
+    if diff_summary is not None:
+        verdict = str(diff_summary.get("verdict") or "neutral")
+        confidence = diff_summary.get("comparability_confidence")
+        if isinstance(confidence, (int, float)):
+            comparability_confidence = float(confidence)
+        recorded = diff_summary.get("decision")
+        if recorded is not None:
+            status = str(recorded.get("status") or "").strip().lower()
+            if status == "accepted":
+                decision = "accept"
+            elif status == "rejected":
+                decision = "reject"
+            decision_reason = str(recorded.get("reason") or "")
+            # C5: path only when a decision has been recorded, not merely when
+            # diff.json exists.
+            decision_path = str(Path(session_dir_path) / "diff.json")
+
+    return {
+        "session_mode": True,
+        "session_id": snapshot.state.session_id,
+        "before_path": before_path,
+        "after_path": after_path,
+        "before_label": profile_display_name(before_path),
+        "after_label": profile_display_name(after_path),
+        "phase": snapshot.state.phase,
+        "proposal": proposal_payload,
+        "expected_impact": expected_impact if expected_impact is not None else "",
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "decision_path": decision_path,
+        "diagnose_ran": diagnose_ran,
+        "diagnose_findings_count": diagnose_findings_count,
+        "diff_summary": diff_summary,
+        "comparability_confidence": comparability_confidence,
+        "verdict": verdict,
+        "last_error": "",
+    }

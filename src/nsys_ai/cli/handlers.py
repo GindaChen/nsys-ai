@@ -1379,6 +1379,7 @@ def _cmd_timeline_web(args, _profile):
             loop_before=getattr(args, "loop_before", None),
             loop_after=getattr(args, "loop_after", None),
             loop_h100_preset=getattr(args, "h100_preset", False),
+            session=getattr(args, "session", None),
         )
 
 
@@ -1446,8 +1447,17 @@ def _cmd_loop(args, _profile):
                 loop_before=before_path,
                 loop_after=after_path,
                 loop_h100_preset=bool(getattr(args, "h100_preset", False)),
+                session=getattr(args, "session", None),
             )
         return
+
+    if getattr(args, "session", None) is not None:
+        print(
+            "Error: --session is only supported with --surface timeline-web "
+            "in this change; tree and timeline TUI session wiring is a later phase",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.surface == "timeline":
         from nsys_ai.timeline import run_timeline
