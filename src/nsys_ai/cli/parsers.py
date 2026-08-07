@@ -336,6 +336,17 @@ def _register_evidence_parser(sub):
     )
     sp_build.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
     sp_build.add_argument("-o", "--output", default=None, help="Write findings JSON to file")
+    sp_build.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Publish findings into SessionStore under .nsys-ai/sessions/<id>. "
+            "Omit ID to derive it from the before profile content id."
+        ),
+    )
     p.set_defaults(handler=_cmd_evidence)
     return p
 
@@ -418,7 +429,12 @@ def _build_parser():
         "propose",
         help="Generate a deterministic proposal artifact from one finding",
     )
-    p.add_argument("findings", help="Path to a v0.1 findings.json artifact")
+    p.add_argument(
+        "findings",
+        nargs="?",
+        default=None,
+        help="Path to a v0.1 findings.json artifact (omit when using --session)",
+    )
     p.add_argument(
         "--finding-id",
         required=True,
@@ -434,6 +450,17 @@ def _build_parser():
         "--output",
         default="proposal.json",
         help="Proposal artifact path (default: proposal.json)",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Read findings from SessionStore and publish the proposal back. "
+            "Requires an explicit session id."
+        ),
     )
     p.set_defaults(handler=_cmd_propose)
 
@@ -676,6 +703,17 @@ def _build_parser():
         "--reason",
         default=None,
         help="Reason text required when using --accept or --reject",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Publish the undecided diff into SessionStore (and register the after "
+            "profile). Omit ID to derive it from the before profile content id."
+        ),
     )
     p.set_defaults(handler=_cmd_diff)
 

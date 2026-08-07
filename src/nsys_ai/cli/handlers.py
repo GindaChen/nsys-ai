@@ -750,6 +750,8 @@ def _cmd_baseline_show(args, _profile):
 
 
 def _cmd_diff(args, _profile):
+    from pathlib import Path
+
     from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
     from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
@@ -757,6 +759,7 @@ def _cmd_diff(args, _profile):
         format_diff_markdown_multi,
         format_diff_terminal,
         format_diff_terminal_multi,
+        to_diff_dict,
         to_diff_json,
     )
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
@@ -779,6 +782,20 @@ def _cmd_diff(args, _profile):
     elif getattr(args, "reject", False):
         decision = "rejected"
     reason = getattr(args, "reason", None)
+    session = getattr(args, "session", None)
+    if session is not None and decision is not None:
+        print(
+            "Error: --session cannot be combined with --accept/--reject "
+            "(record decisions through SessionWriter.publish_decision)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if session is not None and getattr(args, "chat", False):
+        print("Error: --session cannot be combined with --chat", file=sys.stderr)
+        sys.exit(2)
+    if session is not None:
+        args.before = str(Path(args.before).expanduser().resolve())
+        args.after = str(Path(args.after).expanduser().resolve())
     if decision is not None:
         if getattr(args, "chat", False):
             print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
@@ -993,6 +1010,27 @@ def _cmd_diff(args, _profile):
         for warning in decision_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
         print(f"Diff decision written to {decision_path}", file=sys.stderr)
+
+    if session is not None:
+        if gate_summary is None:
+            print("Error: --session requires a computed profile diff", file=sys.stderr)
+            sys.exit(2)
+        from nsys_ai.profile_runner import build_local_profile_reference
+        from nsys_ai.session_cli import publish_session_diff, resolve_session_id
+
+        before_ref = build_local_profile_reference(args.before)
+        after_ref = build_local_profile_reference(args.after)
+        session_id = resolve_session_id(session or None, before=before_ref)
+        try:
+            publish_session_diff(
+                session_id=session_id,
+                diff=to_diff_dict(gate_summary),
+                after_profile=after_ref,
+            )
+        except (TypeError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(f"Diff published to session {session_id}", file=sys.stderr)
 
     if args.output:
         out_dir = os.path.dirname(args.output)
@@ -1445,6 +1483,7 @@ def _cmd_evidence(args, _profile):
     compatible alias and will be removed in a future release.
     """
     import json
+    from pathlib import Path
 
     from nsys_ai.evidence_builder import EvidenceBuilder
 
@@ -1462,7 +1501,15 @@ def _cmd_evidence(args, _profile):
         flush=True,
     )
 
-    with _profile.open(args.profile) as prof:
+    session = getattr(args, "session", None)
+    profile_path = args.profile
+    if session is not None:
+        # Absolute path keeps EvidenceReport.profile_id aligned with
+        # build_local_profile_reference (relative opens can fall back to a
+        # path-derived id when metadata is unreachable through the cache).
+        profile_path = str(Path(args.profile).expanduser().resolve())
+
+    with _profile.open(profile_path) as prof:
         trim = _parse_trim(args)
         device = getattr(args, "gpu", 0) or 0
         builder = EvidenceBuilder(prof, device=device, trim=trim)
@@ -1500,6 +1547,27 @@ def _cmd_evidence(args, _profile):
         out = getattr(args, "output", None)
         if out:
             _write_evidence_report_or_die(report, out)
+
+        if session is not None:
+            from nsys_ai.profile_runner import build_local_profile_reference
+            from nsys_ai.session_cli import publish_session_findings, resolve_session_id
+
+            before = build_local_profile_reference(profile_path)
+            session_id = resolve_session_id(session or None, before=before)
+            try:
+                publish_session_findings(
+                    session_id=session_id,
+                    report=report,
+                    before_profile=before,
+                )
+            except (TypeError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr, flush=True)
+                sys.exit(2)
+            print(
+                f"Findings published to session {session_id}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:

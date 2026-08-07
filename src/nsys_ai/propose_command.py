@@ -337,14 +337,31 @@ def _write_proposal(
     return destination
 
 
-def run_propose_command(
-    args: Any,
+def run_propose(
     *,
+    finding_id: str,
+    findings_path: str | os.PathLike[str] | None = None,
+    session_id: str | None = None,
+    runspec_path: str | os.PathLike[str] | None = None,
+    output: str | os.PathLike[str] = "proposal.json",
+    session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     stdout: TextIO = sys.stdout,
     environment: Mapping[str, str] = os.environ,
 ) -> int:
-    """Generate one Proposal from a strictly validated evidence artifact."""
-    runspec_input = _read_json(Path(args.runspec), "RunSpec") if args.runspec else None
+    """Generate one Proposal from a findings file or a session findings artifact.
+
+    Pass either ``findings_path`` or ``session_id``, not both. Session mode loads
+    findings from ``SessionStore`` and publishes the proposal back through
+    ``publish_session_proposal``.
+    """
+    if findings_path is None and session_id is None:
+        raise ProposeCommandError("findings path is required unless --session is given")
+    if findings_path is not None and session_id is not None:
+        raise ProposeCommandError("pass a findings path or --session, not both")
+    if session_id is not None and not session_id:
+        raise ProposeCommandError("--session requires an explicit session id for propose")
+
+    runspec_input = _read_json(Path(runspec_path), "RunSpec") if runspec_path else None
     if runspec_input is not None:
         try:
             runspec = RunSpec.from_dict(runspec_input.payload)
@@ -355,24 +372,76 @@ def run_propose_command(
     resolved_secrets = (
         _resolve_declared_secrets(runspec, environment) if runspec is not None else None
     )
-    findings_input = _read_json(Path(args.findings), "evidence")
-    try:
-        report = validate_evidence_report_payload(findings_input.payload)
-    except (TypeError, ValueError) as exc:
-        detail = _redact_message(str(exc), resolved_secrets or {})
-        raise ProposeCommandError(f"invalid evidence report: {detail}") from exc
-    finding = _select_finding(report, args.finding_id)
+
+    findings_input: _InputArtifact | None = None
+    if session_id is not None:
+        from .session_store import SessionStore
+
+        snapshot = SessionStore(session_root).load(session_id)
+        if snapshot.findings is None:
+            raise ProposeCommandError("session has no findings.json to propose from")
+        report = snapshot.findings
+        if runspec is None and snapshot.runspec is not None:
+            runspec = snapshot.runspec
+    else:
+        findings_input = _read_json(Path(findings_path), "evidence")
+        try:
+            report = validate_evidence_report_payload(findings_input.payload)
+        except (TypeError, ValueError) as exc:
+            detail = _redact_message(str(exc), resolved_secrets or {})
+            raise ProposeCommandError(f"invalid evidence report: {detail}") from exc
+
+    finding = _select_finding(report, finding_id)
     proposal = generate_proposal(
         finding,
         runspec,
         resolved_secrets=resolved_secrets,
     )
-    output = Path(args.output)
+    output_path = Path(output)
     if resolved_secrets is not None:
-        validate_persisted_secret_strings([str(output)], resolved_secrets)
-    inputs = (findings_input,) + ((runspec_input,) if runspec_input is not None else ())
-    written = _write_proposal(output, proposal, inputs)
-    print(f"Proposal written to {written}", file=stdout)
+        validate_persisted_secret_strings([str(output_path)], resolved_secrets)
+
+    if session_id is not None:
+        from .session_cli import publish_session_proposal
+
+        publish_session_proposal(
+            session_id=session_id,
+            proposal=proposal,
+            runspec=runspec,
+            resolved_secrets=resolved_secrets,
+            root=session_root,
+        )
+        print(
+            f"Proposal published to session {session_id}",
+            file=stdout,
+        )
+
+    if findings_input is not None:
+        inputs = (findings_input,) + (
+            (runspec_input,) if runspec_input is not None else ()
+        )
+        written = _write_proposal(output_path, proposal, inputs)
+        print(f"Proposal written to {written}", file=stdout)
+
     if proposal.abstained:
         print(f"Abstained: {proposal.abstention_reason}", file=stdout)
     return 0
+
+
+def run_propose_command(
+    args: Any,
+    *,
+    stdout: TextIO = sys.stdout,
+    environment: Mapping[str, str] = os.environ,
+) -> int:
+    """Adapt an argparse Namespace to :func:`run_propose`."""
+    session = getattr(args, "session", None)
+    return run_propose(
+        finding_id=args.finding_id,
+        findings_path=getattr(args, "findings", None),
+        session_id=session,
+        runspec_path=getattr(args, "runspec", None),
+        output=getattr(args, "output", "proposal.json"),
+        stdout=stdout,
+        environment=environment,
+    )
