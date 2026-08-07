@@ -336,6 +336,17 @@ def _register_evidence_parser(sub):
     )
     sp_build.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
     sp_build.add_argument("-o", "--output", default=None, help="Write findings JSON to file")
+    sp_build.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Publish findings into SessionStore under .nsys-ai/sessions/<id>. "
+            "Omit ID to derive it from this command's profile content id."
+        ),
+    )
     p.set_defaults(handler=_cmd_evidence)
     return p
 
@@ -418,7 +429,12 @@ def _build_parser():
         "propose",
         help="Generate a deterministic proposal artifact from one finding",
     )
-    p.add_argument("findings", help="Path to a v0.1 findings.json artifact")
+    p.add_argument(
+        "findings",
+        nargs="?",
+        default=None,
+        help="Path to a v0.1 findings.json artifact (omit when using --session)",
+    )
     p.add_argument(
         "--finding-id",
         required=True,
@@ -432,8 +448,32 @@ def _build_parser():
     p.add_argument(
         "-o",
         "--output",
-        default="proposal.json",
-        help="Proposal artifact path (default: proposal.json)",
+        default=None,
+        help=(
+            "Proposal artifact path (default: proposal.json). "
+            "Cannot be combined with --session."
+        ),
+    )
+    p.add_argument(
+        "--profile",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Before profile used only to derive the session id when --session "
+            "is given without an id (same derivation as evidence build / diff)"
+        ),
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Read findings from SessionStore and publish the proposal back. "
+            "Omit ID and pass --profile to derive the id from the before "
+            "profile content id."
+        ),
     )
     p.set_defaults(handler=_cmd_propose)
 
@@ -486,6 +526,18 @@ def _build_parser():
         action="store_true",
         help="Auto-fill H100 replay before/after paths when available",
     )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Open a SessionStore session for read/render/decide. Omit ID to "
+            "derive it from the before profile content id. Root is always "
+            ".nsys-ai/sessions under the working directory."
+        ),
+    )
     p.set_defaults(handler=_cmd_timeline_web)
 
     p = sub.add_parser("loop", help="Guided diagnose->propose->reprofile->diff->accept workflow")
@@ -516,6 +568,19 @@ def _build_parser():
         "--h100-preset",
         action="store_true",
         help="Auto-fill H100 replay before/after paths when available",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Open a SessionStore session for read/render/decide on any surface "
+            "(timeline-web, timeline, tree). Omit ID to derive it from the "
+            "before profile content id. Root is always .nsys-ai/sessions under "
+            "the working directory."
+        ),
     )
     p.set_defaults(handler=_cmd_loop)
 
@@ -676,6 +741,18 @@ def _build_parser():
         "--reason",
         default=None,
         help="Reason text required when using --accept or --reject",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Publish the undecided diff into SessionStore (and register the after "
+            "profile). Omit ID to derive it from the before profile content id "
+            "(same derivation as evidence build / propose --profile)."
+        ),
     )
     p.set_defaults(handler=_cmd_diff)
 

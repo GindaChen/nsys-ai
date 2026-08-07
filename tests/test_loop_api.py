@@ -1,42 +1,160 @@
+"""Web loop API: session-backed decision endpoints and route registration."""
+
+from __future__ import annotations
+
 import http.client
 import json
+import os
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 from nsys_ai import web
-from nsys_ai.diff_decision import write_diff_decision_json_from_diff_dict
-from nsys_ai.loop_state import DiffLoopState
+from nsys_ai.profile_runner import build_local_profile_reference
+from nsys_ai.runspec import RunSpec
+from nsys_ai.session_cli import project_loop_state, resolve_session_id, session_dir
+from nsys_ai.session_store import SessionStore
+
+ROOT = Path(__file__).resolve().parents[1]
+BEFORE = ROOT / "tests" / "fixtures" / "mfu_2gpu_before.sqlite"
+AFTER = ROOT / "tests" / "fixtures" / "mfu_2gpu_after.sqlite"
 
 
-def _diff_summary(confidence: float = 0.9) -> dict:
-    """Minimal to_diff_dict-shaped payload sufficient to record a decision."""
-    return {
-        "verdict": "neutral",
-        "comparability_confidence": confidence,
-        "warnings": [],
-        "before": {"path": "/tmp/before.sqlite", "profile_id": "before-id"},
-        "after": {"path": "/tmp/after.sqlite", "profile_id": "after-id"},
-    }
+def _subprocess_environment(**extra: str) -> dict[str, str]:
+    environment = dict(os.environ)
+    source = str(ROOT / "src")
+    current = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = source if not current else f"{source}{os.pathsep}{current}"
+    environment.update(extra)
+    return environment
+
+
+def _run_cli(cwd: Path, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "nsys_ai", *args],
+        cwd=cwd,
+        env=_subprocess_environment(),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _finding_id_from_evidence_stdout(stdout: str) -> str:
+    payload = json.loads(stdout)
+    return next(
+        finding["id"]
+        for finding in payload["findings"]
+        if finding.get("id") and finding.get("suggested_actions")
+    )
+
+
+def _publish_through_propose(tmp_path: Path, session_id: str) -> None:
+    if not BEFORE.is_file():
+        raise FileNotFoundError(f"missing fixture profile: {BEFORE}")
+    before = BEFORE.resolve()
+    runspec_path = tmp_path / "runspec.json"
+    runspec_path.write_bytes(RunSpec(argv=("true",)).canonical_json_bytes())
+
+    evidence = _run_cli(
+        tmp_path,
+        "evidence",
+        "build",
+        str(before),
+        "--format",
+        "json",
+        "--gpu",
+        "0",
+        "--session",
+        session_id,
+        "--analyzers",
+        "overlap_ratio",
+    )
+    assert evidence.returncode == 0, evidence.stderr
+    finding_id = _finding_id_from_evidence_stdout(evidence.stdout)
+
+    propose = _run_cli(
+        tmp_path,
+        "propose",
+        "--session",
+        session_id,
+        "--finding-id",
+        finding_id,
+        "--runspec",
+        str(runspec_path),
+    )
+    assert propose.returncode == 0, propose.stderr
+    assert "Abstained:" not in propose.stdout
+
+
+def _publish_full_session(tmp_path: Path, session_id: str) -> None:
+    _publish_through_propose(tmp_path, session_id)
+    before = BEFORE.resolve()
+    after = AFTER.resolve()
+    diff = _run_cli(
+        tmp_path,
+        "diff",
+        str(before),
+        str(after),
+        "--gpu",
+        "0",
+        "--format",
+        "json",
+        "--no-ai",
+        "--session",
+        session_id,
+    )
+    assert diff.returncode == 0, diff.stderr
 
 
 @contextmanager
-def _running_loop_server(loop_state):
+def _running_session_server(tmp_path: Path, session_id: str):
     """Start a real _ViewerHandler HTTP server bound to an ephemeral port."""
     handler = web._ViewerHandler
-    saved_state, saved_prof = handler._loop_state, handler.prof
-    handler._loop_state, handler.prof = loop_state, None
-    server = web._ThreadedHTTPServer(("127.0.0.1", 0), handler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    saved = (
+        handler.prof,
+        handler._session_id,
+        handler._session_root,
+        handler._findings,
+        handler.devices,
+    )
+    previous_cwd = Path.cwd()
+    os.chdir(tmp_path)
     try:
-        yield port
+        handler.prof = None
+        handler.devices = [0]
+        handler._findings = []
+        handler._session_root = ".nsys-ai/sessions"
+        before_ref = build_local_profile_reference(BEFORE.resolve())
+        resolved = resolve_session_id(session_id, before=before_ref)
+        snapshot = SessionStore(handler._session_root).load(resolved)
+        handler._session_id = resolved
+        project_loop_state(
+            snapshot,
+            session_dir_path=session_dir(resolved, root=handler._session_root),
+        )
+        server = web._ThreadedHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield port, resolved
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        handler._loop_state, handler.prof = saved_state, saved_prof
+        os.chdir(previous_cwd)
+        (
+            handler.prof,
+            handler._session_id,
+            handler._session_root,
+            handler._findings,
+            handler.devices,
+        ) = saved
 
 
 def _post(port, path, payload):
@@ -57,86 +175,74 @@ def _get(port, path):
     return status, json.loads(body) if body else {}
 
 
-def test_web_decision_writes_diff_json_and_matches_cli(tmp_path, monkeypatch):
-    # The web writer targets Path("diff.json") in the process CWD (same as the CLI).
-    monkeypatch.chdir(tmp_path)
-    state = DiffLoopState()
-    state.diff_summary = _diff_summary()
+def test_web_decision_writes_session_diff_json(tmp_path):
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    session_id = "loop-api-decide"
+    _publish_full_session(tmp_path, session_id)
 
-    with _running_loop_server(state) as port:
-        status, data = _post(port, "/api/loop/decision", {"decision": "accept", "reason": "faster on H100"})
+    with _running_session_server(tmp_path, session_id) as (port, resolved):
+        status, data = _post(
+            port, "/api/loop/decision", {"decision": "accept", "reason": "faster on H100"}
+        )
 
-    assert status == 200
+    assert status == 200, data
     assert data["decision"] == "accept"
     assert data["decision_reason"] == "faster on H100"
-    assert data["decision_path"], "decision_path should be surfaced back to the client"
+    assert data["decision_path"].endswith("diff.json")
+    assert data["session_mode"] is True
+    assert data["session_id"] == resolved
 
-    written = tmp_path / "diff.json"
+    written = tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json"
     assert written.exists()
-    web_record = json.loads(written.read_text(encoding="utf-8"))
-    assert web_record["decision"]["status"] == "accepted"
-    assert web_record["decision"]["reason"] == "faster on H100"
-
-    # Byte-shape parity with the CLI encoder for the same diff payload: everything
-    # except the volatile identity/timestamp must be identical.
-    write_diff_decision_json_from_diff_dict(
-        _diff_summary(),
-        decision="accepted",
-        reason="faster on H100",
-        path=tmp_path / "cli.json",
-        decider="fixed@example",
-        decided_at="2026-01-01T00:00:00Z",
-    )
-    cli_record = json.loads((tmp_path / "cli.json").read_text(encoding="utf-8"))
-    web_record["decision"]["decider"] = "fixed@example"
-    web_record["decision"]["decided_at"] = "2026-01-01T00:00:00Z"
-    assert json.dumps(web_record, sort_keys=True) == json.dumps(cli_record, sort_keys=True)
+    record = json.loads(written.read_text(encoding="utf-8"))
+    assert record["decision"]["status"] == "accepted"
+    assert record["decision"]["reason"] == "faster on H100"
 
 
-def test_web_decision_survives_reload(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    state = DiffLoopState()
-    state.diff_summary = _diff_summary()
+def test_web_decision_survives_reload(tmp_path):
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    session_id = "loop-api-reload"
+    _publish_full_session(tmp_path, session_id)
 
-    with _running_loop_server(state) as port:
+    with _running_session_server(tmp_path, session_id) as (port, _):
         _post(port, "/api/loop/decision", {"decision": "reject", "reason": "regressed"})
-        # Simulate a page reload: re-fetch loop state from the server.
         status, reloaded = _get(port, "/api/loop/state")
 
     assert status == 200
     assert reloaded["decision"] == "reject"
     assert reloaded["decision_reason"] == "regressed"
     assert reloaded["decision_path"].endswith("diff.json")
-    # The record is on disk independent of server memory, and rehydrates cleanly.
-    assert (tmp_path / "diff.json").exists()
-    restored = DiffLoopState.from_dict(reloaded)
-    assert restored.decision == "reject"
-    assert restored.decision_path.endswith("diff.json")
+    assert (tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json").exists()
 
 
-def test_web_decision_requires_reason(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    state = DiffLoopState()
-    state.diff_summary = _diff_summary()
+def test_web_decision_requires_reason(tmp_path):
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    session_id = "loop-api-reason"
+    _publish_full_session(tmp_path, session_id)
 
-    with _running_loop_server(state) as port:
+    with _running_session_server(tmp_path, session_id) as (port, _):
         status, data = _post(port, "/api/loop/decision", {"decision": "accept", "reason": "   "})
 
     assert status == 400
     assert "reason" in data.get("error", "").lower()
-    assert not (tmp_path / "diff.json").exists()
 
 
-def test_web_decision_requires_diff_first(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    state = DiffLoopState()  # no diff run yet
+def test_web_decision_requires_diff_first(tmp_path):
+    if not BEFORE.is_file():
+        raise FileNotFoundError(f"missing fixture profile: {BEFORE}")
+    session_id = "loop-api-no-diff"
+    _publish_through_propose(tmp_path, session_id)
 
-    with _running_loop_server(state) as port:
-        status, data = _post(port, "/api/loop/decision", {"decision": "accept", "reason": "looks good"})
+    with _running_session_server(tmp_path, session_id) as (port, _):
+        status, data = _post(
+            port, "/api/loop/decision", {"decision": "accept", "reason": "looks good"}
+        )
 
     assert status == 400
     assert "diff" in data.get("error", "").lower()
-    assert not (tmp_path / "diff.json").exists()
 
 
 def test_web_loop_endpoints_are_registered():

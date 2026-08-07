@@ -757,6 +757,7 @@ def _cmd_diff(args, _profile):
         format_diff_markdown_multi,
         format_diff_terminal,
         format_diff_terminal_multi,
+        to_diff_dict,
         to_diff_json,
     )
     from nsys_ai.diff_tools import DiffContext, get_iteration_boundaries
@@ -779,6 +780,21 @@ def _cmd_diff(args, _profile):
     elif getattr(args, "reject", False):
         decision = "rejected"
     reason = getattr(args, "reason", None)
+    session = getattr(args, "session", None)
+    if session is not None and decision is not None:
+        print(
+            "Error: --session cannot be combined with --accept/--reject "
+            "(record decisions through SessionWriter.publish_decision)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if session is not None and getattr(args, "chat", False):
+        print("Error: --session cannot be combined with --chat", file=sys.stderr)
+        sys.exit(2)
+    # Keep session profile paths as caller spelling normalized with abspath
+    # (no symlink dereference), matching SessionStore / build_local_profile_reference.
+    session_before_path = None
+    session_after_path = None
     if decision is not None:
         if getattr(args, "chat", False):
             print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
@@ -846,6 +862,10 @@ def _cmd_diff(args, _profile):
                 sys.exit(1)
 
     with _profile.open(args.before) as before, _profile.open(args.after) as after:
+        if session is not None:
+            # Opened Profile.path is the resolved .sqlite (including .nsys-rep sidecars).
+            session_before_path = before.path
+            session_after_path = after.path
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
                 before,
@@ -993,6 +1013,54 @@ def _cmd_diff(args, _profile):
         for warning in decision_warnings:
             print(f"Warning: {warning}", file=sys.stderr)
         print(f"Diff decision written to {decision_path}", file=sys.stderr)
+
+    if session is not None:
+        if gate_summary is None:
+            print("Error: --session requires a computed profile diff", file=sys.stderr)
+            sys.exit(2)
+        from nsys_ai.exceptions import ProfileError
+        from nsys_ai.profile_runner import build_local_profile_reference
+        from nsys_ai.session_cli import publish_session_diff, resolve_session_id
+
+        # Absolute either way. ``session_before_path`` is the opened profile's
+        # own ``path``, which keeps the caller's spelling -- relative when the
+        # user typed a relative one, which is the normal way to invoke a CLI.
+        # The store requires absolute paths in the diff payload
+        # (session_store._validate_diff_references), so leaving that branch
+        # un-absolutised made `nsys-ai diff before.sqlite after.sqlite --session`
+        # fail with "diff before path must be absolute" from the directory the
+        # profiles were in. The `or` used to skip the absolutising for exactly
+        # the case that needed it.
+        before_path = os.path.abspath(
+            os.path.expanduser(session_before_path or args.before)
+        )
+        after_path = os.path.abspath(
+            os.path.expanduser(session_after_path or args.after)
+        )
+        try:
+            before_ref = build_local_profile_reference(before_path)
+            after_ref = build_local_profile_reference(after_path)
+            session_id = resolve_session_id(session or None, before=before_ref)
+            # to_diff_dict carries each profile's ``path`` straight from
+            # Profile.path, which is the caller's spelling -- "before.sqlite"
+            # when that is what was typed. The store requires absolute paths
+            # (session_store._validate_diff_references) and compares them against
+            # the session's own references, so publish the same absolute spelling
+            # those references were built from rather than the raw argument.
+            diff_payload = to_diff_dict(gate_summary)
+            for side, resolved in (("before", before_path), ("after", after_path)):
+                entry = diff_payload.get(side)
+                if isinstance(entry, dict):
+                    entry["path"] = resolved
+            publish_session_diff(
+                session_id=session_id,
+                diff=diff_payload,
+                after_profile=after_ref,
+            )
+        except (TypeError, ValueError, ProfileError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(f"Diff published to session {session_id}", file=sys.stderr)
 
     if args.output:
         out_dir = os.path.dirname(args.output)
@@ -1331,6 +1399,7 @@ def _cmd_timeline_web(args, _profile):
             loop_before=getattr(args, "loop_before", None),
             loop_after=getattr(args, "loop_after", None),
             loop_h100_preset=getattr(args, "h100_preset", False),
+            session=getattr(args, "session", None),
         )
 
 
@@ -1398,20 +1467,38 @@ def _cmd_loop(args, _profile):
                 loop_before=before_path,
                 loop_after=after_path,
                 loop_h100_preset=bool(getattr(args, "h100_preset", False)),
+                session=getattr(args, "session", None),
             )
         return
+
+    session = getattr(args, "session", None)
 
     if args.surface == "timeline":
         from nsys_ai.timeline import run_timeline
 
         gpu = args.gpu if args.gpu is not None else 0
-        run_timeline(before_path, gpu, trim, min_ms=0, loop_after=after_path)
+        run_timeline(
+            before_path,
+            gpu,
+            trim,
+            min_ms=0,
+            loop_after=after_path,
+            session=session,
+        )
         return
 
     from nsys_ai.tree import run_tui
 
     gpu = args.gpu if args.gpu is not None else 0
-    run_tui(before_path, gpu, trim, max_depth=-1, min_ms=0, loop_after=after_path)
+    run_tui(
+        before_path,
+        gpu,
+        trim,
+        max_depth=-1,
+        min_ms=0,
+        loop_after=after_path,
+        session=session,
+    )
 
 
 def _cmd_tui(args, _profile):
@@ -1462,7 +1549,16 @@ def _cmd_evidence(args, _profile):
         flush=True,
     )
 
-    with _profile.open(args.profile) as prof:
+    session = getattr(args, "session", None)
+    profile_path = args.profile
+    if session is not None:
+        # Absolute path keeps EvidenceReport.profile_id aligned with
+        # build_local_profile_reference (relative opens can fall back to a
+        # path-derived id when metadata is unreachable through the cache).
+        # Use abspath (no symlink dereference) to match SessionStore policy.
+        profile_path = os.path.abspath(os.path.expanduser(args.profile))
+
+    with _profile.open(profile_path) as prof:
         trim = _parse_trim(args)
         device = getattr(args, "gpu", 0) or 0
         builder = EvidenceBuilder(prof, device=device, trim=trim)
@@ -1500,6 +1596,29 @@ def _cmd_evidence(args, _profile):
         out = getattr(args, "output", None)
         if out:
             _write_evidence_report_or_die(report, out)
+
+        if session is not None:
+            from nsys_ai.exceptions import ProfileError
+            from nsys_ai.profile_runner import build_local_profile_reference
+            from nsys_ai.session_cli import publish_session_findings, resolve_session_id
+
+            # Use the opened Profile's resolved .sqlite path so .nsys-rep inputs work.
+            try:
+                before = build_local_profile_reference(prof.path)
+                session_id = resolve_session_id(session or None, before=before)
+                publish_session_findings(
+                    session_id=session_id,
+                    report=report,
+                    before_profile=before,
+                )
+            except (TypeError, ValueError, ProfileError) as exc:
+                print(f"Error: {exc}", file=sys.stderr, flush=True)
+                sys.exit(2)
+            print(
+                f"Findings published to session {session_id}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:

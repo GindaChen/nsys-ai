@@ -3326,9 +3326,51 @@ function loopSuggestedPhase(state) {
     if (s.decision) return 'accept';
     if (s.diff_summary) return 'accept';
     if (!s.diagnose_ran) return 'diagnose';
-    if (!s.after_path) return s.proposal ? 'reprofile' : 'propose';
-    if (!s.proposal) return 'propose';
+    if (!loopHasProposal(s)) return 'propose';
+    if (!s.after_path) return 'reprofile';
     return 'diff';
+}
+
+function loopIsSessionMode(state) {
+    return Boolean((state || LOOP_STATE || {}).session_mode);
+}
+
+function loopHasProposal(state) {
+    const p = (state || {}).proposal;
+    if (!p) return false;
+    if (typeof p === 'string') return Boolean(p.trim());
+    // Structured Proposal artifact: present even when abstained; stepper treats
+    // abstention as "proposal step done, but not ready to reprofile".
+    if (p.abstained) return false;
+    return true;
+}
+
+function loopProposalDisplay(state) {
+    const p = (state || LOOP_STATE || {}).proposal;
+    if (!p) return '';
+    if (typeof p === 'string') return p;
+    if (p.abstained) {
+        return p.abstention_reason
+            ? `Abstained: ${p.abstention_reason}`
+            : 'Abstained';
+    }
+    return p.summary || '';
+}
+
+function loopExpectedImpactDisplay(state) {
+    const e = (state || LOOP_STATE || {}).expected_impact;
+    if (!e) return '';
+    if (typeof e === 'string') return e;
+    if (e.headroom_ms != null) {
+        const basis = e.headroom_basis ? ` (${e.headroom_basis})` : '';
+        return `${e.headroom_ms} ms${basis}`;
+    }
+    return '';
+}
+
+function loopSessionLimitation(cli) {
+    const command = cli || 'the matching nsys-ai CLI command';
+    return `Session mode is read/render/decide only. Use ${command} to drive this step.`;
 }
 
 function loopPrimaryLabel(state) {
@@ -3408,12 +3450,25 @@ function loopSetStepUi(next) {
     const sectionProfiles = document.getElementById('loopSectionProfiles');
     const sectionProposal = document.getElementById('loopSectionProposal');
     const sectionDecide = document.getElementById('loopDecideSection');
+    const sessionMode = loopIsSessionMode();
+    const decided = Boolean(LOOP_STATE && LOOP_STATE.decision);
 
-    if (proposalEl) proposalEl.disabled = LOOP_BUSY || next !== 'propose';
-    if (expectedEl) expectedEl.disabled = LOOP_BUSY || next !== 'propose';
-    if (afterEl) afterEl.disabled = LOOP_BUSY || next !== 'reprofile';
-    if (btnAccept) btnAccept.disabled = LOOP_BUSY || next !== 'accept';
-    if (btnReject) btnReject.disabled = LOOP_BUSY || next !== 'accept';
+    // Session mode: CLI owns propose/reprofile inputs; keep them read-only.
+    if (proposalEl) {
+        proposalEl.disabled = LOOP_BUSY || sessionMode || next !== 'propose';
+        proposalEl.readOnly = sessionMode;
+    }
+    if (expectedEl) {
+        expectedEl.disabled = LOOP_BUSY || sessionMode || next !== 'propose';
+        expectedEl.readOnly = sessionMode;
+    }
+    if (afterEl) {
+        afterEl.disabled = LOOP_BUSY || sessionMode || next !== 'reprofile';
+        afterEl.readOnly = sessionMode;
+    }
+    // C2: once a decision exists, disable accept/reject (store rejects a second write).
+    if (btnAccept) btnAccept.disabled = LOOP_BUSY || decided || next !== 'accept';
+    if (btnReject) btnReject.disabled = LOOP_BUSY || decided || next !== 'accept';
 
     if (sectionProfiles) {
         const active = next === 'reprofile';
@@ -3514,12 +3569,14 @@ function loopRenderState() {
     const proposalEl = document.getElementById('loopProposalText');
     const expectedEl = document.getElementById('loopExpectedImpact');
     if (proposalEl) {
-        if (LOOP_STATE.proposal) proposalEl.value = LOOP_STATE.proposal;
+        const display = loopProposalDisplay(LOOP_STATE);
+        if (display) proposalEl.value = display;
         else if (!proposalEl.value) proposalEl.value = '';
         if (!proposalEl.placeholder) proposalEl.placeholder = LOOP_DEFAULT_PROPOSAL;
     }
     if (expectedEl) {
-        if (LOOP_STATE.expected_impact) expectedEl.value = LOOP_STATE.expected_impact;
+        const impact = loopExpectedImpactDisplay(LOOP_STATE);
+        if (impact) expectedEl.value = impact;
         else if (!expectedEl.value) expectedEl.value = '';
         if (!expectedEl.placeholder) expectedEl.placeholder = LOOP_DEFAULT_EXPECTED_IMPACT;
     }
@@ -3659,6 +3716,11 @@ async function loopRunPrimary() {
 }
 
 async function loopRunDiagnose() {
+    if (loopIsSessionMode()) {
+        loopSetError(loopSessionLimitation('nsys-ai evidence build <profile> --session'));
+        showToast(loopSessionLimitation('nsys-ai evidence'));
+        return;
+    }
     try {
         loopSetError('');
         loopSetBusy(true);
@@ -3683,6 +3745,11 @@ async function loopRunDiagnose() {
 }
 
 async function loopSaveProposal() {
+    if (loopIsSessionMode()) {
+        loopSetError(loopSessionLimitation('nsys-ai propose --session'));
+        showToast(loopSessionLimitation('nsys-ai propose'));
+        return;
+    }
     const proposal = (document.getElementById('loopProposalText')?.value || '').trim();
     const expected_impact = (document.getElementById('loopExpectedImpact')?.value || '').trim();
     if (!proposal) {
@@ -3706,6 +3773,11 @@ async function loopSaveProposal() {
 }
 
 async function loopSetReprofile() {
+    if (loopIsSessionMode()) {
+        loopSetError(loopSessionLimitation('nsys-ai profile / nsys-ai diff --session'));
+        showToast(loopSessionLimitation('nsys-ai profile'));
+        return;
+    }
     const after_path = (document.getElementById('loopAfterPath')?.value || '').trim();
     if (!after_path) {
         loopSetError('Enter the path to the candidate profile (.sqlite) after your change.');
@@ -3721,6 +3793,24 @@ async function loopSetReprofile() {
 }
 
 async function loopRunDiff() {
+    if (loopIsSessionMode()) {
+        try {
+            loopSetError('');
+            loopSetBusy(true);
+            const data = await loopPost('/api/loop/diff', {});
+            loopRevealDiffStats(true);
+            if (data.diff && data.diff.verdict) {
+                showToast(`${loopFormatVerdict(data.diff.verdict)} — ${loopFormatDelta(
+                    data.diff.step_time?.delta_ms,
+                    data.diff.step_time?.delta_pct
+                )}`);
+            } else {
+                showToast('Reloaded session diff');
+            }
+        } catch (err) { showToast(loopErrorMessage('Diff reload failed', err)); }
+        finally { loopSetBusy(false); }
+        return;
+    }
     const after_path = (document.getElementById('loopAfterPath')?.value || LOOP_STATE?.after_path || '').trim();
     if (!after_path) {
         loopSetError('Register a candidate profile path before running diff.');
@@ -3747,6 +3837,10 @@ async function loopRunDiff() {
 async function loopSetDecision(decision) {
     if (!LOOP_STATE?.diff_summary) {
         loopSetError('Run diff before accepting or rejecting.');
+        return;
+    }
+    if (LOOP_STATE.decision) {
+        loopSetError('A decision is already recorded for this session.');
         return;
     }
     const reasonEl = document.getElementById('loopDecisionReason');
