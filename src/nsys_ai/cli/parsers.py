@@ -576,8 +576,10 @@ def _build_parser():
         default=None,
         metavar="ID",
         help=(
-            "Open a SessionStore session for read/render/decide (timeline-web). "
-            "Omit ID to derive it from the before profile content id."
+            "Open a SessionStore session for read/render/decide on any surface "
+            "(timeline-web, timeline, tree). Omit ID to derive it from the "
+            "before profile content id. Root is always .nsys-ai/sessions under "
+            "the working directory."
         ),
     )
     p.set_defaults(handler=_cmd_loop)

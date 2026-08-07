@@ -1451,25 +1451,34 @@ def _cmd_loop(args, _profile):
             )
         return
 
-    if getattr(args, "session", None) is not None:
-        print(
-            "Error: --session is only supported with --surface timeline-web "
-            "in this change; tree and timeline TUI session wiring is a later phase",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    session = getattr(args, "session", None)
 
     if args.surface == "timeline":
         from nsys_ai.timeline import run_timeline
 
         gpu = args.gpu if args.gpu is not None else 0
-        run_timeline(before_path, gpu, trim, min_ms=0, loop_after=after_path)
+        run_timeline(
+            before_path,
+            gpu,
+            trim,
+            min_ms=0,
+            loop_after=after_path,
+            session=session,
+        )
         return
 
     from nsys_ai.tree import run_tui
 
     gpu = args.gpu if args.gpu is not None else 0
-    run_tui(before_path, gpu, trim, max_depth=-1, min_ms=0, loop_after=after_path)
+    run_tui(
+        before_path,
+        gpu,
+        trim,
+        max_depth=-1,
+        min_ms=0,
+        loop_after=after_path,
+        session=session,
+    )
 
 
 def _cmd_tui(args, _profile):
