@@ -3,7 +3,7 @@
 `abstain()` distinguishes "ran, found nothing" from "could not run", and that
 distinction reached `skill run` and `Agent.analyze` — but not `EvidenceBuilder`,
 which is the path behind `analyze --format json`, `evidence build`, the web
-`/api/analyze` endpoint and `loop_state.run_diagnose`. There the abstention row
+`/api/analyze` endpoint. There the abstention row
 was dropped before `to_findings_fn` and nothing else was recorded, so a profile
 missing a table it needs produced a report identical in shape to a clean one.
 Findings and no explanation is the failure mode a verify-first tool can least
@@ -261,8 +261,7 @@ def test_skipped_is_keyword_only():
 
 
 def test_findings_serialization_is_untouched():
-    """`web._handle_analyze` and `loop_state.run_diagnose` read only
-    ``report.findings``; the new field must not reach into a Finding."""
+    """Evidence surfaces read only ``report.findings``; skipped must not leak."""
     f = Finding(type="region", label="L", start_ns=10)
     report = EvidenceReport(
         title="T",
@@ -273,16 +272,17 @@ def test_findings_serialization_is_untouched():
     assert report.to_dict()["findings"] == [f.to_dict()]
 
 
-def test_run_diagnose_ignores_skipped_and_still_ranks_findings():
+def test_evidence_builder_ignores_skipped_and_still_ranks_findings():
     from nsys_ai import profile as profile_module
-    from nsys_ai.loop_state import DiffLoopState
+    from nsys_ai.evidence_builder import EvidenceBuilder
+    from nsys_ai.loop_state import _normalize_findings
 
-    state = DiffLoopState()
     with profile_module.open(str(NO_NVTX)) as prof:
-        ranked = state.run_diagnose(prof, device=0)
+        report = EvidenceBuilder(prof, device=0).build()
+        ranked = _normalize_findings([f.to_dict() for f in report.findings])
 
-    assert state.diagnose_ran
-    assert len(ranked) == state.diagnose_findings_count
+    assert isinstance(ranked, list)
+    assert len(ranked) == len(report.findings)
 
 
 # ── Round-trip ─────────────────────────────────────────────────────────────

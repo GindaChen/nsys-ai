@@ -4,6 +4,12 @@ tests/test_tui_timeline_app.py — Pilot-based headless tests for NsysTimelineAp
 Run with: pytest tests/test_tui_timeline_app.py -v
 """
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from nsys_ai.timeline.app import NsysTimelineApp
@@ -157,24 +163,96 @@ async def test_zoom_to_time_range_api(timeline_app):
 
 
 # ---------------------------------------------------------------------------
-# Loop accept/reject decision recording
+# Loop accept/reject decision recording (SessionStore path)
 # ---------------------------------------------------------------------------
 
+ROOT = Path(__file__).resolve().parents[1]
+BEFORE = ROOT / "tests" / "fixtures" / "mfu_2gpu_before.sqlite"
+AFTER = ROOT / "tests" / "fixtures" / "mfu_2gpu_after.sqlite"
 
-def _comparable_diff_summary(confidence: float = 0.9) -> dict:
-    """Minimal diff payload (to_diff_dict shape) sufficient to record a decision."""
-    return {
-        "verdict": "neutral",
-        "comparability_confidence": confidence,
-        "warnings": [],
-        "before": {"path": "/tmp/before.sqlite", "profile_id": "before-id"},
-        "after": {"path": "/tmp/after.sqlite", "profile_id": "after-id"},
-    }
+
+def _subprocess_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    source = str(ROOT / "src")
+    current = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = source if not current else f"{source}{os.pathsep}{current}"
+    return environment
+
+
+def _run_cli(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "nsys_ai", *args],
+        cwd=cwd,
+        env=_subprocess_environment(),
+        capture_output=True,
+        text=True,
+        timeout=180.0,
+        check=False,
+    )
+
+
+def _finding_id_from_evidence_stdout(stdout: str) -> str:
+    payload = json.loads(stdout)
+    return next(
+        finding["id"]
+        for finding in payload["findings"]
+        if finding.get("id") and finding.get("suggested_actions")
+    )
+
+
+def _publish_full_session(tmp_path: Path, session_id: str) -> None:
+    from nsys_ai.runspec import RunSpec
+
+    before = BEFORE.resolve()
+    after = AFTER.resolve()
+    runspec_path = tmp_path / "runspec.json"
+    runspec_path.write_bytes(RunSpec(argv=("true",)).canonical_json_bytes())
+    evidence = _run_cli(
+        tmp_path,
+        "evidence",
+        "build",
+        str(before),
+        "--format",
+        "json",
+        "--gpu",
+        "0",
+        "--session",
+        session_id,
+        "--analyzers",
+        "overlap_ratio",
+    )
+    assert evidence.returncode == 0, evidence.stderr
+    finding_id = _finding_id_from_evidence_stdout(evidence.stdout)
+    propose = _run_cli(
+        tmp_path,
+        "propose",
+        "--session",
+        session_id,
+        "--finding-id",
+        finding_id,
+        "--runspec",
+        str(runspec_path),
+    )
+    assert propose.returncode == 0, propose.stderr
+    diff = _run_cli(
+        tmp_path,
+        "diff",
+        str(before),
+        str(after),
+        "--gpu",
+        "0",
+        "--format",
+        "json",
+        "--no-ai",
+        "--session",
+        session_id,
+    )
+    assert diff.returncode == 0, diff.stderr
 
 
 @pytest.mark.asyncio
 async def test_loop_accept_before_diff_warns_without_crashing(timeline_app, tmp_path, monkeypatch):
-    """Pressing accept before a diff has run notifies instead of crashing or writing."""
+    """Pressing accept without a session notifies instead of crashing."""
     monkeypatch.chdir(tmp_path)
     async with timeline_app.run_test(size=(120, 40)) as pilot:
         notes: list[tuple] = []
@@ -182,34 +260,56 @@ async def test_loop_accept_before_diff_warns_without_crashing(timeline_app, tmp_
         timeline_app.action_loop_accept()
         await pilot.pause()
         assert timeline_app.is_running
-        assert timeline_app._loop_state.decision is None
+        assert timeline_app._session_id is None
         assert not (tmp_path / "diff.json").exists()
-        assert notes and any("diff" in str(a).lower() for a, _ in notes)
+        assert notes and any("session" in str(a).lower() for a, _ in notes)
 
 
 @pytest.mark.asyncio
-async def test_loop_accept_after_diff_writes_next_to_candidate(timeline_app, tmp_path):
-    """Accept after a diff persists diff.json next to the candidate profile."""
-    async with timeline_app.run_test(size=(120, 40)) as pilot:
-        timeline_app._loop_state.after_path = str(tmp_path / "after.sqlite")
-        timeline_app._loop_state.diff_summary = _comparable_diff_summary()
-        timeline_app.action_loop_accept()
+async def test_loop_accept_after_diff_writes_session_diff(tmp_path, monkeypatch):
+    """Accept after a published session diff persists <session>/diff.json."""
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    session_id = "timeline-loop-accept"
+    _publish_full_session(tmp_path, session_id)
+    monkeypatch.chdir(tmp_path)
+    app = NsysTimelineApp(
+        db_path=str(BEFORE.resolve()),
+        device=0,
+        trim=None,
+        json_roots=SAMPLE_JSON,
+        session=session_id,
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.action_loop_accept()
         await pilot.pause()
-        assert timeline_app._loop_state.decision == "accept"
-        written = tmp_path / "diff.json"
+        assert app._session_projection is not None
+        assert app._session_projection["decision"] == "accept"
+        written = tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json"
         assert written.exists()
-        assert timeline_app._loop_state.decision_path == str(written)
+        assert app._session_projection["decision_path"] == str(written)
 
 
 @pytest.mark.asyncio
-async def test_loop_set_decision_empty_reason_uses_fallback(timeline_app, tmp_path):
+async def test_loop_set_decision_empty_reason_uses_fallback(tmp_path, monkeypatch):
     """An agent set_decision action with the default empty reason does not crash."""
-    async with timeline_app.run_test(size=(120, 40)) as pilot:
-        timeline_app._loop_state.after_path = str(tmp_path / "after.sqlite")
-        timeline_app._loop_state.diff_summary = _comparable_diff_summary()
-        timeline_app.set_loop_decision("reject", "")
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    session_id = "timeline-loop-reason"
+    _publish_full_session(tmp_path, session_id)
+    monkeypatch.chdir(tmp_path)
+    app = NsysTimelineApp(
+        db_path=str(BEFORE.resolve()),
+        device=0,
+        trim=None,
+        json_roots=SAMPLE_JSON,
+        session=session_id,
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.set_loop_decision("reject", "")
         await pilot.pause()
-        assert timeline_app.is_running
-        assert timeline_app._loop_state.decision == "reject"
-        assert timeline_app._loop_state.decision_reason.strip()
-        assert (tmp_path / "diff.json").exists()
+        assert app.is_running
+        assert app._session_projection is not None
+        assert app._session_projection["decision"] == "reject"
+        assert app._session_projection["decision_reason"].strip()
+        assert (tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json").exists()

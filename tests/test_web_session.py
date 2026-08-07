@@ -80,7 +80,6 @@ def _session_web_server(tmp_path: Path, profile_path: Path, session_id: str):
     """Serve timeline against an existing session under tmp_path CWD."""
     handler = web._ViewerHandler
     saved = (
-        handler._loop_state,
         handler.prof,
         handler._session_id,
         handler._session_root,
@@ -107,7 +106,6 @@ def _session_web_server(tmp_path: Path, profile_path: Path, session_id: str):
             resolved = resolve_session_id(session_id, before=before_ref)
             snapshot = Store(handler._session_root).load(resolved)
             handler._session_id = resolved
-            handler._loop_state = None
             findings = []
             if snapshot.findings is not None:
                 findings = [f.to_dict() for f in snapshot.findings.findings]
@@ -130,7 +128,6 @@ def _session_web_server(tmp_path: Path, profile_path: Path, session_id: str):
     finally:
         os.chdir(previous_cwd)
         (
-            handler._loop_state,
             handler.prof,
             handler._session_id,
             handler._session_root,

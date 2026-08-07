@@ -187,8 +187,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     _tile_nvtx_cache: dict = {}  # (start_ns, end_ns, devices_tuple) -> {gpu_id: [nvtx_spans]}
     _asset_cache: dict[str, tuple[float, bytes]] = {}  # filename -> (mtime, body)
     _findings: list[dict] = []  # mutable findings state for evidence overlay
-    _loop_state = None  # DiffLoopState (non-session / legacy loop mode)
-    _session_id: str | None = None  # SessionStore id when opened in session mode
+    _session_id: str | None = None  # SessionStore id (always set by serve_timeline)
     _session_root: str = ".nsys-ai/sessions"
 
     def do_GET(self):
@@ -229,7 +228,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 self._json_response(list(self._findings))
             return
         if path == "/api/loop/state":
-            self._handle_loop_state_get()
+            self._handle_loop_get()
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -485,192 +484,119 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             400,
         )
 
-    def _loop_or_error(self):
-        if self._session_mode():
-            return True
-        loop_state = self.__class__._loop_state
-        if loop_state is None:
-            self._json_response({"error": "loop state not initialized"}, 500)
-            return None
-        return loop_state
+    def _require_session(self) -> bool:
+        if self.__class__._session_id is None:
+            self._json_response({"error": "session not initialized"}, 500)
+            return False
+        return True
 
-    def _handle_loop_state_get(self):
+    def _handle_loop_get(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                try:
-                    self._json_response(self._load_session_projection())
-                except Exception as e:
-                    self._json_response({"error": str(e)}, 500)
-                return
-            self._json_response(self.__class__._loop_state.to_dict())
+            try:
+                self._json_response(self._load_session_projection())
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
 
     def _handle_loop_phase(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                self._session_limitation(
-                    "nsys-ai evidence|propose|diff",
-                    "session mode does not set phase directly; CLI publishers "
-                    "advance the session phase (nsys-ai evidence, propose, diff)",
-                )
-                return
-            payload = self._read_json_body()
-            phase = str(payload.get("phase") or "").strip()
-            if not phase:
-                self._json_response({"error": "phase is required"}, 400)
-                return
-            loop_state = self.__class__._loop_state
-            loop_state.set_phase(phase)  # validated by loop_state.py
-            self._json_response(loop_state.to_dict())
+            self._session_limitation(
+                "nsys-ai evidence|propose|diff",
+                "session mode does not set phase directly; CLI publishers "
+                "advance the session phase (nsys-ai evidence, propose, diff)",
+            )
 
     def _handle_loop_proposal(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                self._session_limitation(
-                    "nsys-ai propose",
-                    "session mode does not save free-text proposals; use "
-                    "nsys-ai propose --session to publish a Proposal artifact",
-                )
-                return
-            payload = self._read_json_body()
-            proposal = str(payload.get("proposal") or "").strip()
-            expected = str(payload.get("expected_impact") or "").strip()
-            if not proposal:
-                self._json_response({"error": "proposal is required"}, 400)
-                return
-            loop_state = self.__class__._loop_state
-            loop_state.set_proposal(proposal, expected_impact=expected)
-            self._json_response(loop_state.to_dict())
+            self._session_limitation(
+                "nsys-ai propose",
+                "session mode does not save free-text proposals; use "
+                "nsys-ai propose --session to publish a Proposal artifact",
+            )
 
     def _handle_loop_reprofile(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                self._session_limitation(
-                    "nsys-ai profile",
-                    "session mode does not register an after profile from the "
-                    "browser; capture/validate with nsys-ai profile, then "
-                    "publish via nsys-ai diff --session (which registers the "
-                    "after profile after a non-abstained proposal)",
-                )
-                return
-            payload = self._read_json_body()
-            after_path = str(payload.get("after_path") or "").strip()
-            if not after_path:
-                self._json_response({"error": "after_path is required"}, 400)
-                return
-            loop_state = self.__class__._loop_state
-            loop_state.record_reprofile_artifact(after_path)
-            self._json_response(loop_state.to_dict())
+            self._session_limitation(
+                "nsys-ai profile",
+                "session mode does not register an after profile from the "
+                "browser; capture/validate with nsys-ai profile, then "
+                "publish via nsys-ai diff --session (which registers the "
+                "after profile after a non-abstained proposal)",
+            )
 
     def _handle_loop_diagnose(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                self._session_limitation(
-                    "nsys-ai evidence",
-                    "session mode does not run diagnose in the browser; use "
-                    "nsys-ai evidence build <profile> --session to publish "
-                    "findings, then reload loop state",
-                )
-                return
-            payload = self._read_json_body()
-            trim = None
-            trim_raw = payload.get("trim")
-            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
-                trim = (int(trim_raw[0]), int(trim_raw[1]))
-            device = self.devices[0] if self.devices else 0
-            loop_state = self.__class__._loop_state
-            findings = loop_state.run_diagnose(self.prof, device=device, trim=trim)
-            with _FINDINGS_LOCK:
-                self.__class__._findings = findings
-            self._json_response({"state": loop_state.to_dict(), "findings": findings})
+            self._session_limitation(
+                "nsys-ai evidence",
+                "session mode does not run diagnose in the browser; use "
+                "nsys-ai evidence build <profile> --session to publish "
+                "findings, then reload loop state",
+            )
 
     def _handle_loop_diff(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
-            if self._session_mode():
-                # C6 recommendation: read-only reload of SessionSnapshot.diff.
-                # No analysis and no publish_* on this endpoint.
-                try:
-                    projected = self._load_session_projection()
-                except Exception as e:
-                    self._json_response({"error": str(e)}, 500)
-                    return
-                if projected.get("diff_summary") is None:
-                    self._session_limitation(
-                        "nsys-ai diff",
-                        "session has no published diff yet; use "
-                        "nsys-ai diff <before> <after> --session to publish, "
-                        "then reload",
-                    )
-                    return
-                self._json_response(
-                    {"state": projected, "diff": projected["diff_summary"]}
+            # C6 recommendation: read-only reload of SessionSnapshot.diff.
+            # No analysis and no publish_* on this endpoint.
+            try:
+                projected = self._load_session_projection()
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+                return
+            if projected.get("diff_summary") is None:
+                self._session_limitation(
+                    "nsys-ai diff",
+                    "session has no published diff yet; use "
+                    "nsys-ai diff <before> <after> --session to publish, "
+                    "then reload",
                 )
                 return
-            payload = self._read_json_body()
-            gpu_raw = payload.get("gpu")
-            gpu = int(gpu_raw) if gpu_raw is not None else None
-            trim = None
-            trim_raw = payload.get("trim")
-            if isinstance(trim_raw, (list, tuple)) and len(trim_raw) == 2:
-                trim = (int(trim_raw[0]), int(trim_raw[1]))
-            baseline_prof = self.prof if self.prof is not None else None
-            loop_state = self.__class__._loop_state
-            diff_payload = loop_state.run_diff(gpu=gpu, trim=trim, baseline_prof=baseline_prof)
-            self._json_response({"state": loop_state.to_dict(), "diff": diff_payload})
+            self._json_response(
+                {"state": projected, "diff": projected["diff_summary"]}
+            )
 
     def _handle_loop_decision(self):
         with _LOOP_LOCK:
-            if self._loop_or_error() is None:
+            if not self._require_session():
                 return
             payload = self._read_json_body()
             decision = str(payload.get("decision") or "").strip()
             reason = str(payload.get("reason") or "").strip()
-            if self._session_mode():
-                from .session_store import SessionConflictError
+            from .session_store import SessionConflictError
 
-                try:
-                    store = self._session_store()
-                    with store.writer(self.__class__._session_id) as writer:
-                        writer.publish_decision(decision, reason)
-                    self._json_response(self._load_session_projection())
-                except SessionConflictError as e:
-                    self._json_response({"error": str(e)}, 409)
-                except ValueError as e:
-                    self._json_response({"error": str(e)}, 400)
-                except Exception as e:
-                    _log.exception("Error publishing session decision")
-                    self._json_response({"error": str(e)}, 500)
-                return
-            loop_state = self.__class__._loop_state
-            loop_state.set_decision(decision, reason=reason)
-            self._json_response(loop_state.to_dict())
+            try:
+                store = self._session_store()
+                with store.writer(self.__class__._session_id) as writer:
+                    writer.publish_decision(decision, reason)
+                self._json_response(self._load_session_projection())
+            except SessionConflictError as e:
+                self._json_response({"error": str(e)}, 409)
+            except ValueError as e:
+                self._json_response({"error": str(e)}, 400)
+            except Exception as e:
+                _log.exception("Error publishing session decision")
+                self._json_response({"error": str(e)}, 500)
 
     def _handle_loop_server_error(self, path: str, exc: Exception):
         _log.exception("Error handling POST %s", path)
         with _LOOP_LOCK:
-            if self._session_mode():
-                try:
-                    state = self._load_session_projection()
-                except Exception:
-                    state = None
-                self._json_response({"error": str(exc), "state": state}, 500)
-                return
-            loop_state = self.__class__._loop_state
-            if loop_state is not None:
-                loop_state.last_error = str(exc)
-                state = loop_state.to_dict()
-            else:
+            try:
+                state = (
+                    self._load_session_projection()
+                    if self.__class__._session_id is not None
+                    else None
+                )
+            except Exception:
                 state = None
             self._json_response({"error": str(exc), "state": state}, 500)
 
@@ -873,8 +799,9 @@ def serve_timeline(
     the client can freely navigate via /api/data.
     If *findings_path* is given, findings are loaded and rendered as overlays.
     If *auto_findings* is given, they are used directly (from --auto-analyze).
-    If *session* is not None (including empty string), open that SessionStore
-    session: empty derives the id from the before profile content id.
+    If *session* is given (including empty string), open that SessionStore
+    session; empty or omitted derives the id from the before profile content id
+    (C1). SessionStore is always used — there is no in-memory loop state.
     """
     from collections.abc import Sequence
 
@@ -896,12 +823,7 @@ def serve_timeline(
     _ViewerHandler._findings = findings_data or []
     _ViewerHandler._session_id = None
     _ViewerHandler._session_root = ".nsys-ai/sessions"
-    from .loop_state import (
-        DiffLoopState,
-        detect_h100_replay_preset,
-        normalize_profile_path,
-        reconcile_h100_loop_paths,
-    )
+    from .loop_state import detect_h100_replay_preset
 
     raw_path = prof.path if hasattr(prof, "path") else ""
     _profile_path = os.fspath(raw_path) if raw_path else ""
@@ -909,55 +831,46 @@ def serve_timeline(
     preset = detect_h100_replay_preset() if loop_h100_preset else None
     if preset:
         loop_before_path = preset["before_path"]
-        loop_after_path = preset["after_path"]
     else:
         loop_before_path = loop_before or _profile_path
-        loop_after_path = loop_after or ""
 
-    if session is not None:
-        from .profile_runner import build_local_profile_reference
-        from .session_cli import project_loop_state, resolve_session_id, session_dir
-        from .session_store import SessionStore
+    from .profile_runner import build_local_profile_reference
+    from .session_cli import project_loop_state, resolve_session_id, session_dir
+    from .session_store import SessionExistsError, SessionStore
 
-        before_for_id = loop_before_path or _profile_path
-        if not before_for_id:
-            raise ValueError(
-                "session mode requires a before profile path to open or derive "
-                "the session id"
-            )
-        before_ref = build_local_profile_reference(before_for_id)
-        session_id = resolve_session_id(session or None, before=before_ref)
-        store = SessionStore(_ViewerHandler._session_root)
-        snapshot = store.load(session_id)
-        _ViewerHandler._session_id = session_id
-        _ViewerHandler._loop_state = None
-        if snapshot.findings is not None and not findings_data:
-            findings_data = [f.to_dict() for f in snapshot.findings.findings]
-            _ViewerHandler._findings = findings_data
-            print(
-                f"Loaded {len(findings_data)} finding(s) from session {session_id}",
-                flush=True,
-            )
-        projected = project_loop_state(
-            snapshot,
-            session_dir_path=session_dir(
-                session_id, root=_ViewerHandler._session_root
-            ),
+    before_for_id = loop_before_path or _profile_path
+    if not before_for_id:
+        raise ValueError(
+            "session mode requires a before profile path to open or derive "
+            "the session id"
         )
+    before_ref = build_local_profile_reference(before_for_id)
+    session_id = resolve_session_id(session or None, before=before_ref)
+    store = SessionStore(_ViewerHandler._session_root)
+    try:
+        store.create(session_id, before_profile=before_ref)
+    except SessionExistsError:
+        pass
+    snapshot = store.load(session_id)
+    _ViewerHandler._session_id = session_id
+    if snapshot.findings is not None and not findings_data:
+        findings_data = [f.to_dict() for f in snapshot.findings.findings]
+        _ViewerHandler._findings = findings_data
         print(
-            f"Opened session {session_id} (phase={projected['phase']})",
+            f"Loaded {len(findings_data)} finding(s) from session {session_id}",
             flush=True,
         )
-        _in_loop_mode = True
-    else:
-        loop_state = DiffLoopState(phase="diagnose")
-        if loop_before_path:
-            loop_state.sync_before_path(loop_before_path)
-        if loop_after_path:
-            loop_state.after_path = normalize_profile_path(loop_after_path, label="after")
-        reconcile_h100_loop_paths(loop_state)
-        _ViewerHandler._loop_state = loop_state
-        _in_loop_mode = bool(loop_before or loop_after or loop_h100_preset)
+    projected = project_loop_state(
+        snapshot,
+        session_dir_path=session_dir(
+            session_id, root=_ViewerHandler._session_root
+        ),
+    )
+    print(
+        f"Opened session {session_id} (phase={projected['phase']})",
+        flush=True,
+    )
+    _in_loop_mode = True
 
     _asset_v = _template_asset_version()
     _css_href = _versioned_asset_url("/assets/timeline.css")

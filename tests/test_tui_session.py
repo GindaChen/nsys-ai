@@ -207,7 +207,6 @@ async def test_cli_session_opens_in_tree_tui(tmp_path: Path, monkeypatch):
         session=session_id,
     )
     assert app._session_mode() is True
-    assert app._loop_state is None
     assert app._session_id == session_id
     assert app.analysis_phase == "propose"
     assert app._session_projection is not None
@@ -276,7 +275,6 @@ async def test_cli_session_opens_in_timeline_tui(tmp_path: Path, monkeypatch):
         session=session_id,
     )
     assert app._session_mode() is True
-    assert app._loop_state is None
     assert app._session_id == session_id
     assert app.analysis_phase == "propose"
     assert app._session_projection is not None

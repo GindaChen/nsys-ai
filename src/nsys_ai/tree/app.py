@@ -22,8 +22,6 @@ Layout:
 
 from __future__ import annotations
 
-import os
-
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -31,7 +29,6 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input
 
 from .. import tui_actions
-from ..loop_state import DiffLoopState
 from ..tui_models import TreeNode
 from .chat import ChatPanel
 from .logic import (
@@ -153,17 +150,10 @@ class NsysTreeApp(App):
         self._session_id: str | None = None
         self._session_root = ".nsys-ai/sessions"
         self._session_projection: dict | None = None
-        self._loop_state: DiffLoopState | None = None
-        if session is not None:
-            # Session mode: CLI owns diagnose/propose/diff; TUI reads and decides.
-            # json_roots still skips the DB load below — session open does not
-            # require building the tree from SQLite.
+        # Always open a SessionStore session when a before profile path is
+        # available (C1). from_json tests may omit db_path and skip open.
+        if self._db_path:
             self._open_session(session)
-        else:
-            self._loop_state = DiffLoopState(
-                before_path=db_path, after_path=loop_after or ""
-            )
-            self.analysis_phase = self._loop_state.phase
         self.max_depth = max_depth
         self.min_dur_us = min_ms * 1000  # convert ms → µs
 
@@ -706,7 +696,7 @@ class NsysTreeApp(App):
     def _open_session(self, session: str) -> None:
         from ..profile_runner import build_local_profile_reference
         from ..session_cli import project_loop_state, resolve_session_id, session_dir
-        from ..session_store import SessionStore
+        from ..session_store import SessionExistsError, SessionStore
 
         if not self._db_path:
             raise ValueError(
@@ -716,9 +706,12 @@ class NsysTreeApp(App):
         before_ref = build_local_profile_reference(self._db_path)
         session_id = resolve_session_id(session or None, before=before_ref)
         store = SessionStore(self._session_root)
+        try:
+            store.create(session_id, before_profile=before_ref)
+        except SessionExistsError:
+            pass
         snapshot = store.load(session_id)
         self._session_id = session_id
-        self._loop_state = None
         self._session_projection = project_loop_state(
             snapshot,
             session_dir_path=session_dir(session_id, root=self._session_root),
@@ -747,75 +740,60 @@ class NsysTreeApp(App):
         )
 
     def set_analysis_phase(self, phase: str) -> None:
-        if self._session_mode():
+        if not self._session_mode():
             self._session_limitation(
                 "nsys-ai evidence|propose|diff",
-                "session mode does not set phase directly; CLI publishers "
-                "advance the session phase",
+                "loop actions require a SessionStore session (open with a profile path)",
             )
             return
-        self._loop_state.set_phase(phase)
-        self.analysis_phase = self._loop_state.phase
-        self._update_title()
+        self._session_limitation(
+            "nsys-ai evidence|propose|diff",
+            "session mode does not set phase directly; CLI publishers "
+            "advance the session phase",
+        )
 
     def action_loop_diagnose(self) -> None:
-        if self._session_mode():
-            self._session_limitation(
-                "nsys-ai evidence build <profile> --session",
-                "session mode does not run diagnose in the tree TUI",
-            )
-            return
-        self.set_analysis_phase("diagnose")
-        self.notify("Loop: diagnose", timeout=2)
+        self._session_limitation(
+            "nsys-ai evidence build <profile> --session",
+            "session mode does not run diagnose in the tree TUI",
+        )
 
     def action_loop_propose(self) -> None:
-        if self._session_mode():
-            self._session_limitation(
-                "nsys-ai propose --session",
-                "session mode does not save free-text proposals in the tree TUI",
-            )
-            return
-        self.set_analysis_phase("propose")
-        self.notify("Loop: propose", timeout=2)
+        self._session_limitation(
+            "nsys-ai propose --session",
+            "session mode does not save free-text proposals in the tree TUI",
+        )
 
     def action_loop_reprofile(self) -> None:
-        if self._session_mode():
-            self._session_limitation(
-                "nsys-ai profile / nsys-ai diff --session",
-                "session mode does not register an after profile from the tree TUI",
-            )
-            return
-        self.set_analysis_phase("reprofile")
-        self.notify("Loop: re-profile", timeout=2)
+        self._session_limitation(
+            "nsys-ai profile / nsys-ai diff --session",
+            "session mode does not register an after profile from the tree TUI",
+        )
 
     def action_loop_diff(self) -> None:
-        if self._session_mode():
-            # C6: read-only reload of SessionSnapshot.diff. No analysis, no publish_*.
-            try:
-                projected = self._load_session_projection()
-            except Exception as e:
-                self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
-                return
-            self._update_title()
-            if projected.get("diff_summary") is None:
-                self._session_limitation(
-                    "nsys-ai diff <before> <after> --session",
-                    "session has no published diff yet",
-                )
-                return
-            self.notify(
-                f"Loop diff verdict: {projected.get('verdict', 'neutral')}",
-                timeout=3,
+        if not self._session_mode():
+            self._session_limitation(
+                "nsys-ai diff <before> <after> --session",
+                "loop diff requires a SessionStore session",
             )
             return
+        # C6: read-only reload of SessionSnapshot.diff. No analysis, no publish_*.
         try:
-            trim = None if self._trim == (0, 0) else self._trim
-            self._loop_state.run_diff(gpu=self._device, trim=trim)
-            self.analysis_phase = self._loop_state.phase
-            self._update_title()
-            self.notify(f"Loop diff verdict: {self._loop_state.verdict}", timeout=3)
+            projected = self._load_session_projection()
         except Exception as e:
             self.notify(f"Loop diff failed: {e}", severity="warning", timeout=4)
+            return
+        self._update_title()
+        if projected.get("diff_summary") is None:
+            self._session_limitation(
+                "nsys-ai diff <before> <after> --session",
+                "session has no published diff yet",
+            )
+            return
+        self.notify(
+            f"Loop diff verdict: {projected.get('verdict', 'neutral')}",
+            timeout=3,
+        )
 
     def action_loop_accept(self) -> None:
         self._record_loop_decision("accept", "accepted in tree TUI")
@@ -823,84 +801,51 @@ class NsysTreeApp(App):
     def set_loop_decision(self, decision: str, reason: str = "") -> None:
         self._record_loop_decision(decision, reason)
 
-    def _loop_decision_dir(self) -> str:
-        """Directory the shared diff.json decision record is written to.
-
-        The record lands next to the candidate ('after') profile so it is
-        discoverable alongside the run it describes rather than dropped into
-        the process CWD. Session mode writes via SessionStore instead (C4).
-        """
-        after = self._loop_state.after_path if self._loop_state is not None else ""
-        directory = os.path.dirname(after) if after else ""
-        return directory or "."
-
     def _record_loop_decision(self, decision: str, reason: str) -> None:
-        """Persist a loop accept/reject decision, guarding TUI-side edge cases.
-
-        Legacy mode: set_decision requires a completed diff and a non-empty
-        reason and writes diff.json beside the after profile.
-
-        Session mode: publish_decision under a short SessionWriter lease; the
-        artifact is always <session>/diff.json (C4).
-        """
-        if self._session_mode():
-            projected = self._session_projection or {}
-            if projected.get("diff_summary") is None:
-                try:
-                    projected = self._load_session_projection()
-                except Exception as e:
-                    self.notify(
-                        f"Loop decision failed: {e}", severity="warning", timeout=4
-                    )
-                    return
-            if projected.get("diff_summary") is None:
+        """Persist a loop accept/reject via SessionStore (C4)."""
+        if not self._session_mode():
+            self.notify(
+                "Loop decision requires a SessionStore session",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        projected = self._session_projection or {}
+        if projected.get("diff_summary") is None:
+            try:
+                projected = self._load_session_projection()
+            except Exception as e:
                 self.notify(
-                    "Run loop diff before recording a decision",
-                    severity="warning",
-                    timeout=4,
+                    f"Loop decision failed: {e}", severity="warning", timeout=4
                 )
                 return
-            reason = (reason or "").strip() or f"{decision}ed in tree TUI"
-            try:
-                from ..session_store import SessionConflictError, SessionStore
-
-                store = SessionStore(self._session_root)
-                with store.writer(self._session_id) as writer:
-                    writer.publish_decision(decision, reason)
-                projected = self._load_session_projection()
-            except SessionConflictError as e:
-                self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
-                return
-            except ValueError as e:
-                self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
-                return
-            except Exception as e:
-                self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
-                return
-            self._update_title()
-            path = projected.get("decision_path") or ""
-            self.notify(f"Loop decision: {decision} -> {path}", timeout=3)
-            return
-
-        if self._loop_state.diff_summary is None:
+        if projected.get("diff_summary") is None:
             self.notify(
-                "Run loop diff before recording a decision", severity="warning", timeout=4
+                "Run loop diff before recording a decision",
+                severity="warning",
+                timeout=4,
             )
             return
         reason = (reason or "").strip() or f"{decision}ed in tree TUI"
         try:
-            _payload, warnings = self._loop_state.set_decision(
-                decision, reason=reason, decision_dir=self._loop_decision_dir()
-            )
+            from ..session_store import SessionConflictError, SessionStore
+
+            store = SessionStore(self._session_root)
+            with store.writer(self._session_id) as writer:
+                writer.publish_decision(decision, reason)
+            projected = self._load_session_projection()
+        except SessionConflictError as e:
+            self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
+            return
+        except ValueError as e:
+            self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
+            return
         except Exception as e:
             self.notify(f"Loop decision failed: {e}", severity="warning", timeout=4)
             return
-        self.analysis_phase = self._loop_state.phase
         self._update_title()
-        msg = f"Loop decision: {decision} -> {self._loop_state.decision_path}"
-        if warnings:
-            msg += f" ({'; '.join(warnings)})"
-        self.notify(msg, timeout=3)
+        path = projected.get("decision_path") or ""
+        self.notify(f"Loop decision: {decision} -> {path}", timeout=3)
 
 
 # ---------------------------------------------------------------------------
