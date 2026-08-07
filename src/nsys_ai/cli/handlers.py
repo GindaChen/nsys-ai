@@ -750,8 +750,6 @@ def _cmd_baseline_show(args, _profile):
 
 
 def _cmd_diff(args, _profile):
-    from pathlib import Path
-
     from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
     from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
@@ -793,9 +791,10 @@ def _cmd_diff(args, _profile):
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
-    if session is not None:
-        args.before = str(Path(args.before).expanduser().resolve())
-        args.after = str(Path(args.after).expanduser().resolve())
+    # Keep session profile paths as caller spelling normalized with abspath
+    # (no symlink dereference), matching SessionStore / build_local_profile_reference.
+    session_before_path = None
+    session_after_path = None
     if decision is not None:
         if getattr(args, "chat", False):
             print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
@@ -863,6 +862,10 @@ def _cmd_diff(args, _profile):
                 sys.exit(1)
 
     with _profile.open(args.before) as before, _profile.open(args.after) as after:
+        if session is not None:
+            # Opened Profile.path is the resolved .sqlite (including .nsys-rep sidecars).
+            session_before_path = before.path
+            session_after_path = after.path
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
                 before,
@@ -1015,19 +1018,26 @@ def _cmd_diff(args, _profile):
         if gate_summary is None:
             print("Error: --session requires a computed profile diff", file=sys.stderr)
             sys.exit(2)
+        from nsys_ai.exceptions import ProfileError
         from nsys_ai.profile_runner import build_local_profile_reference
         from nsys_ai.session_cli import publish_session_diff, resolve_session_id
 
-        before_ref = build_local_profile_reference(args.before)
-        after_ref = build_local_profile_reference(args.after)
-        session_id = resolve_session_id(session or None, before=before_ref)
+        before_path = session_before_path or os.path.abspath(
+            os.path.expanduser(args.before)
+        )
+        after_path = session_after_path or os.path.abspath(
+            os.path.expanduser(args.after)
+        )
         try:
+            before_ref = build_local_profile_reference(before_path)
+            after_ref = build_local_profile_reference(after_path)
+            session_id = resolve_session_id(session or None, before=before_ref)
             publish_session_diff(
                 session_id=session_id,
                 diff=to_diff_dict(gate_summary),
                 after_profile=after_ref,
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, ProfileError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(2)
         print(f"Diff published to session {session_id}", file=sys.stderr)
@@ -1483,7 +1493,6 @@ def _cmd_evidence(args, _profile):
     compatible alias and will be removed in a future release.
     """
     import json
-    from pathlib import Path
 
     from nsys_ai.evidence_builder import EvidenceBuilder
 
@@ -1507,7 +1516,8 @@ def _cmd_evidence(args, _profile):
         # Absolute path keeps EvidenceReport.profile_id aligned with
         # build_local_profile_reference (relative opens can fall back to a
         # path-derived id when metadata is unreachable through the cache).
-        profile_path = str(Path(args.profile).expanduser().resolve())
+        # Use abspath (no symlink dereference) to match SessionStore policy.
+        profile_path = os.path.abspath(os.path.expanduser(args.profile))
 
     with _profile.open(profile_path) as prof:
         trim = _parse_trim(args)
@@ -1549,18 +1559,20 @@ def _cmd_evidence(args, _profile):
             _write_evidence_report_or_die(report, out)
 
         if session is not None:
+            from nsys_ai.exceptions import ProfileError
             from nsys_ai.profile_runner import build_local_profile_reference
             from nsys_ai.session_cli import publish_session_findings, resolve_session_id
 
-            before = build_local_profile_reference(profile_path)
-            session_id = resolve_session_id(session or None, before=before)
+            # Use the opened Profile's resolved .sqlite path so .nsys-rep inputs work.
             try:
+                before = build_local_profile_reference(prof.path)
+                session_id = resolve_session_id(session or None, before=before)
                 publish_session_findings(
                     session_id=session_id,
                     report=report,
                     before_profile=before,
                 )
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, ProfileError) as exc:
                 print(f"Error: {exc}", file=sys.stderr, flush=True)
                 sys.exit(2)
             print(

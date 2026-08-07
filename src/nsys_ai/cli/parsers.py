@@ -344,7 +344,7 @@ def _register_evidence_parser(sub):
         metavar="ID",
         help=(
             "Publish findings into SessionStore under .nsys-ai/sessions/<id>. "
-            "Omit ID to derive it from the before profile content id."
+            "Omit ID to derive it from this command's profile content id."
         ),
     )
     p.set_defaults(handler=_cmd_evidence)
@@ -448,8 +448,20 @@ def _build_parser():
     p.add_argument(
         "-o",
         "--output",
-        default="proposal.json",
-        help="Proposal artifact path (default: proposal.json)",
+        default=None,
+        help=(
+            "Proposal artifact path (default: proposal.json). "
+            "Cannot be combined with --session."
+        ),
+    )
+    p.add_argument(
+        "--profile",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Before profile used only to derive the session id when --session "
+            "is given without an id (same derivation as evidence build / diff)"
+        ),
     )
     p.add_argument(
         "--session",
@@ -459,7 +471,8 @@ def _build_parser():
         metavar="ID",
         help=(
             "Read findings from SessionStore and publish the proposal back. "
-            "Requires an explicit session id."
+            "Omit ID and pass --profile to derive the id from the before "
+            "profile content id."
         ),
     )
     p.set_defaults(handler=_cmd_propose)
@@ -712,7 +725,8 @@ def _build_parser():
         metavar="ID",
         help=(
             "Publish the undecided diff into SessionStore (and register the after "
-            "profile). Omit ID to derive it from the before profile content id."
+            "profile). Omit ID to derive it from the before profile content id "
+            "(same derivation as evidence build / propose --profile)."
         ),
     )
     p.set_defaults(handler=_cmd_diff)

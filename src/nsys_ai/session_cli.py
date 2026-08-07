@@ -95,10 +95,12 @@ def publish_session_diff(
 ) -> SessionState:
     """Publish undecided diff.json via SessionWriter.
 
-    Registers ``after_profile`` when the session is still in ``propose`` /
-    ``reprofile``. When the session is already in ``diff`` (re-publish), the
-    after profile must already match ``after_profile``; ``publish_diff``
-    re-validates the references.
+    Registers ``after_profile`` when the session is in ``propose`` /
+    ``reprofile`` (after a non-abstained proposal). Sessions still in
+    ``diagnose`` have not been proposed yet — run ``nsys-ai propose`` first.
+    When the session is already in ``diff`` (re-publish), the after profile
+    must already match ``after_profile``; ``publish_diff`` re-validates the
+    references.
     """
     if not isinstance(diff, Mapping):
         raise TypeError("diff must be a mapping")
@@ -107,6 +109,11 @@ def publish_session_diff(
     with store.writer(session_id) as writer:
         if snapshot.state.phase in {"propose", "reprofile"}:
             writer.publish_after_profile(after_profile)
+        elif snapshot.state.phase == "diagnose":
+            raise ValueError(
+                "session is still in diagnose phase; run nsys-ai propose "
+                "before publishing a diff with --session"
+            )
         elif snapshot.state.after_profile != after_profile:
             raise ValueError(
                 "session after profile does not match the after profile being diffed"

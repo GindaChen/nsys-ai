@@ -337,13 +337,28 @@ def _write_proposal(
     return destination
 
 
+def _derive_session_id_from_profile(
+    profile_path: str | os.PathLike[str],
+) -> str:
+    """Derive a session id the same way ``evidence build`` / ``diff`` do."""
+    from .profile import resolve_profile_path
+    from .profile_runner import build_local_profile_reference
+    from .session_cli import resolve_session_id
+
+    raw = os.path.abspath(os.path.expanduser(os.fspath(profile_path)))
+    sqlite_path = resolve_profile_path(raw)
+    before = build_local_profile_reference(sqlite_path)
+    return resolve_session_id(None, before=before)
+
+
 def run_propose(
     *,
     finding_id: str,
     findings_path: str | os.PathLike[str] | None = None,
     session_id: str | None = None,
+    profile_path: str | os.PathLike[str] | None = None,
     runspec_path: str | os.PathLike[str] | None = None,
-    output: str | os.PathLike[str] = "proposal.json",
+    output: str | os.PathLike[str] | None = None,
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     stdout: TextIO = sys.stdout,
     environment: Mapping[str, str] = os.environ,
@@ -352,14 +367,22 @@ def run_propose(
 
     Pass either ``findings_path`` or ``session_id``, not both. Session mode loads
     findings from ``SessionStore`` and publishes the proposal back through
-    ``publish_session_proposal``.
+    ``publish_session_proposal``. When ``session_id`` is empty, derive it from
+    ``profile_path`` using the same content-id derivation as ``evidence build``.
     """
     if findings_path is None and session_id is None:
         raise ProposeCommandError("findings path is required unless --session is given")
     if findings_path is not None and session_id is not None:
         raise ProposeCommandError("pass a findings path or --session, not both")
     if session_id is not None and not session_id:
-        raise ProposeCommandError("--session requires an explicit session id for propose")
+        if profile_path is None:
+            raise ProposeCommandError(
+                "--session without an id requires --profile <path> to derive "
+                "the session id from the before profile content id"
+            )
+        session_id = _derive_session_id_from_profile(profile_path)
+    elif profile_path is not None and session_id is None:
+        raise ProposeCommandError("--profile is only valid with --session")
 
     runspec_input = _read_json(Path(runspec_path), "RunSpec") if runspec_path else None
     if runspec_input is not None:
@@ -369,22 +392,33 @@ def run_propose(
             raise ProposeCommandError("invalid RunSpec artifact") from exc
     else:
         runspec = None
-    resolved_secrets = (
-        _resolve_declared_secrets(runspec, environment) if runspec is not None else None
-    )
 
     findings_input: _InputArtifact | None = None
+    adopted_runspec = False
     if session_id is not None:
         from .session_store import SessionStore
 
+        if output is not None:
+            raise ProposeCommandError(
+                "--output/-o cannot be combined with --session; "
+                "the proposal is published into SessionStore"
+            )
         snapshot = SessionStore(session_root).load(session_id)
         if snapshot.findings is None:
             raise ProposeCommandError("session has no findings.json to propose from")
         report = snapshot.findings
         if runspec is None and snapshot.runspec is not None:
             runspec = snapshot.runspec
+            adopted_runspec = True
     else:
         findings_input = _read_json(Path(findings_path), "evidence")
+
+    # Resolve secrets only after the runspec source is final (file or session).
+    resolved_secrets = (
+        _resolve_declared_secrets(runspec, environment) if runspec is not None else None
+    )
+
+    if findings_input is not None:
         try:
             report = validate_evidence_report_payload(findings_input.payload)
         except (TypeError, ValueError) as exc:
@@ -397,9 +431,6 @@ def run_propose(
         runspec,
         resolved_secrets=resolved_secrets,
     )
-    output_path = Path(output)
-    if resolved_secrets is not None:
-        validate_persisted_secret_strings([str(output_path)], resolved_secrets)
 
     if session_id is not None:
         from .session_cli import publish_session_proposal
@@ -407,7 +438,7 @@ def run_propose(
         publish_session_proposal(
             session_id=session_id,
             proposal=proposal,
-            runspec=runspec,
+            runspec=None if adopted_runspec else runspec,
             resolved_secrets=resolved_secrets,
             root=session_root,
         )
@@ -415,8 +446,10 @@ def run_propose(
             f"Proposal published to session {session_id}",
             file=stdout,
         )
-
-    if findings_input is not None:
+    else:
+        output_path = Path("proposal.json" if output is None else output)
+        if resolved_secrets is not None:
+            validate_persisted_secret_strings([str(output_path)], resolved_secrets)
         inputs = (findings_input,) + (
             (runspec_input,) if runspec_input is not None else ()
         )
@@ -436,12 +469,22 @@ def run_propose_command(
 ) -> int:
     """Adapt an argparse Namespace to :func:`run_propose`."""
     session = getattr(args, "session", None)
+    findings = getattr(args, "findings", None)
+    # Restore argparse exit status 2 for the missing-positional case when the
+    # caller did not opt into --session (nargs="?" made findings optional).
+    if findings is None and session is None:
+        print(
+            "nsys-ai propose: error: the following arguments are required: findings",
+            file=sys.stderr,
+        )
+        return 2
     return run_propose(
         finding_id=args.finding_id,
-        findings_path=getattr(args, "findings", None),
+        findings_path=findings,
         session_id=session,
+        profile_path=getattr(args, "profile", None),
         runspec_path=getattr(args, "runspec", None),
-        output=getattr(args, "output", "proposal.json"),
+        output=getattr(args, "output", None),
         stdout=stdout,
         environment=environment,
     )
