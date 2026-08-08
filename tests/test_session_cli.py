@@ -384,3 +384,53 @@ def test_cli_session_accepts_relative_profile_paths(tmp_path: Path):
         assert os.path.isabs(published[side]["path"]), (
             f"{side} path published as {published[side]['path']!r}; the store requires an absolute one"
         )
+
+
+def test_cli_session_records_the_decision_on_the_session_diff(tmp_path: Path):
+    """--session and --accept/--reject compose: the loop's last step is reachable.
+
+    They used to be mutually exclusive, and the error directed a CLI user to
+    ``SessionWriter.publish_decision`` -- a Python API -- leaving the session
+    permanently undecided.
+    """
+    if not BEFORE.is_file() or not AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {BEFORE} / {AFTER}")
+    before = BEFORE.resolve()
+    after = AFTER.resolve()
+    session_id = "cli-session-decision"
+    runspec_path = tmp_path / "runspec.json"
+    runspec_path.write_bytes(RunSpec(argv=("true",)).canonical_json_bytes())
+
+    evidence = _run_cli(
+        tmp_path, "evidence", "build", str(before), "--format", "json",
+        "--gpu", "0", "--session", session_id, "--analyzers", "overlap_ratio",
+    )
+    assert evidence.returncode == 0, evidence.stderr
+    finding_id = _finding_id_from_evidence_stdout(evidence.stdout)
+
+    propose = _run_cli(
+        tmp_path, "propose", "--session", session_id,
+        "--finding-id", finding_id, "--runspec", str(runspec_path),
+    )
+    assert propose.returncode == 0, propose.stderr
+
+    decided = _run_cli(
+        tmp_path, "diff", str(before), str(after), "--gpu", "0",
+        "--format", "json", "--no-ai", "--session", session_id,
+        "--reject", "--reason", "3x the launches for 2x the time",
+    )
+    assert decided.returncode == 0, decided.stderr
+
+    directory = session_dir(session_id, root=tmp_path / ".nsys-ai" / "sessions")
+    diff_payload = json.loads((directory / "diff.json").read_text(encoding="utf-8"))
+    decision = diff_payload.get("decision")
+    assert decision is not None, "session diff was left undecided"
+    assert decision["status"] == "rejected"
+    assert decision["reason"] == "3x the launches for 2x the time"
+
+    state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "accept"
+
+    # The session's diff.json is the record. A second copy in the working
+    # directory would be free to disagree with it.
+    assert not (tmp_path / "diff.json").exists()

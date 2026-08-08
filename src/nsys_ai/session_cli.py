@@ -139,6 +139,29 @@ def publish_session_diff(
         return writer.publish_diff(diff)
 
 
+def publish_session_decision(
+    *,
+    session_id: str,
+    decision: str,
+    reason: str,
+    decider: str | None = None,
+    root: str | os.PathLike[str] = ".nsys-ai/sessions",
+) -> SessionState:
+    """Record accept/reject on a session's published diff.
+
+    The store permits exactly one decision and requires the session to be in the
+    ``diff`` phase, so this is the terminal step of the loop. ``publish_decision``
+    raises if the diff is missing or already decided; both are surfaced to the
+    caller unchanged rather than being swallowed into a partial success.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("a decision requires a reason")
+    store = SessionStore(root)
+    with store.writer(session_id) as writer:
+        state, _, _ = writer.publish_decision(decision, reason, decider=decider)
+    return state
+
+
 def session_dir(session_id: str, root: str | os.PathLike[str] = ".nsys-ai/sessions") -> Path:
     """Return the on-disk directory for ``session_id`` under ``root``."""
     return SessionStore(root).root / session_id

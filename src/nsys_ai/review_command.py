@@ -48,13 +48,15 @@ def run_review(
     """Resume a session decision path, or compare a before/after pair without a session.
 
     Pass either ``before_path`` + ``after_path`` (no session ownership), or
-    ``session_id`` to resume. Pair form ignores and does not invent a session.
+    ``session_id`` to resume. The pair form does not invent a session, and
+    passing a session id alongside a pair is an error rather than ignored.
 
     Parameters forwarded from ``diff`` keep the same defaults: ``gpu`` is
     ``None`` (all GPUs), ``trim`` optional. Not forwarded: ``--against``,
     ``--iteration``, ``--marker``, ``--format``, ``--output``, ``--limit``,
     ``--sort``, ``--no-ai``, ``--chat``, gates, or ``--accept``/``--reject``
-    (decision recording stays on the browser / ``publish_decision`` path).
+    (decisions are recorded by ``nsys-ai diff --session --accept/--reject`` or
+    in the browser; this verb presents the decision path rather than owning it).
     Internal diff uses the same limit=15 and sort=delta defaults as ``diff``.
 
     The pair form prints the terminal report ``diff`` prints, with no LLM call:
@@ -241,9 +243,20 @@ def _print_decision_path(
         if reason:
             print(f"Reason: {reason}", file=stdout)
     elif snapshot.diff is not None:
+        # Both paths record the same decision on the session's diff.json. The
+        # CLI one is listed first because it needs no browser and is scriptable.
+        before_ref = getattr(snapshot.state, "before_profile", None)
+        after_ref = getattr(snapshot.state, "after_profile", None)
+        before_path = getattr(before_ref, "path", None) or "<before>"
+        after_path = getattr(after_ref, "path", None) or "<after>"
         print(
-            "Decision path: undecided. Record accept/reject in the browser "
-            f"via: nsys-ai review --session {session_id} --web",
+            "Decision path: undecided. Record it with: "
+            f"nsys-ai diff {before_path} {after_path} --session {session_id} "
+            "--accept|--reject --reason TEXT",
+            file=stdout,
+        )
+        print(
+            f"Or in the browser: nsys-ai review --session {session_id} --web",
             file=stdout,
         )
     else:

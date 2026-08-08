@@ -829,13 +829,6 @@ def _cmd_diff(args, _profile):
         decision = "rejected"
     reason = getattr(args, "reason", None)
     session = getattr(args, "session", None)
-    if session is not None and decision is not None:
-        print(
-            "Error: --session cannot be combined with --accept/--reject "
-            "(record decisions through SessionWriter.publish_decision)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
@@ -1027,7 +1020,10 @@ def _cmd_diff(args, _profile):
         )
         sys.exit(1)
 
-    if decision is not None and gate_summary is not None:
+    # With --session the decision belongs to the session's own diff.json, recorded
+    # below through the store. Writing a second copy into the working directory
+    # would leave two records of one decision, free to disagree.
+    if decision is not None and gate_summary is not None and session is None:
         try:
             decision_path, _, decision_warnings = write_diff_decision_json(
                 gate_summary,
@@ -1089,6 +1085,22 @@ def _cmd_diff(args, _profile):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(2)
         print(f"Diff published to session {session_id}", file=sys.stderr)
+        if decision is not None:
+            # The store permits exactly one decision, so a re-run of the same
+            # command reports why rather than silently leaving the session
+            # undecided.
+            from nsys_ai.session_cli import publish_session_decision
+
+            try:
+                publish_session_decision(
+                    session_id=session_id,
+                    decision=decision,
+                    reason=reason,
+                )
+            except (TypeError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(2)
+            print(f"Decision '{decision}' recorded in session {session_id}", file=sys.stderr)
 
     if args.output:
         out_dir = os.path.dirname(args.output)

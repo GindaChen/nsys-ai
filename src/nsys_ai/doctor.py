@@ -27,6 +27,7 @@ import importlib.util
 import platform
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 # The doctor report's own envelope version. Deliberately NOT
@@ -523,6 +524,28 @@ def _overhead_check(pct: float | None) -> CheckResult:
     return CheckResult("Profiler overhead", "ok", f"{pct:.1f}%")
 
 
+def _runspec_check(profile_path: str | None) -> CheckResult:
+    """Report whether this capture carries the RunSpec that lets the loop verify a change.
+
+    ``nsys-ai profile`` writes ``runspec.json`` beside the profile it exports, and
+    ``nsys-ai propose --runspec`` consumes it. A profile captured with plain ``nsys``
+    has no sibling, which is why this reports a state rather than a failure.
+    """
+    if profile_path:
+        sibling = Path(profile_path).resolve().parent / "runspec.json"
+        if sibling.is_file():
+            return CheckResult("RunSpec attached", "ok", "runspec.json")
+    return CheckResult(
+        "RunSpec attached",
+        "not_configured",
+        "no",
+        hint=(
+            "Capture with `nsys-ai profile` to record a runspec.json beside the profile; "
+            "`nsys-ai propose --runspec` needs one to produce a non-abstained proposal."
+        ),
+    )
+
+
 def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
     checks: list[CheckResult] = []
     meta = prof.meta
@@ -618,15 +641,7 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
 
     checks.append(_overhead_check(_profiler_overhead_pct(prof, span_ns)))
 
-    # RunSpec presence (forward-compatible; recording lands with `profile --runspec`).
-    checks.append(
-        CheckResult(
-            "RunSpec attached",
-            "not_configured",
-            "no",
-            hint="RunSpec recording (nsys-ai profile --runspec) is not yet available.",
-        )
-    )
+    checks.append(_runspec_check(getattr(prof, "path", None)))
 
     return DoctorSection("Profile health", checks)
 
