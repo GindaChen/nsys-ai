@@ -1,0 +1,15 @@
+---
+# Blank issues stay enabled deliberately. The forms cover the common cases, but the
+# issues this project runs on are often prose with a measurement table and a Done
+# section, and a form is a worse container for that than an empty box.
+blank_issues_enabled: true
+contact_links:
+  - name: Roadmap — check whether it is already planned
+    url: https://github.com/GindaChen/nsys-ai/blob/main/ROADMAP.md
+    about: Prioritized work with issue links. A roadmap item number is not a GitHub issue number.
+  - name: Profiling and Nsight Systems guides
+    url: https://github.com/GindaChen/nsys-ai/tree/main/docs
+    about: How to capture a usable profile, NVTX annotation, NCCL tracing, container profiling.
+  - name: Book of Root Causes
+    url: https://github.com/GindaChen/nsys-ai/tree/main/docs/root-causes
+    about: Known GPU performance root causes and how they present in a profile.

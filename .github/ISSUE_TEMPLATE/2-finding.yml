@@ -1,0 +1,98 @@
+---
+name: Performance or correctness finding
+description: A defect found by reading or measuring the code, with the evidence attached
+title: "<subsystem>: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a finding you can point at in the code — a rescan, a stale cache, a missing
+        abstention, a contract nothing enforces. This is the shape most issues in this
+        repository take, and the shape that can be picked up without a conversation.
+
+        The sections below are the ones those issues use. Fill them and the issue is
+        implementable by someone who has never seen it; skip them and it is a note.
+  - type: textarea
+    attributes:
+      label: The mechanism
+      description: >
+        Name the function and the file, and say what it does today. Two or three
+        sentences, specific enough that a reader can go and look at it.
+      placeholder: >
+        `detect_iterations` scans the complete primary-thread runtime list from the
+        beginning for every detected iteration. Both inputs can be normalized into
+        ascending, non-overlapping windows, so one advancing cursor performs the same
+        correlation in O(N+M).
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Measured
+      description: >
+        Real numbers, in a table or a block: row counts, the excess factor, seconds,
+        memory peak, or a per-site table of observed behavior. Say what you measured it
+        on. If nothing can be measured, say precisely what you observed and how — an
+        issue asserting slowness without a number does not get picked up.
+      placeholder: |
+        Measured on a 3.5 GB capture:
+
+        primary-thread runtime rows = 1,696,160
+        iterations                  =       952
+        current inner-loop steps   ~= 558,521,628
+        single advancing scan      ~=   1,697,112
+                                          329x excess work
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What the fix must respect
+      description: >
+        Invariants a fix cannot break — ordering assumptions, the abstention contract,
+        the pure-SQLite fallback path, determinism of output. This is where a reviewer's
+        objection gets pre-empted.
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Suggested
+      description: >
+        Candidate approaches when there is a choice, with the cheap per-site fix and the
+        structural fix distinguished, and which one you recommend. Do not present one
+        option as obvious when there are two.
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Scope
+      description: >
+        What must **not** be folded into the pull request. Bundled work is the most common
+        review rejection here, and this field is what lets a reviewer tell an omission
+        from an oversight.
+      placeholder: >
+        This ticket changes the correlation loop only. Arrow/columnar loading and removal
+        of the 1.7 million Python dictionaries are separate memory work.
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Done
+      description: >
+        Acceptance criteria as statements, not checkboxes and not "tests pass". What must
+        be true to close this, including how it is verified — oracle comparison, both
+        committed profile pairs identical, a test that fails if the invariant is violated.
+        A finding without this cannot carry `agent-ready`.
+      placeholder: |
+        - All 952 output rows compare field-for-field with the current implementation on the 3.5 GB oracle.
+        - Both committed profile pairs produce identical output.
+        - Tests cover zero iterations, one full-capture iteration, and multiple NVTX iterations.
+        - A test fails if the runtime iterable is restarted.
+        - The timing is recorded even if another skill remains the new bottleneck.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Related issues
+      description: "Real GitHub numbers only — roadmap handles (`#001`-`#094`, `§5.1`, `E#.#`) are not GitHub numbers."
+      placeholder: "Part of #300. Context: the note added in #340 points here."
+    validations:
+      required: false

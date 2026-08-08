@@ -1,0 +1,51 @@
+---
+name: Documentation gap
+description: A page is missing, wrong, or describes code that no longer exists
+title: "docs: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before writing the fix: `docs/01-cli-reference.md` through
+        `docs/08-focused-profiling.md` document **Nsight Systems and profiling technique**,
+        not this tool. They are domain knowledge and are not stale. `README.md` is where
+        most nsys-ai commands appear at all.
+
+        This repository has spent several issues removing prose that described code which
+        no longer existed, so a documentation claim is only as good as the command its
+        author actually ran.
+  - type: input
+    attributes:
+      label: Which page
+      description: Path, or "missing — there is no page for this".
+      placeholder: "docs/guided-loop-setup.md, or missing"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What it says, and what is actually true
+      description: >
+        Quote the passage and state the current behavior beside it. For a missing page, say
+        what a reader is trying to do and where they currently give up.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: How you know
+      description: >
+        The command you ran and its output, or the code that contradicts the page. A
+        documentation issue with a pasted failure is actionable; one asserting staleness
+        needs re-verifying before anyone can fix it.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Done
+      description: >
+        What must be true to close this. The standing bar for documentation here: reader
+        first, no emoji, no enumerating pull request numbers, every documented command
+        verified by running it, and nothing left alongside its own replacement.
+    validations:
+      required: false

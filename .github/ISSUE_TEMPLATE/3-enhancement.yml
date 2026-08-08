@@ -1,0 +1,78 @@
+---
+name: Enhancement or feature request
+description: A capability nsys-ai does not have yet
+title: "<subsystem>: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `ROADMAP.md` first — the idea may already be queued there, in which case
+        this issue is the place to say what the roadmap entry does not cover.
+
+        Lead with the analysis you cannot do today, not with the feature. A request framed
+        as a question the tool cannot answer survives review; one framed as an
+        implementation usually gets rebuilt into something else.
+  - type: dropdown
+    attributes:
+      label: Subsystem
+      options:
+        - cache (Parquet cache, warm, sweep)
+        - cli (a new verb, or a flag on an existing one)
+        - skills (a new builtin analysis skill)
+        - agent (ask, chat, agent, propose)
+        - loop (loop, sessions, reprofile, verdict)
+        - tui (tree or timeline viewer)
+        - web (web, timeline-web, diff-web, export)
+        - diff (diff, baseline, comparability)
+        - evidence (evidence, report, root-cause)
+        - docs
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: The question you cannot answer today
+      description: >
+        What are you trying to learn from a profile, and where does the current tool stop?
+        Name the command you reached for and what it gave you instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed surface
+      description: >
+        Concretely: a new verb, a flag, a builtin skill, a column in an existing table. If
+        it produces output, say what the output looks like — a skill returns rows with
+        named keys, and naming them here is most of the design.
+      placeholder: >
+        `nsys-ai skill run <name>` returning rows with keys `kernel_name: str,
+        stall_pct: float, device: int`, and a finding when stall_pct exceeds ...
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: What it must not need
+      description: >
+        Constraints that shape the design. New runtime dependencies are a high bar — SQL
+        analysis and the web server are stdlib on purpose, and AI features stay behind the
+        `[agent]` / `[chat]` extras and degrade cleanly when those are absent. Say whether
+        this works on a profile with no NVTX, no NCCL trace, or no Parquet cache.
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Prior art
+      description: >
+        Has another tool solved this — Nsight recipes, HTA, PyTorch Profiler, NAV? Link
+        the implementation rather than the README, and say what should and should not be
+        taken from it.
+    validations:
+      required: false
+  - type: checkboxes
+    attributes:
+      label: Willingness to contribute
+      options:
+        - label: I can implement this independently
+        - label: I would be willing to implement this with guidance
+        - label: I cannot implement this at this time
