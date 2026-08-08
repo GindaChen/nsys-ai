@@ -48,15 +48,18 @@ def run_review(
     """Resume a session decision path, or compare a before/after pair without a session.
 
     Pass either ``before_path`` + ``after_path`` (no session ownership), or
-    ``session_id`` to resume. The pair form does not invent a session, and
-    passing a session id alongside a pair is an error rather than ignored.
+    ``session_id`` to resume. The pair form neither invents nor binds a session,
+    and combining it with ``session_id`` is an error, not a silent ignore:
+    ``ReviewCommandError`` is raised and the CLI exits 2.
 
     Parameters forwarded from ``diff`` keep the same defaults: ``gpu`` is
     ``None`` (all GPUs), ``trim`` optional. Not forwarded: ``--against``,
     ``--iteration``, ``--marker``, ``--format``, ``--output``, ``--limit``,
-    ``--sort``, ``--no-ai``, ``--chat``, gates, or ``--accept``/``--reject``
-    (decisions are recorded by ``nsys-ai diff --session --accept/--reject`` or
-    in the browser; this verb presents the decision path rather than owning it).
+    ``--sort``, ``--no-ai``, ``--chat``, gates, or ``--accept``/``--reject``.
+    ``review`` never records a decision itself; it reports the decision path and
+    leaves the writing to ``SessionWriter.publish_decision``, reached from
+    ``nsys-ai diff --session --accept/--reject``, the browser overlay, and
+    ``nsys-ai optimize``.
     Internal diff uses the same limit=15 and sort=delta defaults as ``diff``.
 
     The pair form prints the terminal report ``diff`` prints, with no LLM call:

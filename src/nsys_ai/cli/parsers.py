@@ -36,6 +36,7 @@ from .handlers import (
     _cmd_markdown,
     _cmd_nccl,
     _cmd_open,
+    _cmd_optimize,
     _cmd_overlap,
     _cmd_perfetto,
     _cmd_profile,
@@ -154,6 +155,71 @@ def _register_profile_parser(sub):
         help="Workload command and arguments; wrapper options must precede it",
     )
     p.set_defaults(handler=_cmd_profile)
+    return p
+
+
+def _register_optimize_parser(sub):
+    """Register the ``optimize`` front door on *sub*."""
+    p = sub.add_parser(
+        "optimize",
+        help="Run the whole loop on one profile: diagnose, propose, re-capture, diff, decide",
+        description=(
+            "Take a baseline profile to a recorded verdict without a "
+            "hand-supplied after-profile. optimize runs the default skill pack "
+            "(diagnose), turns the top actionable finding into a deterministic "
+            "proposal, executes that proposal's verification RunSpec with the "
+            "local nsys runner to capture the after-profile, runs the canonical "
+            "all-GPU diff, and records accept/reject with a reason in diff.json. "
+            "It writes no analysis of its own. Every step is published to the "
+            "session first, so re-running the same command resumes from the last "
+            "artifact instead of redoing it. If the proposal abstains -- no "
+            "verification RunSpec, or a finding with no suggested action -- "
+            "optimize stops before re-profiling and names the precondition that "
+            "failed. Exit status: 0 only when a decision was recorded, 1 when a "
+            "step failed, 2 when the loop stopped before a decision, 130 when "
+            "the capture was cancelled."
+        ),
+    )
+    p.add_argument("profile", help="Before profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "--repo",
+        required=True,
+        metavar="PATH",
+        help="Directory the verification run executes in, recorded on the RunSpec",
+    )
+    p.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help=(
+            "Session to create or resume (default: derived from the before "
+            "profile content id, so re-running resumes the same session)"
+        ),
+    )
+    p.add_argument("--nsys", default="nsys", help="Nsight Systems executable")
+    p.add_argument(
+        "--gpu",
+        type=int,
+        default=0,
+        help="GPU device id for diagnose (default: 0, as evidence build); the diff stays all-GPU",
+    )
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds, applied to diagnose and to the diff",
+    )
+    p.add_argument(
+        # REMAINDER, not "*", so a workload keeps its own flags and its own
+        # "--" verbatim instead of having them parsed or dropped by nsys-ai.
+        "workload",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND",
+        help="Verification workload after '--', e.g. -- ./axpy 20",
+    )
+    p.set_defaults(handler=_cmd_optimize)
     return p
 
 
@@ -420,12 +486,13 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
-            "profile,propose,diagnose,review,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "profile,propose,diagnose,review,optimize,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
             "root-cause,help}"
         ),
     )
 
     _register_profile_parser(sub)
+    _register_optimize_parser(sub)
 
     p = sub.add_parser(
         "propose",

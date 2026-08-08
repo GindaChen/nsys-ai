@@ -116,10 +116,47 @@ def _normalize_default_profile_command(argv: list[str]) -> list[str]:
     return argv
 
 
+def _normalize_optimize_command(argv: list[str]) -> list[str]:
+    """Accept ``optimize <profile> [options] -- <command>`` as documented.
+
+    ``optimize`` takes a leading positional and then a workload that must reach
+    the child process verbatim, so the workload is an ``argparse.REMAINDER``.
+    REMAINDER starts at the token after the profile, which means the documented
+    order leaves ``--repo`` and the rest inside the workload. Moving the profile
+    token to sit directly in front of the ``--`` delimiter (or, with no
+    delimiter, to the end followed by an explicit ``--``) produces the
+    options-first spelling argparse parses natively. Nothing after ``--`` is
+    touched, so a workload keeps its own flags and its own ``--``, and both
+    spellings reach the same Namespace.
+
+    Anything else is returned unchanged so argparse still owns the error.
+    """
+    if len(argv) < 3 or argv[1] != "optimize":
+        return argv
+    profile = argv[2]
+    if profile.startswith("-"):
+        return argv  # already options-first, or -h/--help
+    rest = argv[3:]
+    try:
+        delimiter = rest.index("--")
+    except ValueError:
+        # No workload at all. Everything after the profile is an nsys-ai option,
+        # so the profile goes last and an empty workload is made explicit.
+        if rest and rest[-1].startswith("-"):
+            return argv
+        return [argv[0], argv[1], *rest, profile, "--"]
+    if delimiter and rest[delimiter - 1].startswith("-"):
+        # The slot in front of "--" belongs to an option that is still waiting
+        # for its value, so putting the profile there would hand it over.
+        return argv
+    return [argv[0], argv[1], *rest[:delimiter], profile, *rest[delimiter:]]
+
+
 def main():
     from .parsers import _build_legacy_parser, _build_parser
 
     sys.argv = _normalize_default_profile_command(sys.argv)
+    sys.argv = _normalize_optimize_command(sys.argv)
 
     legacy_commands = {
         "analyze",
