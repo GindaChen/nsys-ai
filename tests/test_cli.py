@@ -41,6 +41,8 @@ def test_subcommands():
         "agent",
         "agent-guide",
         "propose",
+        "diagnose",
+        "review",
         "info",
         "warm",
         "skill",
@@ -203,6 +205,33 @@ def test_propose_subcommand_help():
     assert "--finding-id" in result.stdout
     assert "--runspec" in result.stdout
     assert "--output" in result.stdout
+
+
+def test_diagnose_subcommand_help():
+    """diagnose should expose session publish and --web reopen flags."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diagnose", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--session" in result.stdout
+    assert "--web" in result.stdout
+
+
+def test_review_subcommand_help():
+    """review should expose before/after, --session resume, and --web."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "review", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--session" in result.stdout
+    assert "--web" in result.stdout
+    assert "before" in result.stdout
+    # gpu must default like diff (all GPUs), not silently to device 0
+    assert "default: all GPUs" in result.stdout
 
 
 def test_loop_missing_profile_has_friendly_error(tmp_path):

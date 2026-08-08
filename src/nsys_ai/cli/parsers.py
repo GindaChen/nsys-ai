@@ -22,6 +22,7 @@ from .handlers import (
     _cmd_baseline_tag,
     _cmd_chat,
     _cmd_cutracer,
+    _cmd_diagnose,
     _cmd_diff,
     _cmd_diff_web,
     _cmd_doctor,
@@ -40,6 +41,7 @@ from .handlers import (
     _cmd_profile,
     _cmd_propose,
     _cmd_report,
+    _cmd_review,
     _cmd_root_cause,
     _cmd_search,
     _cmd_skill,
@@ -418,7 +420,7 @@ def _build_parser():
         dest="command",
         metavar=(
             "{open,web,timeline-web,loop,chat,ask,agent,agent-guide,"
-            "profile,propose,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
+            "profile,propose,diagnose,review,info,doctor,warm,skill,evidence,report,diff,diff-web,baseline,export,cutracer,"
             "root-cause,help}"
         ),
     )
@@ -476,6 +478,123 @@ def _build_parser():
         ),
     )
     p.set_defaults(handler=_cmd_propose)
+
+    p = sub.add_parser(
+        "diagnose",
+        help="Run the default skill pack and publish ranked findings into a session",
+    )
+    p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Path to profile (.sqlite or .nsys-rep); omit with --session --web",
+    )
+    p.add_argument(
+        "--gpu",
+        type=int,
+        default=0,
+        help="GPU device ID (default: 0; same as evidence build)",
+    )
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Session id to publish into (or reopen with --web). Omit ID to "
+            "derive it from the profile content id."
+        ),
+    )
+    p.add_argument(
+        "--web",
+        action="store_true",
+        help="Open timeline-web on the same session without regenerating state",
+    )
+    p.add_argument("--port", type=int, default=8144, help="HTTP port for --web")
+    p.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Don't auto-open a browser with --web",
+    )
+    p.set_defaults(handler=_cmd_diagnose)
+
+    p = sub.add_parser(
+        "review",
+        help=(
+            "Compare before/after profiles, or resume a session decision path"
+        ),
+        description=(
+            "Compare before/after profiles, or resume a session decision path. "
+            "The pair form is the canonical diff: stdout is byte-identical to "
+            "'nsys-ai diff <before> <after> --no-ai', including the per-GPU "
+            "overview and per-GPU regressions when --gpu is omitted. review "
+            "never calls an LLM, so the executive summary is the deterministic "
+            "one that --no-ai produces. Next-step hints are written to stderr, "
+            "so a redirected stdout holds exactly the diff report. review does "
+            "not create a session; --session resumes one."
+        ),
+    )
+    p.add_argument(
+        "before",
+        nargs="?",
+        default=None,
+        help="Before profile (.sqlite or .nsys-rep); omit with --session to resume",
+    )
+    p.add_argument(
+        "after",
+        nargs="?",
+        default=None,
+        help="After profile (.sqlite or .nsys-rep); omit with --session to resume",
+    )
+    p.add_argument(
+        "--gpu",
+        type=int,
+        default=None,
+        help=(
+            "GPU device ID (default: all GPUs, with the same per-GPU "
+            "breakdown diff prints)"
+        ),
+    )
+    p.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (same as diff)",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help=(
+            "Resume an existing session and present its decision path. "
+            "Does not create a session; pair form is a comparison only."
+        ),
+    )
+    p.add_argument(
+        "--web",
+        action="store_true",
+        help="Open timeline-web on the same --session without regenerating state",
+    )
+    p.add_argument("--port", type=int, default=8144, help="HTTP port for --web")
+    p.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Don't auto-open a browser with --web",
+    )
+    p.set_defaults(handler=_cmd_review)
 
     # Public commands (simplified)
     p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
