@@ -922,3 +922,189 @@ def test_warm_succeeds_when_there_is_nothing_for_the_sweep_to_read(tmp_path):
     assert "nothing for the sweep to read" in result.stdout
     assert "runtime.parquet" in result.stdout
     assert (tmp_path / "min.nsys-cache").is_dir()
+
+
+def _help_screen() -> str:
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def _declared_subcommands() -> set[str]:
+    """Every command `main()` can dispatch, across both parsers.
+
+    `main()` picks `_build_legacy_parser` by name for the legacy commands
+    (summary, tui, viewer, export-csv, ...) and `_build_parser` otherwise, so
+    neither one alone is the full surface.
+    """
+    from nsys_ai.cli.parsers import _build_legacy_parser, _build_parser
+
+    names: set[str] = set()
+    for parser in (_build_parser(), _build_legacy_parser()):
+        for action in parser._subparsers._group_actions:  # noqa: SLF001 - argparse has no public API
+            names.update(action.choices)
+    return names
+
+
+def test_getting_started_screen_names_the_loop_verbs():
+    """`nsys-ai help` is the front door; the loop is the headline feature.
+
+    It previously named none of `loop`, `diff`, `doctor`, `baseline`, so the whole
+    diagnose -> propose -> re-profile -> diff -> decide path was undiscoverable
+    from the tool's own introduction.
+    """
+    screen = _help_screen()
+    for verb in ("optimize", "diagnose", "propose", "diff", "review", "loop", "doctor", "baseline"):
+        assert f"nsys-ai {verb}" in screen, f"help screen does not name `{verb}`"
+
+
+def test_getting_started_screen_only_advertises_commands_that_exist():
+    """Every `nsys-ai <verb>` the screen shows must be a real subcommand.
+
+    A getting-started screen that names a command the parser rejects is worse than
+    one that omits it: the reader runs it and gets `invalid choice`.
+    """
+    import re
+
+    declared = _declared_subcommands()
+    advertised = {
+        m.group(1)
+        for m in re.finditer(r"nsys-ai ([a-z][a-z0-9-]*)", _help_screen())
+        if m.group(1) not in {"help"}
+    }
+    missing = sorted(advertised - declared)
+    assert not missing, f"help screen advertises non-existent subcommands: {missing}"
+
+
+def test_optimize_without_the_delimiter_does_not_blame_the_workload():
+    """Omitting '--' must not report the workload as an unreadable profile.
+
+    The argv normaliser used to slide the profile token past a workload that had
+    lost its '--', so `optimize before.sqlite --repo /tmp ./axpy 40` failed with
+    "could not resolve before profile: .../axpy" -- naming a file the caller never
+    offered as a profile.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "optimize", "before.sqlite",
+         "--repo", "/tmp", "./axpy", "40"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "could not resolve before profile" not in combined, combined
+    assert "axpy" not in combined, combined
+
+
+def test_optimize_reports_a_flag_led_workload_as_a_missing_delimiter():
+    """No executable is named by a flag, so this can only be a dropped '--'."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "optimize", "--repo", "/tmp",
+         "before.sqlite", "--verbose", "40"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "the workload must follow '--'" in result.stdout + result.stderr
+
+
+def test_optimize_argv_normaliser_leaves_a_delimiterless_workload_alone():
+    from nsys_ai.cli.app import _normalize_optimize_command
+
+    # Two bare tokens in a row cannot both be option values -> a lost '--'.
+    argv = ["x", "optimize", "b.sqlite", "--repo", "/r", "./axpy", "40"]
+    assert _normalize_optimize_command(argv) == argv
+
+    # The documented spellings still normalise to the options-first form.
+    assert _normalize_optimize_command(
+        ["x", "optimize", "b.sqlite", "--repo", "/r", "--", "./axpy", "40"]
+    ) == ["x", "optimize", "--repo", "/r", "b.sqlite", "--", "./axpy", "40"]
+    assert _normalize_optimize_command(["x", "optimize", "b.sqlite", "--repo", "/r"]) == [
+        "x", "optimize", "--repo", "/r", "b.sqlite", "--",
+    ]
+
+
+def test_no_ai_help_does_not_call_itself_a_no_op():
+    """--no-ai selects the deterministic narrative; it is not decorative."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "No-op" not in result.stdout
+
+
+def _advertised_invocations() -> list[tuple[str, list[str]]]:
+    """Turn each `nsys-ai <verb> ...` line on the help screen into a real argv.
+
+    The screen is column-aligned, so the description cannot be found by splitting
+    on runs of spaces. Instead the command ends at the first token that reads as
+    prose: capitalised and not the value of a preceding flag.
+    """
+    import shlex
+
+    values = {
+        "<profile>": "p.sqlite", "<profile.sqlite>": "p.sqlite",
+        "<before>": "b.sqlite", "<after>": "a.sqlite", "<command>": "true",
+        "<name>": "top_kernels", "<file.md>": "f.md", "<id>": "x",
+        "DIR": "out", "TEXT": "why", "ID": "x", "PATH": "p", "N": "0",
+        "S": "0", "E": "1", "runspec.json": "r.json", "findings.json": "f.json",
+    }
+    out: list[tuple[str, list[str]]] = []
+    for line in _help_screen().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("nsys-ai "):
+            continue
+        tokens = shlex.split(stripped)[1:]  # drop "nsys-ai"
+        if not tokens or tokens[0].startswith(("<", "(")):
+            continue  # the bare-profile shortcut, or a prose line
+        argv: list[str] = []
+        shown = ["nsys-ai"]
+        for token in tokens:
+            if token.startswith("["):
+                break  # optional group; everything after is optional or prose
+            # Every flag value on this screen is a placeholder (N, S, E, DIR,
+            # TEXT, ID, PATH), so a capitalised token that is not one is where
+            # the right-hand description begins.
+            if token[:1].isupper() and token not in values and not token.startswith("-"):
+                break
+            shown.append(token)
+            argv.append(values.get(token, token))
+        if argv:
+            out.append((" ".join(shown), argv))
+    return out
+
+
+def test_every_advertised_invocation_parses():
+    """The screen must show forms that run, not forms that error on required flags.
+
+    `nsys-ai viewer <profile> --gpu N` was advertised for five commands that also
+    require --trim, so a newcomer typing what the front door showed got
+    "error: the following arguments are required: --trim" five times in a row.
+    """
+    import contextlib
+    import io
+
+    from nsys_ai.cli.parsers import _build_legacy_parser, _build_parser
+
+    failures = []
+    for shown, argv in _advertised_invocations():
+        if not argv:
+            continue
+        if argv[0] == "optimize":
+            from nsys_ai.cli.app import _normalize_optimize_command
+
+            argv = _normalize_optimize_command(["nsys-ai", *argv])[1:]
+        legacy = argv[0] in {
+            "summary", "tui", "timeline", "viewer", "export-csv", "analyze",
+            "overlap", "nccl", "iters", "tree", "markdown", "search",
+            "export-json", "timeline-html", "perfetto",
+        }
+        parser = _build_legacy_parser() if legacy else _build_parser()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                parser.parse_args(argv)
+        except SystemExit:
+            message = stderr.getvalue().strip().splitlines()
+            failures.append(f"{shown!r} -> {message[-1] if message else 'SystemExit'}")
+    assert not failures, "help screen shows invocations that do not parse:\n  " + "\n  ".join(failures)

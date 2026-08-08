@@ -92,6 +92,17 @@ def _cmd_optimize(args, _profile):
         )
         raise SystemExit(2)
 
+    # An option leading the workload means the '--' was omitted and argparse swept
+    # this command's own options into the REMAINDER. No executable is named by a
+    # flag, so this cannot be a real workload.
+    if workload[0].startswith("-"):
+        print(
+            "nsys-ai optimize: error: the workload must follow '--': "
+            "nsys-ai optimize <profile> --repo <path> -- <command> [args...]",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     try:
         exit_code = run_optimize(
             before_path=args.profile,

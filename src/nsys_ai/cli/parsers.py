@@ -841,7 +841,11 @@ def _build_parser():
         default="delta",
         help="Sort mode for top changes (default: delta)",
     )
-    p.add_argument("--no-ai", action="store_true", help="No-op v1 flag (reserved for AI narrative)")
+    p.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Skip the LLM narrative; report the deterministic summary only",
+    )
     p.add_argument(
         "--chat",
         action="store_true",

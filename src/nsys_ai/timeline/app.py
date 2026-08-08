@@ -203,7 +203,7 @@ class NsysTimelineApp(App):
         self._time_start = 0
         self._time_end = 0
         self._time_span = 1
-        self._is_mounted = False
+        self._dom_ready = False
 
         # Bookmarks and navigation state
         self._bookmarks: list[dict] = []
@@ -354,7 +354,7 @@ class NsysTimelineApp(App):
         # initial zoom: fit full trace in ~100 columns
         self.ns_per_col = max(1, self._time_span // 100)
         self.cursor_ns = self._time_start
-        if self._is_mounted:
+        if self._dom_ready:
             self.query_one("#bottom-panel", BottomPanel).set_nvtx_spans(
                 getattr(self, "_nvtx_spans", [])
             )
@@ -385,7 +385,7 @@ class NsysTimelineApp(App):
     # Mount
     # -------------------------------------------------------------------------
     def on_mount(self) -> None:
-        self._is_mounted = True
+        self._dom_ready = True
         if not self._kernels and self._db_path:
             self._run_load_worker()
         else:
@@ -422,8 +422,13 @@ class NsysTimelineApp(App):
         self.call_from_thread(self._apply_gpu_data, payload, error)
 
     def _push_canvas_state(self) -> None:
-        if not self._is_mounted:
-            return  # DOM not ready yet — called from __init__ via reactive setter
+        # Two different "not now"s. ``_dom_ready`` is startup: reactive setters run
+        # from __init__ before compose(). ``is_running`` is teardown: quit clears it
+        # and then prunes the screen, so a watcher firing in between would query a
+        # widget that is gone. Textual never sets a widget's own ``is_mounted`` back
+        # to False, so it cannot stand in for the second one.
+        if not self._dom_ready or not self.is_running:
+            return
         canvas = self.query_one("#canvas", TimelineCanvas)
         viewport_start = center_viewport(
             self.cursor_ns, self.ns_per_col, max(canvas.size.width - canvas.label_w, 1)
@@ -498,7 +503,7 @@ class NsysTimelineApp(App):
 
     def watch_selected_stream_idx(self) -> None:
         self._push_canvas_state()
-        if self._is_mounted:
+        if self._dom_ready:
             self._update_title()
 
     def watch_ns_per_col(self) -> None:
@@ -506,12 +511,12 @@ class NsysTimelineApp(App):
 
     def watch_filter_text(self) -> None:
         self._push_canvas_state()
-        if self._is_mounted:
+        if self._dom_ready:
             self._update_title()
 
     def watch_min_dur_us(self) -> None:
         self._push_canvas_state()
-        if self._is_mounted:
+        if self._dom_ready:
             self._update_title()
 
     # -------------------------------------------------------------------------
