@@ -60,10 +60,12 @@ def show_help():
     print("    nsys-ai profile -- <command> [args...]       Capture a local profile")
     print()
     print("  Optimization loop (diagnose -> propose -> re-profile -> diff -> decide):")
-    print("    nsys-ai evidence build <profile> --session   Findings, published to a session")
+    print("    nsys-ai optimize <profile> --repo PATH -- <command>   Whole loop, one command")
+    print("    nsys-ai diagnose <profile>               Findings, published to a session")
     print("    nsys-ai propose --session --finding-id ID --runspec runspec.json")
     print("    nsys-ai diff <before> <after>            Compare two profiles")
-    print("    nsys-ai diff <before> <after> --accept --reason TEXT   Record the outcome")
+    print("    nsys-ai diff <before> <after> --session --accept --reason TEXT   Record it")
+    print("    nsys-ai review --session ID              Where a session stands")
     print("    nsys-ai loop <before> --after <after>    Same loop, guided in the browser")
     print("    nsys-ai baseline list                    Named baselines to diff against")
     print("    See docs/user-guide.md for the whole path end to end.")
@@ -71,7 +73,7 @@ def show_help():
     print("  Skills & Agent:")
     print("    nsys-ai skill list                       List analysis skills")
     print("    nsys-ai skill run <name> <profile>       Run a specific skill")
-    print("    nsys-ai report  <profile>                Generate a performance report")
+    print("    nsys-ai report  <profile> --gpu N --trim S E   Performance report")
     print("    nsys-ai agent analyze <profile>           Full auto-analysis")
     print('    nsys-ai agent ask <profile> "question"   Ask about a profile')
     print("    nsys-ai agent-guide                      Print agent System Prompt")
@@ -82,10 +84,11 @@ def show_help():
     print("    nsys-ai root-cause submit <file.md>      Submit a new pattern")
     print()
     print("  Export:")
-    print("    nsys-ai export     <profile> -o DIR       Perfetto JSON traces")
-    print("    nsys-ai export-csv <profile> --gpu N       CSV export")
-    print("    nsys-ai viewer     <profile> --gpu N       HTML report")
-    print("    nsys-ai web        <profile> --gpu N       Browser UI")
+    print("    nsys-ai export     <profile> --trim S E -o DIR   Perfetto JSON traces")
+    print("    nsys-ai export-csv <profile> --gpu N --trim S E   CSV export")
+    print("    nsys-ai viewer     <profile> --gpu N --trim S E   HTML report")
+    print("    nsys-ai web        <profile> --gpu N --trim S E   Browser UI")
+    print("    (--trim takes seconds; `nsys-ai info <profile>` prints the window)")
     print()
     print("  Getting Started:")
     print("    1. Profile:  nsys-ai profile -- python train.py")
@@ -144,6 +147,14 @@ def _normalize_optimize_command(argv: list[str]) -> list[str]:
         # so the profile goes last and an empty workload is made explicit.
         if rest and rest[-1].startswith("-"):
             return argv
+        # ...unless the tail is plainly a workload that lost its "--". Two bare
+        # tokens in a row cannot both be option values, so rearranging here would
+        # slide a workload token onto the profile positional and the failure would
+        # surface as "could not resolve before profile", naming a file the caller
+        # never offered as one. Leave it alone; the handler reports the real cause.
+        for earlier, later in zip(rest, rest[1:]):
+            if not earlier.startswith("-") and not later.startswith("-"):
+                return argv
         return [argv[0], argv[1], *rest, profile, "--"]
     if delimiter and rest[delimiter - 1].startswith("-"):
         # The slot in front of "--" belongs to an option that is still waiting
