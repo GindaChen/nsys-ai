@@ -18,8 +18,6 @@ DEFAULT_MAX_LIMIT = 50
 # Default maximum JSON length (characters) returned to the model.
 DEFAULT_MAX_JSON_CHARS = 8000
 
-# NVTX table name is stable; kernel table is detected by NsightSchema.
-NVTX_TABLE = "NVTX_EVENTS"
 # StringIds maps id -> value for kernel names (shortName, demangledName reference it).
 STRING_IDS_TABLE = "StringIds"
 
@@ -217,9 +215,15 @@ def get_profile_schema(
     """
     Return a short schema description for injection into the system prompt.
 
-    Uses NsightSchema to get the kernel table name, then fetches DDL from
-    sqlite_master for that table and NVTX_EVENTS (if present).
+    Uses NsightSchema to get the kernel table name and resolve_activity_tables
+    for the NVTX table (which newer exports suffix _V2/_V3), then fetches DDL
+    from sqlite_master for those tables. The DDL carries the resolved names, so
+    the model writes SQL against the tables that actually exist.
     """
+    from nsys_ai.connection import DB_ERRORS, DuckDBAdapter, wrap_connection
+
+    adapter = wrap_connection(conn)
+
     try:
         from nsys_ai.profile import NsightSchema
 
@@ -228,11 +232,15 @@ def get_profile_schema(
     except Exception:
         kernel_table = None
 
+    # Same path every other reader uses: a literal "NVTX_EVENTS" misses
+    # NVTX_EVENTS_V2/_V3 on raw sqlite3 (no parquet_cache alias view).
+    nvtx_table = adapter.resolve_activity_tables().get("nvtx")
+
     want = list(table_names) if table_names else []
     if kernel_table and kernel_table not in want:
         want.append(kernel_table)
-    if NVTX_TABLE not in want:
-        want.append(NVTX_TABLE)
+    if nvtx_table and nvtx_table not in want:
+        want.append(nvtx_table)
     if STRING_IDS_TABLE not in want:
         want.append(STRING_IDS_TABLE)
 
@@ -241,9 +249,6 @@ def get_profile_schema(
 
     parts = []
 
-    from nsys_ai.connection import DB_ERRORS, DuckDBAdapter, wrap_connection
-
-    adapter = wrap_connection(conn)
     is_duckdb = isinstance(adapter, DuckDBAdapter)
 
     if is_duckdb:
