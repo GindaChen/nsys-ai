@@ -56,7 +56,7 @@ SELECT
     max_queue_delay_us,
     starvation_events,
     avg_kernel_us,
-    ROUND(CAST(dispatches AS REAL) / (SELECT SUM(dispatches) FROM per_thread) * 100, 1)
+    ROUND(CAST(dispatches AS DOUBLE) / (SELECT SUM(dispatches) FROM per_thread) * 100, 1)
         AS pct_of_dispatches
 FROM per_thread
 ORDER BY dispatches DESC, cpu_tid ASC

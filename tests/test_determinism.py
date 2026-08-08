@@ -326,31 +326,143 @@ def _duckdb_view_of(sqlite_path):
     return con
 
 
+def _ordered_payload(rows):
+    """Compare every non-summary field, including derived floats.
+
+    Summary rows are excluded deliberately: some fields there reflect backend
+    *capability* rather than ordering — `device_idle_ms` is computed by a
+    sweep-line that only the DuckDB path provides, so it is legitimately None
+    on SQLite. Comparing it would test the wrong thing.
+    """
+    return [
+        tuple(sorted((k, str(v)) for k, v in r.items()))
+        for r in rows
+        if not r.get("_summary")
+    ]
+
+
+@pytest.fixture
+def float_cast_sqlite(tmp_path):
+    """Uneven dispatch counts whose percentages are not exact in float32.
+
+    11/21 and 10/21 round to 52.4 and 47.6. DuckDB's REAL (float32) cannot
+    represent those tenths, so CAST(... AS REAL) + ROUND yields
+    52.400001525878906 / 47.599998474121094 while SQLite's REAL (float64)
+    yields 52.4 / 47.6. That is the #276 symptom on a minimal fixture.
+    """
+    path = tmp_path / "float_cast.sqlite"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_SCHEMA)
+    conn.execute("INSERT INTO StringIds VALUES (1, 'k'), (2, 'cudaLaunchKernel')")
+    kernels = []
+    runtimes = []
+    corr = 1
+    # Thread 1001: 11 launches; thread 1002: 10. CPU end must precede GPU start.
+    for tid, n in ((1001, 11), (1002, 10)):
+        for i in range(n):
+            gpu_start = 1_000_000 + corr * 10_000
+            kernels.append((gpu_start, gpu_start + 5_000, 0, 7, corr, 1, 1))
+            runtimes.append((gpu_start - 2_000, gpu_start - 1_000, corr, tid, 2))
+            corr += 1
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?,?,?,?,?,?,?)", kernels
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?,?,?,?,?)", runtimes
+    )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_skill_sql_casts_ratios_as_double_not_real():
+    """SQLite REAL is float64; DuckDB REAL is float32. Skills must say DOUBLE.
+
+    Width is pinned at the skill SQL cast, not by post-query Python rounding:
+    findings and golden fixtures consume the SQL values directly.
+    """
+    from pathlib import Path
+
+    builtins = Path(__file__).resolve().parent.parent / "src/nsys_ai/skills/builtins"
+    offenders = []
+    for path in builtins.glob("*.py"):
+        text = path.read_text()
+        if "AS REAL" in text:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"CAST(... AS REAL) is float32 on DuckDB — use DOUBLE: {offenders}"
+    )
+
+
+def test_pct_of_dispatches_is_float64_on_both_backends(float_cast_sqlite):
+    """Pin the schema-visible percentage, not merely 'same type on both sides'.
+
+    Before the DOUBLE cast, DuckDB returned 52.400001525878906 for the leading
+    thread — enough to disagree with SQLite and to poison a golden fixture.
+    """
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("cpu_gpu_pipeline")
+
+    conn = sqlite3.connect(float_cast_sqlite)
+    try:
+        via_sqlite = skill.execute(conn, limit=10)
+    finally:
+        conn.close()
+
+    try:
+        con = _duckdb_view_of(float_cast_sqlite)
+    except Exception as exc:
+        pytest.skip(f"duckdb sqlite attach unavailable: {exc}")
+    try:
+        via_duckdb = skill.execute(con, limit=10)
+    except Exception as exc:
+        pytest.skip(f"cpu_gpu_pipeline unsupported on duckdb attach path: {exc}")
+    finally:
+        con.close()
+
+    assert [(r["cpu_tid"], r["dispatches"], r["pct_of_dispatches"]) for r in via_sqlite] == [
+        (1001, 11, 52.4),
+        (1002, 10, 47.6),
+    ]
+    assert [(r["cpu_tid"], r["dispatches"], r["pct_of_dispatches"]) for r in via_duckdb] == [
+        (1001, 11, 52.4),
+        (1002, 10, 47.6),
+    ]
+
+
 @pytest.mark.parametrize(
     "skill_name,kwargs",
     [
         ("top_kernels", {"limit": 10}),
         ("gpu_idle_gaps", {"min_gap_ns": 1, "limit": 20, "device": 0}),
+        ("kernel_launch_pattern", {"limit": 10}),
+        ("cpu_gpu_pipeline", {"limit": 10}),
     ],
 )
-def test_same_profile_same_answer_on_both_backends(tie_dense_sqlite, skill_name, kwargs):
+def test_same_profile_same_answer_on_both_backends(tie_dense_sqlite, float_cast_sqlite, skill_name, kwargs):
     """A user must not get a different answer because the cache was built.
 
     Skills issue identical SQL to both adapters; only a total order makes the
-    two engines agree when keys tie.
+    two engines agree when keys tie. Derived floats (pct_of_dispatches,
+    dispatch_rate_per_ms) must agree too — that requires float64 casts, not
+    DuckDB REAL.
     """
     from nsys_ai.skills.registry import get_skill
 
     skill = get_skill(skill_name)
+    # cpu_gpu_pipeline needs correlated runtime rows; the float-cast fixture
+    # supplies them. Other skills keep using the tie-dense profile.
+    profile = float_cast_sqlite if skill_name == "cpu_gpu_pipeline" else tie_dense_sqlite
 
-    conn = sqlite3.connect(tie_dense_sqlite)
+    conn = sqlite3.connect(profile)
     try:
         via_sqlite = skill.execute(conn, **kwargs)
     finally:
         conn.close()
 
     try:
-        con = _duckdb_view_of(tie_dense_sqlite)
+        con = _duckdb_view_of(profile)
     except Exception as exc:  # sqlite_scanner unavailable in this environment
         pytest.skip(f"duckdb sqlite attach unavailable: {exc}")
     try:
@@ -360,20 +472,6 @@ def test_same_profile_same_answer_on_both_backends(tie_dense_sqlite, skill_name,
     finally:
         con.close()
 
-    def ordered_rows(rows):
-        """The ordering-sensitive payload only.
-
-        Summary rows are excluded deliberately: some fields there reflect
-        backend *capability* rather than ordering — `device_idle_ms` is
-        computed by a sweep-line that only the DuckDB path provides, so it is
-        legitimately None on SQLite. Comparing it would test the wrong thing.
-        """
-        return [
-            tuple(sorted((k, str(v)) for k, v in r.items()))
-            for r in rows
-            if not r.get("_summary")
-        ]
-
-    assert ordered_rows(via_sqlite) == ordered_rows(via_duckdb), (
+    assert _ordered_payload(via_sqlite) == _ordered_payload(via_duckdb), (
         f"{skill_name} disagreed between SQLite and DuckDB on a tie-dense profile"
     )
