@@ -1,0 +1,104 @@
+---
+name: Bug report
+description: nsys-ai does something wrong on a profile, on the CLI, or in a viewer
+title: "<subsystem>: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please search **open and closed** issues — this repository has
+        found the same defect twice more than once.
+
+        Two things not to put in an issue:
+
+        - **Anything sensitive.** Kernel and NVTX names in a profile can carry internal
+          model, project, or customer names. Redact before pasting, and do not attach a
+          `.sqlite` you are not free to publish.
+        - **A large profile.** Attachments are capped and a multi-GB capture is not
+          reviewable. Describe its shape instead, or link a public one.
+
+        The title prefix is the subsystem, lowercase, followed by the specific thing that
+        is wrong — `cache: the lazy publish resurrects a stale cache and serves stale
+        data`. Not `feat:`/`fix:` (those are pull request prefixes), and not a task
+        (`improve the cache`).
+  - type: dropdown
+    attributes:
+      label: Subsystem
+      description: Where the problem shows up. Pick the closest.
+      options:
+        - cache (Parquet cache, warm, sweep)
+        - cli (argument parsing, a verb's behavior)
+        - skills (a builtin analysis skill or its SQL)
+        - agent (ask, chat, agent, propose)
+        - loop (loop, sessions, reprofile, verdict)
+        - tui (tree or timeline viewer)
+        - web (web, timeline-web, diff-web, export)
+        - diff (diff, baseline, comparability)
+        - evidence (evidence, report, root-cause)
+        - schema (Nsight table or column resolution)
+        - docs
+        - other / not sure
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: nsys-ai version
+      description: "`nsys-ai info --version`, or `pip show nsys-ai`. If running from a clone, the commit SHA."
+      placeholder: "0.2.3, or main @ 9617b50"
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Python version
+      options:
+        - "3.10"
+        - "3.11"
+        - "3.12"
+        - other (please say which in the description)
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Nsight Systems version that produced the profile
+      description: >
+        From `nsys --version`, or the exporter recorded in the profile. This matters more
+        than it looks: Nsight renames its activity tables between versions (`_V2` / `_V3`
+        suffixes), so a defect that only appears on one exporter version is a different
+        defect.
+      placeholder: "2024.5.1, or unknown"
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: What happened, and what you expected instead
+      description: State both. "It fails" without the expectation leaves the reader guessing which half is the bug.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: How to reproduce
+      description: >
+        The exact command, and the output or traceback. Paste it rather than describing
+        it — a documented command that was never run is how several stale claims got into
+        this repo.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Profile shape
+      description: >
+        Optional, but it is usually the difference between reproducible and not: size on
+        disk, GPU count and model, framework (PyTorch, Megatron, vLLM), whether NVTX
+        ranges are present, whether NCCL was traced.
+      placeholder: "3.5 GB, 2x H100, Megatron, NVTX push/pop present, NCCL traced"
+    validations:
+      required: false
+  - type: checkboxes
+    attributes:
+      label: Willingness to contribute
+      options:
+        - label: I can contribute a fix for this independently
+        - label: I would be willing to contribute a fix with guidance
+        - label: I cannot contribute a fix at this time
