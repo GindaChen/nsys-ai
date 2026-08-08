@@ -43,6 +43,7 @@ def test_subcommands():
         "propose",
         "diagnose",
         "review",
+        "optimize",
         "info",
         "warm",
         "skill",
@@ -232,6 +233,115 @@ def test_review_subcommand_help():
     assert "before" in result.stdout
     # gpu must default like diff (all GPUs), not silently to device 0
     assert "default: all GPUs" in result.stdout
+
+
+def test_optimize_subcommand_help():
+    """optimize should document the whole loop, its inputs and its exit codes."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "optimize", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--repo" in result.stdout
+    assert "--session" in result.stdout
+    assert "profile" in result.stdout
+    # argparse re-wraps the description, so compare against unwrapped text.
+    unwrapped = " ".join(result.stdout.split())
+    # A wrapping script needs to know that only a decision exits 0.
+    assert "0 only when a decision was recorded" in unwrapped
+    # The abstention promise is part of the contract, not an implementation note.
+    assert "stops before re-profiling" in unwrapped
+
+
+def test_optimize_documented_argument_order_parses():
+    """``optimize <profile> --repo R -- <cmd>`` is the spelling the help shows."""
+    from nsys_ai.cli.app import _normalize_optimize_command
+    from nsys_ai.cli.parsers import _build_parser
+
+    documented = [
+        "nsys-ai",
+        "optimize",
+        "before.sqlite",
+        "--repo",
+        "/repo",
+        "--session",
+        "sid",
+        "--",
+        "./axpy",
+        "--launches",
+        "20",
+    ]
+    args = _build_parser().parse_args(_normalize_optimize_command(documented)[1:])
+    assert args.command == "optimize"
+    assert args.profile == "before.sqlite"
+    assert args.repo == "/repo"
+    assert args.session == "sid"
+    # Options belonging to the workload must survive, not be parsed by nsys-ai.
+    assert args.workload == ["./axpy", "--launches", "20"]
+
+    # The options-first spelling argparse handles natively must agree.
+    options_first = [
+        "nsys-ai",
+        "optimize",
+        "--repo",
+        "/repo",
+        "--session",
+        "sid",
+        "before.sqlite",
+        "--",
+        "./axpy",
+        "--launches",
+        "20",
+    ]
+    assert _normalize_optimize_command(options_first) == options_first
+    same = _build_parser().parse_args(options_first[1:])
+    assert (same.profile, same.repo, same.session, same.workload) == (
+        args.profile,
+        args.repo,
+        args.session,
+        args.workload,
+    )
+
+    # A workload may contain its own '--'; nsys-ai must hand it over untouched.
+    nested = ["nsys-ai", "optimize", "b.sqlite", "--repo", "/r", "--", "./a", "--", "-v"]
+    assert _build_parser().parse_args(
+        _normalize_optimize_command(nested)[1:]
+    ).workload == ["./a", "--", "-v"]
+
+
+def test_optimize_does_not_rewrite_an_option_into_the_profile_slot():
+    """Rewriting must never feed the profile to an option waiting for a value."""
+    import pytest
+
+    from nsys_ai.cli.app import _normalize_optimize_command
+    from nsys_ai.cli.parsers import _build_parser
+
+    malformed = ["nsys-ai", "optimize", "b.sqlite", "--repo", "/r", "--session", "--", "./a"]
+    assert _normalize_optimize_command(malformed) == malformed
+    with pytest.raises(SystemExit) as excinfo:
+        _build_parser().parse_args(_normalize_optimize_command(malformed)[1:])
+    assert excinfo.value.code == 2
+
+
+def test_optimize_without_a_workload_exits_2(tmp_path):
+    """No verification workload means no loop; say so instead of profiling."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "optimize",
+            str(tmp_path / "before.sqlite"),
+            "--repo",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "a verification workload is required" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_loop_missing_profile_has_friendly_error(tmp_path):

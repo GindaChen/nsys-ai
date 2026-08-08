@@ -79,6 +79,39 @@ def _cmd_review(args, _profile):
         raise SystemExit(exit_code)
 
 
+def _cmd_optimize(args, _profile):
+    """Front door over the loop: diagnose -> propose -> capture -> diff -> decision."""
+    from nsys_ai.optimize_command import OptimizeCommandError, run_optimize
+
+    workload = list(getattr(args, "workload", None) or [])
+    if not workload:
+        print(
+            "nsys-ai optimize: error: a verification workload is required, "
+            "after '--': nsys-ai optimize <profile> --repo <path> -- <command>",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    try:
+        exit_code = run_optimize(
+            before_path=args.profile,
+            repo=args.repo,
+            workload=workload,
+            session_id=getattr(args, "session", None),
+            nsys=getattr(args, "nsys", "nsys"),
+            gpu=getattr(args, "gpu", 0) or 0,
+            trim=_parse_trim(args),
+        )
+    except KeyboardInterrupt:
+        print("Verification capture cancelled.", file=sys.stderr)
+        raise SystemExit(130) from None
+    except OptimizeCommandError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------
