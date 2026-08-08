@@ -300,3 +300,59 @@ def test_review_gpu_default_matches_diff_all_gpus():
     diff = parser.parse_args(["diff", "before.sqlite", "after.sqlite"])
     assert review.gpu is None
     assert diff.gpu is None
+
+
+def test_undecided_review_names_the_cli_decision_path_and_it_runs(tmp_path: Path):
+    """The printed next step must be a command that works, not only the browser.
+
+    `diff --session --accept/--reject` records a decision, so offering the browser
+    alone sends a CLI user to a surface they may not want. This drives the printed
+    command verbatim rather than asserting on its text alone.
+    """
+    from nsys_ai.runspec import RunSpec
+
+    before, after = BEFORE.resolve(), AFTER.resolve()
+    session_id = "review-decision-path"
+    runspec_path = tmp_path / "runspec.json"
+    runspec_path.write_bytes(RunSpec(argv=("true",)).canonical_json_bytes())
+
+    evidence = _run_cli(
+        tmp_path, "evidence", "build", str(before), "--format", "json",
+        "--gpu", "0", "--session", session_id, "--analyzers", "overlap_ratio",
+    )
+    assert evidence.returncode == 0, evidence.stderr
+    finding_id = next(
+        f["id"]
+        for f in json.loads(evidence.stdout)["findings"]
+        if f.get("id") and f.get("suggested_actions")
+    )
+    assert _run_cli(
+        tmp_path, "propose", "--session", session_id,
+        "--finding-id", finding_id, "--runspec", str(runspec_path),
+    ).returncode == 0
+    assert _run_cli(
+        tmp_path, "diff", str(before), str(after), "--gpu", "0",
+        "--format", "json", "--no-ai", "--session", session_id,
+    ).returncode == 0
+
+    review = _run_cli(tmp_path, "review", "--session", session_id)
+    assert review.returncode == 0, review.stderr
+    line = next(
+        (ln for ln in review.stdout.splitlines() if ln.startswith("Decision path: undecided")),
+        None,
+    )
+    assert line is not None, review.stdout
+    assert "nsys-ai diff" in line, f"CLI decision path not offered: {line}"
+    assert "--accept|--reject" in line
+
+    # Drive it, substituting a concrete choice for the alternation.
+    decided = _run_cli(
+        tmp_path, "diff", str(before), str(after), "--gpu", "0",
+        "--format", "json", "--no-ai", "--session", session_id,
+        "--reject", "--reason", "following the printed instruction",
+    )
+    assert decided.returncode == 0, decided.stderr
+
+    directory = session_dir(session_id, root=tmp_path / ".nsys-ai" / "sessions")
+    payload = json.loads((directory / "diff.json").read_text(encoding="utf-8"))
+    assert payload["decision"]["status"] == "rejected"

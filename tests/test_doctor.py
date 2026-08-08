@@ -165,3 +165,63 @@ def test_overhead_skipped_when_profile_has_no_overhead_table(minimal_nsys_db_pat
     overhead = _check(report, "Profiler overhead")
     assert overhead is not None
     assert overhead.status == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# RunSpec attachment
+# ---------------------------------------------------------------------------
+
+
+def test_runspec_check_finds_the_sibling_nsys_ai_profile_writes(tmp_path):
+    """`nsys-ai profile` writes runspec.json beside the profile it exports."""
+    from nsys_ai.doctor import _runspec_check
+
+    profile = tmp_path / "profile.sqlite"
+    profile.touch()
+    (tmp_path / "runspec.json").write_text("{}", encoding="utf-8")
+
+    check = _runspec_check(str(profile))
+    assert check.status == "ok"
+    assert check.detail == "runspec.json"
+
+
+def test_runspec_check_hint_names_a_command_that_exists(tmp_path):
+    """A capture without a RunSpec is a state, not a failure -- and the hint must work.
+
+    The previous hint pointed at `nsys-ai profile --runspec`, which is not a flag
+    on that command, and called the feature unavailable when it already shipped.
+    """
+    from nsys_ai.doctor import _runspec_check
+
+    profile = tmp_path / "profile.sqlite"
+    profile.touch()
+
+    check = _runspec_check(str(profile))
+    assert check.status == "not_configured"
+    assert "profile --runspec" not in (check.hint or "")
+    assert "not yet available" not in (check.hint or "")
+    assert "nsys-ai profile" in (check.hint or "")
+
+
+def test_runspec_check_without_a_profile_path_does_not_raise():
+    from nsys_ai.doctor import _runspec_check
+
+    assert _runspec_check(None).status == "not_configured"
+
+
+def test_reported_runspec_hint_does_not_advertise_a_flag_that_does_not_exist(
+    minimal_nsys_db_path,
+):
+    """Through the public entry point, not the helper.
+
+    `nsys-ai profile` has no --runspec flag -- that argument belongs to `propose`
+    -- and RunSpec recording is not unavailable: `profile` writes runspec.json on
+    every capture. A hint naming a rejected flag sends users away from the one
+    artifact that lets a proposal verify itself.
+    """
+    report = run_doctor(profile_path=str(minimal_nsys_db_path), include_env=False)
+    check = _check(report, "RunSpec attached")
+    assert check is not None
+    hint = check.hint or ""
+    assert "profile --runspec" not in hint
+    assert "not yet available" not in hint
