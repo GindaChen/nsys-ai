@@ -394,11 +394,17 @@ and [docs/claude-plugin.md](docs/claude-plugin.md) for the full reference.
 
 ## Documentation
 
-The `docs/` directory mirrors the relevant NVIDIA Nsight Systems reference
+Start with the **[User guide](docs/user-guide.md)** — one workload from capture to a recorded
+decision, on the command line. To drive the same workflow in a browser instead, see
+[Guided loop setup](docs/guided-loop-setup.md).
+
+The rest of the `docs/` directory mirrors the relevant NVIDIA Nsight Systems reference
 (capture, schema, NVTX, CUDA/NCCL trace) plus nsys-ai project guides:
 
 | Guide | Topic |
 |-------|-------|
+| [User guide](docs/user-guide.md) | Capture, diagnose, propose, diff, decide — end to end |
+| [doctor](docs/doctor.md) | Environment and profile health checks |
 | [NVIDIA nsys CLI](docs/01-cli-reference.md) | The upstream `nsys` profiler CLI (capture-time) |
 | [SQLite schema](docs/02-sqlite-schema.md) | Nsight export tables and queries |
 | [NVTX annotations](docs/03-nvtx-annotations.md) | Annotating your code (and iteration markers) |
@@ -434,7 +440,9 @@ pip install -e '.[dev]'
 pytest tests/ -v
 ```
 
-**Guided optimization loop** (diagnose → propose → re-profile → diff → accept): see [docs/guided-loop-setup.md](docs/guided-loop-setup.md).
+**Guided optimization loop** (diagnose → propose → re-profile → diff → accept): see the
+[User guide](docs/user-guide.md) for the CLI path and
+[docs/guided-loop-setup.md](docs/guided-loop-setup.md) for the browser path.
 
 ---
 
