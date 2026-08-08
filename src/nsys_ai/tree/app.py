@@ -22,13 +22,17 @@ Layout:
 
 from __future__ import annotations
 
-from textual import on
+from collections.abc import Callable
+
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input
+from textual.worker import get_current_worker
 
 from .. import tui_actions
+from ..tui_cache import CacheBuildProgress, format_cache_progress, post_cache_progress
 from ..tui_models import TreeNode
 from .chat import ChatPanel
 from .logic import (
@@ -206,7 +210,7 @@ class NsysTreeApp(App):
     # -------------------------------------------------------------------------
     def on_mount(self) -> None:
         if not self._json_roots and self._db_path:
-            self._load_from_db()
+            self._run_load_worker()
         else:
             self._refresh_table()
         self._update_title()
@@ -215,68 +219,90 @@ class NsysTreeApp(App):
         # focus first and silently swallow key presses.
         self.query_one(DataTable).focus()
 
-    @staticmethod
-    def _suppress_cache_progress(label: str, step: int, total: int) -> None:
-        """Drop cache-build progress so Textual does not paint it on stderr.
+    def on_cache_build_progress(self, event: CacheBuildProgress) -> None:
+        if not self.is_running:
+            return
+        self.sub_title = format_cache_progress(event.label, event.step, event.total)
 
-        Passing any callback silences the ``\\r`` redraw path inside ``build_cache``.
-        This one does nothing else: the build still runs synchronously on the
-        message loop, so the UI cannot update between steps (#332).
-        """
+    @work(thread=True, exclusive=True, group="load")
+    def _run_load_worker(self) -> None:
+        """Build/open the profile off the message loop; apply results on the UI thread."""
+        worker = get_current_worker()
+        try:
+            json_roots = self._fetch_json_roots_from_db(
+                lambda label, step, total: post_cache_progress(self, label, step, total)
+            )
+            error: str | None = None
+        except Exception as e:
+            json_roots = []
+            error = str(e)
+        if worker.is_cancelled:
+            return
+        self.call_from_thread(self._apply_json_roots, json_roots, error)
 
-    def _load_from_db(self) -> None:
+    def _fetch_json_roots_from_db(
+        self, progress: Callable[[str, int, int], None]
+    ) -> list[dict]:
+        """Open the profile and build JSON roots. Safe to call from a worker thread."""
         from .. import profile as _profile
         from ..nvtx_tree import build_nvtx_tree, to_json
 
-        try:
-            with _profile.open(
-                self._db_path, progress=self._suppress_cache_progress
-            ) as prof:
-                roots = build_nvtx_tree(prof, self._device, self._trim)
-                json_roots = to_json(roots)
+        with _profile.open(self._db_path, progress=progress) as prof:
+            roots = build_nvtx_tree(prof, self._device, self._trim)
+            json_roots = to_json(roots)
 
-                # Add kernels not under any NVTX span as "(ungrouped)" root node
-                nvtx_starts = _kernel_starts_in_json(json_roots)
-                raw_kernels = prof.kernels(self._device, self._trim)
-                ungrouped_raw = [k for k in raw_kernels if k["start"] not in nvtx_starts]
-                if ungrouped_raw:
-                    children = []
-                    for k in ungrouped_raw:
-                        dur = (k["end"] - k["start"]) / 1e6
-                        children.append(
-                            {
-                                "name": k["name"],
-                                "type": "kernel",
-                                "duration_ms": round(dur, 3),
-                                "heat": 0.0,
-                                "relative_pct": 100.0,
-                                "start_ns": k["start"],
-                                "end_ns": k["end"],
-                                "stream": str(k["streamId"]),
-                                "demangled": k.get("demangled", ""),
-                            }
-                        )
-                    max_dur = max((c["duration_ms"] for c in children), default=1) or 1
-                    for c in children:
-                        c["heat"] = round(c["duration_ms"] / max_dur, 3)
-                    json_roots.append(
+            # Add kernels not under any NVTX span as "(ungrouped)" root node
+            nvtx_starts = _kernel_starts_in_json(json_roots)
+            raw_kernels = prof.kernels(self._device, self._trim)
+            ungrouped_raw = [k for k in raw_kernels if k["start"] not in nvtx_starts]
+            if ungrouped_raw:
+                children = []
+                for k in ungrouped_raw:
+                    dur = (k["end"] - k["start"]) / 1e6
+                    children.append(
                         {
-                            "name": "(ungrouped)",
-                            "type": "nvtx",
-                            "duration_ms": round(sum(c["duration_ms"] for c in children), 3),
+                            "name": k["name"],
+                            "type": "kernel",
+                            "duration_ms": round(dur, 3),
                             "heat": 0.0,
                             "relative_pct": 100.0,
-                            "start_ns": min(c["start_ns"] for c in children),
-                            "end_ns": max(c["end_ns"] for c in children),
-                            "path": "(ungrouped)",
-                            "children": children,
+                            "start_ns": k["start"],
+                            "end_ns": k["end"],
+                            "stream": str(k["streamId"]),
+                            "demangled": k.get("demangled", ""),
                         }
                     )
+                max_dur = max((c["duration_ms"] for c in children), default=1) or 1
+                for c in children:
+                    c["heat"] = round(c["duration_ms"] / max_dur, 3)
+                json_roots.append(
+                    {
+                        "name": "(ungrouped)",
+                        "type": "nvtx",
+                        "duration_ms": round(sum(c["duration_ms"] for c in children), 3),
+                        "heat": 0.0,
+                        "relative_pct": 100.0,
+                        "start_ns": min(c["start_ns"] for c in children),
+                        "end_ns": max(c["end_ns"] for c in children),
+                        "path": "(ungrouped)",
+                        "children": children,
+                    }
+                )
+            return json_roots
 
-                self._json_roots = json_roots
-        except Exception as e:
-            self.notify(f"Failed to load profile: {e}", severity="error")
+    def _apply_json_roots(self, json_roots: list[dict], error: str | None) -> None:
+        """Main-thread apply after a DB load."""
+        # Quit cancels workers before it clears ``_running``, so the worker's own
+        # ``is_cancelled`` check normally skips this. This covers the window where
+        # the worker passed that check first and ``call_from_thread`` is serviced
+        # while the app is shutting down.
+        if not self.is_running:
             return
+        self.sub_title = ""
+        if error is not None:
+            self.notify(f"Failed to load profile: {error}", severity="error")
+            return
+        self._json_roots = json_roots
         self._all_nodes = build_nodes(self._json_roots)
         self._total_kernels, self._total_gpu_ms, self._total_nvtx = compute_summary(
             self._json_roots
@@ -339,6 +365,13 @@ class NsysTreeApp(App):
         )
 
     def _update_detail_bar(self) -> None:
+        # App shutdown pops the screen and then drains the message queue, so a
+        # RowHighlighted queued just before quit is still dispatched here with
+        # #tree-table already gone. ``is_running`` is False by then; the widget's
+        # own ``is_mounted`` is not — Textual never sets it back to False — so
+        # gate on the app. A #tree-table id regression still raises while running.
+        if not self.is_running:
+            return
         dt = self.query_one("#tree-table", TreeTable)
         row = dt.cursor_row
         node = self._visible[row] if self._visible and 0 <= row < len(self._visible) else None
@@ -389,7 +422,7 @@ class NsysTreeApp(App):
                 if e_ns > s_ns:
                     self._trim = (s_ns, e_ns)
                     if self._db_path:
-                        self._load_from_db()
+                        self._run_load_worker()
                     self._update_title()
                     self.notify(f"Trim → {parts[0]}s – {parts[1]}s", timeout=2)
                 else:
@@ -573,7 +606,7 @@ class NsysTreeApp(App):
     # Actions — reload
     def action_reload(self) -> None:
         if self._db_path:
-            self._load_from_db()
+            self._run_load_worker()
             self.notify("Reloaded", timeout=2)
 
     # Actions — bookmarks
@@ -686,7 +719,7 @@ class NsysTreeApp(App):
             return
         self._trim = (int(start_s * 1e9), int(end_s * 1e9))
         if self._db_path:
-            self._load_from_db()
+            self._run_load_worker()
         self._update_title()
         self.notify(f"AI zoom → {start_s:.2f}s–{end_s:.2f}s", timeout=3)
 

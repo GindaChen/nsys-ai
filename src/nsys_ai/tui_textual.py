@@ -12,6 +12,10 @@ Threading:
     stream_agent_loop runs in a @work(thread=True) worker.
     UI updates are dispatched via self.call_from_thread().
 
+    Load and stream workers use distinct ``group=`` values. Textual scopes
+    ``exclusive=True`` to a group, so without that a new stream turn would
+    cancel an in-flight cache load (and vice versa).
+
     A thread worker cannot be interrupted: Worker.cancel() only marks it
     cancelled, and all three ways a turn ends go through that same non-stopping
     path — cancel_all() on Ctrl+C, exclusive supersession by a new submit, and
@@ -47,6 +51,7 @@ Threading:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from textual import work
@@ -57,30 +62,30 @@ from textual.message import Message
 from textual.widgets import DataTable, Footer, Header, Input, Label, RichLog, Static
 from textual.worker import NoActiveWorker, get_current_worker
 
+from .tui_cache import CacheBuildProgress, format_cache_progress, post_cache_progress
+
 # ---------------------------------------------------------------------------
 # Profile helper — load top kernels without importing the full Profile class.
 # ---------------------------------------------------------------------------
 
 
-def _suppress_cache_progress(label: str, step: int, total: int) -> None:
-    """Drop cache-build progress so Textual does not paint it on stderr.
-
-    Passing any callback silences the ``\\r`` redraw path inside ``build_cache``.
-    This one does nothing else: the build still runs synchronously on the
-    message loop, so the UI cannot update between steps (#332).
-    """
-
-
-def _load_top_kernels(sqlite_path: str, limit: int = 30) -> list[dict]:
+def _load_top_kernels(
+    sqlite_path: str,
+    limit: int = 30,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> list[dict]:
     """Return top kernels by total GPU duration as a list of dicts.
 
     Each dict has: name, count, total_ms, avg_ms.
     Opens the file via accelerated Profile class; returns [] on any error.
+    ``progress`` is forwarded to the profile open so a Textual caller can
+    route cache-build steps to the UI instead of stderr.
     """
     try:
         from .profile import open as open_profile
 
-        with open_profile(sqlite_path, progress=_suppress_cache_progress) as prof:
+        with open_profile(sqlite_path, progress=progress) as prof:
             aggs = prof.aggregate_kernels(device=None, limit=limit)
             return [
                 {
@@ -242,17 +247,15 @@ class NsysChatApp(App):
     def on_mount(self) -> None:
         self.title = f"nsys-ai chat — {self.profile_name}"
         self._setup_table_columns()
-        self._load_and_populate_kernels()
         log = self.query_one("#chat-log", RichLog)
         log.write(f"[bold cyan]Profile:[/bold cyan] {self.profile_path}")
-        if self._kernels:
-            log.write(
-                f"[bold cyan]{len(self._kernels)} kernels loaded.[/bold cyan] "
-                "Ask anything about this GPU profile."
-            )
-        else:
-            log.write("[yellow]No kernels found. Profile may be empty or incompatible.[/yellow]")
-        log.write("[dim]─────────────────────────────────────────[/dim]")
+        log.write("[dim]Loading profile…[/dim]")
+        self._run_load_worker()
+
+    def on_cache_build_progress(self, event: CacheBuildProgress) -> None:
+        if not self.is_running:
+            return
+        self.sub_title = format_cache_progress(event.label, event.step, event.total)
 
     # ── Setup helpers ─────────────────────────────────────────────────────────
 
@@ -260,19 +263,42 @@ class NsysChatApp(App):
         table = self.query_one("#kernel-table", DataTable)
         table.add_columns("#", "Kernel", "ms (total)", "Calls")
 
-    def _load_and_populate_kernels(self) -> None:
-        """Synchronously load kernels from the profile DB and fill the DataTable."""
+    @work(thread=True, exclusive=True, group="load")
+    def _run_load_worker(self) -> None:
+        """Load kernels off the message loop; post progress and apply on the UI thread."""
+        worker = get_current_worker()
+
+        def progress(label: str, step: int, total: int) -> None:
+            post_cache_progress(self, label, step, total)
+
         try:
             from .profile import resolve_profile_path
 
             sqlite_path = resolve_profile_path(self.profile_path)
-            self._kernels = _load_top_kernels(sqlite_path)
+            kernels = _load_top_kernels(sqlite_path, progress=progress)
+            error: str | None = None
         except Exception as e:
-            self.query_one("#chat-log", RichLog).write(
-                f"[bold red]Error loading profile:[/bold red] {e}"
-            )
+            kernels = []
+            error = str(e)
+
+        if worker.is_cancelled:
+            return
+        self.call_from_thread(self._on_kernels_loaded, kernels, error)
+
+    def _on_kernels_loaded(self, kernels: list[dict], error: str | None) -> None:
+        """Main-thread apply after the load worker finishes."""
+        # See NsysTreeApp._apply_json_roots: covers the shutdown window where the
+        # worker passed its is_cancelled check before quit cleared ``_running``.
+        if not self.is_running:
+            return
+        self.sub_title = ""
+        log = self.query_one("#chat-log", RichLog)
+        if error is not None:
+            log.write(f"[bold red]Error loading profile:[/bold red] {error}")
+            log.write("[dim]─────────────────────────────────────────[/dim]")
             return
 
+        self._kernels = kernels
         table = self.query_one("#kernel-table", DataTable)
         self._kernel_name_to_row = {}
         for i, k in enumerate(self._kernels):
@@ -285,6 +311,15 @@ class NsysChatApp(App):
                 str(k.get("count", 0)),
             )
             self._kernel_name_to_row[name.lower()] = i
+
+        if self._kernels:
+            log.write(
+                f"[bold cyan]{len(self._kernels)} kernels loaded.[/bold cyan] "
+                "Ask anything about this GPU profile."
+            )
+        else:
+            log.write("[yellow]No kernels found. Profile may be empty or incompatible.[/yellow]")
+        log.write("[dim]─────────────────────────────────────────[/dim]")
 
     # ── Input handler ─────────────────────────────────────────────────────────
 
@@ -366,6 +401,12 @@ class NsysChatApp(App):
         self, name: str, total_ms: float, calls: int, avg_ms: float
     ) -> None:
         """Update the selected kernel info bar below the DataTable."""
+        # Same teardown race as NsysTreeApp._update_detail_bar: a RowHighlighted
+        # still bubbling at quit is dispatched after the screen is pruned, with
+        # #kernel-info-bar already gone. Gate on the app — the control's own
+        # is_mounted stays True once mounted and cannot see this.
+        if not self.is_running:
+            return
         bar = self.query_one("#kernel-info-bar", Static)
         bar.update(
             f"▶ [bold]{name}[/bold]  │  [magenta]{total_ms:,.1f}ms total[/magenta]  │  "
@@ -414,7 +455,7 @@ class NsysChatApp(App):
 
     # ── Background worker ─────────────────────────────────────────────────────
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="stream")
     def _run_stream_worker(self, user_msg: str, gen: int) -> None:
         """Background thread: calls stream_agent_loop, posts UI updates via call_from_thread.
 
