@@ -392,7 +392,11 @@ async def test_cache_build_inside_textual_writes_no_cr_to_piped_stderr(profile_c
         os.close(err_fd)
         app = NsysChatApp(profile_copy)
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
+            # Wait for the load worker to finish (kernels populated, subtitle cleared).
+            assert await _until(
+                pilot,
+                lambda: bool(app._kernels) and app.sub_title in ("", None),
+            )
     finally:
         os.dup2(saved, 2)
         os.close(saved)

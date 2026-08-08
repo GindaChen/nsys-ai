@@ -48,16 +48,20 @@ Layout:
 
 from __future__ import annotations
 
-from textual import on
+from collections.abc import Callable
+
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input
+from textual.worker import get_current_worker
 
 from .. import tui_actions
 from ..formatting import fmt_dur as _fmt_dur
 from ..formatting import fmt_ns as _fmt_ns
 from ..tree.chat import ChatPanel
+from ..tui_cache import CacheBuildProgress, format_cache_progress, post_cache_progress
 from ..tui_models import KernelEvent
 from .canvas import TimelineCanvas
 from .logic import (
@@ -269,57 +273,83 @@ class NsysTimelineApp(App):
             self._nvtx_spans.extend(spans)
         self._nvtx_max_depth = max(self._gpu_nvtx_max_depth.values(), default=0)
 
-    def _load_from_db(self) -> None:
+    def _fetch_gpu_data_from_db(
+        self, progress: Callable[[str, int, int], None]
+    ) -> dict:
+        """Open the profile and collect per-GPU data. Safe to call from a worker thread."""
         from .. import profile as _profile
         from ..nvtx_tree import build_nvtx_tree, to_json
 
-        try:
-            with _profile.open(
-                self._db_path, progress=self._suppress_cache_progress
-            ) as prof:
-                # Auto-detect devices if none specified or single default 0
-                devices = self._devices
-                if not devices or devices == [0]:
-                    if (
-                        hasattr(prof, "meta")
-                        and hasattr(prof.meta, "devices")
-                        and prof.meta.devices
-                    ):
-                        devices = prof.meta.devices
-                        self._devices = devices
-                for dev in devices:
-                    # All kernels from GPU table (not only those under NVTX)
-                    raw_kernels = prof.kernels(dev, self._trim)
-                    kernel_events = [
-                        KernelEvent(
-                            {
-                                "name": k["name"],
-                                "demangled": k.get("demangled", ""),
-                                "start_ns": k["start"],
-                                "end_ns": k["end"],
-                                "duration_ms": (k["end"] - k["start"]) / 1e6,
-                                "stream": str(k["streamId"]),
-                            }
-                        )
-                        for k in raw_kernels
-                    ]
-                    # NVTX spans from tree for overlay rows
-                    roots = build_nvtx_tree(prof, dev, self._trim)
-                    json_roots = to_json(roots)
-                    _, nvtx_spans = extract_events(json_roots)
-                    self._gpu_kernels[dev] = kernel_events
-                    streams = collect_streams(kernel_events)
-                    self._gpu_streams[dev] = streams if streams else ["?"]
-                    self._gpu_stream_kernels[dev] = build_stream_kernels(
-                        kernel_events, self._gpu_streams[dev]
+        gpu_kernels: dict[int, list[KernelEvent]] = {}
+        gpu_streams: dict[int, list[str]] = {}
+        gpu_stream_kernels: dict[int, dict[str, list[KernelEvent]]] = {}
+        gpu_nvtx_spans: dict[int, list] = {}
+        gpu_nvtx_max_depth: dict[int, int] = {}
+        devices = list(self._devices)
+
+        with _profile.open(self._db_path, progress=progress) as prof:
+            # Auto-detect devices if none specified or single default 0
+            if not devices or devices == [0]:
+                if (
+                    hasattr(prof, "meta")
+                    and hasattr(prof.meta, "devices")
+                    and prof.meta.devices
+                ):
+                    devices = list(prof.meta.devices)
+            for dev in devices:
+                # All kernels from GPU table (not only those under NVTX)
+                raw_kernels = prof.kernels(dev, self._trim)
+                kernel_events = [
+                    KernelEvent(
+                        {
+                            "name": k["name"],
+                            "demangled": k.get("demangled", ""),
+                            "start_ns": k["start"],
+                            "end_ns": k["end"],
+                            "duration_ms": (k["end"] - k["start"]) / 1e6,
+                            "stream": str(k["streamId"]),
+                        }
                     )
-                    self._gpu_nvtx_spans[dev] = nvtx_spans
-                    self._gpu_nvtx_max_depth[dev] = (
-                        max((s.depth for s in nvtx_spans), default=-1) + 1
-                    )
-        except Exception as e:
-            self.notify(f"Failed to load profile: {e}", severity="error")
+                    for k in raw_kernels
+                ]
+                # NVTX spans from tree for overlay rows
+                roots = build_nvtx_tree(prof, dev, self._trim)
+                json_roots = to_json(roots)
+                _, nvtx_spans = extract_events(json_roots)
+                gpu_kernels[dev] = kernel_events
+                streams = collect_streams(kernel_events)
+                gpu_streams[dev] = streams if streams else ["?"]
+                gpu_stream_kernels[dev] = build_stream_kernels(
+                    kernel_events, gpu_streams[dev]
+                )
+                gpu_nvtx_spans[dev] = nvtx_spans
+                gpu_nvtx_max_depth[dev] = max((s.depth for s in nvtx_spans), default=-1) + 1
+
+        return {
+            "devices": devices,
+            "gpu_kernels": gpu_kernels,
+            "gpu_streams": gpu_streams,
+            "gpu_stream_kernels": gpu_stream_kernels,
+            "gpu_nvtx_spans": gpu_nvtx_spans,
+            "gpu_nvtx_max_depth": gpu_nvtx_max_depth,
+        }
+
+    def _apply_gpu_data(self, payload: dict, error: str | None) -> None:
+        """Main-thread apply after a DB load."""
+        # See NsysTreeApp._apply_json_roots: covers the shutdown window where the
+        # worker passed its is_cancelled check before quit cleared ``_running``.
+        if not self.is_running:
             return
+        self.sub_title = ""
+        if error is not None:
+            self.notify(f"Failed to load profile: {error}", severity="error")
+            return
+        self._devices = payload["devices"]
+        self._gpu_kernels = payload["gpu_kernels"]
+        self._gpu_streams = payload["gpu_streams"]
+        self._gpu_stream_kernels = payload["gpu_stream_kernels"]
+        self._gpu_nvtx_spans = payload["gpu_nvtx_spans"]
+        self._gpu_nvtx_max_depth = payload["gpu_nvtx_max_depth"]
         self._rebuild_flattened()
         # initial zoom: fit full trace in ~100 columns
         self.ns_per_col = max(1, self._time_span // 100)
@@ -357,7 +387,7 @@ class NsysTimelineApp(App):
     def on_mount(self) -> None:
         self._is_mounted = True
         if not self._kernels and self._db_path:
-            self._load_from_db()
+            self._run_load_worker()
         else:
             self._rebuild_flattened()
             self.ns_per_col = max(1, self._time_span // 100)
@@ -370,14 +400,26 @@ class NsysTimelineApp(App):
         # Focus the canvas so App-level key bindings work.
         self.query_one("#canvas", TimelineCanvas).focus()
 
-    @staticmethod
-    def _suppress_cache_progress(label: str, step: int, total: int) -> None:
-        """Drop cache-build progress so Textual does not paint it on stderr.
+    def on_cache_build_progress(self, event: CacheBuildProgress) -> None:
+        if not self.is_running:
+            return
+        self.sub_title = format_cache_progress(event.label, event.step, event.total)
 
-        Passing any callback silences the ``\\r`` redraw path inside ``build_cache``.
-        This one does nothing else: the build still runs synchronously on the
-        message loop, so the UI cannot update between steps (#332).
-        """
+    @work(thread=True, exclusive=True, group="load")
+    def _run_load_worker(self) -> None:
+        """Build/open the profile off the message loop; apply results on the UI thread."""
+        worker = get_current_worker()
+        try:
+            payload = self._fetch_gpu_data_from_db(
+                lambda label, step, total: post_cache_progress(self, label, step, total)
+            )
+            error: str | None = None
+        except Exception as e:
+            payload = {}
+            error = str(e)
+        if worker.is_cancelled:
+            return
+        self.call_from_thread(self._apply_gpu_data, payload, error)
 
     def _push_canvas_state(self) -> None:
         if not self._is_mounted:
