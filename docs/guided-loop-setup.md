@@ -1,6 +1,8 @@
-# Guided loop setup (Direction 2)
+# Guided loop setup (web UI)
 
 Step-by-step setup for the **diagnose → propose → re-profile → diff → accept** workflow in the timeline web UI. This path is **not AI-based** — diagnose uses local SQL/skills, diff uses deterministic before/after comparison, and you record accept/reject yourself.
+
+For the same workflow on the command line, see the [User guide](user-guide.md).
 
 ---
 
