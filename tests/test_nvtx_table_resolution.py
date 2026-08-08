@@ -187,3 +187,36 @@ def test_sqlite_blob_fallback_reads_the_versioned_table(versioned_profile):
         f"the SQLite blob fallback failed against a profile whose NVTX table is "
         f"{RENAMED} — the table name is not being resolved: {diagnostics}"
     )
+
+
+# ── profile_db_tool (get_profile_schema) ─────────────────────────────────────
+# The text-to-SQL system prompt is built from get_profile_schema on whatever
+# connection open_profile_readonly returned. On the DuckDB/cache path the
+# unversioned alias exists, so a literal still finds DDL. On the raw sqlite3
+# fallback it does not — and that is the path a read-only mount always takes.
+
+
+def test_get_profile_schema_includes_the_versioned_nvtx_table(versioned_profile):
+    """The assertion that fails while NVTX_TABLE is the literal NVTX_EVENTS.
+
+    Measured on this fixture: unrenamed schema is ~7034 chars and contains NVTX;
+    renamed under the literal is ~4710 chars and contains none. The model is
+    then asked to write SQL against a table it has not been shown.
+    """
+    from nsys_ai.ai.backend.profile_db_tool import get_profile_schema
+
+    conn = sqlite3.connect(versioned_profile)
+    try:
+        schema = get_profile_schema(conn)
+    finally:
+        conn.close()
+
+    assert RENAMED in schema, (
+        f"get_profile_schema omitted {RENAMED} from the model prompt on a raw "
+        f"sqlite3 connection — the NVTX table name is not being resolved"
+    )
+    # The DDL must teach the model the name that exists, not the unversioned
+    # literal it would invent from memory of older exports.
+    assert "CREATE TABLE" in schema and RENAMED in schema
+    assert "CREATE TABLE NVTX_EVENTS\n" not in schema
+    assert "CREATE TABLE NVTX_EVENTS (" not in schema
