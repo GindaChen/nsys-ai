@@ -64,6 +64,20 @@ def build_executive_summary(summary: ProfileDiffSummary) -> str:
     return " ".join(parts)
 
 
+def offline_diff_narrative(summary: ProfileDiffSummary) -> DiffNarrative:
+    """Narrative with the deterministic summary only — no LLM call, no warning.
+
+    Used by ``diff --no-ai`` and by every caller that never reaches an LLM, so
+    the non-AI report is byte-identical across those front doors.
+    """
+    return DiffNarrative(
+        executive_summary=build_executive_summary(summary),
+        ai_narrative=None,
+        model=None,
+        warning=None,
+    )
+
+
 def _build_narrative_prompt_payload(summary: ProfileDiffSummary) -> str:
     """Build a compact, numeric-only payload for the LLM (no raw kernel lists)."""
     lines: list[str] = []

@@ -792,6 +792,7 @@ def serve_timeline(
     loop_after: str | None = None,
     loop_h100_preset: bool = False,
     session: str | None = None,
+    session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
 ):
     """Start a local HTTP server serving the horizontal timeline viewer.
 
@@ -802,6 +803,9 @@ def serve_timeline(
     If *session* is given (including empty string), open that SessionStore
     session; empty or omitted derives the id from the before profile content id
     (C1). SessionStore is always used — there is no in-memory loop state.
+    *session_root* is the SessionStore root the caller already published into;
+    default is ``.nsys-ai/sessions`` under the process CWD. Callers that used a
+    different root must pass it here so --web opens that same session.
     """
     from collections.abc import Sequence
 
@@ -822,7 +826,7 @@ def serve_timeline(
     _ViewerHandler._tile_nvtx_cache = {}
     _ViewerHandler._findings = findings_data or []
     _ViewerHandler._session_id = None
-    _ViewerHandler._session_root = ".nsys-ai/sessions"
+    _ViewerHandler._session_root = os.fspath(session_root)
     from .loop_state import detect_h100_replay_preset
 
     raw_path = prof.path if hasattr(prof, "path") else ""

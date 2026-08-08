@@ -1081,3 +1081,48 @@ def diff_profiles(
         step_time_delta_pct=step_time_delta_pct,
         diff_id=diff_id,
     )
+
+
+#: Per-device top-k used by the all-GPU view. The global section already lists
+#: the full top-k, so the per-GPU tables stay short.
+PER_GPU_TOP_K = 3
+
+
+def diff_profiles_all_gpus(
+    before_prof: Profile,
+    after_prof: Profile,
+    *,
+    trim: tuple[int, int] | None = None,
+    limit: int = 15,
+    sort: str = "delta",
+    regression_pct: float = STEP_TIME_REGRESSION_PCT,
+) -> tuple[ProfileDiffSummary, dict[int, ProfileDiffSummary]]:
+    """Compare two profiles across all GPUs: global summary + per-device breakdown.
+
+    This is the ``--gpu`` unset shape of ``nsys-ai diff``. Every caller that
+    renders an all-GPU comparison must go through here so the device set (union
+    of both profiles' devices) and the per-device top-k stay identical.
+    """
+    global_summary = diff_profiles(
+        before_prof,
+        after_prof,
+        gpu=None,
+        trim=trim,
+        limit=limit,
+        sort=sort,
+        regression_pct=regression_pct,
+    )
+    per_gpu_limit = min(limit, PER_GPU_TOP_K)
+    devices = sorted(set(before_prof.meta.devices) | set(after_prof.meta.devices))
+    per_gpu: dict[int, ProfileDiffSummary] = {}
+    for dev in devices:
+        per_gpu[dev] = diff_profiles(
+            before_prof,
+            after_prof,
+            gpu=dev,
+            trim=trim,
+            limit=per_gpu_limit,
+            sort=sort,
+            regression_pct=regression_pct,
+        )
+    return global_summary, per_gpu

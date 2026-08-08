@@ -35,6 +35,50 @@ def _cmd_propose(args, _profile):
     if exit_code:
         raise SystemExit(exit_code)
 
+
+def _cmd_diagnose(args, _profile):
+    """Thin front door: default evidence pack → session findings."""
+    from nsys_ai.diagnose_command import DiagnoseCommandError, run_diagnose
+
+    try:
+        exit_code = run_diagnose(
+            profile_path=getattr(args, "profile", None),
+            session_id=getattr(args, "session", None),
+            gpu=getattr(args, "gpu", 0) or 0,
+            trim=_parse_trim(args),
+            web=bool(getattr(args, "web", False)),
+            port=getattr(args, "port", 8144),
+            open_browser=not bool(getattr(args, "no_browser", False)),
+        )
+    except DiagnoseCommandError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+def _cmd_review(args, _profile):
+    """Thin front door: canonical before/after diff, or resume a session."""
+    from nsys_ai.review_command import ReviewCommandError, run_review
+
+    try:
+        exit_code = run_review(
+            before_path=getattr(args, "before", None),
+            after_path=getattr(args, "after", None),
+            session_id=getattr(args, "session", None),
+            gpu=getattr(args, "gpu", None),
+            trim=_parse_trim(args),
+            web=bool(getattr(args, "web", False)),
+            port=getattr(args, "port", 8144),
+            open_browser=not bool(getattr(args, "no_browser", False)),
+        )
+    except ReviewCommandError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
 # ---------------------------------------------------------------------------
 # cutracer subcommand
 # ---------------------------------------------------------------------------
@@ -750,7 +794,11 @@ def _cmd_baseline_show(args, _profile):
 
 
 def _cmd_diff(args, _profile):
-    from nsys_ai.diff import STEP_TIME_REGRESSION_PCT, diff_profiles
+    from nsys_ai.diff import (
+        STEP_TIME_REGRESSION_PCT,
+        diff_profiles,
+        diff_profiles_all_gpus,
+    )
     from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
         format_diff_markdown,
@@ -815,18 +863,12 @@ def _cmd_diff(args, _profile):
         if args.format not in ("terminal", "markdown"):
             return None
         from nsys_ai.ai.diff_narrative import (
-            DiffNarrative,
-            build_executive_summary,
             generate_diff_narrative,
+            offline_diff_narrative,
         )
 
         if no_ai:
-            return DiffNarrative(
-                executive_summary=build_executive_summary(summary),
-                ai_narrative=None,
-                model=None,
-                warning=None,
-            )
+            return offline_diff_narrative(summary)
         return generate_diff_narrative(summary)
 
     if getattr(args, "chat", False):
@@ -908,31 +950,17 @@ def _cmd_diff(args, _profile):
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
         else:
-            # Global (all GPUs) + per-GPU breakdown.
-            global_summary = diff_profiles(
+            # Global (all GPUs) + per-GPU breakdown. Shared with `review` so the
+            # two front doors cannot drift on devices or per-GPU top-k.
+            global_summary, per_gpu = diff_profiles_all_gpus(
                 before,
                 after,
-                gpu=None,
                 trim=trim,
                 limit=args.limit,
                 sort=args.sort,
                 regression_pct=regression_pct,
             )
             gate_summary = global_summary
-            # For per-GPU we keep top-k small to avoid overwhelming output.
-            per_gpu_limit = min(args.limit, 3)
-            devices = sorted(set(before.meta.devices) | set(after.meta.devices))
-            per_gpu = {}
-            for dev in devices:
-                per_gpu[dev] = diff_profiles(
-                    before,
-                    after,
-                    gpu=dev,
-                    trim=trim,
-                    limit=per_gpu_limit,
-                    sort=args.sort,
-                    regression_pct=regression_pct,
-                )
 
             narrative = _narrative_for(global_summary)
             if args.format == "terminal":
