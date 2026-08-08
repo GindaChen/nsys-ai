@@ -58,7 +58,7 @@ SELECT
     kernel_count,
     ROUND((last_end - first_start) / 1e6, 2) AS span_ms,
     total_kernel_ms,
-    ROUND(CAST(kernel_count AS REAL) / NULLIF((last_end - first_start) / 1e6, 0), 1) AS dispatch_rate_per_ms,
+    ROUND(CAST(kernel_count AS DOUBLE) / NULLIF((last_end - first_start) / 1e6, 0), 1) AS dispatch_rate_per_ms,
     ROUND(total_kernel_ms / NULLIF((last_end - first_start) / 1e6, 0) * 100, 1) AS occupancy_pct,
     avg_kernel_us,
     max_gap_ms,
