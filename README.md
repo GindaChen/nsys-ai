@@ -173,7 +173,9 @@ nsys-ai diff before.sqlite after.sqlite --iteration 0
 nsys-ai diff before.sqlite after.sqlite --format markdown -o diff.md
 nsys-ai diff before.sqlite after.sqlite --format json
 
-# Gate CI: exit non-zero when the verdict is a likely regression
+# Gate CI: exit non-zero when the verdict is a likely regression, or when the
+# two profiles could not be compared at all (for example one side recorded no
+# GPU kernel activity because the profiling step failed)
 nsys-ai diff before.sqlite after.sqlite --exit-on-regression
 
 # Same gate with a custom regression threshold (default 5%)
@@ -195,7 +197,7 @@ across every device.
 | `--format` | `terminal` | `terminal` \| `markdown` \| `json` |
 | `--limit N` | 15 | Top regressions/improvements to show |
 | `--sort` | `delta` | `delta` \| `percent` \| `total` |
-| `--exit-on-regression` | — | Exit 1 when the verdict is `regression_likely` |
+| `--exit-on-regression` | — | Exit 1 when the verdict is `regression_likely`, or `inconclusive` because the profiles could not be compared |
 | `--gate PCT` | 5.0 | Regression threshold (%) for the verdict; implies `--exit-on-regression` |
 
 ## Baselines

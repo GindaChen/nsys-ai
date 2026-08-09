@@ -854,7 +854,8 @@ def _build_parser():
     p.add_argument(
         "--exit-on-regression",
         action="store_true",
-        help="Exit with status 1 when the diff verdict is regression_likely (CI gate)",
+        help="Exit with status 1 when the diff verdict is regression_likely, or "
+        "inconclusive because the two profiles could not be compared (CI gate)",
     )
     p.add_argument(
         "--gate",

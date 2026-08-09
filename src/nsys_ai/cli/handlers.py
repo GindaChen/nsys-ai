@@ -839,6 +839,7 @@ def _cmd_baseline_show(args, _profile):
 
 def _cmd_diff(args, _profile):
     from nsys_ai.diff import (
+        MIN_COMPARABILITY_CONFIDENCE,
         STEP_TIME_REGRESSION_PCT,
         diff_profiles,
         diff_profiles_all_gpus,
@@ -1179,6 +1180,12 @@ def _cmd_diff(args, _profile):
     relative_failed = (
         gate_enabled and gate_summary is not None and gate_summary.verdict == "regression_likely"
     )
+    # A gate exists to block regressions. A comparison that could not be made has
+    # not shown their absence, so it must not exit 0 either — that is how an empty
+    # capture from a broken profiling step green-lights a change.
+    gate_inconclusive = (
+        gate_enabled and gate_summary is not None and gate_summary.verdict == "inconclusive"
+    )
     if relative_failed:
         print(
             "Diff gate failed: "
@@ -1189,6 +1196,23 @@ def _cmd_diff(args, _profile):
             f"gate_pct={regression_pct:.2f}%.",
             file=sys.stderr,
         )
+    elif gate_inconclusive:
+        if gate_summary.warnings:
+            reason = " ".join(gate_summary.warnings)
+        elif gate_summary.step_time_delta_pct is None:
+            reason = "Step time could not be derived from these profiles."
+        else:
+            reason = "The two profiles are not comparable enough to judge."
+        print(
+            "Diff gate could not be evaluated: "
+            f"verdict={gate_summary.verdict} "
+            f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+            f"(minimum {MIN_COMPARABILITY_CONFIDENCE:.2f}). "
+            f"{reason} "
+            "Exiting non-zero: a comparison that could not be made has not shown "
+            "the absence of a regression.",
+            file=sys.stderr,
+        )
 
     if sol_failed:
         detail = ", ".join(
@@ -1197,7 +1221,7 @@ def _cmd_diff(args, _profile):
         )
         print(f"SOL gate failed: {detail}.", file=sys.stderr)
 
-    if relative_failed or sol_failed:
+    if relative_failed or gate_inconclusive or sol_failed:
         sys.exit(1)
 
 

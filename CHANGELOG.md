@@ -33,7 +33,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   VRAM and allocation/free deltas), and locate each top kernel regression to a
   specific GPU, stream, and time window.
 - `nsys-ai diff --exit-on-regression` exits non-zero on a likely-regression
-  verdict, so a diff can gate CI.
+  verdict, and on an inconclusive one, so a diff can gate CI. A comparison that
+  could not be made has not shown the absence of a regression — a capture with no
+  GPU kernel activity is the clearest case.
 - `nsys-ai diff --format json` emits a versioned envelope: a top-level
   `verdict`, a `comparability_confidence` score, step-time `category_attribution`
   (compute / communication / launch overhead / idle), and a content-derived
