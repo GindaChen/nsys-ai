@@ -8,6 +8,7 @@ from nsys_ai.viewer import (
     generate_timeline_html,
     write_timeline_html,
 )
+from nsys_ai.web import _build_timeline_overview, _slice_nvtx_spans
 
 
 def test_timeline_web_kernel_first_keeps_kernels_outside_nvtx(minimal_nsys_db_path):
@@ -34,6 +35,43 @@ def test_timeline_web_kernel_first_keeps_kernels_outside_nvtx(minimal_nsys_db_pa
 
         k_c = next(k for k in gpu0["kernels"] if k["name"] == "kernel_C")
         assert k_c["path"] == "kernel_C"
+
+
+def test_timeline_web_nvtx_slice_keeps_boundary_overlaps():
+    spans = [
+        {"name": "before", "start": 0, "end": 10},
+        {"name": "inside", "start": 20, "end": 30},
+        {"name": "after", "start": 40, "end": 50},
+    ]
+
+    assert [s["name"] for s in _slice_nvtx_spans(spans, 10, 40)] == [
+        "before",
+        "inside",
+        "after",
+    ]
+    assert [s["name"] for s in _slice_nvtx_spans(spans, 11, 39)] == ["inside"]
+
+
+def test_timeline_web_overview_covers_full_profile_without_loaded_tiles():
+    bins, kernel_count = _build_timeline_overview(
+        [
+            {
+                "id": 0,
+                "kernels": [
+                    {"start_ns": 100, "end_ns": 200, "duration_ms": 0.1},
+                    {"start_ns": 2_100, "end_ns": 2_300, "duration_ms": 0.2},
+                ],
+            }
+        ],
+        (0, 4_000),
+        bin_count=4,
+    )
+
+    assert kernel_count == 2
+    assert bins[0] > 0
+    assert bins[2] > 0
+    assert bins[1] == 0
+    assert bins[3] == 0
 
 
 def test_timeline_web_trim_uses_overlap_not_containment(minimal_nsys_db_path):
@@ -142,6 +180,11 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="setHierarchyLayout"' in html
     assert 'id="setRulerLabelMode"' in html
     assert 'id="detailResizeHandle"' in html
+    assert 'id="overviewCanvas"' in html
+    assert 'id="viewportReadout"' in html
+    assert 'id="viewBackBtn"' in html
+    assert 'id="gpuSel"' in html
+    assert 'id="focusBtn"' in html
     assert 'id="chatCapabilities"' in html
     assert "fit_nvtx_range" in html
     assert "Go to NVTX" in html

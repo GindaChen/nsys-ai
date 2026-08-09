@@ -8,6 +8,8 @@ const FINDINGS = Array.isArray(BOOT.FINDINGS) ? BOOT.FINDINGS : [];
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const wrap = document.getElementById('canvasWrap');
+const overviewCanvas = document.getElementById('overviewCanvas');
+const overviewCtx = overviewCanvas ? overviewCanvas.getContext('2d') : null;
 
 // ── Tile Cache ──
 class TileCache {
@@ -33,9 +35,31 @@ class TileCache {
     put(startS, endS, data) {
         const k = this.key(startS, endS);
         const sizeEst = JSON.stringify(data).length * 2;  // rough byte estimate
-        // No eviction — tiles are small with pre-built server cache
+        const previous = this.tiles.get(k);
+        if (previous) this.currentBytes -= previous.sizeEst;
         this.tiles.set(k, { data, ts: Date.now(), sizeEst });
         this.currentBytes += sizeEst;
+        // Keep the browser bounded on long profiles.  The active viewport is
+        // always re-fetched before it is drawn, so evicted history remains
+        // transparent to the user.
+        while (this.currentBytes > this.maxBytes && this.tiles.size > 1) {
+            let oldestKey = null;
+            let oldestTs = Infinity;
+            for (const [key, entry] of this.tiles) {
+                if (key === k) continue;
+                if (entry.ts < oldestTs) {
+                    oldestKey = key;
+                    oldestTs = entry.ts;
+                }
+            }
+            if (oldestKey === null) break;
+            const evicted = this.tiles.get(oldestKey);
+            this.tiles.delete(oldestKey);
+            this.currentBytes -= evicted ? evicted.sizeEst : 0;
+            for (const readyKey of this.nvtxReady) {
+                if (readyKey.startsWith(oldestKey + '|')) this.nvtxReady.delete(readyKey);
+            }
+        }
         this._dirty = true;
     }
     mergeNvtx(startS, endS, nvtxData, gpuId) {
@@ -118,6 +142,7 @@ class TileCache {
 }
 const tileCache = new TileCache();
 const nvtxInflight = new Set();
+const tileInflight = new Map();
 let profileMeta = null;  // {time_range_ns, gpus, device_ids}
 let isLoading = false;
 
@@ -142,16 +167,30 @@ function hideLoading() {
 // ── Fetch data for a time window ──
 async function fetchTile(startS, endS, { requestNvtx = false } = {}) {
     if (tileCache.has(startS, endS)) return tileCache.get(startS, endS);
+    const tileKey = tileCache.key(startS, endS);
+    if (tileInflight.has(tileKey)) return tileInflight.get(tileKey);
     const pfx = BOOT.API_PREFIX || '';
-    const resp = await fetch(`${pfx}/api/data?start_s=${startS}&end_s=${endS}&kernels=1&nvtx=0`);
-    const data = await resp.json();
-    if (data.error) { console.error('fetchTile error:', data.error); return null; }
-    tileCache.put(startS, endS, data);
-    if (requestNvtx && showNVTX) void fetchTileNvtx(startS, endS, currentActiveGpuId());
-    return data;
+    const request = fetch(`${pfx}/api/data?start_s=${startS}&end_s=${endS}&kernels=1&nvtx=0`)
+        .then(async resp => {
+            if (!resp.ok) throw new Error(`tile request failed (${resp.status})`);
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+            tileCache.put(startS, endS, data);
+            if (requestNvtx && showNVTX) void fetchTileNvtx(startS, endS, currentActiveGpuId());
+            return data;
+        })
+        .catch(err => {
+            console.error('fetchTile error:', err);
+            showToast(`Unable to load ${startS.toFixed(1)}–${endS.toFixed(1)}s`);
+            return null;
+        })
+        .finally(() => tileInflight.delete(tileKey));
+    tileInflight.set(tileKey, request);
+    return request;
 }
 
 function currentActiveGpuId() {
+    if (selectedGpuId !== null && gpuIds.includes(selectedGpuId)) return selectedGpuId;
     if (isMultiGPU && streamIds[selectedStreamIdx]) {
         const parts = String(streamIds[selectedStreamIdx]).split(':');
         const maybeGpu = parseInt(parts[0], 10);
@@ -172,11 +211,15 @@ async function fetchTileNvtx(startS, endS, gpuId) {
     try {
         const pfx = BOOT.API_PREFIX || '';
         const resp = await fetch(`${pfx}/api/data?start_s=${startS}&end_s=${endS}&kernels=0&nvtx=1&gpu=${gpuId}`);
+        if (!resp.ok) throw new Error(`NVTX request failed (${resp.status})`);
         const data = await resp.json();
-        if (data.error) { console.error('fetchTileNvtx error:', data.error); return; }
+        if (data.error) throw new Error(data.error);
         tileCache.mergeNvtx(startS, endS, data, gpuId);
         rebuildDataFromCache();
         draw();
+    } catch (err) {
+        console.error('fetchTileNvtx error:', err);
+        showToast('NVTX is not available for this view');
     } finally {
         nvtxInflight.delete(key);
         updateNvtxLoadingIndicator();
@@ -201,12 +244,20 @@ function tileBounds(ns) {
     return [startS, startS + TILE_WINDOW_S];
 }
 
+function tileRangeForView(vStart, vEnd) {
+    const startS = tileBounds(vStart)[0];
+    const endS = Math.max(
+        startS + TILE_WINDOW_S,
+        Math.ceil((vEnd / 1e9) / TILE_WINDOW_S) * TILE_WINDOW_S,
+    );
+    return [startS, endS];
+}
+
 // ── Load tiles covering the current viewport ──
 async function ensureTilesForView(vStart, vEnd) {
-    const startTile = tileBounds(vStart);
-    const endTile = tileBounds(vEnd);
+    const [startS, endS] = tileRangeForView(vStart, vEnd);
     const promises = [];
-    for (let s = startTile[0]; s < endTile[1]; s += TILE_WINDOW_S) {
+    for (let s = startS; s < endS; s += TILE_WINDOW_S) {
         if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
         if (!tileCache.has(s, s + TILE_WINDOW_S)) {
             promises.push(fetchTile(s, s + TILE_WINDOW_S));
@@ -227,11 +278,10 @@ async function ensureTilesForView(vStart, vEnd) {
 
 function maybeFetchNvtxForCurrentView() {
     if (!PROGRESSIVE || !showNVTX) return;
-    const startTile = tileBounds(viewStart);
-    const endTile = tileBounds(viewEnd);
+    const [startS, endS] = tileRangeForView(viewStart, viewEnd);
     const activeGpu = currentActiveGpuId();
     if (activeGpu === null || activeGpu === undefined) return;
-    for (let s = startTile[0]; s < endTile[1]; s += TILE_WINDOW_S) {
+    for (let s = startS; s < endS; s += TILE_WINDOW_S) {
         if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
         if (tileCache.has(s, s + TILE_WINDOW_S)) {
             void fetchTileNvtx(s, s + TILE_WINDOW_S, activeGpu);
@@ -243,11 +293,10 @@ function maybeFetchNvtxForCurrentView() {
 function prefetchAdjacent() {
     if (!PROGRESSIVE || typeof requestIdleCallback === 'undefined') return;
     requestIdleCallback(() => {
-        const startTile = tileBounds(viewStart);
-        const endTile = tileBounds(viewEnd);
+        const [startS, endS] = tileRangeForView(viewStart, viewEnd);
         // Prefetch one tile before and after
-        const before = [startTile[0] - TILE_WINDOW_S, startTile[0]];
-        const after = [endTile[1], endTile[1] + TILE_WINDOW_S];
+        const before = [startS - TILE_WINDOW_S, startS];
+        const after = [endS, endS + TILE_WINDOW_S];
         if (profileMeta) {
             const pStartS = profileMeta.time_range_ns[0] / 1e9;
             const pEndS = profileMeta.time_range_ns[1] / 1e9;
@@ -327,6 +376,8 @@ function rebuildDataFromCache() {
     // Clear and rebuild from all cached tiles (progressive) or from baked data
     allNodes = []; kernels = []; nvtxSpans = [];
     gpuIds = []; isMultiGPU = false;
+    renderStateCacheKey = '';
+    renderStateCache = null;
 
     if (PROGRESSIVE) {
         loadFromData(tileCache.allData());
@@ -413,7 +464,92 @@ function rebuildDataFromCache() {
     chips.push(`<span class="stat-chip">GPU <strong>${totalMs.toFixed(1)}</strong><span class="stat-unit">ms</span></span>`);
     document.getElementById('stats').innerHTML = chips.join('');
     ensureRenderLockDefaults();
+    updateGpuOptions();
     updateNvtxThreadOptions();
+    overviewDirty = true;
+    rebuildOverviewHistogram();
+    updateViewportReadout();
+}
+
+function overviewRangeNs() {
+    if (profileMeta && Array.isArray(profileMeta.time_range_ns)) {
+        return profileMeta.time_range_ns;
+    }
+    return [timeStart, timeEnd];
+}
+
+function rebuildOverviewHistogram() {
+    if (profileMeta && Array.isArray(profileMeta.overview_bins) && profileMeta.overview_bins.length) {
+        const max = Math.max(...profileMeta.overview_bins, 1);
+        overviewBins = profileMeta.overview_bins.map(value => value / max);
+        overviewDirty = false;
+        return;
+    }
+    const [lo, hi] = overviewRangeNs();
+    const span = Math.max(hi - lo, 1);
+    const count = 240;
+    const bins = new Array(count).fill(0);
+    for (const k of kernels) {
+        const start = Math.max(0, Math.floor((k.start_ns - lo) / span * count));
+        const end = Math.min(count - 1, Math.floor((k.end_ns - lo) / span * count));
+        for (let i = start; i <= end; i++) bins[i] += Math.max(1, Math.min(8, k.duration_ms || 1));
+    }
+    let max = 1;
+    for (const v of bins) if (v > max) max = v;
+    overviewBins = bins.map(v => v / max);
+    overviewDirty = false;
+}
+
+function updateViewportReadout() {
+    const range = document.getElementById('viewportRange');
+    const zoom = document.getElementById('viewportZoom');
+    if (!range || !zoom || !Number.isFinite(viewStart) || !Number.isFinite(viewEnd)) return;
+    const span = Math.max(viewEnd - viewStart, 1);
+    range.textContent = `${fmtTimeS(viewStart)} → ${fmtTimeS(viewEnd)}`;
+    const [lo, hi] = overviewRangeNs();
+    const fullSpan = Math.max(hi - lo, 1);
+    zoom.textContent = `${Math.max(0.01, fullSpan / span).toFixed(1)}×`;
+    const back = document.getElementById('viewBackBtn');
+    const forward = document.getElementById('viewForwardBtn');
+    if (back) back.disabled = viewHistoryIndex <= 0;
+    if (forward) forward.disabled = viewHistoryIndex < 0 || viewHistoryIndex >= viewHistory.length - 1;
+}
+
+function resizeOverview() {
+    if (!overviewCanvas || !overviewCtx) return;
+    const width = Math.max(80, overviewCanvas.clientWidth || wrap.clientWidth || 80);
+    const dpr = window.devicePixelRatio || 1;
+    overviewCanvas.width = Math.round(width * dpr);
+    overviewCanvas.height = Math.round(34 * dpr);
+    overviewCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawOverview() {
+    if (!overviewCanvas || !overviewCtx) return;
+    if (overviewDirty) rebuildOverviewHistogram();
+    const width = overviewCanvas.width / (window.devicePixelRatio || 1);
+    const height = 34;
+    const [lo, hi] = overviewRangeNs();
+    const fullSpan = Math.max(hi - lo, 1);
+    overviewCtx.clearRect(0, 0, width, height);
+    overviewCtx.fillStyle = '#0d1117';
+    overviewCtx.fillRect(0, 0, width, height);
+    const barWidth = Math.max(1, width / Math.max(overviewBins.length, 1));
+    for (let i = 0; i < overviewBins.length; i++) {
+        const h = Math.max(1, overviewBins[i] * 21);
+        overviewCtx.fillStyle = `rgba(88, 166, 255, ${0.16 + overviewBins[i] * 0.58})`;
+        overviewCtx.fillRect(i * barWidth, height - h - 4, Math.ceil(barWidth), h);
+    }
+    const x1 = Math.max(0, (viewStart - lo) / fullSpan * width);
+    const x2 = Math.min(width, (viewEnd - lo) / fullSpan * width);
+    overviewCtx.fillStyle = 'rgba(88, 166, 255, 0.12)';
+    overviewCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
+    overviewCtx.strokeStyle = '#79b8ff';
+    overviewCtx.lineWidth = 1;
+    overviewCtx.strokeRect(x1 + 0.5, 1.5, Math.max(1, x2 - x1 - 1), height - 3);
+    overviewCtx.fillStyle = '#79b8ff';
+    overviewCtx.fillRect(Math.max(0, x1 - 1), 0, 3, height);
+    overviewCtx.fillRect(Math.min(width - 2, x2 - 1), 0, 3, height);
 }
 
 // ── Initialization ──
@@ -421,8 +557,10 @@ async function initData() {
     if (INITIAL_DATA !== null) {
         // Baked-in data mode (--trim was specified)
         rebuildDataFromCache();
+        resetViewHistory();
         viewStart = timeStart - timeSpan * 0.02;
         viewEnd = timeEnd + timeSpan * 0.02;
+        resetViewHistory();
         resize();
         return;
     }
@@ -442,6 +580,7 @@ async function initData() {
                 viewEnd = saved.e;
                 await ensureTilesForView(viewStart, viewEnd);
                 rebuildDataFromCache();
+                resetViewHistory();
                 restored = true;
             }
         } catch (e) { }
@@ -452,6 +591,7 @@ async function initData() {
             viewEnd = firstEnd * 1e9;
             await ensureTilesForView(viewStart, viewEnd);
             rebuildDataFromCache();
+            resetViewHistory();
         }
         hideLoading();
         resize();
@@ -470,6 +610,7 @@ let viewEnd = 1;
 let selectedKernel = null;
 let selectedNvtx = null;
 let selectedStreamIdx = 0;
+let selectedGpuId = null;  // null follows the selected stream; a number pins NVTX
 let showNVTX = true;
 let selectedNvtxThread = 'auto';
 let searchQuery = '';
@@ -480,6 +621,15 @@ let isSelecting = false, selectStartX = 0, selectStartNs = 0, selectEndNs = 0;
 let isResizingDetail = false, detailResizeStartY = 0, detailResizeStartH = 0;
 let bookmarks = [];
 let hiddenStreams = new Set();  // stream keys to hide
+let viewHistory = [];
+let viewHistoryIndex = -1;
+let overviewBins = [];
+let overviewDirty = true;
+let overviewDragging = false;
+let overviewDragOffset = 0;
+let overviewDragSpan = 0;
+let renderStateCacheKey = '';
+let renderStateCache = null;
 const RENDER_SETTINGS_KEY = 'timeline-render-settings-v1';
 const RENDER_LOCK_KEY = 'timeline-render-lock-v1';
 const DEFAULT_RENDER_SETTINGS = Object.freeze({
@@ -905,6 +1055,43 @@ function updateNvtxThreadOptions() {
     sel.value = selectedNvtxThread;
 }
 
+function updateGpuOptions() {
+    const sel = document.getElementById('gpuSel');
+    if (!sel) return;
+    sel.innerHTML = '';
+    if (!isMultiGPU) {
+        sel.style.display = 'none';
+        selectedGpuId = null;
+        return;
+    }
+    sel.style.display = 'inline-block';
+    const auto = document.createElement('option');
+    auto.value = 'auto';
+    auto.textContent = 'GPU follows stream';
+    sel.appendChild(auto);
+    for (const id of gpuIds) {
+        const opt = document.createElement('option');
+        opt.value = String(id);
+        opt.textContent = `GPU ${id}`;
+        sel.appendChild(opt);
+    }
+    sel.value = selectedGpuId === null ? 'auto' : String(selectedGpuId);
+}
+
+function onGpuChange() {
+    const sel = document.getElementById('gpuSel');
+    if (!sel) return;
+    selectedGpuId = sel.value === 'auto' ? null : Number(sel.value);
+    if (selectedGpuId !== null) {
+        const first = streamIds.findIndex(sid => String(sid).startsWith(selectedGpuId + ':'));
+        if (first >= 0) selectedStreamIdx = first;
+    }
+    selectedNvtx = null;
+    updateNvtxThreadOptions();
+    maybeFetchNvtxForCurrentView();
+    draw();
+}
+
 function onNvtxThreadChange() {
     const sel = document.getElementById('nvtxThreadSel');
     selectedNvtxThread = sel ? sel.value : 'auto';
@@ -925,6 +1112,7 @@ function resize() {
     canvas.style.width = r.width + 'px';
     canvas.style.height = needH + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    resizeOverview();
     draw();
 }
 window.addEventListener('resize', resize);
@@ -960,13 +1148,97 @@ function streamY(idx) {
 function draw() {
     const W = canvas.width / DPR;
     const H = canvas.height / DPR;
+    const renderState = timelineRenderState(W);
     ctx.clearRect(0, 0, W, H);
     ctx.font = '11px SF Mono, Cascadia Code, Fira Code, monospace';
 
     drawRuler(W);
     if (showNVTX) drawNVTX(W);
-    drawStreams(W, H);
+    drawStreams(W, H, renderState);
     if (FINDINGS.length) drawFindings(W, H);
+    updateRenderSummary(renderState);
+    drawOverview();
+    updateViewportReadout();
+}
+
+function kernelOverlapsView(k) {
+    return k.end_ns >= viewStart && k.start_ns <= viewEnd;
+}
+
+function isKernelEmphasized(k) {
+    return k === selectedKernel || (searchQuery && searchKernelMatches.has(k));
+}
+
+function timelineRenderState(W) {
+    const plotW = Math.max(1, W - LABEL_W);
+    const hiddenKey = Array.from(hiddenStreams).sort().join(',');
+    const key = `${Math.round(viewStart)}:${Math.round(viewEnd)}:${Math.round(plotW)}:${kernels.length}:${hiddenKey}:${searchQuery}`;
+    if (renderStateCacheKey === key && renderStateCache) return renderStateCache;
+
+    let visibleKernels = 0;
+    let repeatedItems = 0;
+    let repeatedGroups = 0;
+    const names = new Map();
+    for (const sid of streamIds) {
+        if (hiddenStreams.has(sid)) continue;
+        for (const k of (streamMap[sid] || [])) {
+            if (!kernelOverlapsView(k)) continue;
+            visibleKernels++;
+            const name = String(k.name || '(unnamed)');
+            names.set(name, (names.get(name) || 0) + 1);
+        }
+    }
+    for (const count of names.values()) {
+        if (count > 1) {
+            repeatedGroups++;
+            repeatedItems += count - 1;
+        }
+    }
+
+    const averagePixels = plotW / Math.max(visibleKernels, 1);
+    let mode = 'detail';
+    if (visibleKernels > Math.max(2200, plotW * 2.2) || averagePixels < 1.2) {
+        mode = 'density';
+    } else if (visibleKernels > Math.max(700, plotW * 0.7) || averagePixels < 3.5) {
+        mode = 'compact';
+    }
+    const state = {
+        mode,
+        visibleKernels,
+        repeatedGroups,
+        repeatedItems,
+        condensedNvtx: 0,
+    };
+    renderStateCacheKey = key;
+    renderStateCache = state;
+
+    return state;
+}
+
+function updateRenderSummary(state) {
+    const summary = document.getElementById('renderSummary');
+    if (!summary) return;
+    const count = new Intl.NumberFormat().format(state.visibleKernels);
+    const fullCount = profileMeta && Number.isFinite(profileMeta.overview_kernel_count)
+        ? profileMeta.overview_kernel_count : 0;
+    const loadedCount = kernels.length;
+    const coverage = fullCount > loadedCount
+        ? ` · ${new Intl.NumberFormat().format(loadedCount)}/${new Intl.NumberFormat().format(fullCount)} loaded` : '';
+    let text;
+    if (state.mode === 'density') {
+        text = `${count} kernels · condensed view · zoom in for names${coverage}`;
+    } else if (state.mode === 'compact') {
+        const repeats = state.repeatedGroups ? ` · ${state.repeatedGroups} repeated groups collapsed` : '';
+        text = `${count} kernels · compact labels${repeats}${coverage}`;
+    } else {
+        text = `${count} kernels · detailed view${coverage}`;
+    }
+    if (state.condensedNvtx) text += ` · ${state.condensedNvtx} NVTX ranges condensed`;
+    if (state.hiddenInfoFindings) text += ` · ${state.hiddenInfoFindings} info findings hidden`;
+    summary.textContent = text;
+    summary.title = state.repeatedItems
+        ? `${count} kernels in view; ${state.repeatedItems} repeated occurrences share a name`
+        : `${count} kernels in view`;
 }
 
 function drawRuler(W) {
@@ -1043,13 +1315,29 @@ function formatTickValue(ns, div, decimals) {
     return fmt.format(v);
 }
 
+function nvtxSpansForRender(spans, renderState) {
+    if (renderState.mode !== 'density' || spans.length <= 180) return spans;
+    const keep = new Set();
+    const ranked = spans.slice().sort((a, b) =>
+        ((b.end - b.start) - (a.end - a.start)) || ((a.depth || 0) - (b.depth || 0))
+    );
+    for (let i = 0; i < ranked.length && keep.size < 180; i++) keep.add(ranked[i]._key);
+    if (selectedNvtx) keep.add(selectedNvtx.key);
+    renderState.condensedNvtx = Math.max(0, spans.length - keep.size);
+    return spans.filter(s => keep.has(s._key));
+}
+
 function drawNVTX(W) {
+    const renderState = timelineRenderState(W);
     const baseY = RULER_H + findingsLaneH();
     ctx.fillStyle = 'rgba(22, 27, 34, 0.85)';
     ctx.fillRect(0, baseY, W, nvtxAreaH());
 
-    const { activeGpu, thread, spans: visibleSpans, clipped } = activeNvtxLayout();
+    const { activeGpu, thread, spans: allVisibleSpans, clipped } = activeNvtxLayout();
+    const visibleSpans = nvtxSpansForRender(allVisibleSpans, renderState);
+    let clippedCount = clipped + Math.max(0, allVisibleSpans.length - visibleSpans.length);
     const depthMax = activeNvtxMaxDepth();
+    const seenLabels = new Set();
 
     for (const span of visibleSpans) {
         const x1 = Math.max(LABEL_W, nsToX(span.start));
@@ -1074,8 +1362,14 @@ function drawNVTX(W) {
         ctx.strokeRect(x1 + 0.5, y + 0.5, w - 1, h - 1);
         ctx.globalAlpha = 1;
 
-        // Label if wide enough
-        if (w > 40) {
+        // Repeated nested ranges are useful at detail scale, but become noise
+        // when zoomed out. Keep one label per lane/name until the user zooms.
+        const labelKey = `${span._lane}|${span.name}`;
+        const canLabel = renderState.mode === 'detail'
+            ? w > 40
+            : w > 60 && !seenLabels.has(labelKey);
+        if (canLabel || isSel || (searchQuery && isSearchMatch)) {
+            seenLabels.add(labelKey);
             ctx.fillStyle = isSel ? '#ffffff' : (searchQuery && !isSearchMatch ? '#6b7280' : '#e6edf3');
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
@@ -1119,10 +1413,10 @@ function drawNVTX(W) {
         ctx.textBaseline = 'top';
         const threadLabel = thread ? ` • ${thread}` : '';
         ctx.fillText(`NVTX: GPU ${activeGpu}${threadLabel}`, LABEL_W + 4, baseY + 2);
-        if (clipped > 0) {
+        if (clippedCount > 0) {
             ctx.fillStyle = '#8b949e';
             ctx.textAlign = 'right';
-            ctx.fillText(`+${clipped} clipped`, W - 8, baseY + 2);
+            ctx.fillText(`+${clippedCount} condensed`, W - 8, baseY + 2);
         }
     }
     ctx.font = '11px SF Mono, Cascadia Code, Fira Code, monospace';
@@ -1133,7 +1427,108 @@ function drawNVTX(W) {
     ctx.beginPath(); ctx.moveTo(0, sepY); ctx.lineTo(W, sepY); ctx.stroke();
 }
 
-function drawStreams(W, H) {
+function drawKernelBlock(k, y, W, options = {}) {
+    let x1 = nsToX(k.start_ns);
+    let x2 = nsToX(k.end_ns);
+    if (x2 < LABEL_W || x1 > W) return;
+    x1 = Math.max(LABEL_W, x1);
+    x2 = Math.min(W, x2);
+    const w = Math.max(MIN_BLOCK_W, x2 - x1);
+    const bY = y + 2;
+    const bH = STREAM_H - 4;
+    const isMatch = !searchQuery || searchKernelMatches.has(k);
+    const isSel = k === selectedKernel;
+    const isNcclK = String(k.name || '').toLowerCase().includes('nccl');
+
+    // Per-kernel color from name hash (NCCL keeps special purple).
+    if (!k._nsysColor) {
+        k._nsysColor = isNcclK
+            ? { color: '#d2a8ff', lightness: 72 }
+            : kernelColorFromName(k.name);
+    }
+    const kColor = k._nsysColor;
+    let fillColor = kColor.color;
+    const kLightness = kColor.lightness;
+    let alpha = 0.78 + 0.22 * (k.heat || 0);
+    if (searchQuery && !isMatch) {
+        alpha = renderSettings.kernelSearchNonMatchAlpha;
+    } else if (selectedNvtx && !isSel) {
+        alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
+    } else if (w < 6) {
+        alpha *= Math.max(0.25, w / 6);
+    }
+    if (isSel) fillColor = '#79b8ff', alpha = 1;
+
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(x1, bY, w, bH);
+    ctx.globalAlpha = 1;
+    if (!isSel) {
+        ctx.strokeStyle = fillColor;
+        ctx.globalAlpha = 0.5;
+        ctx.strokeRect(x1 + 0.5, bY + 0.5, w - 1, bH - 1);
+        ctx.globalAlpha = 1;
+    }
+    if (isSel) {
+        ctx.strokeStyle = '#79b8ff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x1, bY, w, bH);
+        ctx.lineWidth = 1;
+    }
+
+    if (options.label && w > 20) {
+        ctx.fillStyle = isSel
+            ? '#fff'
+            : (searchQuery && !isMatch ? '#555' : (kLightness > 55 ? '#1c1c1c' : '#e6edf3'));
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x1 + 1, bY, w - 2, bH); ctx.clip();
+        const short = String(k.name || '(unnamed)').length > 40
+            ? String(k.name || '(unnamed)').slice(0, 38) + '…'
+            : String(k.name || '(unnamed)');
+        const label = w > 100 ? short + ' ' + fmtDur(k.duration_ms) : short;
+        ctx.fillText(label, x1 + 3, bY + bH / 2);
+        ctx.restore();
+    }
+}
+
+function drawDenseStream(ks, y, W) {
+    const plotW = Math.max(1, W - LABEL_W);
+    const bucketCount = Math.max(48, Math.min(320, Math.floor(plotW / 3)));
+    const counts = new Array(bucketCount).fill(0);
+    const heat = new Array(bucketCount).fill(0);
+    const span = Math.max(viewEnd - viewStart, 1);
+    for (const k of ks) {
+        if (!kernelOverlapsView(k)) continue;
+        const b1 = Math.max(0, Math.floor((Math.max(k.start_ns, viewStart) - viewStart) / span * bucketCount));
+        const b2 = Math.min(bucketCount - 1, Math.floor((Math.min(k.end_ns, viewEnd) - viewStart) / span * bucketCount));
+        for (let b = b1; b <= b2; b++) {
+            counts[b]++;
+            heat[b] = Math.max(heat[b], k.heat || 0);
+        }
+    }
+    const bucketW = plotW / bucketCount;
+    for (let b = 0; b < bucketCount; b++) {
+        if (!counts[b]) continue;
+        const x = LABEL_W + b * bucketW;
+        const alpha = Math.min(0.82, 0.18 + Math.log2(counts[b] + 1) * 0.12 + heat[b] * 0.18);
+        ctx.fillStyle = '#58a6ff';
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(x, y + 3, Math.max(1, bucketW + 0.5), STREAM_H - 6);
+        ctx.globalAlpha = 1;
+    }
+
+    // Keep search and selection actionable even when the background is condensed.
+    let emphasized = 0;
+    for (const k of ks) {
+        if (!kernelOverlapsView(k) || !isKernelEmphasized(k)) continue;
+        if (k !== selectedKernel && emphasized++ > 500) continue;
+        drawKernelBlock(k, y, W, { label: k === selectedKernel });
+    }
+}
+
+function drawStreams(W, H, renderState) {
     // Draw GPU separator rows first (if multi-GPU)
     if (isMultiGPU) {
         for (let gi = 0; gi < gpuBands.length; gi++) {
@@ -1211,81 +1606,23 @@ function drawStreams(W, H) {
         }
         ctx.fillText(streamLabel, LABEL_W - 6, y + STREAM_H / 2);
 
-        // Kernel blocks
-        for (const k of ks) {
-            let x1 = nsToX(k.start_ns);
-            let x2 = nsToX(k.end_ns);
-            if (x2 < LABEL_W || x1 > W) continue;
-            x1 = Math.max(LABEL_W, x1);
-            x2 = Math.min(W, x2);
-            const w = Math.max(MIN_BLOCK_W, x2 - x1);
-            const bY = y + 2;
-            const bH = STREAM_H - 4;
-
-            const isMatch = !searchQuery || searchKernelMatches.has(k);
-            const isSel = k === selectedKernel;
-            const isNcclK = k.name.toLowerCase().includes('nccl');
-
-            // Per-kernel color from name hash (NCCL keeps special purple).
-            // Cache the resolved {color, lightness} on the kernel object so we
-            // don't recompute it on every redraw inside the hot render loop.
-            if (!k._nsysColor) {
-                if (isNcclK) {
-                    // #d2a8ff ≈ L72
-                    k._nsysColor = { color: '#d2a8ff', lightness: 72 };
-                } else {
-                    k._nsysColor = kernelColorFromName(k.name);
+        // At wide scales, render a quiet density map.  Selecting or searching
+        // still paints the matching raw blocks above it.
+        if (renderState.mode === 'density') {
+            drawDenseStream(ks, y, W);
+        } else {
+            const seenLabels = new Set();
+            for (const k of ks) {
+                if (!kernelOverlapsView(k)) continue;
+                const width = Math.max(MIN_BLOCK_W, nsToX(k.end_ns) - nsToX(k.start_ns));
+                const emphasized = isKernelEmphasized(k);
+                let label = width > 20;
+                if (renderState.mode === 'compact' && !emphasized) {
+                    const name = String(k.name || '(unnamed)');
+                    label = width > 40 && !seenLabels.has(name);
+                    if (label) seenLabels.add(name);
                 }
-            }
-
-            const kColor = k._nsysColor;
-            let fillColor = kColor.color;
-            let kLightness = kColor.lightness;
-            let alpha = 0.78 + 0.22 * (k.heat || 0);
-            // Apply dim overrides (search/NVTX) OR density reduction, not both
-            if (searchQuery && !isMatch) {
-                alpha = renderSettings.kernelSearchNonMatchAlpha;
-            } else if (selectedNvtx && !isSel) {
-                alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
-            } else if (w < 6) {
-                // Density-aware: 1px → 0.25α, 3px → 0.5α, 6px+ → full
-                alpha *= Math.max(0.25, w / 6);
-            }
-            if (isSel) { fillColor = '#79b8ff'; kLightness = 60; alpha = 1; }
-
-            ctx.globalAlpha = alpha;
-            ctx.fillStyle = fillColor;
-            ctx.fillRect(x1, bY, w, bH);
-            ctx.globalAlpha = 1;
-            // Subtle border so blocks don't blend into background
-            if (!isSel) {
-                ctx.strokeStyle = fillColor;
-                ctx.globalAlpha = 0.5;
-                ctx.strokeRect(x1 + 0.5, bY + 0.5, w - 1, bH - 1);
-                ctx.globalAlpha = 1;
-            }
-
-            if (isSel) {
-                ctx.strokeStyle = '#79b8ff';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(x1, bY, w, bH);
-                ctx.lineWidth = 1;
-            }
-
-            // Kernel name label (dynamic contrast: dark text on light bars, white on dark)
-            if (w > 20) {
-                ctx.fillStyle = isSel
-                    ? '#fff'
-                    : (searchQuery && !isMatch ? '#555' : (kLightness > 55 ? '#1c1c1c' : '#e6edf3'));
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.save();
-                ctx.beginPath(); ctx.rect(x1 + 1, bY, w - 2, bH); ctx.clip();
-                const short = k.name.length > 40 ? k.name.slice(0, 38) + '…' : k.name;
-                // Name first, duration only if space
-                const label = w > 100 ? short + ' ' + fmtDur(k.duration_ms) : short;
-                if (label) ctx.fillText(label, x1 + 3, bY + bH / 2);
-                ctx.restore();
+                drawKernelBlock(k, y, W, { label });
             }
         }
 
@@ -1365,7 +1702,7 @@ function kernelPathForDisplay(k) {
 function showDetail(item) {
     if (!item) {
         document.getElementById('detail').className = 'empty';
-        document.getElementById('detail').innerHTML = 'Click a kernel or NVTX to see details. Press A for AI chat. Keyboard: ←/→ pan, +/- zoom, ↑/↓ stream, / search, ? help';
+        document.getElementById('detail').innerHTML = 'Click a kernel or NVTX to see details. Drag to pan; Shift+drag to zoom a range. Press A for AI chat, / to search, ? for help.';
         return;
     }
     if (item._kind === 'nvtx') {
@@ -1421,13 +1758,61 @@ function renderPathHtml(path) {
 // ── Navigation ──
 // ── Progressive tile loading on viewport change ──
 let _viewChangeTimer = null;
+let _tileLoadTimer = null;
 const _viewLabel = (typeof BOOT.GPU_LABEL === 'string' && BOOT.GPU_LABEL) ? BOOT.GPU_LABEL : 'timeline';
 const _viewKey = 'timeline-view-' + _viewLabel.replace(/[^a-zA-Z0-9]/g, '_');
-function afterViewChange() {
+function resetViewHistory() {
+    viewHistory = [{ start: viewStart, end: viewEnd }];
+    viewHistoryIndex = 0;
+    updateViewportReadout();
+}
+
+function recordViewHistory() {
+    const current = { start: viewStart, end: viewEnd };
+    const previous = viewHistory[viewHistoryIndex];
+    if (previous && Math.abs(previous.start - current.start) < 1 && Math.abs(previous.end - current.end) < 1) {
+        return;
+    }
+    if (viewHistoryIndex < viewHistory.length - 1) {
+        viewHistory = viewHistory.slice(0, viewHistoryIndex + 1);
+    }
+    viewHistory.push(current);
+    if (viewHistory.length > 80) viewHistory.shift();
+    viewHistoryIndex = viewHistory.length - 1;
+}
+
+function restoreViewSnapshot(snapshot) {
+    if (!snapshot) return;
+    viewStart = snapshot.start;
+    viewEnd = snapshot.end;
+    clampView();
+    draw();
+    afterViewChange({ record: false });
+}
+
+function goBackView() {
+    if (viewHistoryIndex <= 0) return;
+    viewHistoryIndex -= 1;
+    restoreViewSnapshot(viewHistory[viewHistoryIndex]);
+}
+
+function goForwardView() {
+    if (viewHistoryIndex >= viewHistory.length - 1) return;
+    viewHistoryIndex += 1;
+    restoreViewSnapshot(viewHistory[viewHistoryIndex]);
+}
+
+function afterViewChange({ record = true, deferLoad = false } = {}) {
+    if (record) recordViewHistory();
     // Persist viewport to localStorage
     try { localStorage.setItem(_viewKey, JSON.stringify({ s: viewStart, e: viewEnd, t: Date.now() })); } catch (e) { }
     if (PROGRESSIVE) {
-        ensureTilesForView(viewStart, viewEnd).catch(console.error);
+        clearTimeout(_tileLoadTimer);
+        if (deferLoad) {
+            _tileLoadTimer = setTimeout(() => ensureTilesForView(viewStart, viewEnd).catch(console.error), 120);
+        } else {
+            ensureTilesForView(viewStart, viewEnd).catch(console.error);
+        }
         prefetchAdjacent();
     }
     if (window.parent && window.parent !== window) {
@@ -1848,6 +2233,17 @@ function showToast(msg) {
     setTimeout(() => { toast.style.opacity = '0'; }, 2000);
 }
 
+function toggleFocus() {
+    const active = document.body.classList.toggle('focus-mode');
+    const btn = document.getElementById('focusBtn');
+    if (btn) {
+        btn.classList.toggle('active', active);
+        btn.textContent = active ? 'Exit focus' : 'Focus';
+    }
+    setTimeout(resize, 0);
+    showToast(active ? 'Focus mode — press F or Esc to restore controls' : 'Controls restored');
+}
+
 function toggleNVTX() {
     showNVTX = !showNVTX;
     document.getElementById('nvtxBtn').classList.toggle('active', showNVTX);
@@ -2051,8 +2447,9 @@ canvas.addEventListener('mousedown', e => {
         if (hit.kernel) { selectKernel(hit.kernel); return; }
     }
 
-    // Shift+drag = pan (old behavior), plain drag = select time range
-    if (e.shiftKey) {
+    // Plain drag pans (the discoverable default); Shift+drag selects a time
+    // range and zooms to it on release.
+    if (!e.shiftKey) {
         isDragging = true;
         dragStartX = e.clientX;
         dragViewStart = viewStart;
@@ -2100,7 +2497,7 @@ canvas.addEventListener('mousemove', e => {
         viewStart = dragViewStart - dx * nsPerPx;
         viewEnd = dragViewEnd - dx * nsPerPx;
         clampView();
-        afterViewChange();
+        afterViewChange({ record: false, deferLoad: true });
         draw();
         return;
     }
@@ -2181,7 +2578,7 @@ canvas.addEventListener('mouseup', () => {
     if (isSelecting) {
         isSelecting = false;
         canvas.style.cursor = 'crosshair';
-        // Zoom to selection if it's wide enough
+        // Zoom to selection if it's wide enough.
         const sNs = Math.min(selectStartNs, selectEndNs);
         const eNs = Math.max(selectStartNs, selectEndNs);
         if (eNs - sNs > 1000) {
@@ -2194,9 +2591,15 @@ canvas.addEventListener('mouseup', () => {
         }
         return;
     }
-    isDragging = false; canvas.style.cursor = 'crosshair';
+    if (isDragging) {
+        isDragging = false;
+        afterViewChange();
+        draw();
+    }
+    canvas.style.cursor = 'crosshair';
 });
 canvas.addEventListener('mouseleave', () => {
+    if (isDragging) afterViewChange();
     isDragging = false; isSelecting = false; canvas.style.cursor = 'crosshair';
     document.getElementById('tooltip').style.display = 'none';
 });
@@ -2222,6 +2625,53 @@ canvas.addEventListener('wheel', e => {
         afterViewChange();
     }
 }, { passive: false });
+
+// ── Overview navigator ──
+function updateFromOverview(clientX) {
+    if (!overviewCanvas) return;
+    const rect = overviewCanvas.getBoundingClientRect();
+    const [lo, hi] = overviewRangeNs();
+    const fullSpan = Math.max(hi - lo, 1);
+    const px = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const nextStart = lo + ((px - overviewDragOffset) / Math.max(rect.width, 1)) * fullSpan;
+    viewStart = nextStart;
+    viewEnd = nextStart + overviewDragSpan;
+    clampView();
+    afterViewChange({ record: false, deferLoad: true });
+    draw();
+}
+
+if (overviewCanvas) {
+    overviewCanvas.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const rect = overviewCanvas.getBoundingClientRect();
+        const [lo, hi] = overviewRangeNs();
+        const fullSpan = Math.max(hi - lo, 1);
+        const x = e.clientX - rect.left;
+        const currentStartX = (viewStart - lo) / fullSpan * rect.width;
+        const currentEndX = (viewEnd - lo) / fullSpan * rect.width;
+        overviewDragSpan = viewEnd - viewStart;
+        overviewDragOffset = x >= currentStartX && x <= currentEndX
+            ? x - currentStartX
+            : (currentEndX - currentStartX) / 2;
+        overviewDragging = true;
+        updateFromOverview(e.clientX);
+    });
+    overviewCanvas.addEventListener('mousemove', e => {
+        if (overviewDragging) updateFromOverview(e.clientX);
+    });
+    overviewCanvas.addEventListener('mouseup', () => {
+        if (!overviewDragging) return;
+        overviewDragging = false;
+        afterViewChange();
+    });
+    overviewCanvas.addEventListener('mouseleave', () => {
+        if (!overviewDragging) return;
+        overviewDragging = false;
+        afterViewChange();
+    });
+}
 
 const detailEl = document.getElementById('detail');
 const detailResizeHandle = document.getElementById('detailResizeHandle');
@@ -2329,6 +2779,17 @@ document.addEventListener('keydown', e => {
     const helpEl = document.getElementById('helpOverlay');
     if (helpEl.style.display === 'block' && e.key !== '?') { helpEl.style.display = 'none'; return; }
 
+    if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        goBackView();
+        return;
+    }
+    if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault();
+        goForwardView();
+        return;
+    }
+
     switch (e.key) {
         case 'ArrowLeft': case 'h': e.preventDefault(); panBy(-0.15); break;
         case 'ArrowRight': case 'l': e.preventDefault(); panBy(0.15); break;
@@ -2363,6 +2824,7 @@ document.addEventListener('keydown', e => {
         case 'v': case 'V': e.preventDefault(); gotoNvtxPrompt(); break;
         case '/': e.preventDefault(); document.getElementById('searchInput').focus(); break;
         case 'Escape':
+            if (document.body.classList.contains('focus-mode')) toggleFocus();
             selectedKernel = null; selectedNvtx = null; selectedFindingIdx = -1;
             document.querySelectorAll('.finding-card').forEach(el => el.classList.remove('active'));
             showDetail(null);
@@ -2375,7 +2837,7 @@ document.addEventListener('keydown', e => {
         case 'a': case 'A': toggleChat(); break;
         case 'e': case 'E': if (FINDINGS.length) toggleFindings(); break;
         case 'w': case 'W': toggleLoop(); break;
-        case 'f': case 'F': fitAll(); break;
+        case 'f': case 'F': toggleFocus(); break;
         case 'b': saveBookmark(); break;
         case 'B': toggleBookmarkList(); break;
         case 's': case 'S': toggleStreamFilter(); break;
@@ -2779,9 +3241,30 @@ function _findingStreamRange(f) {
     return { y: topY, h: totalH };
 }
 
+function findingIndicesForRender(renderState) {
+    const visible = [];
+    let hiddenInfo = 0;
+    for (let i = 0; i < FINDINGS.length; i++) {
+        const f = FINDINGS[i];
+        const endNs = f.end_ns ?? f.start_ns;
+        if (endNs < viewStart || f.start_ns > viewEnd) continue;
+        // Info annotations remain available in the evidence sidebar, but do
+        // not compete with critical/warning markers at the overview scale.
+        if (renderState.mode === 'density' && f.severity === 'info' && i !== selectedFindingIdx) {
+            hiddenInfo++;
+            continue;
+        }
+        visible.push(i);
+    }
+    renderState.hiddenInfoFindings = hiddenInfo;
+    return visible;
+}
+
 function drawFindings(W, H) {
     const font = ctx.font;
     ctx.save();
+    const renderState = timelineRenderState(W);
+    const findingIndices = findingIndicesForRender(renderState);
 
     const hasActive = selectedFindingIdx >= 0 && selectedFindingIdx < FINDINGS.length;
     const laneY = RULER_H;  // annotation lane starts right below the ruler
@@ -2834,7 +3317,7 @@ function drawFindings(W, H) {
     }
 
     // ── Pass 2: Draw region/highlight/marker overlays on streams ──
-    for (let i = 0; i < FINDINGS.length; i++) {
+    for (const i of findingIndices) {
         const f = FINDINGS[i];
         const startNs = f.start_ns;
         const endNs = f.end_ns ?? startNs;
@@ -2846,7 +3329,8 @@ function drawFindings(W, H) {
         const isActive = i === selectedFindingIdx;
         const sevCol = _findingSevColor(f.severity);
         const { y: targetY, h: targetH } = _findingStreamRange(f);
-        const baseAlpha = hasActive && !isActive ? 0.1 : 1;
+        const severityAlpha = renderState.mode === 'compact' && f.severity === 'info' ? 0.45 : 1;
+        const baseAlpha = (hasActive && !isActive ? 0.1 : 1) * severityAlpha;
 
         if (f.type === 'region' || f.type === 'highlight') {
             ctx.globalAlpha = baseAlpha;
@@ -2900,7 +3384,7 @@ function drawFindings(W, H) {
 
     // ── Pass 3: Draw annotation lane pills + connecting lines ──
     if (laneH > 0) {
-        for (let i = 0; i < FINDINGS.length; i++) {
+        for (const i of findingIndices) {
             const f = FINDINGS[i];
             const startNs = f.start_ns;
             const endNs = f.end_ns ?? startNs;
@@ -2911,7 +3395,8 @@ function drawFindings(W, H) {
             const midX = (x1 + x2) / 2;
             const isActive = i === selectedFindingIdx;
             const sevCol = _findingSevColor(f.severity);
-            const baseAlpha = hasActive && !isActive ? 0.2 : 1;
+            const severityAlpha = renderState.mode === 'compact' && f.severity === 'info' ? 0.45 : 1;
+            const baseAlpha = (hasActive && !isActive ? 0.2 : 1) * severityAlpha;
             const { y: targetY, h: targetH } = _findingStreamRange(f);
 
             // ── Connecting dotted line from pill to target region ──
@@ -3164,7 +3649,7 @@ function selectFinding(idx) {
     viewEnd = endNs + pad;
     clampView();
     draw();
-    if (PROGRESSIVE) ensureTilesForView(viewStart, viewEnd);
+    afterViewChange();
 }
 
 function toggleFindings() {
