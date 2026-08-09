@@ -845,7 +845,9 @@ def test_diff_cli_exit_on_regression_allows_improvement(tmp_path):
     assert json.loads(result.stdout)["verdict"] == "improvement_likely"
 
 
-def test_diff_cli_exit_on_regression_allows_inconclusive(tmp_path):
+def test_diff_cli_exit_on_regression_blocks_inconclusive(tmp_path):
+    """A gate blocks regressions; a comparison that could not be made has not shown
+    their absence, so it must not exit 0 either."""
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"
     _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
@@ -875,11 +877,113 @@ def test_diff_cli_exit_on_regression_allows_inconclusive(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     payload = json.loads(result.stdout)
     assert payload["verdict"] == "inconclusive"
     assert payload["comparability_confidence"] < 0.5
-    assert "Diff gate failed" not in result.stderr
+    # The reason is stated, not implied by a number.
+    assert "Diff gate could not be evaluated" in result.stderr
+    assert "verdict=inconclusive" in result.stderr
+
+
+@pytest.mark.parametrize("empty_side", ["after", "before", "both"])
+def test_diff_cli_empty_capture_is_not_an_improvement(tmp_path, empty_side):
+    """A capture that recorded nothing must not read as the best result ever seen.
+
+    This is the failure mode that silently green-lights a broken pipeline: the
+    workload crashed, the trace was truncated, nsys was misconfigured, or the
+    wrong artifact was uploaded. Every delta then points the "improvement" way.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    kernels = [(0, 10_000_000, 0, 7, 1, 1, 2), (20_000_000, 30_000_000, 0, 7, 2, 3, 4)]
+    _make_profile(str(before), kernels=[] if empty_side in ("before", "both") else kernels)
+    _make_profile(str(after), kernels=[] if empty_side in ("after", "both") else kernels)
+
+    result = _run_diff_cli(before, after, "--no-ai", "--gate", "5")
+    # 2. The gate does not pass a comparison that could not be made.
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    # 1. No improvement claim in the executive summary.
+    assert "Total GPU time went" not in result.stdout
+    assert "Largest improvement" not in result.stdout
+    # 3. The reason is stated, in the report and on stderr, not implied by a number.
+    assert "no GPU kernel activity" in result.stdout
+    assert "Diff gate could not be evaluated" in result.stderr
+    assert "no GPU kernel activity" in result.stderr
+
+    payload = json.loads(_run_diff_cli(before, after, "--no-ai", "--format", "json").stdout)
+    assert payload["verdict"] == "inconclusive"
+    assert payload["comparability_confidence"] == 0.0
+    assert any("no GPU kernel activity" in w for w in payload["warnings"])
+
+
+def test_empty_side_is_refused_before_the_model_is_asked(tmp_path, monkeypatch):
+    """The LLM path must not narrate a comparison the deterministic path refused.
+
+    ``generate_diff_narrative`` builds a prompt listing "Top improvements" from the
+    same deltas and instructs the model to mention them, so without this an LLM
+    would narrate the vanished kernels as a win directly beneath the refusal.
+    """
+    from nsys_ai.ai import diff_narrative as narrative_module
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("the model was consulted about an empty capture")
+
+    monkeypatch.setattr(narrative_module, "_get_model_and_key", _fail, raising=False)
+    monkeypatch.setattr(
+        "nsys_ai.chat_config._get_model_and_key", _fail, raising=False
+    )
+
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.profile import Profile
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[])
+    with Profile(str(before)) as bp, Profile(str(after)) as ap:
+        summary = diff_profiles(bp, ap, gpu=0)
+
+    result = narrative_module.generate_diff_narrative(summary)
+
+    assert result.ai_narrative is None
+    assert "no GPU kernel activity" in result.executive_summary
+
+
+def test_diff_cli_all_gpu_empty_capture_is_not_an_improvement(tmp_path):
+    """The issue's own invocation: no --gpu, so every device is compared.
+
+    The parametrized test above passes --gpu 0, and on that path an empty side
+    already tripped the pre-existing "Overlap analysis unavailable" warning, so it
+    was inconclusive before this fix too. The reported defect was the all-GPU
+    default: it returned improvement_likely at confidence 1.0 and exit 0, and
+    nothing covered it end to end.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    kernels = [(0, 10_000_000, 0, 7, 1, 1, 2), (20_000_000, 30_000_000, 0, 7, 2, 3, 4)]
+    _make_profile(str(before), kernels=kernels)
+    _make_profile(str(after), kernels=[])
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", str(before), str(after),
+         "--no-ai", "--gate", "5"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 1, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "Total GPU time went" not in result.stdout
+    assert "Largest improvement" not in result.stdout
+    assert "no GPU kernel activity" in result.stdout
+
+    payload = json.loads(
+        subprocess.run(
+            [sys.executable, "-m", "nsys_ai", "diff", str(before), str(after),
+             "--no-ai", "--format", "json"],
+            capture_output=True, text=True,
+        ).stdout
+    )
+    assert payload["verdict"] == "inconclusive"
+    assert payload["comparability_confidence"] == 0.0
 
 
 def _run_diff_cli(before, after, *extra, cwd=None, env=None):
@@ -2565,6 +2669,52 @@ def test_export_schema_mismatch_still_zeros_comparability():
     )
     assert conf == 0.0
     assert any("export schema differs" in w for w in warnings)
+
+
+@pytest.mark.parametrize("empty_side", ["before", "after", "both"])
+def test_empty_kernel_side_zeros_comparability(empty_side):
+    """An empty side is comparability zero, not a 100% improvement.
+
+    Every other ratio in collect_sanity_warnings guards against a zero
+    denominator, so a side with no kernels used to leave confidence at 1.0 and
+    the verdict at improvement_likely.
+    """
+    from nsys_ai.diff import collect_sanity_warnings, compute_verdict
+
+    warnings, conf = collect_sanity_warnings(
+        _summary(kernel_rows=0 if empty_side in ("before", "both") else 100),
+        _summary(kernel_rows=0 if empty_side in ("after", "both") else 100),
+    )
+    assert conf == 0.0
+    # Same wording the `profile` command refuses this condition with.
+    assert any("no GPU kernel activity" in w for w in warnings)
+    expected_subject = (
+        "Both the before and after profiles contain"
+        if empty_side == "both"
+        else f"The {empty_side} profile contains"
+    )
+    assert any(w.startswith(expected_subject) for w in warnings), warnings
+    assert compute_verdict(-100.0, conf) == "inconclusive"
+
+
+def test_executive_summary_refuses_an_empty_capture(tmp_path):
+    """The deterministic summary states the refusal instead of narrating deltas."""
+    from nsys_ai.ai.diff_narrative import build_executive_summary
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.profile import Profile
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[])
+
+    with Profile(str(before)) as bp, Profile(str(after)) as ap:
+        summary = diff_profiles(bp, ap, gpu=0)
+
+    text = build_executive_summary(summary)
+    assert "no GPU kernel activity" in text
+    assert "Total GPU time went" not in text
+    assert "Largest improvement" not in text
 
 
 def test_build_profile_summary_reads_export_schema_not_product_version():

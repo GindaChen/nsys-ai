@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nsys_ai.diff import ProfileDiffSummary
+from nsys_ai.diff import ProfileDiffSummary, empty_kernel_sides, empty_side_subject
 
 
 def _fmt_ns(ns: int) -> str:
@@ -48,6 +48,17 @@ def build_executive_summary(summary: ProfileDiffSummary) -> str:
 
     Does not call any LLM; safe to use when --no-ai or when no API key is set.
     """
+    # An empty side turns every delta below into an artefact of the absence: an
+    # empty after reads as a total win, an empty before as a total regression.
+    # Neither is a measurement. State the refusal instead of narrating arithmetic.
+    empty_sides = empty_kernel_sides(summary.before, summary.after)
+    if empty_sides:
+        return (
+            f"No comparison was made. {empty_side_subject(empty_sides)} no GPU kernel "
+            "activity. A capture that recorded nothing is not a measurement — check that "
+            "the profiled run executed and that the capture is complete."
+        )
+
     delta_ns = summary.after.total_gpu_ns - summary.before.total_gpu_ns
     direction = "faster" if delta_ns < 0 else "slower"
     total_str = f"Total GPU time went {direction} by {_fmt_delta_ns(delta_ns)}."
@@ -116,6 +127,19 @@ def generate_diff_narrative(
     warning may be set; the report still includes the deterministic summary.
     """
     executive_summary = build_executive_summary(summary)
+
+    # An empty side is refused before the model is ever asked. The prompt payload
+    # lists "Top improvements" from the same deltas, and the instruction tells the
+    # model to mention them, so an LLM handed this would narrate the vanished
+    # kernels as a win directly beneath the deterministic refusal. There is
+    # nothing here to narrate: no comparison was made.
+    if empty_kernel_sides(summary.before, summary.after):
+        return DiffNarrative(
+            executive_summary=executive_summary,
+            ai_narrative=None,
+            model=None,
+            warning=None,
+        )
 
     from nsys_ai.chat_config import _get_model_and_key
 

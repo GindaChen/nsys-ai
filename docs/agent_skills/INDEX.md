@@ -37,7 +37,7 @@ nsys-ai diff before.sqlite after.sqlite
 # Machine-readable JSON
 nsys-ai diff before.sqlite after.sqlite --format json
 
-# Fail a CI job on a likely regression verdict
+# Fail a CI job on a likely regression, or on a comparison that could not be made
 nsys-ai diff before.sqlite after.sqlite --format json --exit-on-regression
 
 # Same gate with a custom regression threshold (default 5%)

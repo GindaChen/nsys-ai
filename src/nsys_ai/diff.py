@@ -274,6 +274,18 @@ def build_profile_summary(
     )
 
 
+def empty_kernel_sides(before: ProfileSummary, after: ProfileSummary) -> list[str]:
+    """Return the side labels ("before"/"after") that recorded no GPU kernels."""
+    return [label for label, side in (("before", before), ("after", after)) if not side.kernel_rows]
+
+
+def empty_side_subject(empty_sides: list[str]) -> str:
+    """Sentence subject naming the empty side(s), e.g. "The after profile contains"."""
+    if len(empty_sides) > 1:
+        return "Both the before and after profiles contain"
+    return f"The {empty_sides[0]} profile contains"
+
+
 def collect_sanity_warnings(
     before: ProfileSummary, after: ProfileSummary
 ) -> tuple[list[str], float]:
@@ -281,9 +293,26 @@ def collect_sanity_warnings(
     warnings: list[str] = []
     c_schema = 1.0
     c_gpu = 1.0
+    c_empty = 1.0
     c_workload = 1.0
     c_kernel_overlap = 1.0
     c_overlap = 1.0
+
+    # A side that recorded nothing is the signature of a failed capture: the
+    # workload crashed, the trace was truncated, nsys was misconfigured, or the
+    # wrong artifact was uploaded. Every ratio below is guarded against a zero
+    # denominator and so quietly leaves confidence at 1.0, which turns "we
+    # measured nothing" into "everything got faster". Say so instead, and make
+    # it comparability zero — the same condition `nsys-ai profile` refuses to
+    # publish with "local profile contains no GPU kernel activity".
+    empty_sides = empty_kernel_sides(before, after)
+    if empty_sides:
+        warnings.append(
+            f"{empty_side_subject(empty_sides)} no GPU kernel activity; there is nothing "
+            "to compare against, so no before/after claim can be made. Check that the "
+            "profiled run actually executed and that the capture is complete."
+        )
+        c_empty = 0.0
 
     if (
         before.schema_version
@@ -336,7 +365,9 @@ def collect_sanity_warnings(
         warnings.append("Overlap analysis unavailable (missing kernels or schema).")
         c_overlap = 0.0
 
-    confidence = max(0.0, min(1.0, c_schema * c_gpu * c_workload * c_kernel_overlap * c_overlap))
+    confidence = max(
+        0.0, min(1.0, c_schema * c_gpu * c_empty * c_workload * c_kernel_overlap * c_overlap)
+    )
     # Return unrounded — compute_verdict reads this and the 0.5 gate must
     # not be crossed by rounding artifacts (e.g. 0.4996 -> 0.5).
     # Quantization happens at the serialization boundary in to_diff_json.
