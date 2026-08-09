@@ -68,7 +68,7 @@ def show_help():
     print("    nsys-ai review --session ID              Where a session stands")
     print("    nsys-ai loop <profile>                   Render that session in a browser")
     print("    nsys-ai baseline list                    Named baselines to diff against")
-    print("    See docs/user-guide.md for the whole path end to end.")
+    print("    Full walkthrough: https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md")
     print()
     print("  Skills & Agent:")
     print("    nsys-ai skill list                       List analysis skills")

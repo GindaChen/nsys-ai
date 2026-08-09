@@ -87,3 +87,29 @@ def test_the_agent_persona_is_readable_the_way_persona_py_reads_it():
     assert persona.SYSTEM_PROMPT.strip(), "persona.md loaded but empty"
     assert "{skill_catalog}" in persona.SYSTEM_PROMPT
     assert persona.build_system_prompt().strip()
+
+
+def test_the_pypi_page_links_back_and_has_no_relative_links():
+    """README is shipped as the wheel's long description, so it *is* the PyPI page.
+
+    A relative link renders there as a dead link — 23 of them, including the
+    user guide this project points newcomers at. And with no [project.urls],
+    the page offered no route to the source, the issues or the changelog at all.
+    """
+    import re
+
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "[project.urls]" in text, "PyPI page would have no link back to the project"
+    for required in ("Homepage", "Repository", "Issues"):
+        assert re.search(rf"^{required}\s*=", text, re.MULTILINE), f"missing {required} URL"
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    relative = [
+        target
+        for target in re.findall(r"\]\(([^)]+)\)", readme)
+        if not target.startswith(("http", "#", "mailto:"))
+    ]
+    assert not relative, (
+        "README is the PyPI long description; these links are dead there:\n  "
+        + "\n  ".join(sorted(set(relative)))
+    )

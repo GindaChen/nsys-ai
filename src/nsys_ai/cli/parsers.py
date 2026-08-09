@@ -740,7 +740,7 @@ def _build_parser():
     p.set_defaults(handler=_cmd_review)
 
     # Public commands (simplified)
-    p = sub.add_parser("open", help="Open profile quickly in Perfetto/web/TUI")
+    p = sub.add_parser("open", help="Open profile quickly in the web viewer or TUI")
     p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
     p.add_argument(
         "--gpu", type=int, default=None, help="GPU device ID (default: first GPU in profile)"
