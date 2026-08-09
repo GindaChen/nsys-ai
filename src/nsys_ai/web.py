@@ -10,6 +10,7 @@ Usage:
     nsys-ai perfetto profile.sqlite --gpu 0 --trim 39 42
 """
 
+import gzip
 import json
 import logging
 import os
@@ -49,6 +50,53 @@ def _template_asset_version() -> str:
 
 def _versioned_asset_url(path: str) -> str:
     return f"{path}?v={_template_asset_version()}"
+
+
+#: Below this, the gzip header costs more than the compression saves.
+_MIN_COMPRESS_BYTES = 1024
+
+#: Level 1, not the default 9. Measured on a 932 KB kernel window: level 1 gives
+#: 11.2% of the original in 2.9 ms, level 6 gives 7.9% in 6.3 ms, level 9 gives
+#: 7.2% in 27.2 ms. The whole request currently takes ~7 ms, and the common case
+#: is a browser on the same machine, so the 30 KB that level 6 saves does not pay
+#: for the CPU it costs. Compression runs on the request thread.
+_COMPRESS_LEVEL = 1
+
+
+def _send_body(
+    handler,
+    body: bytes,
+    content_type: str,
+    status: int = 200,
+    extra_headers: dict[str, str] | None = None,
+) -> None:
+    """Write a response body, compressed when the client said it can read it.
+
+    Timeline payloads are highly repetitive JSON — a window of kernels compresses
+    to roughly 7% of its size — and the server prints an SSH port-forward hint on
+    startup, so it is expected to be read over a link where those bytes are the
+    whole cost. Compression is negotiated, never assumed: a client that does not
+    advertise gzip gets the plain body.
+    """
+    encoding = None
+    accepted = handler.headers.get("Accept-Encoding", "") if handler.headers else ""
+    if len(body) >= _MIN_COMPRESS_BYTES and "gzip" in accepted.lower():
+        compressed = gzip.compress(body, compresslevel=_COMPRESS_LEVEL)
+        # Refuse a "compression" that made it bigger (already-compressed content).
+        if len(compressed) < len(body):
+            body = compressed
+            encoding = "gzip"
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    for name, value in (extra_headers or {}).items():
+        handler.send_header(name, value)
+    if encoding:
+        handler.send_header("Content-Encoding", encoding)
+    # Caches must not serve a gzipped body to a client that cannot read it.
+    handler.send_header("Vary", "Accept-Encoding")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 class _ThreadPoolMixIn(socketserver.ThreadingMixIn):
@@ -230,12 +278,12 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         if path == "/api/loop/state":
             self._handle_loop_get()
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache, must-revalidate")
-        self.send_header("Content-Length", str(len(self.html_bytes)))
-        self.end_headers()
-        self.wfile.write(self.html_bytes)
+        _send_body(
+            self,
+            self.html_bytes,
+            "text/html; charset=utf-8",
+            extra_headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     def _serve_asset(self, filename: str, content_type: str):
         """Serve static timeline assets; reload when template files change on disk."""
@@ -253,12 +301,15 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             cache[filename] = (mtime, body)
         else:
             body = cached[1]
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-cache, must-revalidate")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        # timeline.js is ~150 KB and timeline.css ~40 KB of text; both are paid on
+        # every cold load and compress to a fraction of that. Cache-Control stays
+        # as it was: the ?v= token busts the cache, so the browser must revalidate.
+        _send_body(
+            self,
+            body,
+            content_type,
+            extra_headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     def _handle_meta(self):
         """Return profile metadata: time range, GPU list, device count."""
@@ -377,11 +428,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 f"[tile] {start_s:.1f}s–{end_s:.1f}s  done in {elapsed:.3f}s  ({len(body) // 1024}KB)",
                 flush=True,
             )
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            _send_body(self, body, "application/json; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         except Exception as e:
@@ -391,12 +438,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             self._json_response({"error": str(e)}, 500)
 
     def _json_response(self, obj, status=200):
-        body = json.dumps(obj).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        _send_body(
+            self, json.dumps(obj).encode("utf-8"), "application/json; charset=utf-8", status
+        )
 
     def _handle_analyze(self):
         """POST /api/analyze — run EvidenceBuilder, replace all findings."""
@@ -1020,11 +1064,7 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
             self._handle_data()
             return
         # Default: serve evidence HTML
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(self.html_bytes)))
-        self.end_headers()
-        self.wfile.write(self.html_bytes)
+        _send_body(self, self.html_bytes, "text/html; charset=utf-8")
 
     def _serve_asset(self, filename: str, content_type: str):
         path = os.path.join(_TEMPLATE_DIR, filename)
@@ -1041,20 +1081,20 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
             cache[filename] = (mtime, body)
         else:
             body = cached[1]
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-cache, must-revalidate")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        # timeline.js is ~150 KB and timeline.css ~40 KB of text; both are paid on
+        # every cold load and compress to a fraction of that. Cache-Control stays
+        # as it was: the ?v= token busts the cache, so the browser must revalidate.
+        _send_body(
+            self,
+            body,
+            content_type,
+            extra_headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     def _json_response(self, obj, status=200):
-        body = json.dumps(obj).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        _send_body(
+            self, json.dumps(obj).encode("utf-8"), "application/json; charset=utf-8", status
+        )
 
     def _handle_data(self):
         """Return kernel data for a time window from this handler's prebuilt cache."""
@@ -1080,11 +1120,7 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
                     gpu_entries.append(filtered)
             data_json = json.dumps({"gpus": gpu_entries})
             body = data_json.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            _send_body(self, body, "application/json; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         except Exception as e:
@@ -1158,12 +1194,19 @@ class _PerfettoHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(self.trace_bytes)))
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(self.trace_bytes)
+        # The Perfetto trace is the largest thing this server hands out, and it
+        # crosses the network to ui.perfetto.dev's fetch. CORS headers are set
+        # first so they survive on the compressed response too.
+        _send_body(
+            self,
+            self.trace_bytes,
+            "application/json",
+            extra_headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
