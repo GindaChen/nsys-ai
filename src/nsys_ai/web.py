@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import socketserver
 import threading
@@ -238,6 +239,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     _full_nvtx_by_gpu: dict = {}  # device id -> full-range spans, sliced per request
     _overview_bins: list[float] = []  # full-profile kernel activity for the overview strip
     _overview_kernel_count: int = 0
+    _profile_id: str = ""
     _nvtx_prebuild_done: threading.Event | None = None
     _nvtx_prebuild_error: str | None = None
     _asset_cache: dict[str, tuple[float, bytes]] = {}  # filename -> (mtime, body)
@@ -270,6 +272,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/data":
             self._handle_data()
+            return
+        if path == "/api/search":
+            self._handle_search()
             return
         if path == "/api/findings":
             if self.__class__._session_id is not None:
@@ -341,8 +346,82 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 "device_ids": devices,
                 "overview_bins": list(self.__class__._overview_bins),
                 "overview_kernel_count": self.__class__._overview_kernel_count,
+                "profile_id": self.__class__._profile_id,
             }
         )
+
+    def _handle_search(self):
+        """Search the complete pre-built profile, including unloaded tiles."""
+        from urllib.parse import parse_qs, urlparse
+
+        qs = parse_qs(urlparse(self.path).query)
+        query = str(qs.get("q", [""])[0]).strip()
+        if len(query) > 256:
+            self._json_response({"error": "search query is limited to 256 characters"}, 400)
+            return
+        try:
+            limit = max(1, min(500, int(qs.get("limit", [100])[0])))
+        except (TypeError, ValueError):
+            limit = 100
+        regex = str(qs.get("regex", ["0"])[0]).lower() in ("1", "true", "yes")
+        if not query:
+            self._json_response({"query": "", "matches": [], "count": 0, "truncated": False})
+            return
+        done = self.__class__._nvtx_prebuild_done
+        if done is not None:
+            done.wait()
+        pattern = query
+        if not regex and query.startswith("/") and query.rfind("/") > 0:
+            slash = query.rfind("/")
+            pattern = query[1:slash]
+            regex = True
+        try:
+            matcher = re.compile(pattern, re.IGNORECASE) if regex else None
+        except re.error as exc:
+            self._json_response({"error": f"invalid regex: {exc}"}, 400)
+            return
+        needle = pattern.lower()
+        matches = []
+        total = 0
+        for gpu_entry in self.__class__._prebuilt_data:
+            gpu_id = gpu_entry.get("id")
+            for kernel in gpu_entry.get("kernels", []):
+                name = str(kernel.get("name", ""))
+                if (matcher.search(name) if matcher else needle in name.lower()):
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({
+                            "kind": "kernel",
+                            "gpu": gpu_id,
+                            "name": name,
+                            "start_ns": kernel.get("start_ns", 0),
+                            "end_ns": kernel.get("end_ns", 0),
+                            "stream": kernel.get("stream"),
+                            "path": kernel.get("path", ""),
+                        })
+            spans = self.__class__._full_nvtx_by_gpu.get(gpu_id, gpu_entry.get("nvtx_spans", []))
+            for span in spans:
+                name = str(span.get("name", ""))
+                if (matcher.search(name) if matcher else needle in name.lower()):
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({
+                            "kind": "nvtx",
+                            "gpu": gpu_id,
+                            "name": name,
+                            "start_ns": span.get("start", 0),
+                            "end_ns": span.get("end", 0),
+                            "stream": None,
+                            "path": span.get("path", ""),
+                        })
+        matches.sort(key=lambda item: (item["start_ns"], item["kind"], item["name"]))
+        self._json_response({
+            "query": query,
+            "matches": matches,
+            "count": total,
+            "truncated": total > limit,
+            "scope": "profile",
+        })
 
     def _handle_data(self):
         """Return kernel/NVTX data for a requested time window (from pre-built cache)."""
@@ -899,6 +978,7 @@ def serve_timeline(
     _ViewerHandler._full_nvtx_by_gpu = {}
     _ViewerHandler._overview_bins = []
     _ViewerHandler._overview_kernel_count = 0
+    _ViewerHandler._profile_id = ""
     _ViewerHandler._nvtx_prebuild_done = None
     _ViewerHandler._nvtx_prebuild_error = None
     _ViewerHandler._findings = findings_data or []
@@ -908,6 +988,14 @@ def serve_timeline(
 
     raw_path = prof.path if hasattr(prof, "path") else ""
     _profile_path = os.fspath(raw_path) if raw_path else ""
+    try:
+        from .fingerprint import get_profile_id
+
+        _ViewerHandler._profile_id = get_profile_id(
+            prof.query_conn(), fallback_path=_profile_path or None
+        )
+    except Exception as exc:
+        _log.debug("Could not derive profile id: %s", exc, exc_info=True)
 
     preset = detect_h100_replay_preset() if loop_h100_preset else None
     if preset:
@@ -964,6 +1052,7 @@ def serve_timeline(
             trim,
             findings_data=findings_data,
             profile_path=_profile_path,
+            profile_id=_ViewerHandler._profile_id,
             loop_mode=_in_loop_mode,
             timeline_css_href=_css_href,
             timeline_js_src=_js_src,
@@ -977,6 +1066,7 @@ def serve_timeline(
             None,
             findings_data=findings_data,
             profile_path=_profile_path,
+            profile_id=_ViewerHandler._profile_id,
             loop_mode=_in_loop_mode,
             timeline_css_href=_css_href,
             timeline_js_src=_js_src,

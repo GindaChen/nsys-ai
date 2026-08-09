@@ -291,6 +291,7 @@ def generate_timeline_html(
     timeline_js_src: str = "/assets/timeline.js",
     api_prefix: str = "",
     profile_path: str = "",
+    profile_id: str | None = None,
     loop_mode: bool = False,
 ) -> str:
     """Generate a standalone HTML page with the horizontal timeline viewer.
@@ -302,6 +303,16 @@ def generate_timeline_html(
     from collections.abc import Sequence
 
     devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+
+    if profile_id is None:
+        try:
+            from .fingerprint import get_profile_id
+
+            profile_id = get_profile_id(
+                prof.query_conn(), fallback_path=getattr(prof, "path", None)
+            )
+        except Exception:
+            profile_id = ""
 
     # Build GPU info list (for dropdown) and compact label
     gpu_details = []
@@ -345,6 +356,7 @@ def generate_timeline_html(
     safe_profile_path_json = _escape_json_for_html_script(
         json.dumps(profile_path) if profile_path is not None else "null"
     )
+    safe_profile_id_json = _escape_json_for_html_script(json.dumps(profile_id or ""))
     safe_loop_trim_ns_json = _escape_json_for_html_script(loop_trim_ns_json)
 
     tmpl = _load_template("timeline.html")
@@ -360,6 +372,7 @@ def generate_timeline_html(
         API_PREFIX=api_prefix,
         FINDINGS_JSON=safe_findings_json,
         PROFILE_PATH=safe_profile_path_json,
+        PROFILE_ID=safe_profile_id_json,
         LOOP_TRIM_NS=safe_loop_trim_ns_json,
         LOOP_MODE="1" if loop_mode else "0",
     )

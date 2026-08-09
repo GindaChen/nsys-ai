@@ -161,6 +161,7 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert 'id="loopBtn"' in html
     assert 'id="loopSidebar"' in html
     assert "LOOP_TRIM_NS" in html
+    assert "PROFILE_ID" in html
 
 
 def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):

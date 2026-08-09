@@ -1010,7 +1010,7 @@
 
         /* ── Findings sidebar ── */
         #findingsSidebar {
-            width: 300px;
+            width: 360px;
             flex-shrink: 0;
             display: none;
             flex-direction: column;
@@ -1632,8 +1632,34 @@
             padding: 4px 0;
         }
 
+        .evidence-filters {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            padding: 7px 10px 6px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(13, 17, 23, 0.28);
+        }
+
+        .evidence-filter {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 3px 7px;
+            color: var(--text-dim);
+            background: transparent;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
+        .evidence-filter:hover,
+        .evidence-filter.active {
+            color: var(--text);
+            border-color: var(--accent-dim);
+            background: rgba(88,166,255,0.12);
+        }
+
         .finding-card {
-            padding: 10px 12px;
+            padding: 9px 12px;
             border-bottom: 1px solid var(--border);
             cursor: pointer;
             border-left: 4px solid transparent;
@@ -1704,6 +1730,12 @@
             -webkit-line-clamp: 2;
             -webkit-box-orient: vertical;
             overflow: hidden;
+        }
+
+        /* The canvas carries location only; the sidebar carries explanation. */
+        .finding-card.active .fc-note {
+            -webkit-line-clamp: 5;
+            color: var(--text);
         }
 
         /* Chat finding links — [Finding N] clickable references */

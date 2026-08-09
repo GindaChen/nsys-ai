@@ -121,6 +121,12 @@
                 <span class="findings-badge" id="findingsCount"></span>
                 <button onclick="toggleFindings()" title="Close">✕</button>
             </div>
+            <div id="findingsFilters" class="evidence-filters" aria-label="Filter evidence by severity">
+                <button type="button" class="evidence-filter active" data-severity="all">All</button>
+                <button type="button" class="evidence-filter" data-severity="critical">● Critical</button>
+                <button type="button" class="evidence-filter" data-severity="warning">▲ Warning</button>
+                <button type="button" class="evidence-filter" data-severity="info">● Info</button>
+            </div>
             <div id="findingsList"></div>
         </div>
         <div id="loopSidebar" data-loop-ui="2">
@@ -371,6 +377,7 @@
             TILE_WINDOW_S: 5,
             FINDINGS: $FINDINGS_JSON,
             PROFILE_PATH: $PROFILE_PATH,
+            PROFILE_ID: $PROFILE_ID,
             LOOP_TRIM_NS: $LOOP_TRIM_NS,
             LOOP_MODE: '$LOOP_MODE' === '1',
         };

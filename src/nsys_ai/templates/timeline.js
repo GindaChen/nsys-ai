@@ -478,6 +478,13 @@ function overviewRangeNs() {
     return [timeStart, timeEnd];
 }
 
+function profileRangeNs() {
+    const range = overviewRangeNs();
+    const lo = Number.isFinite(range[0]) ? range[0] : 0;
+    const hi = Number.isFinite(range[1]) && range[1] > lo ? range[1] : lo + 1;
+    return [lo, hi];
+}
+
 function rebuildOverviewHistogram() {
     if (profileMeta && Array.isArray(profileMeta.overview_bins) && profileMeta.overview_bins.length) {
         const max = Math.max(...profileMeta.overview_bins, 1);
@@ -550,6 +557,14 @@ function drawOverview() {
     overviewCtx.fillStyle = '#79b8ff';
     overviewCtx.fillRect(Math.max(0, x1 - 1), 0, 3, height);
     overviewCtx.fillRect(Math.min(width - 2, x2 - 1), 0, 3, height);
+    if (overviewSelecting) {
+        const sx = Math.max(0, Math.min(width, (overviewSelectStartNs - lo) / fullSpan * width));
+        const ex = Math.max(0, Math.min(width, (overviewSelectEndNs - lo) / fullSpan * width));
+        overviewCtx.fillStyle = 'rgba(210, 168, 255, 0.24)';
+        overviewCtx.fillRect(Math.min(sx, ex), 0, Math.max(2, Math.abs(ex - sx)), height);
+        overviewCtx.strokeStyle = '#d2a8ff';
+        overviewCtx.strokeRect(Math.min(sx, ex) + 0.5, 1.5, Math.max(1, Math.abs(ex - sx) - 1), height - 3);
+    }
 }
 
 // ── Initialization ──
@@ -573,7 +588,7 @@ async function initData() {
         // Check for saved viewport
         let restored = false;
         try {
-            const saved = JSON.parse(localStorage.getItem(_viewKey));
+            const saved = JSON.parse(localStorage.getItem(viewStorageKey()));
             if (saved && saved.s !== undefined && saved.e !== undefined) {
                 // Set view first so NVTX fetch targets the correct viewport/GPU.
                 viewStart = saved.s;
@@ -585,10 +600,11 @@ async function initData() {
             }
         } catch (e) { }
         if (!restored) {
-            // Default view: first 5 seconds
-            const firstEnd = TILE_WINDOW_S;
-            viewStart = 0;
-            viewEnd = firstEnd * 1e9;
+            // Default view starts at the profile's actual first event. Profiles
+            // exported from Nsight commonly have a non-zero epoch-relative start.
+            const [profileStart, profileEnd] = profileRangeNs();
+            viewStart = profileStart;
+            viewEnd = Math.min(profileEnd, profileStart + TILE_WINDOW_S * 1e9);
             await ensureTilesForView(viewStart, viewEnd);
             rebuildDataFromCache();
             resetViewHistory();
@@ -616,6 +632,10 @@ let selectedNvtxThread = 'auto';
 let searchQuery = '';
 let searchKernelMatches = new Set();
 let searchNvtxMatches = new Set();
+let searchResults = [];
+let searchGlobalCount = 0;
+let searchTimer = null;
+let searchRequestSerial = 0;
 let isDragging = false, dragStartX = 0, dragViewStart = 0, dragViewEnd = 0;
 let isSelecting = false, selectStartX = 0, selectStartNs = 0, selectEndNs = 0;
 let isResizingDetail = false, detailResizeStartY = 0, detailResizeStartH = 0;
@@ -628,6 +648,9 @@ let overviewDirty = true;
 let overviewDragging = false;
 let overviewDragOffset = 0;
 let overviewDragSpan = 0;
+let overviewSelecting = false;
+let overviewSelectStartNs = 0;
+let overviewSelectEndNs = 0;
 let renderStateCacheKey = '';
 let renderStateCache = null;
 const RENDER_SETTINGS_KEY = 'timeline-render-settings-v1';
@@ -653,7 +676,8 @@ let fitZoomState = null;
 // ── Layout constants ──
 const LABEL_W = isMultiGPU ? 110 : 90;
 const RULER_H = 24;
-const FINDINGS_LANE_H = 28;  // dedicated annotation lane for AI findings
+const FINDINGS_LANE_H = 58;  // three compact rows keep overlapping findings readable
+const FINDING_ROW_H = 18;
 const NVTX_ROW_H = 20;
 const NVTX_PIN_ROWS = 5;
 const STREAM_H = 32;
@@ -1179,10 +1203,25 @@ function timelineRenderState(W) {
     let repeatedItems = 0;
     let repeatedGroups = 0;
     const names = new Map();
+    const visibleByStream = new Map();
+    const lowerBound = (items, value, field) => {
+        let lo = 0, hi = items.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (items[mid][field] < value) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
     for (const sid of streamIds) {
         if (hiddenStreams.has(sid)) continue;
-        for (const k of (streamMap[sid] || [])) {
-            if (!kernelOverlapsView(k)) continue;
+        const all = streamMap[sid] || [];
+        let first = lowerBound(all, viewStart, 'start_ns');
+        while (first > 0 && all[first - 1].end_ns >= viewStart) first--;
+        const last = lowerBound(all, viewEnd, 'start_ns');
+        const visible = all.slice(first, Math.min(all.length, last + 1)).filter(kernelOverlapsView);
+        visibleByStream.set(sid, visible);
+        for (const k of visible) {
             visibleKernels++;
             const name = String(k.name || '(unnamed)');
             names.set(name, (names.get(name) || 0) + 1);
@@ -1207,6 +1246,7 @@ function timelineRenderState(W) {
         visibleKernels,
         repeatedGroups,
         repeatedItems,
+        visibleByStream,
         condensedNvtx: 0,
     };
     renderStateCacheKey = key;
@@ -1580,7 +1620,7 @@ function drawStreams(W, H, renderState) {
     for (let si = 0; si < streamIds.length; si++) {
         const sid = streamIds[si];
         if (hiddenStreams.has(sid)) continue;  // skip hidden streams
-        const ks = streamMap[sid];
+        const ks = renderState.visibleByStream.get(sid) || [];
         const y = streamY(si) + (isMultiGPU && gpuBands[0].startIdx === 0 ? GPU_SEP_H : 0);
         const isSelected = si === selectedStreamIdx;
         const color = streamColor(si);
@@ -1613,7 +1653,6 @@ function drawStreams(W, H, renderState) {
         } else {
             const seenLabels = new Set();
             for (const k of ks) {
-                if (!kernelOverlapsView(k)) continue;
                 const width = Math.max(MIN_BLOCK_W, nsToX(k.end_ns) - nsToX(k.start_ns));
                 const emphasized = isKernelEmphasized(k);
                 let label = width > 20;
@@ -1659,8 +1698,12 @@ function hitTest(mx, my) {
     for (let si = 0; si < streamIds.length; si++) {
         const y = streamY(si) + (isMultiGPU && gpuBands[0].startIdx === 0 ? GPU_SEP_H : 0);
         if (my < y || my > y + STREAM_H) continue;
-        const ks = streamMap[streamIds[si]];
-        for (const k of ks) {
+        const state = timelineRenderState(canvas.width / DPR);
+        const ks = state.visibleByStream.get(streamIds[si]) || [];
+        // Iterate backwards: later/shorter blocks are painted on top and are
+        // the ones a user can actually see and click.
+        for (let ki = ks.length - 1; ki >= 0; ki--) {
+            const k = ks[ki];
             const x1 = Math.max(LABEL_W, nsToX(k.start_ns));
             const x2 = Math.min(canvas.width / DPR, nsToX(k.end_ns));
             if (mx >= x1 && mx <= Math.max(x1 + MIN_BLOCK_W, x2)) {
@@ -1760,7 +1803,10 @@ function renderPathHtml(path) {
 let _viewChangeTimer = null;
 let _tileLoadTimer = null;
 const _viewLabel = (typeof BOOT.GPU_LABEL === 'string' && BOOT.GPU_LABEL) ? BOOT.GPU_LABEL : 'timeline';
-const _viewKey = 'timeline-view-' + _viewLabel.replace(/[^a-zA-Z0-9]/g, '_');
+function viewStorageKey() {
+    const identity = (profileMeta && profileMeta.profile_id) || BOOT.PROFILE_ID || _viewLabel;
+    return 'timeline-view-' + String(identity).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
 function resetViewHistory() {
     viewHistory = [{ start: viewStart, end: viewEnd }];
     viewHistoryIndex = 0;
@@ -1805,7 +1851,7 @@ function goForwardView() {
 function afterViewChange({ record = true, deferLoad = false } = {}) {
     if (record) recordViewHistory();
     // Persist viewport to localStorage
-    try { localStorage.setItem(_viewKey, JSON.stringify({ s: viewStart, e: viewEnd, t: Date.now() })); } catch (e) { }
+    try { localStorage.setItem(viewStorageKey(), JSON.stringify({ s: viewStart, e: viewEnd, t: Date.now() })); } catch (e) { }
     if (PROGRESSIVE) {
         clearTimeout(_tileLoadTimer);
         if (deferLoad) {
@@ -1825,9 +1871,13 @@ function afterViewChange({ record = true, deferLoad = false } = {}) {
 }
 
 function clampView() {
-    const minNs = 0;  // time is never negative
-    const maxNs = profileMeta ? profileMeta.time_range_ns[1] : timeEnd;
-    const span = viewEnd - viewStart;
+    const [minNs, maxNs] = profileRangeNs();
+    const span = Math.max(1, viewEnd - viewStart);
+    if (span >= maxNs - minNs) {
+        viewStart = minNs;
+        viewEnd = maxNs;
+        return;
+    }
     if (viewStart < minNs) { viewStart = minNs; viewEnd = minNs + span; }
     if (viewEnd > maxNs) { viewEnd = maxNs; viewStart = maxNs - span; }
     // Final clamp in case span > total range
@@ -1858,8 +1908,8 @@ function zoomAt(factor, centerNs) {
 function zoomIn() { zoomAt(0.5); }
 function zoomOut() { zoomAt(2); }
 function fitAll() {
-    const maxNs = profileMeta ? profileMeta.time_range_ns[1] : timeEnd;
-    viewStart = 0;
+    const [minNs, maxNs] = profileRangeNs();
+    viewStart = minNs;
     viewEnd = maxNs;
     clampView();
     draw();
@@ -2395,14 +2445,36 @@ function onSearch() {
         });
         const modeLabel = isRegex ? ' (regex)' : '';
         document.getElementById('searchHint').textContent =
-            `${searchKernelMatches.size} kernels, ${searchNvtxMatches.size} NVTX${modeLabel}`;
+            `${searchKernelMatches.size} loaded kernels, ${searchNvtxMatches.size} loaded NVTX${modeLabel}`;
     } else {
         document.getElementById('searchHint').textContent = '';
+    }
+    clearTimeout(searchTimer);
+    searchResults = [];
+    searchGlobalCount = 0;
+    if (raw && PROGRESSIVE) {
+        const serial = ++searchRequestSerial;
+        searchTimer = setTimeout(async () => {
+            try {
+                const pfx = BOOT.API_PREFIX || '';
+                const resp = await fetch(`${pfx}/api/search?q=${encodeURIComponent(raw)}&limit=200`);
+                const data = await resp.json();
+                if (serial !== searchRequestSerial || data.error) return;
+                searchResults = Array.isArray(data.matches) ? data.matches : [];
+                searchGlobalCount = Number(data.count || searchResults.length);
+                const suffix = data.truncated ? '+' : '';
+                document.getElementById('searchHint').textContent =
+                    `${searchGlobalCount}${suffix} profile matches · ${searchKernelMatches.size} loaded here`;
+                draw();
+            } catch (e) {
+                // Local matches remain useful if the server search is unavailable.
+            }
+        }, 220);
     }
     draw();
 }
 
-function gotoFirstSearchMatch() {
+async function gotoFirstSearchMatch() {
     if (!searchQuery) return;
     const kernel = kernels.find(k => searchKernelMatches.has(k));
     if (kernel) {
@@ -2410,6 +2482,25 @@ function gotoFirstSearchMatch() {
         if (si >= 0) selectedStreamIdx = si;
         selectKernel(kernel);
         ensureVisible(kernel);
+        return;
+    }
+    const global = searchResults[0];
+    if (global && global.kind === 'kernel') {
+        const pad = Math.max(1e6, (global.end_ns - global.start_ns) * 2);
+        viewStart = global.start_ns - pad;
+        viewEnd = global.end_ns + pad;
+        clampView();
+        if (PROGRESSIVE) await ensureTilesForView(viewStart, viewEnd);
+        rebuildDataFromCache();
+        const loaded = kernels.find(k => k._gpu === global.gpu &&
+            k.start_ns === global.start_ns && k.end_ns === global.end_ns &&
+            String(k.name) === String(global.name));
+        if (loaded) {
+            selectKernel(loaded);
+            ensureVisible(loaded);
+        } else {
+            draw();
+        }
         return;
     }
     const { spans } = activeGpuNvtxSpans();
@@ -2641,10 +2732,24 @@ function updateFromOverview(clientX) {
     draw();
 }
 
+function overviewNsAt(clientX) {
+    const rect = overviewCanvas.getBoundingClientRect();
+    const [lo, hi] = overviewRangeNs();
+    const px = Math.max(0, Math.min(rect.width, clientX - rect.left));
+    return lo + px / Math.max(rect.width, 1) * Math.max(hi - lo, 1);
+}
+
 if (overviewCanvas) {
     overviewCanvas.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
         e.preventDefault();
+        if (e.shiftKey) {
+            overviewSelecting = true;
+            overviewSelectStartNs = overviewNsAt(e.clientX);
+            overviewSelectEndNs = overviewSelectStartNs;
+            drawOverview();
+            return;
+        }
         const rect = overviewCanvas.getBoundingClientRect();
         const [lo, hi] = overviewRangeNs();
         const fullSpan = Math.max(hi - lo, 1);
@@ -2659,14 +2764,36 @@ if (overviewCanvas) {
         updateFromOverview(e.clientX);
     });
     overviewCanvas.addEventListener('mousemove', e => {
-        if (overviewDragging) updateFromOverview(e.clientX);
+        if (overviewSelecting) {
+            overviewSelectEndNs = overviewNsAt(e.clientX);
+            drawOverview();
+        } else if (overviewDragging) updateFromOverview(e.clientX);
     });
     overviewCanvas.addEventListener('mouseup', () => {
+        if (overviewSelecting) {
+            overviewSelecting = false;
+            const start = Math.min(overviewSelectStartNs, overviewSelectEndNs);
+            const end = Math.max(overviewSelectStartNs, overviewSelectEndNs);
+            if (end - start >= 100) {
+                viewStart = start;
+                viewEnd = end;
+                clampView();
+                afterViewChange();
+                draw();
+            } else {
+                drawOverview();
+            }
+            return;
+        }
         if (!overviewDragging) return;
         overviewDragging = false;
         afterViewChange();
     });
     overviewCanvas.addEventListener('mouseleave', () => {
+        if (overviewSelecting) {
+            overviewSelecting = false;
+            drawOverview();
+        }
         if (!overviewDragging) return;
         overviewDragging = false;
         afterViewChange();
@@ -2829,6 +2956,7 @@ document.addEventListener('keydown', e => {
             document.querySelectorAll('.finding-card').forEach(el => el.classList.remove('active'));
             showDetail(null);
             searchQuery = ''; searchKernelMatches.clear(); searchNvtxMatches.clear();
+            searchResults = []; searchGlobalCount = 0; clearTimeout(searchTimer);
             document.getElementById('searchInput').value = '';
             document.getElementById('searchHint').textContent = '';
             document.getElementById('gpuInfoPanel').style.display = 'none';
@@ -3199,6 +3327,7 @@ setTimeout(initData, 0);
 
 // ── Findings Evidence Layer ──
 let selectedFindingIdx = -1;
+let findingSeverityFilter = 'all';
 
 function _findingSevColor(sev) {
     if (sev === 'critical') return '#ff4444';
@@ -3258,6 +3387,30 @@ function findingIndicesForRender(renderState) {
     }
     renderState.hiddenInfoFindings = hiddenInfo;
     return visible;
+}
+
+// Pack annotation pills into a few compact rows so overlapping findings do not
+// hide one another. Critical and warning findings are assigned first.
+function findingLaneFor(index, indices) {
+    const ordered = indices.slice().sort((a, b) => {
+        const rank = { critical: 0, warning: 1, info: 2 };
+        return (rank[FINDINGS[a].severity] ?? 3) - (rank[FINDINGS[b].severity] ?? 3)
+            || FINDINGS[a].start_ns - FINDINGS[b].start_ns || a - b;
+    });
+    const laneEnds = [];
+    for (const i of ordered) {
+        const f = FINDINGS[i];
+        const x1 = Math.max(LABEL_W, nsToX(f.start_ns));
+        const x2 = Math.min(canvas.width / DPR, nsToX(f.end_ns ?? f.start_ns));
+        let lane = laneEnds.findIndex(end => end < x1 - 2);
+        if (lane < 0) {
+            lane = Math.min(laneEnds.length, Math.floor(FINDINGS_LANE_H / FINDING_ROW_H) - 1);
+            if (lane === laneEnds.length) laneEnds.push(0);
+        }
+        laneEnds[lane] = Math.max(x2, x1 + 24);
+        if (i === index) return lane;
+    }
+    return 0;
 }
 
 function drawFindings(W, H) {
@@ -3332,6 +3485,11 @@ function drawFindings(W, H) {
         const severityAlpha = renderState.mode === 'compact' && f.severity === 'info' ? 0.45 : 1;
         const baseAlpha = (hasActive && !isActive ? 0.1 : 1) * severityAlpha;
 
+        // Keep the overview quiet: only critical regions or the selected
+        // finding paint the stream area. All findings remain discoverable as
+        // compact pills and in the Evidence sidebar.
+        if (!isActive && f.severity !== 'critical') continue;
+
         if (f.type === 'region' || f.type === 'highlight') {
             ctx.globalAlpha = baseAlpha;
 
@@ -3399,21 +3557,25 @@ function drawFindings(W, H) {
             const baseAlpha = (hasActive && !isActive ? 0.2 : 1) * severityAlpha;
             const { y: targetY, h: targetH } = _findingStreamRange(f);
 
-            // ── Connecting dotted line from pill to target region ──
-            ctx.globalAlpha = baseAlpha * (isActive ? 0.6 : 0.25);
-            ctx.strokeStyle = sevCol;
-            ctx.lineWidth = isActive ? 1.5 : 1;
-            ctx.setLineDash(isActive ? [6, 3] : [3, 5]);
-            ctx.beginPath();
-            ctx.moveTo(midX, laneY + laneH);
-            ctx.lineTo(midX, targetY);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.lineWidth = 1;
+            // Connecting lines are only useful for the active finding; drawing
+            // one for every pill creates a dense web over the timeline.
+            if (isActive) {
+                ctx.globalAlpha = baseAlpha * 0.6;
+                ctx.strokeStyle = sevCol;
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([6, 3]);
+                ctx.beginPath();
+                ctx.moveTo(midX, laneY + laneH);
+                ctx.lineTo(midX, targetY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.lineWidth = 1;
+            }
 
             // ── Pill bar in annotation lane ──
-            const pillH = laneH - 6;
-            const pillY = laneY + 3;
+            const lane = findingLaneFor(i, findingIndices);
+            const pillH = FINDING_ROW_H - 5;
+            const pillY = laneY + 3 + lane * FINDING_ROW_H;
             const pillX1 = Math.max(LABEL_W + 2, x1);
             const pillX2 = Math.min(W - 2, x2);
             let pillW = Math.max(pillX2 - pillX1, 24);  // min 24px
@@ -3515,14 +3677,21 @@ function _findingsHitTest(mx, my) {
     const laneH = findingsLaneH();
 
     // Check annotation lane pills
+    const renderState = timelineRenderState(canvas.width / DPR);
+    const findingIndices = findingIndicesForRender(renderState);
     if (laneH > 0 && my >= laneY && my <= laneY + laneH) {
-        for (let i = FINDINGS.length - 1; i >= 0; i--) {
+        for (let pos = findingIndices.length - 1; pos >= 0; pos--) {
+            const i = findingIndices[pos];
             const f = FINDINGS[i];
             const startNs = f.start_ns;
             const endNs = f.end_ns ?? startNs;
             if (endNs < viewStart || startNs > viewEnd) continue;
             const x1 = Math.max(LABEL_W, nsToX(startNs));
             const x2 = Math.min(canvas.width / DPR, nsToX(endNs));
+            const lane = findingLaneFor(i, findingIndices);
+            const pillH = FINDING_ROW_H - 5;
+            const pillY = laneY + 3 + lane * FINDING_ROW_H;
+            if (my < pillY || my > pillY + pillH) continue;
             const pillW = Math.max(x2 - x1, 24);
             const clampedX = Math.max(LABEL_W + 2, Math.min(x1, canvas.width / DPR - pillW - 2));
             if (mx >= clampedX && mx <= clampedX + pillW) {
@@ -3532,7 +3701,8 @@ function _findingsHitTest(mx, my) {
     }
 
     // Check stream-area region/highlight overlays
-    for (let i = FINDINGS.length - 1; i >= 0; i--) {
+    for (let pos = findingIndices.length - 1; pos >= 0; pos--) {
+        const i = findingIndices[pos];
         const f = FINDINGS[i];
         const startNs = f.start_ns;
         const endNs = f.end_ns ?? startNs;
@@ -3566,15 +3736,37 @@ function _initFindingsSidebar() {
     const badge = document.getElementById('findingsCount');
     if (badge) {
         const crit = FINDINGS.filter(f => f.severity === 'critical').length;
-        badge.textContent = FINDINGS.length + ' finding' + (FINDINGS.length !== 1 ? 's' : '');
+        const warn = FINDINGS.filter(f => f.severity === 'warning').length;
+        const info = FINDINGS.length - crit - warn;
+        badge.textContent = `${FINDINGS.length} · ${crit} critical · ${warn} warning · ${info} info`;
         if (crit) badge.style.background = 'rgba(255,68,68,0.2)';
     }
 
     const list = document.getElementById('findingsList');
     if (!list) return;
+    const filterBar = document.getElementById('findingsFilters');
+    if (filterBar && !filterBar.dataset.bound) {
+        filterBar.dataset.bound = '1';
+        filterBar.querySelectorAll('.evidence-filter').forEach(button => {
+            button.addEventListener('click', () => {
+                findingSeverityFilter = button.dataset.severity || 'all';
+                filterBar.querySelectorAll('.evidence-filter').forEach(item =>
+                    item.classList.toggle('active', item === button));
+                _initFindingsSidebar();
+            });
+        });
+    }
     list.innerHTML = '';  // Clear existing cards for re-initialization
 
-    FINDINGS.forEach((f, i) => {
+    const severityRank = { critical: 0, warning: 1, info: 2 };
+    const orderedIndices = FINDINGS.map((f, i) => i)
+      .filter(i => findingSeverityFilter === 'all' || FINDINGS[i].severity === findingSeverityFilter)
+      .sort((a, b) =>
+        (severityRank[FINDINGS[a].severity] ?? 3) - (severityRank[FINDINGS[b].severity] ?? 3)
+        || FINDINGS[a].start_ns - FINDINGS[b].start_ns || a - b
+    );
+    orderedIndices.forEach(i => {
+        const f = FINDINGS[i];
         const card = document.createElement('div');
         card.className = 'finding-card';
         card.dataset.idx = i;
@@ -3634,8 +3826,7 @@ function selectFinding(idx) {
                 (f.gpu_id != null ? ' · GPU ' + f.gpu_id : '') +
                 (f.stream != null ? ' · Stream ' + f.stream : '') +
             '</div>' +
-            (f.note ? '<div style="font-size:11px;color:#e6edf3;margin-top:6px;white-space:pre-wrap;line-height:1.5">' +
-                _esc(f.note) + '</div>' : '');
+            '<div style="font-size:10px;color:#8b949e;margin-top:6px">Full explanation is in the Evidence panel.</div>';
     }
 
     // ── Smart zoom: center the finding, range = 50% of viewport ──
