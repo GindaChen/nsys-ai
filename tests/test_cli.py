@@ -1134,3 +1134,37 @@ def test_the_perfetto_ui_integration_is_gone_but_the_export_remains():
         capture_output=True, text=True,
     )
     assert result.returncode != 0
+
+
+def test_no_help_text_offers_a_command_that_was_removed():
+    """A removal is not finished while the help still advertises it.
+
+    Deleting `nsys-ai perfetto` left two strings behind that six independent
+    end-to-end passes all found: the `open` subcommand description, and the same
+    row in README.md — which setuptools ships as the wheel's long description, so
+    it is the PyPI landing page.
+
+    `export`'s "Perfetto JSON traces" is deliberately still true: that names the
+    Chrome Trace Event format, which the export still produces.
+    """
+    from pathlib import Path
+
+    removed_offers = []
+    for line in _help_screen().splitlines() + subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "--help"], capture_output=True, text=True
+    ).stdout.splitlines():
+        if "erfetto" not in line:
+            continue
+        if line.strip().startswith("export") or "export" in line.split("Perfetto")[0]:
+            continue  # the format, not the command
+        removed_offers.append(line.strip())
+    assert not removed_offers, (
+        "help text still offers the removed perfetto viewer:\n  " + "\n  ".join(removed_offers)
+    )
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    open_rows = [
+        line for line in readme.splitlines()
+        if line.startswith("| `open`") and "erfetto" in line
+    ]
+    assert not open_rows, f"README still offers perfetto under `open`: {open_rows}"

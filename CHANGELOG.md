@@ -5,9 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-08-10
+
+### Removed
+
+- `nsys-ai perfetto` and `open --viewer perfetto`. The command served the trace
+  from a local port with `Access-Control-Allow-Origin: *` so that
+  `ui.perfetto.dev` — a page this project does not run — could fetch it, which
+  meant the feature needed an internet connection on machines that often have
+  none, and the wide-open CORS header existed only to serve it. It could not
+  take part in the loop either: it received a flat list of kernels and NVTX
+  spans, read-only. **`nsys-ai export` is unchanged** — Chrome Trace Event JSON
+  is a format rather than a service, and the exported file can still be opened
+  in Perfetto by anyone who wants to. `open --viewer` now defaults to `web`.
 
 ### Added
+
+- `nsys-ai optimize <profile> --repo <path> -- <command>` carries one baseline
+  profile to a recorded decision in a single command: diagnose, propose, capture
+  the verification run from the proposal's own RunSpec, diff, decide. It writes
+  no new analysis — every step already existed and this composes them. It stops
+  before re-profiling when the proposal abstains, exits non-zero when the loop
+  does not complete, and resumes from the session store rather than from memory,
+  so an interrupted run does not repeat the capture it already made.
+- `nsys-ai diagnose <profile>` and `nsys-ai review` are thin verbs over the
+  evidence pack and the canonical diff. `diagnose` publishes findings to a
+  session and prints the next command with its arguments filled in; `review`
+  resumes a session and reports where its decision stands, or compares a pair
+  without owning a session. `review`'s pair output is byte-identical to
+  `diff --no-ai`.
+- `nsys-ai diff --session --accept/--reject --reason TEXT` records the decision
+  on the session's own `diff.json`, so a session that has findings, a proposal
+  and a diff can reach a decision without leaving the command line.
 
 - `nsys-ai warm <profile>` builds the Parquet cache and the NVTX kernel map in
   one step, so the stack sweep is paid deliberately up front rather than by
@@ -68,6 +97,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- A capture that recorded no GPU kernels is no longer reported as a large
+  improvement. Comparability drops to zero, the report states which side is
+  empty, and `--gate` exits non-zero: a comparison that could not be made has
+  not shown the absence of a regression. The LLM narrative is refused before the
+  model is consulted, so it cannot narrate the vanished kernels as a win beneath
+  the refusal. `--gate` / `--exit-on-regression` now also exit non-zero on any
+  inconclusive verdict, which will fail CI jobs that previously passed silently
+  on incomparable pairs.
+- `arithmetic_intensity` refuses an MFU above 100% instead of classifying it as
+  healthy. Achieved throughput above the peak it is measured against is
+  arithmetically impossible, so it abstains and names which input to check; a
+  non-positive FLOP count or peak abstains for the same reason.
+- `doctor`'s RunSpec check looks at the profile instead of reporting "no" for
+  every one, and its hint names a flag that exists.
+- The getting-started screen lists the optimization loop and shows forms that
+  run: five commands were advertised without a required `--trim`.
+
 - A missing profile path fails immediately with `ProfileNotFoundError` and a
   non-zero exit, instead of creating an empty database and cache directory and
   then reporting a misleading schema error.
@@ -92,6 +138,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Performance
 
+- Served responses are compressed when the client accepts it, cutting a cold
+  `timeline-web` load from 2,184,087 to 272,501 bytes (8.0x) and the Perfetto
+  trace from 1,022,424 to 100,320. Negotiated, never assumed: a client that does
+  not advertise gzip gets the plain body.
+
 - SQL sweep-line overlap analysis (about 3x faster on the analysis call), NVTX
   layer breakdown reduced from ~43s to ~1.4s, and automatic trimming of long
   profiles to a representative window.
@@ -113,5 +164,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 See `git log v0.2.3` for changes prior to the introduction of this
 changelog.
 
-[Unreleased]: https://github.com/GindaChen/nsys-ai/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/GindaChen/nsys-ai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GindaChen/nsys-ai/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/GindaChen/nsys-ai/releases/tag/v0.2.3
