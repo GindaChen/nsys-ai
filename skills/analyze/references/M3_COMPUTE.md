@@ -59,6 +59,7 @@ and model architecture table.
 | `tensor_core_usage[*].is_outlier` = true | Kernel has < 50% TC time (FP32 fallback) | inspect matmul shape; pad to multiple of 8/16 |
 | `region_mfu.mfu.mfu_pct < 30` | Severely underutilizing GPU | widen batch; improve memory access pattern |
 | `region_mfu.mfu.mfu_pct > 100` | FLOPs scope too broad — **always wrong** | narrow `operation` to match the actual kernel target (see MFU.md) |
+| `arithmetic_intensity` abstains with "Refusing to report MFU" | Achieved throughput came out above peak — **always wrong**, the same failure as the row above | fix the input the reason names (usually `theoretical_flops` scope, sometimes a `peak_tflops` for a precision the kernels did not use); there is no classification to report |
 | `arithmetic_intensity.classification` starts with `"Memory-bound"` | Below ridge point | fuse ops; increase tile sizes; reduce redundant loads |
 | `arithmetic_intensity.classification` starts with `"Compute-bound"` with low MFU | Above ridge but inefficient | occupancy issue; check register pressure / block size |
 | `kernel_launch_pattern.sync_stalls` > 0 on a stream | CPU dispatch bottleneck | use CUDA graphs; batch launches |
