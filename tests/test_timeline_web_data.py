@@ -160,6 +160,14 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert "window.__TIMELINE_BOOTSTRAP__" in html
     assert 'id="loopBtn"' in html
     assert 'id="loopSidebar"' in html
+    assert 'id="inspectorRail"' in html
+    assert 'id="inspectorTabs"' in html
+    assert 'id="inspectorTabChat"' in html
+    assert 'id="inspectorTabFindings"' in html
+    assert 'id="inspectorTabLoop"' in html
+    assert 'data-inspector-panel="chat"' in html
+    assert 'data-inspector-panel="findings"' in html
+    assert 'data-inspector-panel="loop"' in html
     assert "LOOP_TRIM_NS" in html
     assert "PROFILE_ID" in html
 
@@ -189,6 +197,26 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="chatCapabilities"' in html
     assert "fit_nvtx_range" in html
     assert "Go to NVTX" in html
+
+
+def test_timeline_template_declutters_inspector_and_annotations(minimal_nsys_db_path):
+    with Profile(minimal_nsys_db_path) as prof:
+        html = generate_timeline_html(
+            prof,
+            [0],
+            None,
+            findings_data=[
+                {
+                    "label": "Overlapping finding",
+                    "severity": "warning",
+                    "type": "region",
+                    "start_ns": 1,
+                    "end_ns": 2,
+                }
+            ],
+        )
+    assert 'onclick="closeInspector()"' in html
+    assert 'data-inspector-panel="findings"' in html
 
 
 def test_timeline_html_export_writes_sidecar_assets(minimal_nsys_db_path, tmp_path):
