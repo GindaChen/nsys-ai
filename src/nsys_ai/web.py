@@ -588,13 +588,28 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         return [f.to_dict() for f in snapshot.findings.findings]
 
     def _session_limitation(self, cli_command: str, detail: str) -> None:
-        """Return a stated limitation: reduced capability, never a silent no-op."""
+        """Return a stated limitation: reduced capability, never a silent no-op.
+
+        The body carries the canonical cannot-answer marker, built by
+        ``cannot_answer`` so this route and a skill row satisfy one predicate —
+        the decision is in ``docs/notes/cannot-answer.md``. ``limitation`` and
+        ``error`` are retained aliases for browser code already reading them,
+        and ``cli`` is retained because it carries what the marker cannot: the
+        command that *can* do the job.
+
+        The HTTP status stays 400 and is not the marker. A status answers a
+        transport question — was this request serviceable on this route — while
+        the body answers the analysis question. A consumer branches on the body.
+        """
+        from .cannot_answer import cannot_answer
+
         self._json_response(
-            {
-                "error": detail,
-                "limitation": True,
-                "cli": cli_command,
-            },
+            cannot_answer(
+                detail,
+                error=detail,
+                limitation=True,
+                cli=cli_command,
+            ),
             400,
         )
 
