@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import socketserver
 import threading
@@ -24,6 +25,9 @@ _log = logging.getLogger(__name__)
 
 _FINDINGS_LOCK = threading.Lock()
 _LOOP_LOCK = threading.Lock()
+# The progressive timeline starts serving kernels immediately.  NVTX is built
+# in the background so the first interactive request does not make a cold
+# load pay the full-profile annotation cost on the request thread.
 
 # Bounded thread pool: fixed worker count, request queue with max size.
 # Workers are released when each request finishes (finish_request + shutdown_request).
@@ -227,8 +231,13 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     prof = None  # set by serve_timeline
     devices: list = []  # set by serve_timeline
     _prebuilt_data: list = []  # pre-built timeline payload per GPU
-    _prebuilt_nvtx_mode: str = "full"  # "full" (prebuilt has NVTX) or "tile" (compute per tile)
-    _tile_nvtx_cache: dict = {}  # (start_ns, end_ns, devices_tuple) -> {gpu_id: [nvtx_spans]}
+    _prebuilt_nvtx_mode: str = "full"  # "full" (baked) or "background" (progressive)
+    _full_nvtx_by_gpu: dict = {}  # device id -> full-range spans, sliced per request
+    _overview_bins: list[float] = []  # full-profile kernel activity for the overview strip
+    _overview_kernel_count: int = 0
+    _profile_id: str = ""
+    _nvtx_prebuild_done: threading.Event | None = None
+    _nvtx_prebuild_error: str | None = None
     _asset_cache: dict[str, tuple[float, bytes]] = {}  # filename -> (mtime, body)
     _findings: list[dict] = []  # mutable findings state for evidence overlay
     _session_id: str | None = None  # SessionStore id (always set by serve_timeline)
@@ -259,6 +268,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/data":
             self._handle_data()
+            return
+        if path == "/api/search":
+            self._handle_search()
             return
         if path == "/api/findings":
             if self.__class__._session_id is not None:
@@ -328,8 +340,84 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 "time_range_ns": [t_start, t_end],
                 "gpus": gpu_infos,
                 "device_ids": devices,
+                "overview_bins": list(self.__class__._overview_bins),
+                "overview_kernel_count": self.__class__._overview_kernel_count,
+                "profile_id": self.__class__._profile_id,
             }
         )
+
+    def _handle_search(self):
+        """Search the complete pre-built profile, including unloaded tiles."""
+        from urllib.parse import parse_qs, urlparse
+
+        qs = parse_qs(urlparse(self.path).query)
+        query = str(qs.get("q", [""])[0]).strip()
+        if len(query) > 256:
+            self._json_response({"error": "search query is limited to 256 characters"}, 400)
+            return
+        try:
+            limit = max(1, min(500, int(qs.get("limit", [100])[0])))
+        except (TypeError, ValueError):
+            limit = 100
+        regex = str(qs.get("regex", ["0"])[0]).lower() in ("1", "true", "yes")
+        if not query:
+            self._json_response({"query": "", "matches": [], "count": 0, "truncated": False})
+            return
+        done = self.__class__._nvtx_prebuild_done
+        if done is not None:
+            done.wait()
+        pattern = query
+        if not regex and query.startswith("/") and query.rfind("/") > 0:
+            slash = query.rfind("/")
+            pattern = query[1:slash]
+            regex = True
+        try:
+            matcher = re.compile(pattern, re.IGNORECASE) if regex else None
+        except re.error as exc:
+            self._json_response({"error": f"invalid regex: {exc}"}, 400)
+            return
+        needle = pattern.lower()
+        matches = []
+        total = 0
+        for gpu_entry in self.__class__._prebuilt_data:
+            gpu_id = gpu_entry.get("id")
+            for kernel in gpu_entry.get("kernels", []):
+                name = str(kernel.get("name", ""))
+                if (matcher.search(name) if matcher else needle in name.lower()):
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({
+                            "kind": "kernel",
+                            "gpu": gpu_id,
+                            "name": name,
+                            "start_ns": kernel.get("start_ns", 0),
+                            "end_ns": kernel.get("end_ns", 0),
+                            "stream": kernel.get("stream"),
+                            "path": kernel.get("path", ""),
+                        })
+            spans = self.__class__._full_nvtx_by_gpu.get(gpu_id, gpu_entry.get("nvtx_spans", []))
+            for span in spans:
+                name = str(span.get("name", ""))
+                if (matcher.search(name) if matcher else needle in name.lower()):
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({
+                            "kind": "nvtx",
+                            "gpu": gpu_id,
+                            "name": name,
+                            "start_ns": span.get("start", 0),
+                            "end_ns": span.get("end", 0),
+                            "stream": None,
+                            "path": span.get("path", ""),
+                        })
+        matches.sort(key=lambda item: (item["start_ns"], item["kind"], item["name"]))
+        self._json_response({
+            "query": query,
+            "matches": matches,
+            "count": total,
+            "truncated": total > limit,
+            "scope": "profile",
+        })
 
     def _handle_data(self):
         """Return kernel/NVTX data for a requested time window (from pre-built cache)."""
@@ -365,39 +453,25 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         )
         try:
             nvtx_spans_by_gpu = None
-            if self.__class__._prebuilt_nvtx_mode == "tile" and nvtx_requested:
+            if self.__class__._prebuilt_nvtx_mode == "background" and nvtx_requested:
                 annotate_devices = (
                     [gpu_filter]
                     if gpu_filter is not None and gpu_filter in self.__class__.devices
                     else self.__class__.devices
                 )
-                devices_key = tuple(annotate_devices)
-                tile_key = (start_ns, end_ns, devices_key)
-                nvtx_spans_by_gpu = self.__class__._tile_nvtx_cache.get(tile_key)
-                if nvtx_spans_by_gpu is None:
-                    t_nv = _time.monotonic()
-                    print(f"[tile] {start_s:.1f}s–{end_s:.1f}s  NVTX annotate...", flush=True)
-                    tile_nvtx_entries = build_timeline_gpu_data(
-                        self.__class__.prof,
-                        annotate_devices,
-                        (start_ns, end_ns),
-                        include_kernels=False,
-                        include_nvtx=True,
+                done = self.__class__._nvtx_prebuild_done
+                if done is not None:
+                    # A request arriving during the warm-up waits once for the
+                    # shared result; subsequent pans and zooms only slice lists.
+                    done.wait()
+                if self.__class__._nvtx_prebuild_error:
+                    raise RuntimeError(self.__class__._nvtx_prebuild_error)
+                nvtx_spans_by_gpu = {
+                    dev: _slice_nvtx_spans(
+                        self.__class__._full_nvtx_by_gpu.get(dev, []), start_ns, end_ns
                     )
-                    nvtx_spans_by_gpu = {
-                        e["id"]: e.get("nvtx_spans", []) for e in tile_nvtx_entries
-                    }
-                    self.__class__._tile_nvtx_cache[tile_key] = nvtx_spans_by_gpu
-                    # Keep memory bounded (simple LRU via insertion-ordered dict semantics).
-                    while len(self.__class__._tile_nvtx_cache) > 64:
-                        self.__class__._tile_nvtx_cache.pop(
-                            next(iter(self.__class__._tile_nvtx_cache))
-                        )
-                    print(
-                        f"[tile] {start_s:.1f}s–{end_s:.1f}s  NVTX done in "
-                        f"{_time.monotonic() - t_nv:.3f}s",
-                        flush=True,
-                    )
+                    for dev in annotate_devices
+                }
 
             # Filter pre-built data by time window
             gpu_entries = []
@@ -791,6 +865,40 @@ def _filter_nodes_by_time(nodes: list, start_ns: int, end_ns: int) -> list:
     return result
 
 
+def _slice_nvtx_spans(spans: list[dict], start_ns: int, end_ns: int) -> list[dict]:
+    """Return full-range NVTX spans overlapping a requested viewport."""
+    return [
+        span
+        for span in spans
+        if span.get("end", 0) >= start_ns and span.get("start", 0) <= end_ns
+    ]
+
+
+def _build_timeline_overview(
+    prebuilt_data: list[dict], time_range_ns: tuple[int, int], bin_count: int = 240
+) -> tuple[list[float], int]:
+    """Build a compact, full-profile kernel activity histogram for the web overview."""
+    if bin_count <= 0:
+        raise ValueError("bin_count must be positive")
+    range_start, range_end = time_range_ns
+    profile_span = max(range_end - range_start, 1)
+    bins = [0.0] * bin_count
+    kernel_count = 0
+    for gpu_entry in prebuilt_data:
+        for kernel in gpu_entry.get("kernels", []):
+            start_ns = kernel.get("start_ns")
+            end_ns = kernel.get("end_ns")
+            if start_ns is None or end_ns is None or end_ns < range_start or start_ns > range_end:
+                continue
+            kernel_count += 1
+            first = max(0, int((start_ns - range_start) / profile_span * bin_count))
+            last = min(bin_count - 1, int((end_ns - range_start) / profile_span * bin_count))
+            weight = max(1.0, min(8.0, float(kernel.get("duration_ms") or 1.0)))
+            for index in range(first, last + 1):
+                bins[index] += weight
+    return bins, kernel_count
+
+
 def _filter_timeline_gpu_entry(
     gpu_entry: dict,
     start_ns: int,
@@ -863,7 +971,12 @@ def serve_timeline(
     # Store prof + devices on handler for /api/meta queries
     _ViewerHandler.prof = prof
     _ViewerHandler.devices = devices
-    _ViewerHandler._tile_nvtx_cache = {}
+    _ViewerHandler._full_nvtx_by_gpu = {}
+    _ViewerHandler._overview_bins = []
+    _ViewerHandler._overview_kernel_count = 0
+    _ViewerHandler._profile_id = ""
+    _ViewerHandler._nvtx_prebuild_done = None
+    _ViewerHandler._nvtx_prebuild_error = None
     _ViewerHandler._findings = findings_data or []
     _ViewerHandler._session_id = None
     _ViewerHandler._session_root = os.fspath(session_root)
@@ -871,6 +984,14 @@ def serve_timeline(
 
     raw_path = prof.path if hasattr(prof, "path") else ""
     _profile_path = os.fspath(raw_path) if raw_path else ""
+    try:
+        from .fingerprint import get_profile_id
+
+        _ViewerHandler._profile_id = get_profile_id(
+            prof.query_conn(), fallback_path=_profile_path or None
+        )
+    except Exception as exc:
+        _log.debug("Could not derive profile id: %s", exc, exc_info=True)
 
     preset = detect_h100_replay_preset() if loop_h100_preset else None
     if preset:
@@ -927,6 +1048,7 @@ def serve_timeline(
             trim,
             findings_data=findings_data,
             profile_path=_profile_path,
+            profile_id=_ViewerHandler._profile_id,
             loop_mode=_in_loop_mode,
             timeline_css_href=_css_href,
             timeline_js_src=_js_src,
@@ -940,15 +1062,18 @@ def serve_timeline(
             None,
             findings_data=findings_data,
             profile_path=_profile_path,
+            profile_id=_ViewerHandler._profile_id,
             loop_mode=_in_loop_mode,
             timeline_css_href=_css_href,
             timeline_js_src=_js_src,
         )
-        _ViewerHandler._prebuilt_nvtx_mode = "tile"
+        _ViewerHandler._prebuilt_nvtx_mode = "background"
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
     if _in_loop_mode:
         print(f"Loop UI loaded (assets v{_asset_v}) — hard-refresh if the panel looks outdated", flush=True)
+
+    nvtx_done: threading.Event | None = None
 
     # Pre-build full kernel-first timeline payload for all GPUs (progressive mode)
     if trim is None:
@@ -1026,10 +1151,63 @@ def serve_timeline(
                 except Exception as e:
                     print(f"Cache save failed: {e}", flush=True)
 
+        _ViewerHandler._overview_bins, _ViewerHandler._overview_kernel_count = (
+            _build_timeline_overview(prebuilt, prof.meta.time_range)
+        )
+
+        # NVTX is much more expensive than kernel filtering.  Warm the full
+        # profile after the cheap kernel payload is resident and before the
+        # server starts accepting browser requests.  The server itself is
+        # started immediately after this thread is launched, so a first NVTX
+        # request either receives the warm result or waits on the one shared
+        # build rather than rebuilding the requested tile.
+        nvtx_done = threading.Event()
+        _ViewerHandler._nvtx_prebuild_done = nvtx_done
+
+        def _warm_nvtx() -> None:
+            t_nv = _time.monotonic()
+            full_range = prof.meta.time_range
+            try:
+                print(
+                    f"Pre-building NVTX in background for {len(devices)} GPU(s) "
+                    f"({full_range[0] / 1e9:.1f}s–{full_range[1] / 1e9:.1f}s)...",
+                    flush=True,
+                )
+                entries = build_timeline_gpu_data(
+                    prof,
+                    devices,
+                    full_range,
+                    include_kernels=False,
+                    include_nvtx=True,
+                )
+                _ViewerHandler._full_nvtx_by_gpu = {
+                    entry["id"]: entry.get("nvtx_spans", []) for entry in entries
+                }
+                total = sum(len(spans) for spans in _ViewerHandler._full_nvtx_by_gpu.values())
+                print(
+                    f"NVTX background pre-build complete in {_time.monotonic() - t_nv:.1f}s "
+                    f"({total} spans)",
+                    flush=True,
+                )
+            except Exception as exc:
+                _ViewerHandler._nvtx_prebuild_error = str(exc)
+                _log.exception("Background NVTX pre-build failed")
+            finally:
+                nvtx_done.set()
+
+        threading.Thread(target=_warm_nvtx, name="timeline-nvtx-warmup", daemon=True).start()
+
     server = _ThreadedHTTPServer(("127.0.0.1", port), _ViewerHandler)
     actual_url = f"http://127.0.0.1:{server.server_address[1]}"
     print(f"Timeline viewer at {actual_url}")
-    _run_server(server, actual_url if open_browser else None, prof)
+    try:
+        _run_server(server, actual_url if open_browser else None, prof)
+    finally:
+        # Keep the Profile alive until the background worker has stopped using
+        # its DuckDB connection.  This also covers callers that replace
+        # _run_server in tests or embed the server lifecycle themselves.
+        if nvtx_done is not None:
+            nvtx_done.wait()
 
 
 # ── Mode 3: Evidence View ────────────────────────────────────────

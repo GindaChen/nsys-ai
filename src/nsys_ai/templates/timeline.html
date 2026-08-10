@@ -16,6 +16,11 @@
                 <span class="chrome-meta">$GPU_LABEL$TRIM_META</span>
             </div>
             <div class="chrome-stats" id="stats"></div>
+            <div class="viewport-readout" id="viewportReadout" aria-live="polite">
+                <span class="viewport-readout-label">VIEW</span>
+                <strong id="viewportRange">—</strong>
+                <span class="viewport-zoom" id="viewportZoom">—</span>
+            </div>
         </div>
         <div id="gpuInfoPanel" class="gpu-info-panel">
             <div id="gpuInfoContent"></div>
@@ -24,15 +29,19 @@
             <div class="tool-group">
                 <span class="tool-group-label">View</span>
                 <div class="tool-group-body">
+                    <button type="button" class="tool-btn tool-btn-icon" onclick="goBackView()" id="viewBackBtn" title="Previous viewport (Alt+←)" aria-label="Previous viewport">↶</button>
+                    <button type="button" class="tool-btn tool-btn-icon" onclick="goForwardView()" id="viewForwardBtn" title="Next viewport (Alt+→)" aria-label="Next viewport">↷</button>
                     <button type="button" class="tool-btn" onclick="zoomIn()" title="Zoom in (+)">Zoom in</button>
                     <button type="button" class="tool-btn" onclick="zoomOut()" title="Zoom out (−)">Zoom out</button>
                     <button type="button" class="tool-btn" onclick="fitAll()" title="Fit full range">Fit</button>
+                    <button type="button" class="tool-btn" onclick="gotoTimePrompt()" title="Go to time (G)">Go to</button>
                 </div>
             </div>
             <div class="tool-group tool-group-nvtx">
                 <span class="tool-group-label">NVTX</span>
                 <div class="tool-group-body">
                     <button type="button" class="tool-btn tool-btn-toggle active" onclick="toggleNVTX()" id="nvtxBtn" title="Show NVTX lanes (N)">Lanes</button>
+                    <select id="gpuSel" class="tool-select gpu-select" onchange="onGpuChange()" title="NVTX GPU"></select>
                     <select id="nvtxThreadSel" class="tool-select" onchange="onNvtxThreadChange()" title="NVTX thread">
                         <option value="auto">Auto thread</option>
                     </select>
@@ -60,17 +69,23 @@
                     <button type="button" class="tool-btn tool-btn-accent" onclick="toggleLoop()" id="loopBtn" title="Guided workflow (W)">Loop</button>
                     <button type="button" class="tool-btn" onclick="toggleChat()" id="chatBtn">Chat</button>
                     <button type="button" class="tool-btn" onclick="toggleFindings()" id="findingsBtn" style="display:none">Evidence</button>
+                    <button type="button" class="tool-btn" onclick="toggleFocus()" id="focusBtn" title="Focus mode (F)">Focus</button>
                     <button type="button" class="tool-btn tool-btn-ghost" onclick="toggleHelp()" title="Keyboard shortcuts">?</button>
                 </div>
             </div>
         </nav>
     </div>
+    <div id="overviewBar" aria-label="Timeline overview and viewport navigation">
+        <span class="overview-label">OVERVIEW</span>
+        <canvas id="overviewCanvas" height="34"></canvas>
+        <span class="render-summary" id="renderSummary" aria-live="polite"></span>
+        <span class="overview-hint">drag to pan · Shift+drag to zoom</span>
+    </div>
     <div id="appLayout">
         <div id="mainCol">
             <div id="canvasWrap"><canvas id="c"></canvas></div>
             <div id="detailResizeHandle" title="Drag to resize details"></div>
-            <div id="detail" class="empty">Click a kernel to see details. Press A for AI chat. Keyboard: ←/→ pan, +/-
-                zoom, ↑/↓ stream, / search, ? help</div>
+            <div id="detail" class="empty">Click a kernel to see details. Drag to pan; Shift+drag to zoom a range. Press A for AI chat, / to search, ? for help.</div>
         </div>
         <div id="chatSidebar">
             <div id="chatHeader">
@@ -105,6 +120,12 @@
                 <span>📋 Evidence</span>
                 <span class="findings-badge" id="findingsCount"></span>
                 <button onclick="toggleFindings()" title="Close">✕</button>
+            </div>
+            <div id="findingsFilters" class="evidence-filters" aria-label="Filter evidence by severity">
+                <button type="button" class="evidence-filter active" data-severity="all">All</button>
+                <button type="button" class="evidence-filter" data-severity="critical">● Critical</button>
+                <button type="button" class="evidence-filter" data-severity="warning">▲ Warning</button>
+                <button type="button" class="evidence-filter" data-severity="info">● Info</button>
             </div>
             <div id="findingsList"></div>
         </div>
@@ -262,6 +283,10 @@
                 <td>Pan viewport</td>
             </tr>
             <tr>
+                <td><span class="key">Alt+← →</span></td>
+                <td>Previous / next viewport</td>
+            </tr>
+            <tr>
                 <td><span class="key">+ −</span></td>
                 <td>Zoom in/out</td>
             </tr>
@@ -330,7 +355,7 @@
                 <td>Toggle help</td>
             </tr>
         </table>
-        <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Mouse: scroll=zoom, drag=pan, click=select, double-click=fit/toggle
+        <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Mouse: drag=pan, Shift+drag=zoom range, Shift+wheel=zoom, click=select, double-click=fit/toggle
         </div>
     </div>
     <div class="command-palette" id="commandPalette" style="display:none">
@@ -352,6 +377,7 @@
             TILE_WINDOW_S: 5,
             FINDINGS: $FINDINGS_JSON,
             PROFILE_PATH: $PROFILE_PATH,
+            PROFILE_ID: $PROFILE_ID,
             LOOP_TRIM_NS: $LOOP_TRIM_NS,
             LOOP_MODE: '$LOOP_MODE' === '1',
         };
