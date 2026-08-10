@@ -38,7 +38,6 @@ from .handlers import (
     _cmd_open,
     _cmd_optimize,
     _cmd_overlap,
-    _cmd_perfetto,
     _cmd_profile,
     _cmd_propose,
     _cmd_report,
@@ -679,15 +678,15 @@ def _build_parser():
     )
     p.add_argument(
         "--viewer",
-        choices=["perfetto", "web", "tui"],
-        default="perfetto",
-        help="Viewer to use (default: perfetto)",
+        choices=["web", "tui"],
+        default="web",
+        help="Viewer to use (default: web)",
     )
     p.add_argument(
-        "--port", type=int, default=None, help="HTTP port for perfetto/web (default: 8143/8142)"
+        "--port", type=int, default=None, help="HTTP port for the web viewer (default: 8142)"
     )
     p.add_argument(
-        "--no-browser", action="store_true", help="Don't auto-open browser (perfetto/web)"
+        "--no-browser", action="store_true", help="Don't auto-open browser (web)"
     )
     p.set_defaults(handler=_cmd_open)
 
@@ -1313,12 +1312,6 @@ def _register_legacy_commands(sub):
     _add_gpu_trim(p)
     p.add_argument("-o", "--output", default="timeline.html", help="Output HTML file")
     p.set_defaults(handler=_cmd_timeline_html)
-
-    p = sub.add_parser("perfetto", help="Open trace in Perfetto UI")
-    _add_gpu_trim(p)
-    p.add_argument("--port", type=int, default=8143, help="HTTP port for trace (default: 8143)")
-    p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
-    p.set_defaults(handler=_cmd_perfetto)
 
     p = sub.add_parser("tui", help="Terminal tree view; press A for AI chat")
     _add_gpu_trim(p)

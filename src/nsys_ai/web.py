@@ -1,13 +1,11 @@
 """
 web.py — Serve profiles via local HTTP servers.
 
-Provides two modes:
+Provides:
   1. `serve`          — Serve the built-in interactive HTML viewer.
-  2. `serve_perfetto` — Serve Perfetto JSON and open ui.perfetto.dev.
 
 Usage:
     nsys-ai web      profile.sqlite --gpu 0 --trim 39 42
-    nsys-ai perfetto profile.sqlite --gpu 0 --trim 39 42
 """
 
 import gzip
@@ -21,7 +19,6 @@ import threading
 import time as _time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import quote
 
 _log = logging.getLogger(__name__)
 
@@ -143,7 +140,6 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
     allow_reuse_address = True
 
 
-from .export import gpu_trace  # noqa: E402
 from .viewer import (  # noqa: E402
     build_timeline_gpu_data,
     generate_evidence_html,
@@ -1177,62 +1173,3 @@ def serve_evidence(
     print(f"Evidence viewer at {actual_url}")
     print(f"  {len(findings_data)} finding(s): {title}")
     _run_server(server, actual_url if open_browser else None, prof)
-
-
-# ── Mode 4: Perfetto UI ─────────────────────────────────────────
-
-
-class _PerfettoHandler(BaseHTTPRequestHandler):
-    """Serve Perfetto JSON trace with CORS so ui.perfetto.dev can fetch it."""
-
-    trace_bytes: bytes = b""
-
-    def do_OPTIONS(self):
-        """Handle CORS preflight."""
-        self.send_response(204)
-        self._cors_headers()
-        self.end_headers()
-
-    def do_GET(self):
-        # The Perfetto trace is the largest thing this server hands out, and it
-        # crosses the network to ui.perfetto.dev's fetch. CORS headers are set
-        # first so they survive on the compressed response too.
-        _send_body(
-            self,
-            self.trace_bytes,
-            "application/json",
-            extra_headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-            },
-        )
-
-    def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def serve_perfetto(
-    prof, device: int, trim: tuple[int, int], *, port: int = 8143, open_browser: bool = True
-):
-    """Generate Perfetto JSON, serve it locally, and open ui.perfetto.dev."""
-    events = gpu_trace(prof, device, trim)
-    trace = json.dumps({"traceEvents": events, "displayTimeUnit": "ms"})
-    _PerfettoHandler.trace_bytes = trace.encode("utf-8")
-
-    nk = sum(1 for e in events if e.get("cat") == "gpu_kernel")
-    nn = sum(1 for e in events if e.get("cat") == "nvtx_projected")
-    print(f"Trace: {nk} kernels, {nn} NVTX, {len(trace) // 1024} KB")
-
-    server = HTTPServer(("127.0.0.1", port), _PerfettoHandler)
-    actual_port = server.server_address[1]
-    trace_url = f"http://127.0.0.1:{actual_port}/trace.json"
-    perfetto_url = f"https://ui.perfetto.dev/#!/?url={quote(trace_url, safe='')}"
-
-    print(f"Perfetto UI: {perfetto_url}")
-    _run_server(server, perfetto_url if open_browser else None, prof)

@@ -83,7 +83,6 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1.0 5.0 -o report.md
 | `nsys-ai nccl <profile> [--gpu N] [--trim S E]` | NCCL collective breakdown | Network communication profiling |
 | `nsys-ai iters <profile> [--gpu N] [--trim S E]` | Detect training iterations | Find stable steps and warmup |
 | `nsys-ai export <profile> [--gpu N] [--trim S E] [-o DIR]` | Export Perfetto JSON | Post-processing / sharing |
-| `nsys-ai perfetto <profile> [--gpu N] [--trim S E] [--port P]` | Open trace in Perfetto UI | Direct Perfetto trace viewer |
 | `nsys-ai export-json <profile> [--gpu N] [--trim S E] [-o out.json] [--summary]` | Export kernel data as flat JSON | Easy programmatic ingestion |
 | `nsys-ai export-csv <profile> [--gpu N] [--trim S E] [-o out.csv]` | Export kernel data as flat CSV | Statistical analysis pipelines |
 | `nsys-ai viewer <profile> [--gpu N] [--trim S E] [-o out.html]` | Generate interactive HTML viewer | Shareable web report |

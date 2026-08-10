@@ -268,7 +268,6 @@ via `--against` or as the `before` positional.
 | `cutracer` | Instruction-level drill-down (`check`, `install`, `plan`, `run`, `analyze`) |
 | `export` / `export-csv` / `export-json` | Perfetto JSON, flat CSV, flat JSON |
 | `viewer` / `timeline-html` | Interactive HTML report / timeline |
-| `perfetto` | Open the trace in the Perfetto UI |
 
 Run `nsys-ai <command> --help` for flags.
 

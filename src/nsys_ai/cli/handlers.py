@@ -1446,7 +1446,7 @@ def _cmd_web(args, _profile):
 
 def _cmd_open(args, _profile):
     from nsys_ai.tree import run_tui
-    from nsys_ai.web import serve, serve_perfetto
+    from nsys_ai.web import serve
 
     with _profile.open(args.profile) as prof:
         gpu = (
@@ -1456,24 +1456,13 @@ def _cmd_open(args, _profile):
             trim_ns = (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
         else:
             trim_ns = (int(prof.meta.time_range[0]), int(prof.meta.time_range[1]))
-        port = args.port if args.port is not None else (8143 if args.viewer == "perfetto" else 8142)
-        if args.viewer == "perfetto":
-            serve_perfetto(prof, gpu, trim_ns, port=port, open_browser=not args.no_browser)
-        elif args.viewer == "web":
+        port = args.port if args.port is not None else 8142
+        if args.viewer == "web":
             serve(prof, gpu, trim_ns, port=port, open_browser=not args.no_browser)
         else:
             profile_path = prof.path
     if args.viewer == "tui":
         run_tui(profile_path, gpu, trim_ns, max_depth=-1, min_ms=0)
-
-
-def _cmd_perfetto(args, _profile):
-    from nsys_ai.web import serve_perfetto
-
-    with _profile.open(args.profile) as prof:
-        serve_perfetto(
-            prof, args.gpu, _parse_trim(args), port=args.port, open_browser=not args.no_browser
-        )
 
 
 def _cmd_timeline_web(args, _profile):
