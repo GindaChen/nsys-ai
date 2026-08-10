@@ -647,3 +647,37 @@ def test_progress_model_is_frozen():
     progress = RunProgress(RunStage.CAPTURING, 1.0)
     with pytest.raises(FrozenInstanceError):
         progress.elapsed_seconds = 2.0
+
+
+def test_declared_gpu_count_the_capture_contradicts_fails_validation(tmp_path, fake_nsys):
+    """expected_gpu_count was recorded into the RunSpec and never read.
+
+    A one-GPU capture declared as eight used to be published with the
+    declaration intact, so every consumer downstream inherited a falsehood the
+    artifact asserted about itself.
+    """
+    result = _run(tmp_path, fake_nsys, expected_gpu_count=8)
+
+    assert result.status is RunStatus.INVALID_PROFILE
+    assert result.detail == (
+        "declared expected_gpu_count=8 but the capture recorded kernels on 1 GPU(s)"
+    )
+    # The artifacts still exist, so the mismatch can be inspected.
+    assert Path(result.sqlite_path).is_file()
+
+
+def test_declared_gpu_count_the_capture_meets_succeeds(tmp_path, fake_nsys):
+    """The check must not fail a capture that matches its declaration."""
+    result = _run(tmp_path, fake_nsys, expected_gpu_count=1)
+
+    assert result.status is RunStatus.SUCCEEDED, result.detail
+    assert result.profile is not None
+
+
+def test_observed_gpu_count_reads_the_devices_that_recorded_kernels(tmp_path, fake_nsys):
+    """A machine can expose eight GPUs and a run can touch one."""
+    from nsys_ai.profile_runner import observed_gpu_count
+
+    result = _run(tmp_path, fake_nsys)
+    assert result.status is RunStatus.SUCCEEDED
+    assert observed_gpu_count(result.sqlite_path) == 1

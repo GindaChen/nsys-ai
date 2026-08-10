@@ -121,7 +121,14 @@ def _register_profile_parser(sub):
     p.add_argument("--warmup-steps", type=_nonnegative_int, default=0)
     p.add_argument("--profile-steps", type=_positive_int, default=1)
     p.add_argument("--seed", type=_nonnegative_int, default=None)
-    p.add_argument("--expected-gpu-count", type=_positive_int, default=None)
+    p.add_argument(
+        "--expected-gpu-count",
+        type=_positive_int,
+        default=None,
+        help="Number of GPUs this capture is expected to record kernels on. The capture "
+        "fails validation if it records a different number, so declare the local "
+        "topology, not the job's",
+    )
     p.add_argument("--expected-rank-count", type=_positive_int, default=None)
     p.add_argument("--timeout", type=_positive_int, default=None, metavar="SECONDS")
     p.add_argument(

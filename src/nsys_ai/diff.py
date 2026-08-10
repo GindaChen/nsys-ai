@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field, replace
 
 from .annotation import TraceSelection
-from .fingerprint import get_profile_id
+from .fingerprint import get_profile_id, profile_id_is_capture_derived
 from .overlap import classify_kernel, launch_overhead_ms, overlap_analysis
 from .profile import Profile
 
@@ -22,6 +22,32 @@ _log = logging.getLogger(__name__)
 STEP_TIME_REGRESSION_PCT = 5.0
 MIN_COMPARABILITY_CONFIDENCE = 0.5
 DIFF_ID_VERSION = "diff1"
+
+#: Absolute step-time delta, in percent, below which the verdict is ``neutral``
+#: however tight a threshold the caller asks for.
+#:
+#: Two captures of an *unchanged* workload do not measure the same step time.
+#: Clock and power state, memory placement, and host scheduling move it by
+#: roughly a percent between runs, and one capture per side gives nothing to
+#: separate that from a real change: the pipeline sees a single number per
+#: side and no spread. Reporting "regression_likely" from a delta inside that
+#: band is a coin flip dressed as a measurement.
+#:
+#: 2.0 is a stated floor, not a measured one, and is deliberately crude. The
+#: honest version is a declared repeat count with a confidence interval over
+#: the per-run deltas, which needs k runs this pipeline does not yet take. It
+#: sits below the default 5% regression threshold, so it changes no verdict
+#: until a caller asks for a gate tighter than the noise.
+NOISE_FLOOR_STEP_TIME_PCT = 2.0
+
+#: Share of GPU time a device must account for before its presence on only one
+#: side is treated as changing what a node-wide total measures. Below this the
+#: topology difference is real but immaterial: an NCCL or cuDNN bootstrap that
+#: touches a second device for microseconds would otherwise refuse an
+#: otherwise-perfect diff, and a CI gate would fail on it. 1% is the point
+#: where a device's contribution starts to move a total by more than the
+#: run-to-run jitter the noise floor above already declines to judge.
+DEVICE_SHARE_MATERIAL_PCT = 1.0
 
 
 @dataclass(frozen=True)
@@ -60,6 +86,26 @@ class ProfileSummary:
     overlap: dict
     profile_id: str = ""
     product_version: str | None = None
+    #: Device ids that actually recorded kernels, ascending. This is the
+    #: capture's observed topology, and it is what makes "the after run lost a
+    #: GPU" visible: `gpu`/`kernel_rows` describe the *selected* scope, so a
+    #: node-wide diff whose two sides ran on different devices leaves no other
+    #: trace. Defaulted so payloads built without it stay constructible; an
+    #: empty tuple means the capture recorded no kernels on any device, which
+    #: `empty_kernel_sides` already refuses on; every check below treats it as
+    #: unknown rather than as a difference, so the two do not double up.
+    devices: tuple[int, ...] = ()
+    #: Whether ``profile_id`` was built from metadata that identifies a run.
+    #: An export carrying no ``TARGET_INFO_*`` / ``ANALYSIS_*`` tables still
+    #: gets a well-formed id, from the kernel row count alone — so equal ids
+    #: mean equal row counts, not the same capture. Defaulted False: a summary
+    #: that never asked has not earned an identity claim.
+    profile_id_is_capture_derived: bool = False
+    #: deviceId -> summed kernel ns, for the devices in ``devices``. Lets a
+    #: topology difference be weighed rather than only detected: a device that
+    #: recorded one microsecond is not the same finding as a rank that dropped
+    #: out. Empty means "not recorded", like ``devices``.
+    device_kernel_ns: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -259,6 +305,7 @@ def build_profile_summary(
             overlap[k] = round(overlap[k], 2)
 
     pid = get_profile_id(prof.conn, fallback_path=prof.path)
+    pid_is_capture_derived = profile_id_is_capture_derived(prof.conn)
 
     return ProfileSummary(
         path=prof.path,
@@ -271,6 +318,9 @@ def build_profile_summary(
         nvtx=nvtx,
         overlap=overlap,
         profile_id=pid,
+        profile_id_is_capture_derived=pid_is_capture_derived,
+        devices=tuple(sorted(prof.meta.devices or ())),
+        device_kernel_ns=dict(prof.meta.device_kernel_ns or {}),
     )
 
 
@@ -286,6 +336,160 @@ def empty_side_subject(empty_sides: list[str]) -> str:
     return f"The {empty_sides[0]} profile contains"
 
 
+def same_capture(before: ProfileSummary, after: ProfileSummary) -> bool:
+    """True when both sides are the same capture, so every delta is self-noise.
+
+    One path pointing at one file is the plain case, and the one a user reaches
+    by rerunning ``diff`` with the same argument twice.
+
+    ``profile_id`` covers the rest: it is content-derived, so equal ids mean
+    the same capture even when the bytes moved — a re-export, a copy under
+    another name, a VACUUM. That is one string comparison, and it settles the
+    question without reading a kernel row.
+
+    Equal ids are not on their own enough to act on. The id degrades when a
+    profile carries no capture metadata — a hand-built fixture, a parquet-only
+    export — leaving the kernel row count as its only contribution, so two
+    unrelated captures with the same number of kernels hash the same. A real
+    The id must also have been built from capture metadata -- see
+    ``profile_id_is_capture_derived``. Every contribution to the id degrades
+    independently, so an export with none of the ``TARGET_INFO_*`` /
+    ``ANALYSIS_*`` tables still gets a well-formed id, from its kernel row
+    count alone, and two unrelated captures of the same size would share it.
+    The two totals are then required to agree as well, which costs nothing
+    because both summaries are already built.
+
+    The caller must also establish that the two sides were read through the
+    same time window: iteration 3 against iteration 40 of one capture is a real
+    comparison, and those two sides share a path and an id.
+    """
+    if before.path and before.path == after.path:
+        return True
+    if not before.profile_id or before.profile_id != after.profile_id:
+        return False
+    # The id has to have come from capture metadata. Schema version was the
+    # wrong proxy: it is read from META_DATA_EXPORT, a different table from the
+    # TARGET_INFO_* / ANALYSIS_* ones the id hashes, so a profile can carry a
+    # schema version while its id has degraded to a hash of its kernel row
+    # count -- and two unrelated captures of the same size then share an id.
+    if not (before.profile_id_is_capture_derived and after.profile_id_is_capture_derived):
+        return False
+    return before.kernel_rows == after.kernel_rows and before.total_gpu_ns == after.total_gpu_ns
+
+
+def same_capture_note() -> str:
+    """The sentence said when both sides are the same capture."""
+    return (
+        "Before and after are the same capture (identical profile id): both sides are the "
+        "same measurement, reached through the same path or through a copy of it, so every "
+        "delta below is self-noise rather than a change between two runs."
+    )
+
+
+def _unshared_device_share_pct(
+    before: ProfileSummary, after: ProfileSummary
+) -> float | None:
+    """GPU time held by devices present on one side only, as a percentage.
+
+    None when either side did not record per-device time, in which case the
+    magnitude is unknown and the caller must not act on it.
+    """
+    b_ns, a_ns = before.device_kernel_ns, after.device_kernel_ns
+    if not b_ns or not a_ns:
+        return None
+    shared = set(before.devices) & set(after.devices)
+    total = sum(b_ns.values()) + sum(a_ns.values())
+    if total <= 0:
+        return None
+    unshared = sum(ns for dev, ns in b_ns.items() if dev not in shared) + sum(
+        ns for dev, ns in a_ns.items() if dev not in shared
+    )
+    return 100.0 * unshared / total
+
+
+def _device_list(devices: tuple[int, ...]) -> str:
+    return "[" + ", ".join(str(d) for d in devices) + "]" if devices else "none"
+
+
+def _device_warnings(before: ProfileSummary, after: ProfileSummary) -> tuple[list[str], float]:
+    """Warn when the two captures did not observe the same GPUs.
+
+    A side that never recorded a device the other one did is the per-device
+    form of an empty capture: the kernels that device ran are missing from one
+    total, so the delta measures the gap in the capture and reads as a change
+    in the workload.
+
+    An empty ``devices`` tuple means the topology was not recorded, not that
+    the capture had no GPUs, so nothing is claimed from it.
+    """
+    warnings: list[str] = []
+    b_devs, a_devs = before.devices, after.devices
+    if not b_devs or not a_devs:
+        return warnings, 1.0
+
+    # Scoped to one device with `--gpu N`: the question is whether that device
+    # exists on both sides, not whether the two topologies match.
+    if before.gpu is not None and before.gpu == after.gpu:
+        dev = before.gpu
+        missing = [
+            label
+            for label, side in (("before", b_devs), ("after", a_devs))
+            if dev not in side
+        ]
+        if len(missing) == 2:
+            warnings.append(
+                f"GPU {dev} recorded no kernels in either profile (before recorded GPUs "
+                f"{_device_list(b_devs)}, after {_device_list(a_devs)}); the selection is "
+                "empty on both sides, so there is nothing to compare and no before/after "
+                "claim can be made."
+            )
+            return warnings, 0.0
+        if missing:
+            present = "after" if missing[0] == "before" else "before"
+            warnings.append(
+                f"GPU {dev} recorded kernels in the {present} profile but none in the "
+                f"{missing[0]} profile (before recorded GPUs {_device_list(b_devs)}, after "
+                f"{_device_list(a_devs)}); the delta on GPU {dev} is that missing capture, "
+                "not a change in the workload."
+            )
+            return warnings, 0.0
+        return warnings, 1.0
+
+    # Node-wide (no `--gpu`): every device on both sides lands in one total, so
+    # a difference in the device set silently changes what the total measures.
+    if before.gpu is None and after.gpu is None and b_devs != a_devs:
+        if len(b_devs) != len(a_devs):
+            share_pct = _unshared_device_share_pct(before, after)
+            if share_pct is not None and share_pct < DEVICE_SHARE_MATERIAL_PCT:
+                # Present on one side only, but holding almost none of the
+                # time: say so and keep comparing, rather than refuse a pair
+                # whose totals are the same measurement to four decimal places.
+                warnings.append(
+                    f"GPU count differs: the before profile recorded {len(b_devs)} device(s) "
+                    f"{_device_list(b_devs)}, the after profile {len(a_devs)} "
+                    f"{_device_list(a_devs)}. The devices on one side only hold "
+                    f"{share_pct:.3f}% of GPU time, under the "
+                    f"{DEVICE_SHARE_MATERIAL_PCT:.0f}% that would move the totals, so the "
+                    "comparison stands on the devices both sides share."
+                )
+                return warnings, 1.0
+            warnings.append(
+                f"GPU count differs: the before profile recorded {len(b_devs)} device(s) "
+                f"{_device_list(b_devs)}, the after profile {len(a_devs)} "
+                f"{_device_list(a_devs)}. Totals measured over different amounts of "
+                "hardware are not a before and an after — the difference is the missing "
+                "or extra devices."
+            )
+            return warnings, 0.0
+        warnings.append(
+            f"The two captures recorded different GPU ids (before {_device_list(b_devs)}, "
+            f"after {_device_list(a_devs)}) with the same device count; node-wide totals "
+            "still compare, but per-device deltas only mean anything for devices present "
+            "on both sides."
+        )
+    return warnings, 1.0
+
+
 def collect_sanity_warnings(
     before: ProfileSummary, after: ProfileSummary
 ) -> tuple[list[str], float]:
@@ -298,6 +502,13 @@ def collect_sanity_warnings(
     c_kernel_overlap = 1.0
     c_overlap = 1.0
 
+    # Devices first: when a requested GPU is missing from a side, the empty
+    # aggregation below is a consequence, and saying "the after profile
+    # contains no GPU kernel activity" about a profile that simply never ran on
+    # that device sends the reader to check the wrong thing.
+    device_warnings, c_devices = _device_warnings(before, after)
+    warnings.extend(device_warnings)
+
     # A side that recorded nothing is the signature of a failed capture: the
     # workload crashed, the trace was truncated, nsys was misconfigured, or the
     # wrong artifact was uploaded. Every ratio below is guarded against a zero
@@ -306,6 +517,14 @@ def collect_sanity_warnings(
     # it comparability zero — the same condition `nsys-ai profile` refuses to
     # publish with "local profile contains no GPU kernel activity".
     empty_sides = empty_kernel_sides(before, after)
+    # ...unless the device check already explained it. With `--gpu 5` on two
+    # profiles that both ran, the selected scope is empty on both sides, and
+    # "the profile contains no GPU kernel activity" is false about the profile
+    # and sends the reader to check whether the run executed. The device
+    # warning above names the actual cause; one cause, one sentence.
+    if empty_sides and c_devices == 0.0 and device_warnings:
+        empty_sides = []
+        c_empty = 0.0
     if empty_sides:
         warnings.append(
             f"{empty_side_subject(empty_sides)} no GPU kernel activity; there is nothing "
@@ -366,7 +585,11 @@ def collect_sanity_warnings(
         c_overlap = 0.0
 
     confidence = max(
-        0.0, min(1.0, c_schema * c_gpu * c_empty * c_workload * c_kernel_overlap * c_overlap)
+        0.0,
+        min(
+            1.0,
+            c_schema * c_gpu * c_empty * c_workload * c_kernel_overlap * c_overlap * c_devices,
+        ),
     )
     # Return unrounded — compute_verdict reads this and the 0.5 gate must
     # not be crossed by rounding artifacts (e.g. 0.4996 -> 0.5).
@@ -433,9 +656,25 @@ def compute_verdict(
     step_time_delta_pct: float | None,
     confidence: float,
     regression_pct: float = STEP_TIME_REGRESSION_PCT,
+    *,
+    is_same_capture: bool = False,
 ) -> str:
+    """Judge the pair: regression, improvement, neutral, or cannot judge.
+
+    Order matters. Comparability is asked first, because a pair that cannot be
+    compared has no verdict to reach — including a capture compared with
+    itself, where an empty or unreadable capture is still unreadable. Identity
+    comes next: the two sides being one measurement is an answer ("nothing
+    changed, because nothing was rerun"), not an abstention. The noise floor
+    comes last, over the thresholds, because it constrains what any threshold
+    is allowed to conclude.
+    """
     if confidence < MIN_COMPARABILITY_CONFIDENCE or step_time_delta_pct is None:
         return "inconclusive"
+    if is_same_capture:
+        return "neutral"
+    if abs(step_time_delta_pct) < NOISE_FLOOR_STEP_TIME_PCT:
+        return "neutral"
     if step_time_delta_pct >= regression_pct:
         return "regression_likely"
     if step_time_delta_pct <= -regression_pct:
@@ -918,6 +1157,15 @@ def diff_profiles(
     before = build_profile_summary(before_prof, gpu, t_before, nvtx_limit=nvtx_limit)
     after = build_profile_summary(after_prof, gpu, t_after, nvtx_limit=nvtx_limit)
     warnings, comparability_confidence = collect_sanity_warnings(before, after)
+    # Same capture on both sides, read through the same window. The trim check
+    # is what keeps an iteration diff — window A of a capture against window B
+    # of that same capture — a real comparison; only the identical window makes
+    # the two sides one measurement. Kept here rather than in
+    # collect_sanity_warnings because the windows are a property of this call,
+    # not of the two summaries.
+    is_same_capture = t_before == t_after and same_capture(before, after)
+    if is_same_capture:
+        warnings.append(same_capture_note())
 
     before_by_key = {k.key: k for k in before.kernels}
     after_by_key = {k.key: k for k in after.kernels}
@@ -1066,8 +1314,28 @@ def diff_profiles(
         if step_time_before_ms > 0:
             step_time_delta_pct = round(delta / step_time_before_ms * 100.0, 2)
     verdict = compute_verdict(
-        step_time_delta_pct, comparability_confidence, regression_pct=regression_pct
+        step_time_delta_pct,
+        comparability_confidence,
+        regression_pct=regression_pct,
+        is_same_capture=is_same_capture,
     )
+    # A caller who asked for a gate tighter than the noise floor gets neutral
+    # where their threshold alone would have called a regression. Say why, or
+    # the verdict looks like it ignored the number printed beside it.
+    if (
+        verdict == "neutral"
+        and not is_same_capture
+        and step_time_delta_pct is not None
+        and regression_pct < NOISE_FLOOR_STEP_TIME_PCT
+        and abs(step_time_delta_pct) >= regression_pct
+    ):
+        warnings.append(
+            f"Step time moved {step_time_delta_pct:+.2f}%, past the {regression_pct:.2f}% "
+            f"threshold asked for but inside the {NOISE_FLOOR_STEP_TIME_PCT:.2f}% "
+            "run-to-run noise floor that one capture per side cannot see through; "
+            "reported as neutral. Repeat the pair of runs to tell a change this small "
+            "from jitter."
+        )
     communication_summary = build_communication_summary(
         before_prof,
         after_prof,

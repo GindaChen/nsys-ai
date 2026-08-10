@@ -291,6 +291,10 @@ class ProfileMeta:
     nvtx_count: int
     tables: list[str]
     gpu_info: dict[int, GpuInfo] = field(default_factory=dict)  # deviceId -> GpuInfo
+    #: deviceId -> summed kernel duration in ns. Comes free from the pass that
+    #: already groups by device, and lets a caller ask how much of the capture
+    #: a device actually accounts for rather than only whether it appears.
+    device_kernel_ns: dict[int, int] = field(default_factory=dict)
 
 
 class Profile:
@@ -439,19 +443,22 @@ class Profile:
         devices: list[int] = []
         streams: dict[int, list[int]] = {}
         kcounts: dict[int, int] = {}
+        device_ns: dict[int, int] = {}
         kernel_count = 0
         min_start = None
         max_end = None
-        for dev, stream, mn, mx, cnt in self.adapter.execute(
-            f"SELECT deviceId, streamId, MIN(start), MAX([end]), COUNT(*) "
+        for dev, stream, mn, mx, cnt, dur in self.adapter.execute(
+            f"SELECT deviceId, streamId, MIN(start), MAX([end]), COUNT(*), SUM([end] - start) "
             f"FROM {kernel_table} GROUP BY deviceId, streamId ORDER BY deviceId, streamId"
         ).fetchall():
             if dev not in streams:
                 streams[dev] = []
                 kcounts[dev] = 0
+                device_ns[dev] = 0
                 devices.append(dev)
             streams[dev].append(stream)
             kcounts[dev] += cnt
+            device_ns[dev] += int(dur or 0)
             kernel_count += cnt
             if mn is not None:
                 min_start = mn if min_start is None else min(min_start, mn)
@@ -473,6 +480,7 @@ class Profile:
             nvtx_count=nc,
             tables=tables,
             gpu_info=self._gpu_info(devices, streams, tables, kcounts),
+            device_kernel_ns=device_ns,
         )
 
     def query_conn(self):

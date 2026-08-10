@@ -268,78 +268,24 @@ PROFILE_ID_VERSION = "nsys2"
 contributing columns or the canonical serialisation change."""
 
 
-def get_profile_id(
-    conn: typing.Any, *, fallback_path: str | os.PathLike[str] | None = None
-) -> str:
-    """Return a stable content-derived id for a Nsight Systems profile.
+def _part_is_empty(value: typing.Any) -> bool:
+    """A contribution that carried nothing, in any of the shapes it can take."""
+    return value is None or value == "" or value == [] or value == 0
 
-    The hash spans only fields stamped at *profile-capture* time, so it
-    survives ``.nsys-rep`` → ``.sqlite`` re-export, ``VACUUM``,
-    ``journal_mode`` changes, and filesystem moves:
 
-      - ``TARGET_INFO_SESSION_START_TIME.utcEpochNs``
-      - ``ANALYSIS_DETAILS`` rows (``duration / startTime / stopTime``)
-      - ``TARGET_INFO_GPU`` rows (``id``, ``name``)
-      - ``TARGET_INFO_GPU.uuid`` values when the column exists
-        (newer Nsight); older exports keep ``uuid`` on
-        ``TARGET_INFO_CUDA_DEVICE`` and that contribution degrades to
-        empty rather than failing
-      - distinct ``ANALYSIS_FILE.globalPid`` values
-      - resolved ``CUPTI_ACTIVITY_KIND_KERNEL[_Vn]`` row count
+#: The one contribution that is not capture metadata. An id resting on this
+#: alone identifies a row count, not a run.
+_NON_CAPTURE_ID_PART = "kernel_count"
 
-    Each contribution is JSON-encoded as a ``(label, value)`` pair before
-    hashing, so values containing ``|`` / ``;`` / ``\\n`` can never collide
-    with neighbouring values via separator ambiguity.
 
-    Format::
+def _profile_id_parts(conn: typing.Any) -> list[tuple[str, typing.Any]]:
+    """The ``(label, value)`` contributions the profile id hashes.
 
-        nsys2:sha256:<64-hex>   # preferred — content-derived
-        nsys2:path:<64-hex>     # fallback — when no Nsight metadata is reachable
-
-    The fallback fires for backends that expose only the parquet cache
-    (``backend='parquetdir'``) where META_DATA / TARGET_INFO tables were
-    never materialised. Callers should pass ``self.prof.conn`` (the
-    SQLite source where available); the function never reads
-    ``self.prof.db`` semantics — it just runs SQL.
-
-    ``fallback_path`` is hashed verbatim — pass an absolute path if you
-    want it to compare equal across working-directory changes.
-
-    .. note::
-       When *both* ``conn`` is None / empty and ``fallback_path`` is
-       None, the function returns ``nsys2:sha256:<sha256 of empty>``.
-       That is a recognisable null-id sentinel: every such caller
-       collapses to the same value. Always pass ``fallback_path`` if
-       cross-call distinguishability matters.
-
-    .. note::
-       ``NULLS LAST`` requires SQLite ≥ 3.30 (2019-10-04) and is native
-       in DuckDB. Older SQLite raises ``OperationalError`` on the
-       ``ORDER BY ... NULLS LAST`` clause; the offending contribution
-       is caught and degraded to empty rather than crashing.
+    Shared with :func:`profile_id_is_capture_derived` so that the id and any
+    question asked about the id read the same contributions rather than two
+    copies of the same SQL. Each contribution degrades to empty rather than
+    raising: an export missing a table loses that contribution, not the id.
     """
-    # Coerce ``fallback_path`` once: callers often pass ``pathlib.Path``
-    # (e.g. via ``Profile(Path(...))`` → ``Profile.path``). Both fallback
-    # branches below would otherwise crash with AttributeError on
-    # ``.encode("utf-8")``.
-    fallback_str = os.fspath(fallback_path) if fallback_path is not None else None
-
-    def _path_id(p: str) -> str:
-        digest = hashlib.sha256(p.encode("utf-8")).hexdigest()
-        return f"{PROFILE_ID_VERSION}:path:{digest}"
-
-    def _null_id() -> str:
-        """The shared null-id sentinel — same value whether ``conn`` is
-        None or merely empty, so consumers can detect "no usable
-        identity" with a single equality check."""
-        return f"{PROFILE_ID_VERSION}:sha256:{hashlib.sha256(b'').hexdigest()}"
-
-    # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
-    # over None, whose .execute() raises AttributeError (not a DB error),
-    # so the loop's try/except wouldn't catch it. Skip the queries.
-    if conn is None:
-        return _path_id(fallback_str) if fallback_str else _null_id()
-
     adapter = wrap_connection(conn)
 
     def _scalar(sql: str) -> typing.Any:
@@ -435,10 +381,105 @@ def get_profile_id(
     # metadata (e.g. parquetdir backend). Fall back to a clearly-labelled
     # path-derived id rather than collapse every such profile to the
     # same constant hash.
-    def _empty(v: typing.Any) -> bool:
-        return v is None or v == "" or v == [] or v == 0
+    return parts
 
-    if all(_empty(v) for _, v in parts):
+
+def profile_id_is_capture_derived(conn: typing.Any) -> bool:
+    """True when the profile id was built from metadata identifying a run.
+
+    Every contribution degrades independently, so an export carrying none of
+    the ``TARGET_INFO_*`` / ``ANALYSIS_*`` tables still produces a well-formed
+    id — from the kernel row count alone. Equal ids then mean equal row counts,
+    which is not identity, and any caller acting on "these are the same
+    capture" has to ask this first.
+
+    Schema version is not a substitute: it comes from ``META_DATA_EXPORT``, a
+    different table, which can be present while every id contribution is not.
+    """
+    if conn is None:
+        return False
+    return any(
+        not _part_is_empty(value)
+        for label, value in _profile_id_parts(conn)
+        if label != _NON_CAPTURE_ID_PART
+    )
+
+
+def get_profile_id(
+    conn: typing.Any, *, fallback_path: str | os.PathLike[str] | None = None
+) -> str:
+    """Return a stable content-derived id for a Nsight Systems profile.
+
+    The hash spans only fields stamped at *profile-capture* time, so it
+    survives ``.nsys-rep`` → ``.sqlite`` re-export, ``VACUUM``,
+    ``journal_mode`` changes, and filesystem moves:
+
+      - ``TARGET_INFO_SESSION_START_TIME.utcEpochNs``
+      - ``ANALYSIS_DETAILS`` rows (``duration / startTime / stopTime``)
+      - ``TARGET_INFO_GPU`` rows (``id``, ``name``)
+      - ``TARGET_INFO_GPU.uuid`` values when the column exists
+        (newer Nsight); older exports keep ``uuid`` on
+        ``TARGET_INFO_CUDA_DEVICE`` and that contribution degrades to
+        empty rather than failing
+      - distinct ``ANALYSIS_FILE.globalPid`` values
+      - resolved ``CUPTI_ACTIVITY_KIND_KERNEL[_Vn]`` row count
+
+    Each contribution is JSON-encoded as a ``(label, value)`` pair before
+    hashing, so values containing ``|`` / ``;`` / ``\\n`` can never collide
+    with neighbouring values via separator ambiguity.
+
+    Format::
+
+        nsys2:sha256:<64-hex>   # preferred — content-derived
+        nsys2:path:<64-hex>     # fallback — when no Nsight metadata is reachable
+
+    The fallback fires for backends that expose only the parquet cache
+    (``backend='parquetdir'``) where META_DATA / TARGET_INFO tables were
+    never materialised. Callers should pass ``self.prof.conn`` (the
+    SQLite source where available); the function never reads
+    ``self.prof.db`` semantics — it just runs SQL.
+
+    ``fallback_path`` is hashed verbatim — pass an absolute path if you
+    want it to compare equal across working-directory changes.
+
+    .. note::
+       When *both* ``conn`` is None / empty and ``fallback_path`` is
+       None, the function returns ``nsys2:sha256:<sha256 of empty>``.
+       That is a recognisable null-id sentinel: every such caller
+       collapses to the same value. Always pass ``fallback_path`` if
+       cross-call distinguishability matters.
+
+    .. note::
+       ``NULLS LAST`` requires SQLite ≥ 3.30 (2019-10-04) and is native
+       in DuckDB. Older SQLite raises ``OperationalError`` on the
+       ``ORDER BY ... NULLS LAST`` clause; the offending contribution
+       is caught and degraded to empty rather than crashing.
+    """
+    # Coerce ``fallback_path`` once: callers often pass ``pathlib.Path``
+    # (e.g. via ``Profile(Path(...))`` → ``Profile.path``). Both fallback
+    # branches below would otherwise crash with AttributeError on
+    # ``.encode("utf-8")``.
+    fallback_str = os.fspath(fallback_path) if fallback_path is not None else None
+
+    def _path_id(p: str) -> str:
+        digest = hashlib.sha256(p.encode("utf-8")).hexdigest()
+        return f"{PROFILE_ID_VERSION}:path:{digest}"
+
+    def _null_id() -> str:
+        """The shared null-id sentinel — same value whether ``conn`` is
+        None or merely empty, so consumers can detect "no usable
+        identity" with a single equality check."""
+        return f"{PROFILE_ID_VERSION}:sha256:{hashlib.sha256(b'').hexdigest()}"
+
+    # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
+    # over None, whose .execute() raises AttributeError (not a DB error),
+    # so the loop's try/except wouldn't catch it. Skip the queries.
+    if conn is None:
+        return _path_id(fallback_str) if fallback_str else _null_id()
+
+    parts = _profile_id_parts(conn)
+
+    if all(_part_is_empty(v) for _, v in parts):
         # Same shape as the ``conn is None`` branch above: path-fallback
         # if available, else the null-id sentinel. This keeps the
         # "no usable identity" check a single equality.

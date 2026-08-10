@@ -3372,6 +3372,104 @@ def test_no_model_is_asked_to_narrate_a_pair_that_cannot_be_compared(tmp_path):
     assert not asked
     assert result.ai_narrative is None
     assert result.executive_summary
+def _kernels(dev, count, duration_ns, *, base_correlation=0):
+    return [
+        (i * 2_000_000, i * 2_000_000 + duration_ns, dev, 7, base_correlation + i, 1, 2)
+        for i in range(count)
+    ]
+
+
+def test_a_device_holding_almost_no_time_does_not_refuse_the_comparison(tmp_path):
+    """One microsecond on a second device is not a topology change.
+
+    An NCCL or cuDNN bootstrap can touch a device for microseconds. Refusing on
+    the device set alone turned that into comparability 0.00 and failed a CI
+    gate on a pair whose totals agree to four decimal places.
+    """
+    before = tmp_path / "boot_before.sqlite"
+    after = tmp_path / "boot_after.sqlite"
+    _make_profile(
+        str(before),
+        kernels=_kernels(0, 200, 1_000_000) + [(0, 1_000, 1, 7, 9_999, 1, 2)],
+    )
+    _make_profile(str(after), kernels=_kernels(0, 200, 1_000_000))
+
+    summary = _diff_summary(before, after, gpu=None, limit=10)
+    assert summary.comparability_confidence >= 0.5, summary.warnings
+    assert summary.verdict == "neutral", summary.verdict
+    # Still said, because it is still true -- just not fatal.
+    assert any("under the 1% that would move the totals" in w for w in summary.warnings), (
+        summary.warnings
+    )
+
+
+def test_a_rank_that_dropped_out_still_refuses_the_comparison(tmp_path):
+    """The immaterial-share exemption must not swallow the case it came from."""
+    before = tmp_path / "rank_before.sqlite"
+    after = tmp_path / "rank_after.sqlite"
+    _make_profile(
+        str(before),
+        kernels=_kernels(0, 200, 1_000_000) + _kernels(1, 200, 1_000_000, base_correlation=1000),
+    )
+    _make_profile(str(after), kernels=_kernels(0, 200, 1_000_000))
+
+    summary = _diff_summary(before, after, gpu=None, limit=10)
+    assert summary.comparability_confidence == 0.0, summary.warnings
+    assert summary.verdict == "inconclusive"
+    assert any("GPU count differs" in w for w in summary.warnings), summary.warnings
+
+
+def test_a_missing_gpu_selection_is_not_also_called_an_empty_capture(tmp_path):
+    """One cause, one sentence.
+
+    `--gpu 5` on two profiles that both ran used to print the device warning
+    and then "the profile contains no GPU kernel activity" -- false about the
+    profile, and it sends the reader off to check whether the run executed.
+    """
+    before = tmp_path / "sel_before.sqlite"
+    after = tmp_path / "sel_after.sqlite"
+    _make_profile(str(before), kernels=_kernels(0, 20, 1_000_000))
+    _make_profile(str(after), kernels=_kernels(0, 20, 1_000_000))
+
+    summary = _diff_summary(before, after, gpu=5, limit=10)
+    assert summary.comparability_confidence == 0.0
+    assert any("GPU 5 recorded no kernels" in w for w in summary.warnings), summary.warnings
+    assert not any("no GPU kernel activity" in w for w in summary.warnings), summary.warnings
+
+
+def test_two_different_captures_carrying_no_capture_metadata_are_not_called_one(tmp_path):
+    """Equal ids mean equal row counts when the metadata that names a run is absent.
+
+    `_make_profile` writes no TARGET_INFO_* / ANALYSIS_* tables, so the id
+    rests on the kernel row count alone. Keying the identity exemption on the
+    schema version let two unrelated captures of the same size be declared
+    "the same capture, every delta below is self-noise".
+    """
+    import sqlite3
+
+    from nsys_ai.fingerprint import get_profile_id, profile_id_is_capture_derived
+
+    before = tmp_path / "anon_before.sqlite"
+    after = tmp_path / "anon_after.sqlite"
+    # Same row count and same total duration, different distribution.
+    _make_profile(
+        str(before),
+        kernels=[(0, 40_000_000, 0, 7, 0, 1, 2), (50_000_000, 60_000_000, 0, 7, 1, 1, 2)],
+    )
+    _make_profile(
+        str(after),
+        kernels=[(0, 10_000_000, 0, 7, 0, 1, 2), (50_000_000, 90_000_000, 0, 7, 1, 1, 2)],
+    )
+    for path in (before, after):
+        conn = sqlite3.connect(str(path))
+        try:
+            assert not profile_id_is_capture_derived(conn), path
+            assert get_profile_id(conn, fallback_path=str(path))
+        finally:
+            conn.close()
+
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+    assert not any("same capture" in w for w in summary.warnings), summary.warnings
 
 
 def test_executive_summary_never_signs_a_magnitude_after_a_direction_word(tmp_path):
@@ -3403,3 +3501,311 @@ def test_executive_summary_says_unchanged_rather_than_slower_by_zero(tmp_path):
     text = build_executive_summary(_diff_summary(before, after, gpu=0, limit=10))
     assert "Total GPU time was unchanged." in text, text
     assert "slower" not in text and "faster" not in text, text
+
+
+# ---------------------------------------------------------------------------
+# Inputs that cannot support a comparison: the same capture on both sides, a
+# side that never recorded a device, a GPU selection that does not exist, two
+# captures of different topologies, and a delta inside run-to-run noise.
+# ---------------------------------------------------------------------------
+
+
+def _lost_device_pair(tmp_path):
+    """before ran on GPUs 0 and 1; after recorded GPU 0 only.
+
+    Per-GPU work is identical, so every delta the pipeline finds is the device
+    the after side never captured.
+    """
+    ms = 1_000_000
+    before = tmp_path / "lost_before.sqlite"
+    after = tmp_path / "lost_after.sqlite"
+    _make_profile(
+        str(before),
+        kernels=[
+            (0, 50 * ms, 0, 7, 1, 1, 2),
+            (60 * ms, 110 * ms, 0, 7, 2, 3, 4),
+            (0, 50 * ms, 1, 7, 3, 1, 2),
+            (60 * ms, 110 * ms, 1, 7, 4, 3, 4),
+        ],
+    )
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 50 * ms, 0, 7, 1, 1, 2),
+            (60 * ms, 110 * ms, 0, 7, 2, 3, 4),
+        ],
+    )
+    return before, after
+
+
+def _all_gpu_summary(before, after, **kwargs):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles_all_gpus
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        return diff_profiles_all_gpus(b, a, **kwargs)
+
+
+def test_a_side_that_lost_a_gpu_is_not_a_clean_win(tmp_path):
+    """Half the devices missing read as half the GPU time saved.
+
+    The all-GPU invocation is the one that matters: with no ``--gpu`` both
+    sides aggregate over whatever devices they happen to have, so the
+    empty-capture check never fires and the missing rank lands in the total as
+    an improvement.
+    """
+    before, after = _lost_device_pair(tmp_path)
+    global_summary, _ = _all_gpu_summary(before, after, limit=10)
+
+    assert global_summary.step_time_delta_pct == -50.0, "the fixture must show a large win"
+    assert global_summary.verdict == "inconclusive", global_summary.verdict
+    assert global_summary.comparability_confidence == 0.0
+    assert any(
+        "GPU count differs" in w and "[0, 1]" in w and "[0]" in w
+        for w in global_summary.warnings
+    ), global_summary.warnings
+
+
+def test_a_gpu_missing_from_one_side_names_the_side_and_the_device(tmp_path):
+    """Scoped to the lost device, the reason must not be "the profile is empty".
+
+    The empty-capture warning already fires on this path, and on its own it
+    sends the reader to check whether the run executed — when the run executed
+    fine and only that device was never captured.
+    """
+    before, after = _lost_device_pair(tmp_path)
+    summary = _diff_summary(before, after, gpu=1, limit=10)
+
+    assert summary.verdict == "inconclusive"
+    assert summary.comparability_confidence == 0.0
+    named = [w for w in summary.warnings if "GPU 1 recorded kernels in the before" in w]
+    assert named, summary.warnings
+    assert "none in the after profile" in named[0]
+    assert "not a change in the workload" in named[0]
+
+
+def test_a_gpu_present_in_neither_profile_says_so(tmp_path):
+    """``--gpu 5`` on two 2-GPU captures is an empty selection, not two empty captures."""
+    before, after = _lost_device_pair(tmp_path)
+    summary = _diff_summary(before, after, gpu=5, limit=10)
+
+    assert summary.verdict == "inconclusive"
+    assert summary.comparability_confidence == 0.0
+    named = [w for w in summary.warnings if "GPU 5 recorded no kernels in either profile" in w]
+    assert named, summary.warnings
+    assert "no before/after claim can be made" in named[0]
+
+
+def test_a_topology_mismatch_is_refused_rather_than_scored(tmp_path):
+    """2 GPUs against 4 is not a before and an after; it is different hardware."""
+    ms = 1_000_000
+    before = tmp_path / "topo_before.sqlite"
+    after = tmp_path / "topo_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 50 * ms, d, 7, i, 1, 2) for i, d in enumerate([0, 1])])
+    _make_profile(
+        str(after), kernels=[(0, 50 * ms, d, 7, i, 1, 2) for i, d in enumerate([0, 1, 2, 3])]
+    )
+    global_summary, _ = _all_gpu_summary(before, after, limit=10)
+
+    assert global_summary.step_time_delta_pct == 100.0, "the fixture must show a large loss"
+    assert global_summary.verdict == "inconclusive"
+    assert global_summary.comparability_confidence == 0.0
+    assert any("GPU count differs" in w for w in global_summary.warnings), global_summary.warnings
+
+
+def test_matching_gpu_count_with_different_ids_warns_without_refusing(tmp_path):
+    """Same amount of hardware, different ordinals: comparable, worth saying."""
+    ms = 1_000_000
+    before = tmp_path / "ids_before.sqlite"
+    after = tmp_path / "ids_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 50 * ms, d, 7, i, 1, 2) for i, d in enumerate([0, 1])])
+    _make_profile(str(after), kernels=[(0, 50 * ms, d, 7, i, 1, 2) for i, d in enumerate([2, 3])])
+    global_summary, _ = _all_gpu_summary(before, after, limit=10)
+
+    assert global_summary.verdict != "inconclusive", global_summary.warnings
+    assert global_summary.comparability_confidence >= 0.5
+    assert any(
+        "different GPU ids" in w and "[0, 1]" in w and "[2, 3]" in w
+        for w in global_summary.warnings
+    ), global_summary.warnings
+
+
+def test_matching_device_sets_add_no_warning(tmp_path):
+    """The gate must stay silent on a pair that recorded the same GPUs."""
+    ms = 1_000_000
+    before = tmp_path / "same_before.sqlite"
+    after = tmp_path / "same_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 50 * ms, d, 7, i, 1, 2) for i, d in enumerate([0, 1])])
+    _make_profile(str(after), kernels=[(0, 52 * ms, d, 7, i, 1, 2) for i, d in enumerate([0, 1])])
+    global_summary, _ = _all_gpu_summary(before, after, limit=10)
+
+    assert global_summary.comparability_confidence == 1.0
+    assert not [w for w in global_summary.warnings if "GPU" in w], global_summary.warnings
+
+
+def test_a_profile_diffed_against_itself_is_self_noise_not_a_verdict(tmp_path):
+    """Same capture on both sides: the answer is "nothing was rerun"."""
+    before, _ = _lost_device_pair(tmp_path)
+    global_summary, _ = _all_gpu_summary(before, before, limit=10)
+
+    assert global_summary.verdict == "neutral"
+    assert any("the same capture" in w for w in global_summary.warnings), global_summary.warnings
+    assert any("self-noise" in w for w in global_summary.warnings), global_summary.warnings
+
+    scoped = _diff_summary(before, before, gpu=0, limit=10)
+    assert scoped.verdict == "neutral"
+    assert any("the same capture" in w for w in scoped.warnings), scoped.warnings
+
+
+def test_the_same_capture_is_recognised_through_a_copy_under_another_name(tmp_path):
+    """The id is content-derived, so a renamed copy is still the same capture."""
+    import shutil
+
+    copy = tmp_path / "renamed.sqlite"
+    shutil.copy(_MFU_BEFORE, copy)
+    global_summary, _ = _all_gpu_summary(_MFU_BEFORE, copy, limit=10)
+
+    assert global_summary.before.path != global_summary.after.path
+    assert global_summary.before.profile_id == global_summary.after.profile_id
+    assert global_summary.verdict == "neutral"
+    assert any("the same capture" in w for w in global_summary.warnings), global_summary.warnings
+
+
+def test_identity_is_not_claimed_from_a_profile_that_carries_no_capture_metadata(tmp_path):
+    """Two unrelated captures must never be called one.
+
+    A profile with no capture metadata contributes only its kernel row count to
+    the profile id, so two different runs with the same number of kernels hash
+    the same. The identity claim must not rest on that.
+    """
+    from nsys_ai.diff import same_capture
+
+    ms = 1_000_000
+    before = tmp_path / "meta_before.sqlite"
+    after = tmp_path / "meta_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 50 * ms, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 50 * ms, 0, 7, 1, 3, 4)])
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+
+    assert summary.before.profile_id == summary.after.profile_id, "the id collision is the setup"
+    assert summary.before.schema_version is None
+    assert not same_capture(summary.before, summary.after)
+    assert not [w for w in summary.warnings if "the same capture" in w], summary.warnings
+
+
+def test_two_windows_of_one_capture_are_still_compared(tmp_path):
+    """An iteration diff reads one capture twice through different windows.
+
+    Both sides share a path and an id, and it is a real comparison; only the
+    identical window makes the two sides one measurement.
+    """
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    ms = 1_000_000
+    path = tmp_path / "windows.sqlite"
+    _make_profile(
+        str(path),
+        kernels=[
+            (0, 50 * ms, 0, 7, 1, 1, 2),
+            (100 * ms, 190 * ms, 0, 7, 2, 1, 2),
+        ],
+    )
+    with profile_mod.open(str(path)) as b, profile_mod.open(str(path)) as a:
+        summary = diff_profiles(
+            b, a, gpu=0, trim_before=(0, 60 * ms), trim_after=(100 * ms, 200 * ms), limit=10
+        )
+
+    assert not [w for w in summary.warnings if "the same capture" in w], summary.warnings
+    assert summary.kernel_diffs[0].delta_ns != 0
+
+
+def test_a_step_time_delta_inside_the_noise_floor_stays_neutral():
+    """A gate tighter than run-to-run jitter cannot make a coin flip a verdict."""
+    from nsys_ai.diff import NOISE_FLOOR_STEP_TIME_PCT, compute_verdict
+
+    assert NOISE_FLOOR_STEP_TIME_PCT < 5.0, "the floor must not move the default verdict"
+    assert compute_verdict(1.0, 1.0, regression_pct=0.5) == "neutral"
+    assert compute_verdict(-1.0, 1.0, regression_pct=0.5) == "neutral"
+    # A change past the floor is still judged against the caller's threshold.
+    assert compute_verdict(3.0, 1.0, regression_pct=0.5) == "regression_likely"
+    assert compute_verdict(-3.0, 1.0, regression_pct=0.5) == "improvement_likely"
+    # And the floor never rescues an incomparable pair into neutral.
+    assert compute_verdict(0.1, 0.2, regression_pct=0.5) == "inconclusive"
+
+
+def test_the_noise_floor_says_why_it_overrode_the_threshold(tmp_path):
+    """Neutral beside a delta past the requested gate has to explain itself."""
+    ms = 1_000_000
+    before = tmp_path / "floor_before.sqlite"
+    after = tmp_path / "floor_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 100 * ms, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 101 * ms, 0, 7, 1, 1, 2)])
+    summary = _diff_summary(before, after, gpu=0, limit=10, regression_pct=0.5)
+
+    assert summary.step_time_delta_pct is not None
+    assert 0.5 <= abs(summary.step_time_delta_pct) < 2.0, summary.step_time_delta_pct
+    assert summary.verdict == "neutral"
+    said = [w for w in summary.warnings if "noise floor" in w]
+    assert said, summary.warnings
+    assert "reported as neutral" in said[0]
+
+
+def test_a_default_gate_never_mentions_the_noise_floor(tmp_path):
+    """The floor sits under the default threshold, so it must stay invisible there."""
+    ms = 1_000_000
+    before = tmp_path / "quiet_before.sqlite"
+    after = tmp_path / "quiet_after.sqlite"
+    _make_profile(str(before), kernels=[(0, 100 * ms, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 101 * ms, 0, 7, 1, 1, 2)])
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+
+    assert summary.verdict == "neutral"
+    assert not [w for w in summary.warnings if "noise floor" in w], summary.warnings
+
+
+def test_cli_refuses_a_pair_that_lost_a_gpu_and_fails_the_gate(tmp_path):
+    """End to end, through the surface a human reads and a CI job exits on."""
+    before, after = _lost_device_pair(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(after),
+            "--no-ai",
+            "--exit-on-regression",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, (result.returncode, result.stdout[-2000:], result.stderr[-2000:])
+    assert "Verdict: inconclusive" in result.stdout, result.stdout[:1200]
+    assert "No comparison was made" in result.stdout, result.stdout[:1200]
+    assert "GPU count differs" in result.stdout, result.stdout[:1200]
+    # The withheld tables must not come back through the per-GPU sections.
+    assert "Per-GPU Overview" not in result.stdout, result.stdout[:2000]
+
+
+def test_cli_self_diff_passes_the_gate_and_says_it_is_the_same_capture(tmp_path):
+    """A capture compared with itself is not a regression, and says why."""
+    before, _ = _lost_device_pair(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "diff",
+            str(before),
+            str(before),
+            "--no-ai",
+            "--exit-on-regression",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert "Verdict: neutral" in result.stdout, result.stdout[:1200]
+    assert "the same capture" in result.stdout, result.stdout[:1200]
