@@ -17,7 +17,7 @@ from .diff import ProfileDiffSummary, diff_profiles
 from .diff_render import to_diff_json
 from .profile import Profile
 from .viewer import build_timeline_gpu_data, generate_timeline_html
-from .web import _TEMPLATE_DIR, _run_server, _ThreadedHTTPServer
+from .web import _TEMPLATE_DIR, _bind_local_server, _run_server
 
 
 class _DiffHandler(BaseHTTPRequestHandler):
@@ -506,13 +506,7 @@ def serve_diff_web(
     _DiffHandler.trim = trim
     _DiffHandler.summary = summary
 
-    try:
-        server = _ThreadedHTTPServer(("127.0.0.1", port), _DiffHandler)
-    except OSError:
-        if port == 0:
-            raise
-        server = _ThreadedHTTPServer(("127.0.0.1", 0), _DiffHandler)
-        print(f"Port {port} in use, using port {server.server_address[1]} instead.")
+    server = _bind_local_server(port, _DiffHandler)
 
     open_url = f"http://127.0.0.1:{server.server_address[1]}" if open_browser else None
     _run_server(server, open_url, before)

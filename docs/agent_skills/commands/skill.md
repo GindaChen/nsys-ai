@@ -9,11 +9,20 @@ Manage and run builtin analysis skills against Nsight Systems profiles.
 
 ### `nsys-ai skill list`
 
-List all registered skills with name, category, and description.
+List all registered skills with name, category, and description. A name marked
+`*` cannot run without a parameter; the footer names the flag and where to look
+up which parameter. In `--format json` the same information is the `required`
+field on each entry in `params`.
 
 ```bash
 nsys-ai skill list                   # human-readable table
 nsys-ai skill list --format json     # JSON array (for programmatic use)
+```
+
+```
+theoretical_flops *             kernels          Computes exact theoretical FLOPs ...
+
+* needs a required parameter: nsys-ai skill run <name> <profile> -p KEY=VALUE (see: nsys-ai skill info <name>)
 ```
 
 ### `nsys-ai skill run`

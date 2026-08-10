@@ -516,7 +516,13 @@ class Skill:
             if p.default is not None:
                 resolved[p.name] = p.default
             elif p.required:
-                raise ValueError(f"Skill '{self.name}' requires parameter '{p.name}'")
+                from ..exceptions import SkillParameterError
+
+                raise SkillParameterError(
+                    f"skill '{self.name}' requires parameter '{p.name}'",
+                    skill_name=self.name,
+                    parameter=p.name,
+                )
 
         # Handle {trim_clause} injection before execute_fn so {overhead_ns} can be computed correctly
         trim_start = resolved.get("trim_start_ns")

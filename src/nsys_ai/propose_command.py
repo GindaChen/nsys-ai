@@ -435,13 +435,25 @@ def run_propose(
     if session_id is not None:
         from .session_cli import publish_session_proposal
 
-        publish_session_proposal(
-            session_id=session_id,
-            proposal=proposal,
-            runspec=None if adopted_runspec else runspec,
-            resolved_secrets=resolved_secrets,
-            root=session_root,
-        )
+        try:
+            publish_session_proposal(
+                session_id=session_id,
+                proposal=proposal,
+                runspec=None if adopted_runspec else runspec,
+                resolved_secrets=resolved_secrets,
+                root=session_root,
+            )
+        except ValueError as exc:
+            # SessionStore enforces the phase order and the immutability of
+            # already-published artifacts, and raises ValueError for both.
+            # Re-running propose against a session that has moved on is an
+            # ordinary mistake, not a crash. TypeError stays uncaught: it means
+            # this function was handed the wrong type, which is our bug, not
+            # the caller's mistake, and reading it as one would hide it.
+            detail = _redact_message(str(exc), resolved_secrets or {})
+            raise ProposeCommandError(
+                f"could not publish the proposal into session {session_id}: {detail}"
+            ) from exc
         print(
             f"Proposal published to session {session_id}",
             file=stdout,

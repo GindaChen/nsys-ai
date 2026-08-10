@@ -437,6 +437,57 @@ def _parse_trim(args):
     return None
 
 
+def _check_trim_window(trim, prof):
+    """Reject a --trim window that selects no part of *prof*.
+
+    ``--trim`` is read on the capture clock, which does not start at zero, so
+    ``--trim 0 1`` on a profile whose first event is at 60 s silently selects
+    nothing.  Name both windows rather than producing an empty result.
+    """
+    if trim is None:
+        return
+    start_ns, end_ns = trim
+    time_range = getattr(getattr(prof, "meta", None), "time_range", None)
+    if not time_range:
+        return
+    lo_ns, hi_ns = time_range
+    if hi_ns <= lo_ns:
+        return
+    # end > start as well as overlapping: --trim 156 156 sits inside the
+    # profile and still selects nothing, which is the same empty result under
+    # a different arithmetic.
+    if end_ns > start_ns and start_ns < hi_ns and end_ns > lo_ns:
+        return
+    from nsys_ai.exceptions import TrimOutOfRangeError
+
+    raise TrimOutOfRangeError(
+        f"--trim {start_ns / 1e9:.3f} {end_ns / 1e9:.3f} selects no part of this "
+        f"profile, whose window is {lo_ns / 1e9:.3f} s to {hi_ns / 1e9:.3f} s on the "
+        f"capture clock. Use a window inside that range, or omit --trim."
+    )
+
+
+def _check_trim_window_for_path(trim, path, _profile):
+    """``_check_trim_window`` for handlers that have not opened the profile yet."""
+    if trim is None:
+        return
+    with _profile.open(path) as prof:
+        _check_trim_window(trim, prof)
+
+
+def _required_param_names(skill):
+    """Parameter names *skill* cannot run without.
+
+    ``required`` with a default never stops execution, so the listing and the
+    error message both read the same condition ``Skill.execute`` reads.
+    """
+    return [
+        p.name
+        for p in getattr(skill, "params", ()) or ()
+        if getattr(p, "required", False) and getattr(p, "default", None) is None
+    ]
+
+
 def _coerce_param_value(raw_value, param_type):
     """Coerce a raw string CLI parameter to the type expected by the skill.
 
@@ -654,6 +705,7 @@ def _cmd_analyze(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         data = run_analyze(prof, args.gpu, trim)
         print(format_report_terminal(data))
         if getattr(args, "output", None):
@@ -736,6 +788,7 @@ def _cmd_analyze_json(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         device = getattr(args, "gpu", 0) or 0
         builder = EvidenceBuilder(prof, device=device, trim=trim)
         report = builder.build()
@@ -1305,6 +1358,7 @@ def _cmd_summary(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
         for gpu in gpus:
             s = gpu_summary(prof, gpu, trim)
@@ -1318,14 +1372,18 @@ def _cmd_overlap(args, _profile):
     from nsys_ai.overlap import format_overlap, overlap_analysis
 
     with _profile.open(args.profile) as prof:
-        print(format_overlap(overlap_analysis(prof, args.gpu, _parse_trim(args))))
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        print(format_overlap(overlap_analysis(prof, args.gpu, trim)))
 
 
 def _cmd_nccl(args, _profile):
     from nsys_ai.overlap import format_nccl, nccl_breakdown
 
     with _profile.open(args.profile) as prof:
-        print(format_nccl(nccl_breakdown(prof, args.gpu, _parse_trim(args))))
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        print(format_nccl(nccl_breakdown(prof, args.gpu, trim)))
 
 
 def _cmd_iters(args, _profile):
@@ -1335,14 +1393,18 @@ def _cmd_iters(args, _profile):
         device = (
             args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
         )
-        print(format_iterations(detect_iterations(prof, device, _parse_trim(args))))
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        print(format_iterations(detect_iterations(prof, device, trim)))
 
 
 def _cmd_tree(args, _profile):
     from nsys_ai.tree import build_nvtx_tree, format_text
 
     with _profile.open(args.profile) as prof:
-        roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        roots = build_nvtx_tree(prof, args.gpu, trim)
         print(format_text(roots))
 
 
@@ -1350,7 +1412,9 @@ def _cmd_markdown(args, _profile):
     from nsys_ai.tree import build_nvtx_tree, format_markdown
 
     with _profile.open(args.profile) as prof:
-        roots = build_nvtx_tree(prof, args.gpu, _parse_trim(args))
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        roots = build_nvtx_tree(prof, args.gpu, trim)
         print(format_markdown(roots))
 
 
@@ -1359,6 +1423,7 @@ def _cmd_search(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         if args.parent or args.type == "hierarchy":
             if args.gpu is None or not trim:
                 print("Error: hierarchical search requires --gpu and --trim")
@@ -1378,6 +1443,7 @@ def _cmd_export_csv(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         content = to_csv(prof, args.gpu, trim, args.output)
         if not args.output:
             print(content)
@@ -1392,6 +1458,7 @@ def _cmd_export_json(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         if args.summary:
             data = to_summary_json(prof, args.gpu, trim, args.output)
         else:
@@ -1407,6 +1474,7 @@ def _cmd_export(args, _profile):
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         os.makedirs(args.output, exist_ok=True)
         gpus = [args.gpu] if args.gpu is not None else prof.meta.devices
         for gpu in gpus:
@@ -1425,7 +1493,9 @@ def _cmd_viewer(args, _profile):
     from nsys_ai.viewer import write_html
 
     with _profile.open(args.profile) as prof:
-        write_html(prof, args.gpu, _parse_trim(args), args.output)
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        write_html(prof, args.gpu, trim, args.output)
         print(f"Written to {args.output} ({os.path.getsize(args.output) // 1024} KB)")
 
 
@@ -1433,7 +1503,9 @@ def _cmd_timeline_html(args, _profile):
     from nsys_ai.viewer import write_timeline_html
 
     with _profile.open(args.profile) as prof:
-        write_timeline_html(prof, args.gpu, _parse_trim(args), args.output)
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        write_timeline_html(prof, args.gpu, trim, args.output)
         print(f"Written to {args.output} ({os.path.getsize(args.output) // 1024} KB)")
 
 
@@ -1441,7 +1513,9 @@ def _cmd_web(args, _profile):
     from nsys_ai.web import serve
 
     with _profile.open(args.profile) as prof:
-        serve(prof, args.gpu, _parse_trim(args), port=args.port, open_browser=not args.no_browser)
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
+        serve(prof, args.gpu, trim, port=args.port, open_browser=not args.no_browser)
 
 
 def _cmd_open(args, _profile):
@@ -1452,9 +1526,9 @@ def _cmd_open(args, _profile):
         gpu = (
             args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
         )
-        if args.trim:
-            trim_ns = (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
-        else:
+        trim_ns = _parse_trim(args)
+        _check_trim_window(trim_ns, prof)
+        if trim_ns is None:
             trim_ns = (int(prof.meta.time_range[0]), int(prof.meta.time_range[1]))
         port = args.port if args.port is not None else 8142
         if args.viewer == "web":
@@ -1469,6 +1543,8 @@ def _cmd_timeline_web(args, _profile):
     from nsys_ai.web import serve_timeline
 
     with _profile.open(args.profile) as prof:
+        trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         if args.gpu is not None:
             devices = args.gpu
         else:
@@ -1488,7 +1564,7 @@ def _cmd_timeline_web(args, _profile):
         serve_timeline(
             prof,
             devices,
-            _parse_trim(args),
+            trim,
             port=args.port,
             open_browser=not args.no_browser,
             findings_path=getattr(args, "findings", None),
@@ -1601,17 +1677,38 @@ def _cmd_loop(args, _profile):
 def _cmd_tui(args, _profile):
     from nsys_ai.tree import run_tui
 
-    run_tui(args.profile, args.gpu, _parse_trim(args), max_depth=args.depth, min_ms=args.min_ms)
+    trim = _parse_trim(args)
+    _check_trim_window_for_path(trim, args.profile, _profile)
+    run_tui(args.profile, args.gpu, trim, max_depth=args.depth, min_ms=args.min_ms)
 
 
 def _cmd_timeline(args, _profile):
     from nsys_ai.timeline import run_timeline
 
     gpu = args.gpu if args.gpu is not None else 0
-    run_timeline(args.profile, gpu, _parse_trim(args), min_ms=args.min_ms)
+    trim = _parse_trim(args)
+    _check_trim_window_for_path(trim, args.profile, _profile)
+    run_timeline(args.profile, gpu, trim, min_ms=args.min_ms)
 
 
 def _cmd_chat(args, _profile):
+    # This check has to happen here, before Textual starts. Once the app is
+    # running, Textual replaces the standard streams with a capture object
+    # whose isatty() answers True unconditionally, so an in-app check cannot
+    # see that there is no terminal — and the app then waits forever for input
+    # that a script, a pipe or a CI runner will never send.
+    from nsys_ai.exceptions import NotATerminalError
+
+    # stdin only. Textual renders through stderr, so `nsys-ai chat p.sqlite >
+    # log` is a real and working invocation; it is stdin with nothing on it
+    # that leaves the app waiting forever.
+    if not sys.stdin.isatty():
+        raise NotATerminalError(
+            "chat is an interactive terminal app and stdin is not a terminal. "
+            "Run it from a terminal, or use 'nsys-ai ask <profile> "
+            "\"<question>\"' for a single non-interactive answer."
+        )
+
     try:
         from nsys_ai.tui_textual import run_chat_tui
     except ImportError:
@@ -1657,6 +1754,7 @@ def _cmd_evidence(args, _profile):
 
     with _profile.open(profile_path) as prof:
         trim = _parse_trim(args)
+        _check_trim_window(trim, prof)
         device = getattr(args, "gpu", 0) or 0
         builder = EvidenceBuilder(prof, device=device, trim=trim)
 
@@ -1743,7 +1841,7 @@ def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
 def _cmd_skill(args, _profile):
     import json as _json
 
-    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError
+    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError, SkillParameterError
     from nsys_ai.skills.registry import all_skills, get_skill, load_custom_skills_dir
     from nsys_ai.skills.registry import run_skill as _run_skill
 
@@ -1780,10 +1878,23 @@ def _cmd_skill(args, _profile):
                 )
             )
         else:
-            print(f"{'Name':<25s}  {'Category':<15s}  Description")
+            # A skill with a required parameter cannot be run by name alone, so
+            # the listing has to say which ones those are — otherwise the only
+            # way to find out is to run it and read the error.
+            marked = {s.name for s in skills if _required_param_names(s)}
+            labels = {s.name: (f"{s.name} *" if s.name in marked else s.name) for s in skills}
+            width = max([25] + [len(v) for v in labels.values()])
+            print(f"{'Name':<{width}s}  {'Category':<15s}  Description")
             print("-" * 80)
             for s in skills:
-                print(f"{s.name:<25s}  {s.category:<15s}  {s.description[:60]}")
+                print(f"{labels[s.name]:<{width}s}  {s.category:<15s}  {s.description[:60]}")
+            if marked:
+                print()
+                print(
+                    "* needs a required parameter: "
+                    "nsys-ai skill run <name> <profile> -p KEY=VALUE "
+                    "(see: nsys-ai skill info <name>)"
+                )
     elif args.skill_action == "info":
         skill = get_skill(args.skill_name)
         if skill is None:
@@ -1966,6 +2077,22 @@ def _cmd_skill(args, _profile):
                 print(_json.dumps(rows, indent=2))
             else:
                 print(_run_skill(args.skill_name, conn, **full_kwargs))
+        except SkillParameterError as e:
+            # A missing required parameter is a usage mistake, not a crash and
+            # not an abstention: say which parameter, how to pass it, and exit 2.
+            payload = e.to_dict()
+            payload["error"]["message"] = (
+                f"{e}; pass it with -p {e.parameter}=VALUE "
+                f"(see: nsys-ai skill info {e.skill_name})"
+            )
+            if fmt == "json":
+                print(_json.dumps(payload))
+            else:
+                print(
+                    f"Error [{e.error_code}]: {payload['error']['message']}",
+                    file=sys.stderr,
+                )
+            sys.exit(e.exit_code)
         except SkillNotFoundError as e:
             if fmt == "json":
                 print(_json.dumps(e.to_dict()))
