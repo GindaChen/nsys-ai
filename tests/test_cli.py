@@ -1108,3 +1108,29 @@ def test_every_advertised_invocation_parses():
             message = stderr.getvalue().strip().splitlines()
             failures.append(f"{shown!r} -> {message[-1] if message else 'SystemExit'}")
     assert not failures, "help screen shows invocations that do not parse:\n  " + "\n  ".join(failures)
+
+
+def test_the_perfetto_ui_integration_is_gone_but_the_export_remains():
+    """We do not ship an integration with someone else's hosted service.
+
+    `nsys-ai perfetto` served the trace locally with `Access-Control-Allow-Origin: *`
+    and opened ui.perfetto.dev, a page we do not run, over a link the user may not
+    have. It could not participate in the loop either -- no findings overlay, no
+    session, nothing came back. The Chrome Trace Event export stays: it is a format,
+    not a service, and anyone who wants Perfetto can open the file there themselves.
+    """
+    import nsys_ai.web as web_module
+
+    assert not hasattr(web_module, "serve_perfetto")
+    assert not hasattr(web_module, "_PerfettoHandler")
+    assert "ui.perfetto.dev" not in _help_screen()
+
+    declared = _declared_subcommands()
+    assert "perfetto" not in declared
+    assert "export" in declared, "the trace export must survive"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "perfetto", "p.sqlite"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0

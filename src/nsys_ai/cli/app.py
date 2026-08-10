@@ -182,7 +182,6 @@ def main():
         "export-json",
         "viewer",
         "timeline-html",
-        "perfetto",
         "tui",
         "timeline",
     }
