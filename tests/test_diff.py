@@ -815,7 +815,10 @@ def test_diff_cli_exit_on_regression_fails_gate(tmp_path):
     assert "Diff gate failed" in result.stderr
     assert "step_time_delta_ms=+2.000" in result.stderr
     assert "step_time_delta_pct=+20.00%" in result.stderr
-    assert "comparability_confidence=1.000" in result.stderr
+    # Two decimals, truncated, matching the report's own rendering: the gate
+    # message used to round to three, so a score of 0.4996 printed as 0.500
+    # beside "(minimum 0.50)" on the same line that refused it.
+    assert "comparability_confidence=1.00 " in result.stderr
 
 
 def test_diff_cli_exit_on_regression_allows_improvement(tmp_path):
@@ -3074,3 +3077,329 @@ def test_v01_diff_id_is_stable_across_runs(tmp_path):
 
     assert d1.diff_id == d2.diff_id
     assert d1.diff_id.startswith("diff1:sha256:")
+
+
+# ---------------------------------------------------------------------------
+# The verdict and comparability score are shown, and an incomparable pair is
+# refused instead of decorated with delta tables.
+# ---------------------------------------------------------------------------
+
+_MFU_BEFORE = pathlib.Path(__file__).parent / "fixtures" / "mfu_2gpu_before.sqlite"
+_MFU_AFTER = pathlib.Path(__file__).parent / "fixtures" / "mfu_2gpu_after.sqlite"
+
+
+def _incomparable_pair(tmp_path, *, before_n=12, after_n=2):
+    """A pair whose only difference is workload size, scoring below the gate.
+
+    ``collect_sanity_warnings`` derives comparability from min/max kernel rows,
+    so 12 vs 2 lands at 0.167 — well under MIN_COMPARABILITY_CONFIDENCE.
+    """
+    before = tmp_path / "incomp_before.sqlite"
+    after = tmp_path / "incomp_after.sqlite"
+
+    def _k(n):
+        return [(i * 10_000_000, i * 10_000_000 + 5_000_000, 0, 7, i, 1, 2) for i in range(n)]
+
+    _make_profile(str(before), kernels=_k(before_n))
+    _make_profile(str(after), kernels=_k(after_n))
+    return before, after
+
+
+def _diff_summary(before, after, **kwargs):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        return diff_profiles(b, a, **kwargs)
+
+
+def test_diff_terminal_states_the_verdict_and_comparability(tmp_path):
+    """The judgement is shown, not left for the reader to infer from deltas.
+
+    Both numbers were already computed, persisted to diff.json and gating CI;
+    the terminal was the one consumer never told.
+    """
+    from nsys_ai.diff_render import format_diff_markdown, format_diff_terminal
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 12_000_000, 0, 7, 1, 1, 2)])
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+    assert summary.comparability_confidence >= 0.5
+
+    terminal = format_diff_terminal(summary)
+    assert f"Verdict: {summary.verdict}" in terminal
+    assert "(comparability 1.00)" in terminal
+
+    markdown = format_diff_markdown(summary)
+    assert f"**Verdict**: `{summary.verdict}`" in markdown
+    assert "comparability `1.00`" in markdown
+
+
+def test_diff_cli_shows_the_verdict_that_contradicts_the_headline():
+    """The reported case: headline says faster, the verdict says neutral.
+
+    Runs the issue's own invocation on the committed pair, so the two numbers
+    have to appear together in the output a human actually reads.
+    """
+    if not _MFU_BEFORE.is_file() or not _MFU_AFTER.is_file():
+        raise FileNotFoundError(f"missing fixture profiles: {_MFU_BEFORE} / {_MFU_AFTER}")
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "diff", str(_MFU_BEFORE), str(_MFU_AFTER), "--no-ai"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Verdict: neutral" in result.stdout, result.stdout[:800]
+    assert "comparability 0.89" in result.stdout, result.stdout[:800]
+
+
+def test_comparability_is_truncated_not_rounded_across_the_gate():
+    """A score under the gate must never display as though it had reached it."""
+    from nsys_ai.diff_render import _fmt_confidence
+
+    assert _fmt_confidence(0.4996) == "0.49"
+    assert _fmt_confidence(0.894) == "0.89"
+    assert _fmt_confidence(1.0) == "1.00"
+    assert _fmt_confidence(0.0) == "0.00"
+
+
+def test_diff_terminal_refuses_an_incomparable_pair_instead_of_tabulating_it(tmp_path):
+    """Below the gate the deltas are arithmetic; printed as tables they read as findings."""
+    from nsys_ai.diff_render import format_diff_terminal
+
+    before, after = _incomparable_pair(tmp_path)
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+    assert summary.comparability_confidence < 0.5
+    assert summary.verdict == "inconclusive"
+
+    out = format_diff_terminal(summary)
+
+    assert "Verdict: inconclusive" in out
+    assert "No comparison was made" in out
+    assert "Kernel row counts differ a lot" in out
+    # The tables that would have been read as findings are gone, not merely
+    # preceded by a caveat.
+    for section in ("Executive Summary", "Overall", "Top regressions", "Top improvements"):
+        assert section not in out, f"{section!r} survived the refusal:\n{out}"
+
+
+def test_diff_markdown_refuses_an_incomparable_pair(tmp_path):
+    from nsys_ai.diff_render import format_diff_markdown
+
+    before, after = _incomparable_pair(tmp_path)
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+
+    out = format_diff_markdown(summary)
+    assert "### No comparison was made" in out
+    assert "Kernel row counts differ a lot" in out
+    for section in ("### Top regressions", "### Top improvements", "### Overall"):
+        assert section not in out, f"{section!r} survived the refusal:\n{out}"
+
+
+def test_incomparable_refusal_states_a_reason_when_no_warning_fired(tmp_path):
+    """The refusal must never be a bare verdict word.
+
+    A workload ratio between 0.33 and 0.5 drops confidence under the gate
+    without tripping the 3x warning threshold, so ``warnings`` is empty and the
+    score against the gate is the only reason available.
+    """
+    from nsys_ai.diff_render import format_diff_terminal, incomparable_reason, is_incomparable
+
+    before, after = _incomparable_pair(tmp_path, before_n=12, after_n=5)
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+    assert summary.warnings == [], summary.warnings
+    assert is_incomparable(summary)
+
+    reason = incomparable_reason(summary)
+    assert reason.strip()
+    assert "0.41" in reason and "0.50" in reason
+
+    out = format_diff_terminal(summary)
+    assert "No comparison was made" in out
+    assert reason in out
+
+
+def test_diff_terminal_multi_withholds_per_gpu_tables_when_incomparable(tmp_path):
+    """Per-GPU tables are the same deltas sliced by device; they must not survive."""
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles_all_gpus
+    from nsys_ai.diff_render import format_diff_terminal_multi
+
+    before, after = _incomparable_pair(tmp_path)
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        global_summary, per_gpu = diff_profiles_all_gpus(b, a, limit=10)
+    assert global_summary.comparability_confidence < 0.5
+
+    out = format_diff_terminal_multi(global_summary, per_gpu)
+    assert "No comparison was made" in out
+    assert "Per-GPU Overview" not in out, out
+    assert "Top regressions" not in out, out
+
+
+def _mixed_comparability_pair(tmp_path):
+    """A node whose GPU 0 slice is sound and whose GPU 1 slice is not.
+
+    Comparability is derived per slice from min/max kernel rows, so GPU 0 at
+    100 vs 100 clears the gate while GPU 1 at 3 vs 40 lands at 0.075. The
+    node-wide score stays above the gate, which is the case that matters: the
+    global refusal never fires, so nothing else stops GPU 1's deltas.
+    """
+    before = tmp_path / "mixed_before.sqlite"
+    after = tmp_path / "mixed_after.sqlite"
+
+    def _k(dev, n, base):
+        return [
+            (base + i * 10_000_000, base + i * 10_000_000 + 5_000_000, dev, 7, i, 1, 2)
+            for i in range(n)
+        ]
+
+    _make_profile(str(before), kernels=_k(0, 100, 0) + _k(1, 3, 0))
+    _make_profile(str(after), kernels=_k(0, 100, 0) + _k(1, 40, 0))
+    return before, after
+
+
+def test_diff_terminal_multi_withholds_only_the_devices_that_cannot_be_compared(tmp_path):
+    """A node-wide pass must not carry an incomparable device's deltas with it.
+
+    The global guard is not enough: a rank that dropped out, or one whose
+    kernel set barely overlaps, scores below the gate on its own while the node
+    total clears it. Its per-device rows are then the same arithmetic the
+    refusal exists to withhold.
+    """
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles_all_gpus
+    from nsys_ai.diff_render import format_diff_terminal_multi, is_incomparable
+
+    before, after = _mixed_comparability_pair(tmp_path)
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        global_summary, per_gpu = diff_profiles_all_gpus(b, a, limit=10)
+
+    assert not is_incomparable(global_summary), global_summary.comparability_confidence
+    assert not is_incomparable(per_gpu[0]), per_gpu[0].comparability_confidence
+    assert is_incomparable(per_gpu[1]), per_gpu[1].comparability_confidence
+
+    out = format_diff_terminal_multi(global_summary, per_gpu)
+    assert "Per-GPU Overview" in out, out
+    overview = out.split("Per-GPU Overview", 1)[1].split("\n\n", 1)[0]
+    assert "\n  0 |" in overview, overview
+    assert "\n  1 |" not in overview, overview
+    assert "Top regressions (GPU 1)" not in out, out
+    # Named, not silently dropped -- the device exists and its numbers are in JSON.
+    assert "GPU 1 (0.07)" in out, out
+
+
+def test_diff_markdown_multi_withholds_only_the_devices_that_cannot_be_compared(tmp_path):
+    """The markdown renderer is the one multi-GPU path with no refusal test."""
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles_all_gpus
+    from nsys_ai.diff_render import format_diff_markdown_multi
+
+    before, after = _mixed_comparability_pair(tmp_path)
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        global_summary, per_gpu = diff_profiles_all_gpus(b, a, limit=10)
+
+    out = format_diff_markdown_multi(global_summary, per_gpu)
+    assert "| `0` |" in out, out
+    assert "| `1` |" not in out, out
+    assert "#### GPU 1" not in out, out
+    assert "GPU 1 (0.07)" in out, out
+
+
+def test_diff_markdown_multi_refuses_an_incomparable_pair(tmp_path):
+    """The whole-node refusal, on the renderer the other tests did not cover."""
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles_all_gpus
+    from nsys_ai.diff_render import format_diff_markdown_multi
+
+    before, after = _incomparable_pair(tmp_path)
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        global_summary, per_gpu = diff_profiles_all_gpus(b, a, limit=10)
+
+    out = format_diff_markdown_multi(global_summary, per_gpu)
+    assert "No comparison was made" in out
+    assert "Per-GPU Breakdown" not in out, out
+    assert "Per-GPU Top Regressions" not in out, out
+
+
+def test_comparability_display_never_reads_one_hundredth_low():
+    """Truncation must not inherit the multiply's binary error.
+
+    math.floor(0.29 * 100) is 28, because 0.29 * 100 is 28.999999999999996.
+    Three of the hundred two-decimal values were displayed a hundredth below
+    the score the gate actually used.
+    """
+    from decimal import Decimal
+
+    from nsys_ai.diff_render import _fmt_confidence
+
+    for hundredths in range(101):
+        exact = Decimal(hundredths) / 100
+        assert _fmt_confidence(float(exact)) == f"{exact:.2f}", hundredths
+
+
+def test_no_model_is_asked_to_narrate_a_pair_that_cannot_be_compared(tmp_path):
+    """The refusal discards the narrative, so requesting one is billed for nothing.
+
+    An empty side was already refused here for the stronger reason that the
+    model would narrate vanished kernels as a win. Low comparability is the
+    same condition one step weaker.
+    """
+    from nsys_ai import chat_config
+    from nsys_ai.ai import diff_narrative as narrative_mod
+
+    before, after = _incomparable_pair(tmp_path)
+    summary = _diff_summary(before, after, gpu=0, limit=10)
+    assert summary.comparability_confidence < 0.5
+
+    asked = []
+
+    # generate_diff_narrative resolves the model lazily from chat_config, so
+    # this is the last gate before any provider call. Reaching it at all is the
+    # failure.
+    def _refuse_to_be_asked(*args, **kwargs):
+        asked.append(args)
+        raise AssertionError("an incomparable pair must not reach the provider")
+
+    original = chat_config._get_model_and_key
+    chat_config._get_model_and_key = _refuse_to_be_asked
+    try:
+        result = narrative_mod.generate_diff_narrative(summary)
+    finally:
+        chat_config._get_model_and_key = original
+
+    assert not asked
+    assert result.ai_narrative is None
+    assert result.executive_summary
+
+
+def test_executive_summary_never_signs_a_magnitude_after_a_direction_word(tmp_path):
+    """"went faster by -46.37ms" is a double negative that inverts the claim."""
+    import re
+
+    from nsys_ai.ai.diff_narrative import build_executive_summary
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 20_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    faster = build_executive_summary(_diff_summary(before, after, gpu=0, limit=10))
+    assert "went faster by 10.00ms" in faster, faster
+    assert not re.search(r"went (faster|slower) by -", faster), faster
+
+    slower = build_executive_summary(_diff_summary(after, before, gpu=0, limit=10))
+    assert "went slower by 10.00ms" in slower, slower
+    assert not re.search(r"went (faster|slower) by -", slower), slower
+
+
+def test_executive_summary_says_unchanged_rather_than_slower_by_zero(tmp_path):
+    from nsys_ai.ai.diff_narrative import build_executive_summary
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    text = build_executive_summary(_diff_summary(before, after, gpu=0, limit=10))
+    assert "Total GPU time was unchanged." in text, text
+    assert "slower" not in text and "faster" not in text, text

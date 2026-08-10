@@ -5,10 +5,11 @@ diff_render.py — Render structured diff payloads for CLI outputs.
 from __future__ import annotations
 
 import json
+from decimal import ROUND_FLOOR, Decimal
 
 from .ai.diff_narrative import DiffNarrative
 from .annotation import PRODUCER, SCHEMA_VERSION, DiffLineage, _producer_version
-from .diff import ProfileDiffSummary
+from .diff import MIN_COMPARABILITY_CONFIDENCE, ProfileDiffSummary
 
 
 def _fmt_ns(ns: int) -> str:
@@ -34,6 +35,112 @@ def _fmt_delta_ns(ns: int) -> str:
 
 def _fmt_pct(x: float) -> str:
     return f"{x * 100:.2f}%"
+
+
+def _fmt_confidence(confidence: float) -> str:
+    """Two decimals, truncated rather than rounded.
+
+    Rounding would let a score below the gate display as though it had reached
+    it — 0.4996 shown as "0.50" beside an "inconclusive" verdict reads as a
+    contradiction.
+
+    Decimal, not ``math.floor(x * 100)``: the multiply carries binary error the
+    other way, and 0.29 * 100 is 28.999999999999996, so a third of the
+    two-decimal values would truncate one hundredth low. Quantising the decimal
+    repr is exact at both ends.
+    """
+    clamped = max(0.0, min(1.0, confidence))
+    return str(Decimal(str(clamped)).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+
+
+def verdict_line(data: ProfileDiffSummary) -> str:
+    """The judgement and how much it can be trusted, on one line.
+
+    Both numbers were already computed, persisted to ``diff.json`` and gating
+    CI; only the terminal reader was left to infer them from the deltas.
+    """
+    return (
+        f"Verdict: {data.verdict}  "
+        f"(comparability {_fmt_confidence(data.comparability_confidence)})"
+    )
+
+
+def is_incomparable(data: ProfileDiffSummary) -> bool:
+    """True when the pair scored below the confidence a verdict requires."""
+    return data.comparability_confidence < MIN_COMPARABILITY_CONFIDENCE
+
+
+def incomparable_reason(data: ProfileDiffSummary) -> str:
+    """Why no before/after claim can be made. Never empty.
+
+    The sanity warnings usually name a specific cause, but not always — a
+    workload-size ratio between 0.33 and 0.5 lowers confidence past the gate
+    without tripping any warning threshold. The score against the gate is
+    therefore the reason, and the warnings refine it.
+    """
+    return (
+        f"Comparability scored {_fmt_confidence(data.comparability_confidence)}, under the "
+        f"{MIN_COMPARABILITY_CONFIDENCE:.2f} minimum — these two captures cannot be read "
+        "as a before and an after."
+    )
+
+
+#: Said on every surface that withholds the tables, so the reader knows the
+#: numbers still exist and where to get them.
+_WITHHELD_NOTE = (
+    "Per-kernel and per-range deltas are withheld: across profiles this different",
+    "they are arithmetic, not findings. --format json still carries every number.",
+)
+
+
+def _refusal_terminal(data: ProfileDiffSummary) -> list[str]:
+    lines = ["No comparison was made", "─" * 60, incomparable_reason(data)]
+    if data.warnings:
+        lines.append("")
+        lines.extend(f"- {w}" for w in data.warnings)
+    lines.append("")
+    lines.extend(_WITHHELD_NOTE)
+    return lines
+
+
+def _refusal_markdown(data: ProfileDiffSummary) -> list[str]:
+    md = ["### No comparison was made", "", incomparable_reason(data), ""]
+    if data.warnings:
+        md.extend(f"- {w}" for w in data.warnings)
+        md.append("")
+    md.append(f"_{' '.join(_WITHHELD_NOTE)}_")
+    md.append("")
+    return md
+
+def _split_comparable_devices(
+    per_gpu: dict[int, ProfileDiffSummary],
+) -> tuple[list[tuple[int, ProfileDiffSummary]], list[tuple[int, ProfileDiffSummary]]]:
+    """Devices whose own slice supports a claim, and those whose does not.
+
+    A node-wide score can clear the gate while one device's slice does not --
+    a rank that dropped out, or one whose kernel set barely overlaps. Its
+    deltas are then the same arithmetic the global refusal withholds, and
+    rendering them per device reinstates exactly what was refused. Splitting
+    here rather than at each table keeps the two multi-GPU renderers agreeing
+    on which devices they will speak for.
+    """
+    comparable: list[tuple[int, ProfileDiffSummary]] = []
+    withheld: list[tuple[int, ProfileDiffSummary]] = []
+    for dev, summary in sorted(per_gpu.items()):
+        (withheld if is_incomparable(summary) else comparable).append((dev, summary))
+    return comparable, withheld
+
+
+def _withheld_devices_note(withheld: list[tuple[int, ProfileDiffSummary]]) -> str:
+    """One line naming the devices left out of the tables, and their scores."""
+    scored = ", ".join(
+        f"GPU {dev} ({_fmt_confidence(summary.comparability_confidence)})"
+        for dev, summary in withheld
+    )
+    return (
+        f"Withheld, below the {MIN_COMPARABILITY_CONFIDENCE:.2f} minimum on their own: "
+        f"{scored}. --format json still carries every number."
+    )
 
 
 def _axis_summary_to_dict(axis):
@@ -104,7 +211,16 @@ def format_diff_terminal(
     lines.append(f"Before: {data.before.path}")
     lines.append(f"After:  {data.after.path}")
     lines.append(f"GPU:    {data.before.gpu}")
+    lines.append(verdict_line(data))
     lines.append("")
+
+    # Below the gate the deltas are still arithmetic, but presenting them as
+    # regressions and improvements makes them read as findings from a
+    # comparison that was never valid. State the refusal instead of decorating
+    # it with tables.
+    if is_incomparable(data):
+        lines.extend(_refusal_terminal(data))
+        return "\n".join(lines).rstrip() + "\n"
 
     if narrative:
         lines.append("Executive Summary")
@@ -250,15 +366,23 @@ def format_diff_terminal_multi(
         gl_lines = processed
     parts.append(header + "\n".join(gl_lines).rstrip() + "\n")
 
+    # The global block is already the refusal; the per-GPU overview and per-GPU
+    # regressions below are the same deltas sliced by device, so they would
+    # reinstate exactly what the refusal withheld.
+    if is_incomparable(global_summary):
+        return "\n".join(parts).rstrip() + "\n"
+
+    comparable_devices, withheld_devices = _split_comparable_devices(per_gpu)
+
     # 2) Per-GPU overview table
-    if per_gpu:
+    if comparable_devices:
         parts.append("Per-GPU Overview")
         parts.append("─" * 60)
         parts.append(
             f"{'GPU':>3} | {'Before Total':>13} | {'After Total':>13} | {'Δ':>10} | {'Overlap % (B→A)':>18}"
         )
         parts.append(f"{'-' * 3}-+-{'-' * 13}-+-{'-' * 13}-+-{'-' * 10}-+-{'-' * 18}")
-        for dev, summary in sorted(per_gpu.items()):
+        for dev, summary in comparable_devices:
             b = summary.before
             a = summary.after
             delta_ns = a.total_gpu_ns - b.total_gpu_ns
@@ -274,8 +398,12 @@ def format_diff_terminal_multi(
             )
         parts.append("")
 
+    if withheld_devices:
+        parts.append(_withheld_devices_note(withheld_devices))
+        parts.append("")
+
     # 3) Per-GPU top regressions (short)
-    for dev, summary in sorted(per_gpu.items()):
+    for dev, summary in comparable_devices:
         if not summary.top_regressions:
             continue
         parts.append(f"Top regressions (GPU {dev})")
@@ -300,7 +428,15 @@ def format_diff_markdown(
     md.append(f"- **Before**: `{data.before.path}`")
     md.append(f"- **After**: `{data.after.path}`")
     md.append(f"- **GPU**: `{data.before.gpu}`")
+    md.append(
+        f"- **Verdict**: `{data.verdict}` "
+        f"(comparability `{_fmt_confidence(data.comparability_confidence)}`)"
+    )
     md.append("")
+
+    if is_incomparable(data):
+        md.extend(_refusal_markdown(data))
+        return "\n".join(md).rstrip() + "\n"
 
     if narrative:
         md.append("### Executive Summary")
@@ -417,7 +553,15 @@ def format_diff_markdown_multi(
     md.append("")
     md.append(f"- **Before**: `{g.before.path}`")
     md.append(f"- **After**: `{g.after.path}`")
+    md.append(
+        f"- **Verdict**: `{g.verdict}` "
+        f"(comparability `{_fmt_confidence(g.comparability_confidence)}`)"
+    )
     md.append("")
+
+    if is_incomparable(g):
+        md.extend(_refusal_markdown(g))
+        return "\n".join(md).rstrip() + "\n"
 
     if narrative:
         md.append("### Executive Summary")
@@ -483,15 +627,17 @@ def format_diff_markdown_multi(
     add_global_axis(g.communication_summary)
     add_global_axis(g.idle_summary)
 
+    comparable_devices, withheld_devices = _split_comparable_devices(per_gpu)
+
     # 2) Per-GPU breakdown table
-    if per_gpu:
+    if comparable_devices:
         md.append("### 2. Per-GPU Breakdown (Load Balancing)")
         md.append("")
         md.append(
             "| GPU | Total Time (Before) | Total Time (After) | Δ | Overlap % (Before → After) |"
         )
         md.append("|---:|---:|---:|---:|---:|")
-        for dev, summary in sorted(per_gpu.items()):
+        for dev, summary in comparable_devices:
             b = summary.before
             a = summary.after
             delta_ns = a.total_gpu_ns - b.total_gpu_ns
@@ -505,6 +651,10 @@ def format_diff_markdown_multi(
                 f"| `{dev}` | `{_fmt_ns(b.total_gpu_ns)}` | `{_fmt_ns(a.total_gpu_ns)}` | "
                 f"`{_fmt_delta_ns(delta_ns)}` | `{ov_str}` |"
             )
+        md.append("")
+
+    if withheld_devices:
+        md.append(f"_{_withheld_devices_note(withheld_devices)}_")
         md.append("")
 
     # 3) Global top regressions / improvements (reuse existing tables)
@@ -533,7 +683,7 @@ def format_diff_markdown_multi(
         md.append("")
         md.append("### 4. Per-GPU Top Regressions")
         md.append("")
-        for dev, summary in sorted(per_gpu.items()):
+        for dev, summary in comparable_devices:
             if not summary.top_regressions:
                 continue
             md.append(f"#### GPU {dev}")

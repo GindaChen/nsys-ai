@@ -846,6 +846,7 @@ def _cmd_diff(args, _profile):
     )
     from nsys_ai.diff_decision import write_diff_decision_json
     from nsys_ai.diff_render import (
+        _fmt_confidence,
         format_diff_markdown,
         format_diff_markdown_multi,
         format_diff_terminal,
@@ -1192,7 +1193,7 @@ def _cmd_diff(args, _profile):
             f"verdict={gate_summary.verdict} "
             f"step_time_delta_ms={gate_summary.step_time_delta_ms:+.3f} "
             f"step_time_delta_pct={gate_summary.step_time_delta_pct:+.2f}% "
-            f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+            f"comparability_confidence={_fmt_confidence(gate_summary.comparability_confidence)} "
             f"gate_pct={regression_pct:.2f}%.",
             file=sys.stderr,
         )
@@ -1206,7 +1207,7 @@ def _cmd_diff(args, _profile):
         print(
             "Diff gate could not be evaluated: "
             f"verdict={gate_summary.verdict} "
-            f"comparability_confidence={gate_summary.comparability_confidence:.3f} "
+            f"comparability_confidence={_fmt_confidence(gate_summary.comparability_confidence)} "
             f"(minimum {MIN_COMPARABILITY_CONFIDENCE:.2f}). "
             f"{reason} "
             "Exiting non-zero: a comparison that could not be made has not shown "
