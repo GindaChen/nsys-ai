@@ -99,9 +99,8 @@ def h100_preset_download_hint() -> str:
         f"    profiles/perf_h100_sp1.sqlite profiles/perf_h100_sp1_fa3.sqlite\n"
         f"(requires the `hf` CLI: pip install -U huggingface_hub)\n"
         f"Expected cache layout: {H100_PRESET_CACHE}/<rev>/profiles/*.sqlite\n"
-        f"Or pass paths explicitly:\n"
-        f"  nsys-ai loop /path/to/perf_h100_sp1.sqlite "
-        f"--after /path/to/perf_h100_sp1_fa3.sqlite"
+        f"Or pass the baseline explicitly:\n"
+        f"  nsys-ai loop /path/to/perf_h100_sp1.sqlite"
     )
 
 

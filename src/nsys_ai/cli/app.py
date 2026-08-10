@@ -66,7 +66,7 @@ def show_help():
     print("    nsys-ai diff <before> <after>            Compare two profiles")
     print("    nsys-ai diff <before> <after> --session --accept --reason TEXT   Record it")
     print("    nsys-ai review --session ID              Where a session stands")
-    print("    nsys-ai loop <before> --after <after>    Same loop, guided in the browser")
+    print("    nsys-ai loop <profile>                   Render that session in a browser")
     print("    nsys-ai baseline list                    Named baselines to diff against")
     print("    See docs/user-guide.md for the whole path end to end.")
     print()

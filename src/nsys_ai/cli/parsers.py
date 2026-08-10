@@ -731,7 +731,6 @@ def _build_parser():
         nargs="?",
         help="Path to baseline profile (.sqlite or .nsys-rep); optional with --h100-preset",
     )
-    p.add_argument("--after", default=None, help="Path to candidate profile (.sqlite or .nsys-rep)")
     p.add_argument("--gpu", type=int, default=None, help="GPU device ID (default: first GPU)")
     p.add_argument(
         "--trim",
@@ -752,7 +751,7 @@ def _build_parser():
     p.add_argument(
         "--h100-preset",
         action="store_true",
-        help="Auto-fill H100 replay before/after paths when available",
+        help="Auto-fill the H100 replay baseline path when available",
     )
     p.add_argument(
         "--session",

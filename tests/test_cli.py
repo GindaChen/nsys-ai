@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 def test_help():
@@ -183,13 +184,17 @@ def test_diff_subcommand_help():
 
 
 def test_loop_subcommand_help():
-    """loop subcommand should expose before/after workflow inputs."""
+    """loop should expose the baseline and surface inputs, and no candidate path.
+
+    The help used to say "Omit --after to enter the candidate path later in the
+    web UI", which /api/loop/reprofile refuses.
+    """
     result = subprocess.run(
         [sys.executable, "-m", "nsys_ai", "loop", "--help"], capture_output=True, text=True
     )
     assert result.returncode == 0
     assert "before" in result.stdout
-    assert "--after" in result.stdout
+    assert "--after" not in result.stdout
     assert "--surface" in result.stdout
     assert "--h100-preset" in result.stdout
 
@@ -342,6 +347,57 @@ def test_optimize_without_a_workload_exits_2(tmp_path):
     assert result.returncode == 2
     assert "a verification workload is required" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_loop_rejects_after(tmp_path):
+    """`loop --after` must fail as an unknown flag, not be accepted and dropped.
+
+    The session store is the loop's single source of truth: the CLI writes a
+    session and every loop surface only renders one, so a candidate passed here
+    lost to the session's own empty after profile without a word. A flag that is
+    parsed, validated and then discarded is the same promise in a costlier form,
+    so the flag is gone. The before profile is a real fixture: the rejection has
+    to come from the flag, not from a path that does not resolve.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "nsys_ai", "loop",
+            str(fixtures / "mfu_2gpu_before.sqlite"),
+            "--after", str(fixtures / "mfu_2gpu_after.sqlite"), "--no-browser",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "unrecognized arguments: --after" in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+
+
+def test_h100_preset_hint_names_a_command_that_parses():
+    """The only recovery instruction on the preset path must still be runnable.
+
+    `loop --h100-preset` with the dataset absent exits 1 after printing this
+    hint, so a command in it that the parser rejects leaves the caller with no
+    way forward. It named `--after` until that flag was removed.
+    """
+    import shlex
+
+    from nsys_ai.cli.parsers import _build_parser
+    from nsys_ai.loop_state import h100_preset_download_hint
+
+    commands = [
+        line.strip()
+        for line in h100_preset_download_hint().splitlines()
+        if line.strip().startswith("nsys-ai ")
+    ]
+    assert commands, "the hint stopped offering a command at all"
+    for command in commands:
+        argv = shlex.split(command)[1:]
+        # Reaching a Namespace at all is the assertion: argparse exits 2 on an
+        # unknown flag, which is exactly the failure this guards.
+        _build_parser().parse_args(argv)
 
 
 def test_loop_missing_profile_has_friendly_error(tmp_path):
