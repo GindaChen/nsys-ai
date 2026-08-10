@@ -1248,6 +1248,8 @@ function timelineRenderState(W) {
         repeatedItems,
         visibleByStream,
         condensedNvtx: 0,
+        condensedNvtxLabels: 0,
+        overflowFindings: 0,
     };
     renderStateCacheKey = key;
     renderStateCache = state;
@@ -1274,7 +1276,9 @@ function updateRenderSummary(state) {
         text = `${count} kernels · detailed view${coverage}`;
     }
     if (state.condensedNvtx) text += ` · ${state.condensedNvtx} NVTX ranges condensed`;
+    if (state.condensedNvtxLabels) text += ` · ${state.condensedNvtxLabels} NVTX labels hidden`;
     if (state.hiddenInfoFindings) text += ` · ${state.hiddenInfoFindings} info findings hidden`;
+    if (state.overflowFindings) text += ` · ${state.overflowFindings} findings grouped`;
     summary.textContent = text;
     summary.title = state.repeatedItems
         ? `${count} kernels in view; ${state.repeatedItems} repeated occurrences share a name`
@@ -1369,6 +1373,7 @@ function nvtxSpansForRender(spans, renderState) {
 
 function drawNVTX(W) {
     const renderState = timelineRenderState(W);
+    renderState.condensedNvtxLabels = 0;
     const baseY = RULER_H + findingsLaneH();
     ctx.fillStyle = 'rgba(22, 27, 34, 0.85)';
     ctx.fillRect(0, baseY, W, nvtxAreaH());
@@ -1378,6 +1383,7 @@ function drawNVTX(W) {
     let clippedCount = clipped + Math.max(0, allVisibleSpans.length - visibleSpans.length);
     const depthMax = activeNvtxMaxDepth();
     const seenLabels = new Set();
+    const labelEnds = new Map();
 
     for (const span of visibleSpans) {
         const x1 = Math.max(LABEL_W, nsToX(span.start));
@@ -1405,11 +1411,15 @@ function drawNVTX(W) {
         // Repeated nested ranges are useful at detail scale, but become noise
         // when zoomed out. Keep one label per lane/name until the user zooms.
         const labelKey = `${span._lane}|${span.name}`;
-        const canLabel = renderState.mode === 'detail'
+        const wantsLabel = renderState.mode === 'detail'
             ? w > 40
             : w > 60 && !seenLabels.has(labelKey);
+        const lastLabelEnd = labelEnds.get(span._lane) ?? -Infinity;
+        const fitsLabel = x1 >= lastLabelEnd - 3;
+        const canLabel = wantsLabel && fitsLabel;
         if (canLabel || isSel || (searchQuery && isSearchMatch)) {
             seenLabels.add(labelKey);
+            labelEnds.set(span._lane, x1 + Math.max(40, w));
             ctx.fillStyle = isSel ? '#ffffff' : (searchQuery && !isSearchMatch ? '#6b7280' : '#e6edf3');
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
@@ -1419,6 +1429,8 @@ function drawNVTX(W) {
             ctx.fillText(span.name, x1 + 4, y + h / 2);
             ctx.restore();
             ctx.font = '11px SF Mono, Cascadia Code, Fira Code, monospace';
+        } else if (wantsLabel) {
+            renderState.condensedNvtxLabels++;
         }
     }
 
@@ -2521,8 +2533,7 @@ canvas.addEventListener('mousedown', e => {
         if (fi >= 0) {
             selectFinding(fi);
             // Ensure sidebar is open
-            const sidebar = document.getElementById('findingsSidebar');
-            if (sidebar && !sidebar.classList.contains('open')) toggleFindings();
+            if (activeInspectorMode !== 'findings') setInspectorMode('findings');
             return;
         }
     }
@@ -2974,7 +2985,7 @@ document.addEventListener('keydown', e => {
                 e.preventDefault();
                 const prevIdx = selectedFindingIdx <= 0 ? FINDINGS.length - 1 : selectedFindingIdx - 1;
                 selectFinding(prevIdx);
-                if (!document.getElementById('findingsSidebar').classList.contains('open')) toggleFindings();
+                if (activeInspectorMode !== 'findings') setInspectorMode('findings');
             }
             break;
         case ']':
@@ -2982,7 +2993,7 @@ document.addEventListener('keydown', e => {
                 e.preventDefault();
                 const nextIdx = selectedFindingIdx >= FINDINGS.length - 1 ? 0 : selectedFindingIdx + 1;
                 selectFinding(nextIdx);
-                if (!document.getElementById('findingsSidebar').classList.contains('open')) toggleFindings();
+                if (activeInspectorMode !== 'findings') setInspectorMode('findings');
             }
             break;
         case '?': toggleHelp(); break;
@@ -3000,15 +3011,60 @@ document.addEventListener('keydown', e => {
 let chatHistory = [];  // [{role, content}]
 let chatStreaming = false;
 
-function toggleChat() {
-    const sidebar = document.getElementById('chatSidebar');
-    const btn = document.getElementById('chatBtn');
-    sidebar.classList.toggle('open');
-    btn.classList.toggle('active', sidebar.classList.contains('open'));
-    if (sidebar.classList.contains('open')) {
-        document.getElementById('chatInput').focus();
+let activeInspectorMode = null;
+const INSPECTOR_PANELS = Object.freeze({
+    chat: 'chatSidebar',
+    findings: 'findingsSidebar',
+    loop: 'loopSidebar',
+});
+
+function setInspectorMode(mode) {
+    const rail = document.getElementById('inspectorRail');
+    if (!rail) return;
+    if (mode && !INSPECTOR_PANELS[mode]) mode = null;
+    if (mode === 'findings' && FINDINGS.length === 0) mode = null;
+
+    activeInspectorMode = mode;
+    rail.classList.toggle('open', !!mode);
+    for (const [panelMode, panelId] of Object.entries(INSPECTOR_PANELS)) {
+        const panel = document.getElementById(panelId);
+        if (panel) {
+            panel.classList.toggle('open', panelMode === mode);
+            panel.setAttribute('aria-hidden', panelMode === mode ? 'false' : 'true');
+        }
+        const tab = document.getElementById(`inspectorTab${panelMode[0].toUpperCase()}${panelMode.slice(1)}`);
+        if (tab) tab.setAttribute('aria-selected', panelMode === mode ? 'true' : 'false');
+    }
+
+    const toolbarButtons = {
+        chat: 'chatBtn',
+        findings: 'findingsBtn',
+        loop: 'loopBtn',
+    };
+    for (const [buttonMode, buttonId] of Object.entries(toolbarButtons)) {
+        const button = document.getElementById(buttonId);
+        if (button) button.classList.toggle('active', buttonMode === mode);
+    }
+
+    if (mode === 'chat') {
+        const input = document.getElementById('chatInput');
+        if (input) input.focus();
+    } else if (mode === 'loop') {
+        loopFetchState().catch(err => console.error('loop state fetch failed', err));
     }
     setTimeout(resize, 0);
+}
+
+function closeInspector() {
+    setInspectorMode(null);
+}
+
+function toggleInspector(mode) {
+    setInspectorMode(activeInspectorMode === mode ? null : mode);
+}
+
+function toggleChat() {
+    toggleInspector('chat');
 }
 
 function buildUIContext() {
@@ -3389,28 +3445,68 @@ function findingIndicesForRender(renderState) {
     return visible;
 }
 
-// Pack annotation pills into a few compact rows so overlapping findings do not
-// hide one another. Critical and warning findings are assigned first.
-function findingLaneFor(index, indices) {
+// Pack annotation pills into two normal rows and reserve the third row for an
+// aggregate. This keeps dense findings readable without making the lane taller
+// as the analysis produces more annotations.
+function buildFindingLayout(indices, width) {
     const ordered = indices.slice().sort((a, b) => {
         const rank = { critical: 0, warning: 1, info: 2 };
         return (rank[FINDINGS[a].severity] ?? 3) - (rank[FINDINGS[b].severity] ?? 3)
             || FINDINGS[a].start_ns - FINDINGS[b].start_ns || a - b;
     });
-    const laneEnds = [];
+    const normalLaneCount = Math.max(1, Math.floor(FINDINGS_LANE_H / FINDING_ROW_H) - 1);
+    const laneEnds = new Array(normalLaneCount).fill(-Infinity);
+    const placements = new Map();
+    const overflow = [];
     for (const i of ordered) {
         const f = FINDINGS[i];
         const x1 = Math.max(LABEL_W, nsToX(f.start_ns));
-        const x2 = Math.min(canvas.width / DPR, nsToX(f.end_ns ?? f.start_ns));
+        const x2 = Math.min(width, Math.max(x1 + 24, nsToX(f.end_ns ?? f.start_ns)));
         let lane = laneEnds.findIndex(end => end < x1 - 2);
         if (lane < 0) {
-            lane = Math.min(laneEnds.length, Math.floor(FINDINGS_LANE_H / FINDING_ROW_H) - 1);
-            if (lane === laneEnds.length) laneEnds.push(0);
+            overflow.push({ index: i, x1, x2 });
+            continue;
         }
         laneEnds[lane] = Math.max(x2, x1 + 24);
-        if (i === index) return lane;
+        placements.set(i, { index: i, lane, x1, x2, indices: [i] });
     }
-    return 0;
+
+    const clusters = [];
+    for (const item of overflow.sort((a, b) => a.x1 - b.x1 || a.index - b.index)) {
+        const previous = clusters[clusters.length - 1];
+        if (previous && item.x1 <= previous.x2 + 2) {
+            previous.x2 = Math.max(previous.x2, item.x2);
+            previous.indices.push(item.index);
+        } else {
+            clusters.push({
+                index: item.index,
+                lane: normalLaneCount,
+                x1: item.x1,
+                x2: item.x2,
+                indices: [item.index],
+                aggregate: true,
+            });
+        }
+    }
+
+    return {
+        items: [...placements.values(), ...clusters],
+        byIndex: new Map([...placements.entries(), ...clusters.flatMap(item =>
+            item.indices.map(index => [index, item]))]),
+        overflowCount: overflow.length,
+    };
+}
+
+function findingPillRect(item, width) {
+    const maxWidth = Math.max(24, width - LABEL_W - 4);
+    const pillW = Math.max(24, Math.min(maxWidth, item.x2 - item.x1));
+    const clampedX = Math.max(LABEL_W + 2, Math.min(item.x1, width - pillW - 2));
+    return {
+        x: clampedX,
+        y: RULER_H + 3 + item.lane * FINDING_ROW_H,
+        w: pillW,
+        h: FINDING_ROW_H - 5,
+    };
 }
 
 function drawFindings(W, H) {
@@ -3482,13 +3578,11 @@ function drawFindings(W, H) {
         const isActive = i === selectedFindingIdx;
         const sevCol = _findingSevColor(f.severity);
         const { y: targetY, h: targetH } = _findingStreamRange(f);
-        const severityAlpha = renderState.mode === 'compact' && f.severity === 'info' ? 0.45 : 1;
-        const baseAlpha = (hasActive && !isActive ? 0.1 : 1) * severityAlpha;
-
-        // Keep the overview quiet: only critical regions or the selected
-        // finding paint the stream area. All findings remain discoverable as
-        // compact pills and in the Evidence sidebar.
-        if (!isActive && f.severity !== 'critical') continue;
+        // Keep the overview quiet: only the selected finding paints the stream
+        // area. All other findings remain discoverable as compact pills and in
+        // the Evidence sidebar.
+        if (!isActive) continue;
+        const baseAlpha = 1;
 
         if (f.type === 'region' || f.type === 'highlight') {
             ctx.globalAlpha = baseAlpha;
@@ -3542,54 +3636,38 @@ function drawFindings(W, H) {
 
     // ── Pass 3: Draw annotation lane pills + connecting lines ──
     if (laneH > 0) {
-        for (const i of findingIndices) {
-            const f = FINDINGS[i];
-            const startNs = f.start_ns;
-            const endNs = f.end_ns ?? startNs;
-            if (endNs < viewStart || startNs > viewEnd) continue;
-
-            const x1 = Math.max(LABEL_W, nsToX(startNs));
-            const x2 = Math.min(W, nsToX(endNs));
-            const midX = (x1 + x2) / 2;
-            const isActive = i === selectedFindingIdx;
+        const findingLayout = buildFindingLayout(findingIndices, W);
+        renderState.overflowFindings = findingLayout.overflowCount;
+        for (const item of findingLayout.items) {
+            const f = FINDINGS[item.index];
+            const activeFinding = selectedFindingIdx >= 0 && item.indices.includes(selectedFindingIdx)
+                ? FINDINGS[selectedFindingIdx] : f;
+            const isActive = item.indices.includes(selectedFindingIdx);
             const sevCol = _findingSevColor(f.severity);
-            const severityAlpha = renderState.mode === 'compact' && f.severity === 'info' ? 0.45 : 1;
-            const baseAlpha = (hasActive && !isActive ? 0.2 : 1) * severityAlpha;
-            const { y: targetY, h: targetH } = _findingStreamRange(f);
+            const rect = findingPillRect(item, W);
 
-            // Connecting lines are only useful for the active finding; drawing
-            // one for every pill creates a dense web over the timeline.
             if (isActive) {
-                ctx.globalAlpha = baseAlpha * 0.6;
+                const target = _findingStreamRange(activeFinding);
+                const targetX = (nsToX(activeFinding.start_ns) +
+                    nsToX(activeFinding.end_ns ?? activeFinding.start_ns)) / 2;
+                ctx.globalAlpha = 0.6;
                 ctx.strokeStyle = sevCol;
                 ctx.lineWidth = 1.5;
                 ctx.setLineDash([6, 3]);
                 ctx.beginPath();
-                ctx.moveTo(midX, laneY + laneH);
-                ctx.lineTo(midX, targetY);
+                ctx.moveTo(rect.x + rect.w / 2, laneY + laneH);
+                ctx.lineTo(targetX, target.y);
                 ctx.stroke();
                 ctx.setLineDash([]);
                 ctx.lineWidth = 1;
             }
 
-            // ── Pill bar in annotation lane ──
-            const lane = findingLaneFor(i, findingIndices);
-            const pillH = FINDING_ROW_H - 5;
-            const pillY = laneY + 3 + lane * FINDING_ROW_H;
-            const pillX1 = Math.max(LABEL_W + 2, x1);
-            const pillX2 = Math.min(W - 2, x2);
-            let pillW = Math.max(pillX2 - pillX1, 24);  // min 24px
-            // Prevent pills from going off screen
-            const clampedX = Math.max(LABEL_W + 2, Math.min(pillX1, W - pillW - 2));
-
-            // Pill background
-            ctx.globalAlpha = baseAlpha * (isActive ? 0.9 : 0.5);
+            ctx.globalAlpha = isActive ? 0.9 : 0.5;
             ctx.fillStyle = sevCol;
             ctx.beginPath();
-            ctx.roundRect(clampedX, pillY, pillW, pillH, 4);
+            ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 4);
             ctx.fill();
 
-            // Active glow
             if (isActive) {
                 ctx.save();
                 ctx.shadowColor = sevCol;
@@ -3598,39 +3676,41 @@ function drawFindings(W, H) {
                 ctx.lineWidth = 1.5;
                 ctx.globalAlpha = 0.6;
                 ctx.beginPath();
-                ctx.roundRect(clampedX, pillY, pillW, pillH, 4);
+                ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 4);
                 ctx.stroke();
                 ctx.restore();
             }
 
-            // Number circle inside pill
-            const circR = pillH / 2 - 1;
-            const circX = clampedX + circR + 3;
-            const circCY = pillY + pillH / 2;
-            ctx.globalAlpha = baseAlpha;
+            const circR = rect.h / 2 - 1;
+            const circX = rect.x + circR + 3;
+            const circCY = rect.y + rect.h / 2;
+            ctx.globalAlpha = 1;
             ctx.fillStyle = '#0d1117';
             ctx.beginPath();
             ctx.arc(circX, circCY, circR, 0, Math.PI * 2);
             ctx.fill();
 
+            const badge = item.aggregate ? `+${item.indices.length}` : String(item.index + 1);
             ctx.fillStyle = sevCol;
-            ctx.font = 'bold 9px SF Mono, monospace';
+            ctx.font = 'bold 8px SF Mono, monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(String(i + 1), circX, circCY);
+            ctx.fillText(badge, circX, circCY);
 
-            // Label text (truncated to fit)
-            if (pillW > 40) {
+            if (rect.w > 40) {
                 ctx.fillStyle = '#0d1117';
                 ctx.font = (isActive ? 'bold ' : '') + '9px SF Mono, monospace';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
                 const textStart = circX + circR + 4;
-                const maxTextW = pillW - (textStart - clampedX) - 4;
+                const maxTextW = rect.w - (textStart - rect.x) - 4;
                 if (maxTextW > 10) {
+                    const label = item.aggregate
+                        ? `${item.indices.length} findings grouped`
+                        : String(f.label || 'Finding');
                     const maxChars = Math.floor(maxTextW / 5.5);
-                    const truncLabel = f.label.length > maxChars
-                        ? f.label.slice(0, maxChars - 1) + '…' : f.label;
+                    const truncLabel = label.length > maxChars
+                        ? label.slice(0, Math.max(1, maxChars - 1)) + '…' : label;
                     ctx.fillText(truncLabel, textStart, circCY);
                 }
             }
@@ -3680,22 +3760,13 @@ function _findingsHitTest(mx, my) {
     const renderState = timelineRenderState(canvas.width / DPR);
     const findingIndices = findingIndicesForRender(renderState);
     if (laneH > 0 && my >= laneY && my <= laneY + laneH) {
-        for (let pos = findingIndices.length - 1; pos >= 0; pos--) {
-            const i = findingIndices[pos];
-            const f = FINDINGS[i];
-            const startNs = f.start_ns;
-            const endNs = f.end_ns ?? startNs;
-            if (endNs < viewStart || startNs > viewEnd) continue;
-            const x1 = Math.max(LABEL_W, nsToX(startNs));
-            const x2 = Math.min(canvas.width / DPR, nsToX(endNs));
-            const lane = findingLaneFor(i, findingIndices);
-            const pillH = FINDING_ROW_H - 5;
-            const pillY = laneY + 3 + lane * FINDING_ROW_H;
-            if (my < pillY || my > pillY + pillH) continue;
-            const pillW = Math.max(x2 - x1, 24);
-            const clampedX = Math.max(LABEL_W + 2, Math.min(x1, canvas.width / DPR - pillW - 2));
-            if (mx >= clampedX && mx <= clampedX + pillW) {
-                return i;
+        const findingLayout = buildFindingLayout(findingIndices, canvas.width / DPR);
+        for (let pos = findingLayout.items.length - 1; pos >= 0; pos--) {
+            const item = findingLayout.items[pos];
+            const rect = findingPillRect(item, canvas.width / DPR);
+            if (my >= rect.y && my <= rect.y + rect.h &&
+                mx >= rect.x && mx <= rect.x + rect.w) {
+                return item.index;
             }
         }
     }
@@ -3704,6 +3775,7 @@ function _findingsHitTest(mx, my) {
     for (let pos = findingIndices.length - 1; pos >= 0; pos--) {
         const i = findingIndices[pos];
         const f = FINDINGS[i];
+        if (i !== selectedFindingIdx) continue;
         const startNs = f.start_ns;
         const endNs = f.end_ns ?? startNs;
         if (endNs < viewStart || startNs > viewEnd) continue;
@@ -3732,6 +3804,8 @@ function _initFindingsSidebar() {
 
     const btn = document.getElementById('findingsBtn');
     if (btn) btn.style.display = '';
+    const tab = document.getElementById('inspectorTabFindings');
+    if (tab) tab.style.display = '';
 
     const badge = document.getElementById('findingsCount');
     if (badge) {
@@ -3844,14 +3918,8 @@ function selectFinding(idx) {
 }
 
 function toggleFindings() {
-    const sidebar = document.getElementById('findingsSidebar');
-    const btn = document.getElementById('findingsBtn');
-    if (!sidebar) return;
-    sidebar.classList.toggle('open');
-    if (btn) btn.classList.toggle('active', sidebar.classList.contains('open'));
-    setTimeout(resize, 0);
-
-    if (sidebar.classList.contains('open') && selectedFindingIdx < 0 && FINDINGS.length) {
+    toggleInspector('findings');
+    if (activeInspectorMode === 'findings' && selectedFindingIdx < 0 && FINDINGS.length) {
         selectFinding(0);
     }
 }
@@ -3876,13 +3944,9 @@ async function runAnalyze() {
         FINDINGS.push(...newFindings);
         selectedFindingIdx = -1;
         _initFindingsSidebar();
-        // Auto-open sidebar + select first finding
-        const sidebar = document.getElementById('findingsSidebar');
-        if (sidebar && FINDINGS.length > 0) {
-            sidebar.classList.add('open');
-            const fbtn = document.getElementById('findingsBtn');
-            if (fbtn) { fbtn.classList.add('active'); fbtn.style.display = ''; }
-            setTimeout(resize, 0);
+        // Auto-open the shared inspector + select first finding.
+        if (FINDINGS.length > 0) {
+            setInspectorMode('findings');
             selectFinding(0);
         }
         btn.textContent = `✓ ${FINDINGS.length} findings`;
@@ -4372,15 +4436,7 @@ function loopRenderState() {
 }
 
 function toggleLoop() {
-    const sidebar = document.getElementById('loopSidebar');
-    const btn = document.getElementById('loopBtn');
-    if (!sidebar) return;
-    sidebar.classList.toggle('open');
-    if (btn) btn.classList.toggle('active', sidebar.classList.contains('open'));
-    setTimeout(resize, 0);
-    if (sidebar.classList.contains('open')) {
-        loopFetchState().catch(err => console.error('loop state fetch failed', err));
-    }
+    toggleInspector('loop');
 }
 
 async function loopRunPrimary() {
@@ -4406,13 +4462,9 @@ async function loopRunDiagnose() {
             FINDINGS.push(...data.findings);
             selectedFindingIdx = -1;
             _initFindingsSidebar();
-            const fs = document.getElementById('findingsSidebar');
-            const fbtn = document.getElementById('findingsBtn');
             if (FINDINGS.length > 0) {
-                if (fs && !fs.classList.contains('open')) fs.classList.add('open');
-                if (fbtn) { fbtn.style.display = ''; fbtn.classList.add('active'); }
+                setInspectorMode('findings');
                 selectFinding(0);
-                setTimeout(resize, 0);
             }
             showToast(`Diagnose: ${FINDINGS.length} finding(s)`);
         }
@@ -4543,14 +4595,8 @@ function addFinding(findingDict) {
     FINDINGS.push(findingDict);
     selectedFindingIdx = -1;
     _initFindingsSidebar();
-    // Show sidebar if hidden
-    const sidebar = document.getElementById('findingsSidebar');
-    const fbtn = document.getElementById('findingsBtn');
-    if (sidebar && !sidebar.classList.contains('open')) {
-        sidebar.classList.add('open');
-        if (fbtn) { fbtn.classList.add('active'); fbtn.style.display = ''; }
-        setTimeout(resize, 0);
-    }
+    // Show the shared inspector if hidden.
+    if (activeInspectorMode !== 'findings') setInspectorMode('findings');
     draw();
     return FINDINGS.length;  // 1-based index
 }
@@ -4560,14 +4606,11 @@ _initFindingsSidebar();
 
 // Auto-open findings sidebar if findings exist
 if (FINDINGS.length > 0) {
-    setTimeout(() => toggleFindings(), 300);
+    setTimeout(() => setInspectorMode('findings'), 300);
 }
 
 // Initialize loop state; auto-open panel when launched via `nsys-ai loop`.
 loopFetchState().catch(() => {});
 if (BOOT.LOOP_MODE) {
-    setTimeout(() => {
-        const sidebar = document.getElementById('loopSidebar');
-        if (sidebar && !sidebar.classList.contains('open')) toggleLoop();
-    }, 450);
+    setTimeout(() => setInspectorMode('loop'), 450);
 }

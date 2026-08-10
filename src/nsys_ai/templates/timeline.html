@@ -87,49 +87,56 @@
             <div id="detailResizeHandle" title="Drag to resize details"></div>
             <div id="detail" class="empty">Click a kernel to see details. Drag to pan; Shift+drag to zoom a range. Press A for AI chat, / to search, ? for help.</div>
         </div>
-        <div id="chatSidebar">
-            <div id="chatHeader">
-                <span>💬 AI Chat</span>
-                <select id="chatModel"></select>
-                <button onclick="toggleChat()" title="Close">✕</button>
+        <aside id="inspectorRail" aria-label="Timeline inspector">
+            <div id="inspectorTabs" role="tablist" aria-label="Inspector views">
+                <button type="button" class="inspector-tab" id="inspectorTabChat" role="tab" aria-selected="false" aria-controls="chatSidebar" onclick="toggleChat()">Chat</button>
+                <button type="button" class="inspector-tab" id="inspectorTabFindings" role="tab" aria-selected="false" aria-controls="findingsSidebar" style="display:none" onclick="toggleFindings()">Evidence</button>
+                <button type="button" class="inspector-tab" id="inspectorTabLoop" role="tab" aria-selected="false" aria-controls="loopSidebar" onclick="toggleLoop()">Workflow</button>
+                <button type="button" class="inspector-close" aria-label="Close inspector" title="Close inspector" onclick="closeInspector()">✕</button>
             </div>
-            <details id="chatCapabilities" class="chat-capabilities">
-                <summary>AI capabilities and controls</summary>
-                <div class="cap-body">
-                    <div><strong>Supported UI actions</strong></div>
-                    <ul>
-                        <li><code>navigate_to_kernel(target_name)</code>: select and highlight a kernel.</li>
-                        <li><code>zoom_to_time_range(start_s, end_s)</code>: zoom timeline to a time window.</li>
-                        <li><code>fit_nvtx_range(...)</code>: fit an NVTX range to full width (by name or start/end).</li>
-                    </ul>
-                    <div><strong>How to control it</strong></div>
-                    <ul>
-                        <li>Natural language: ask directly, e.g. “go to kernel X”.</li>
-                        <li>Deterministic: ask explicitly for an action by name and exact target.</li>
-                    </ul>
+            <div id="chatSidebar" role="tabpanel" data-inspector-panel="chat">
+                <div id="chatHeader">
+                    <span>💬 AI Chat</span>
+                    <select id="chatModel"></select>
+                    <button onclick="toggleChat()" title="Close">✕</button>
                 </div>
-            </details>
-            <div id="chatMessages"></div>
-            <div id="chatInputWrap">
-                <input type="text" id="chatInput" placeholder="Ask about this profile..." />
-                <button id="chatSendBtn" onclick="sendChat()">Send</button>
+                <details id="chatCapabilities" class="chat-capabilities">
+                    <summary>AI capabilities and controls</summary>
+                    <div class="cap-body">
+                        <div><strong>Supported UI actions</strong></div>
+                        <ul>
+                            <li><code>navigate_to_kernel(target_name)</code>: select and highlight a kernel.</li>
+                            <li><code>zoom_to_time_range(start_s, end_s)</code>: zoom timeline to a time window.</li>
+                            <li><code>fit_nvtx_range(...)</code>: fit an NVTX range to full width (by name or start/end).</li>
+                        </ul>
+                        <div><strong>How to control it</strong></div>
+                        <ul>
+                            <li>Natural language: ask directly, e.g. “go to kernel X”.</li>
+                            <li>Deterministic: ask explicitly for an action by name and exact target.</li>
+                        </ul>
+                    </div>
+                </details>
+                <div id="chatMessages"></div>
+                <div id="chatInputWrap">
+                    <input type="text" id="chatInput" placeholder="Ask about this profile..." />
+                    <button id="chatSendBtn" onclick="sendChat()">Send</button>
+                </div>
             </div>
-        </div>
-        <div id="findingsSidebar">
-            <div id="findingsHeader">
-                <span>📋 Evidence</span>
-                <span class="findings-badge" id="findingsCount"></span>
-                <button onclick="toggleFindings()" title="Close">✕</button>
+            <div id="findingsSidebar" role="tabpanel" data-inspector-panel="findings">
+                <div id="findingsHeader">
+                    <span>📋 Evidence</span>
+                    <span class="findings-badge" id="findingsCount"></span>
+                    <button onclick="toggleFindings()" title="Close">✕</button>
+                </div>
+                <div id="findingsFilters" class="evidence-filters" aria-label="Filter evidence by severity">
+                    <button type="button" class="evidence-filter active" data-severity="all">All</button>
+                    <button type="button" class="evidence-filter" data-severity="critical">● Critical</button>
+                    <button type="button" class="evidence-filter" data-severity="warning">▲ Warning</button>
+                    <button type="button" class="evidence-filter" data-severity="info">● Info</button>
+                </div>
+                <div id="findingsList"></div>
             </div>
-            <div id="findingsFilters" class="evidence-filters" aria-label="Filter evidence by severity">
-                <button type="button" class="evidence-filter active" data-severity="all">All</button>
-                <button type="button" class="evidence-filter" data-severity="critical">● Critical</button>
-                <button type="button" class="evidence-filter" data-severity="warning">▲ Warning</button>
-                <button type="button" class="evidence-filter" data-severity="info">● Info</button>
-            </div>
-            <div id="findingsList"></div>
-        </div>
-        <div id="loopSidebar" data-loop-ui="2">
+            <div id="loopSidebar" role="tabpanel" data-loop-ui="2" data-inspector-panel="loop">
             <div id="loopHeader">
                 <span id="loopPhaseBadge">Diagnose</span>
                 <button type="button" class="loop-close" onclick="toggleLoop()" title="Close (W)">✕</button>

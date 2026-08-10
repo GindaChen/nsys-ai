@@ -492,6 +492,25 @@
             }
         }
 
+        @media (max-width: 960px) {
+            #inspectorRail.open {
+                position: absolute;
+                inset: 0;
+                z-index: 30;
+                width: 100%;
+                min-width: 0;
+                max-width: none;
+                border-left: none;
+                box-shadow: -8px 0 28px rgba(0, 0, 0, 0.45);
+            }
+
+            #inspectorRail #chatSidebar,
+            #inspectorRail #findingsSidebar,
+            #inspectorRail #loopSidebar {
+                width: 100%;
+            }
+        }
+
         #canvasWrap {
             flex: 1;
             overflow-x: hidden;
@@ -748,6 +767,7 @@
             display: flex;
             flex: 1;
             overflow: hidden;
+            position: relative;
         }
 
         #mainCol {
@@ -758,8 +778,10 @@
             min-width: 0;
         }
 
-        #chatSidebar {
-            width: 380px;
+        #inspectorRail {
+            width: min(420px, 40vw);
+            min-width: 320px;
+            max-width: 420px;
             flex-shrink: 0;
             display: none;
             flex-direction: column;
@@ -767,7 +789,69 @@
             border-left: 1px solid var(--border);
         }
 
-        #chatSidebar.open {
+        #inspectorRail.open {
+            display: flex;
+        }
+
+        #inspectorTabs {
+            min-height: 42px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(17, 24, 33, 0.92);
+        }
+
+        .inspector-tab,
+        .inspector-close {
+            border: 1px solid transparent;
+            border-radius: 5px;
+            background: transparent;
+            color: var(--text-dim);
+            cursor: pointer;
+            font: 600 10px var(--font-ui);
+            padding: 5px 9px;
+        }
+
+        .inspector-tab:hover,
+        .inspector-tab[aria-selected="true"] {
+            color: var(--text);
+            border-color: var(--border);
+            background: var(--accent-subtle);
+        }
+
+        .inspector-close {
+            margin-left: auto;
+            color: var(--text-muted);
+            font-size: 14px;
+            padding: 3px 7px;
+        }
+
+        .inspector-close:hover {
+            color: var(--text);
+            background: var(--surface-raised);
+        }
+
+        #inspectorRail #chatSidebar,
+        #inspectorRail #findingsSidebar,
+        #inspectorRail #loopSidebar {
+            width: auto;
+            min-width: 0;
+            max-width: none;
+            flex: 1;
+            min-height: 0;
+            border-left: none;
+            box-shadow: none;
+        }
+
+        #inspectorRail #chatSidebar {
+            display: none;
+            flex-direction: column;
+        }
+
+        #inspectorRail #chatSidebar.open {
             display: flex;
         }
 
@@ -1010,12 +1094,10 @@
 
         /* ── Findings sidebar ── */
         #findingsSidebar {
-            width: 360px;
             flex-shrink: 0;
             display: none;
             flex-direction: column;
             background: var(--surface);
-            border-left: 1px solid var(--border);
         }
 
         #findingsSidebar.open {
@@ -1024,13 +1106,10 @@
 
         /* ── Guided loop sidebar ── */
         #loopSidebar {
-            width: 420px;
             flex-shrink: 0;
             display: none;
             flex-direction: column;
             background: var(--bg);
-            border-left: 1px solid var(--border);
-            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.25);
         }
 
         #loopSidebar.open {
