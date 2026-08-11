@@ -375,6 +375,46 @@ def test_loop_rejects_after(tmp_path):
     assert "Traceback" not in result.stderr, result.stderr
 
 
+def test_timeline_web_rejects_loop_after(tmp_path):
+    """The same dead flag one subcommand over, and the last way to reach it.
+
+    `--loop-after` was parsed, forwarded through `serve_timeline`, `run_tui` and
+    `run_timeline`, and read by none of them -- the session store replaced it.
+    Since `loop`'s default surface is `timeline-web`, it was also the only
+    remaining way to hand a loop surface a candidate it cannot register.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "nsys_ai", "timeline-web",
+            str(fixtures / "mfu_2gpu_before.sqlite"),
+            "--loop-after", str(fixtures / "mfu_2gpu_after.sqlite"), "--no-browser",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "unrecognized arguments: --loop-after" in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+
+
+def test_no_surface_still_takes_a_candidate_it_cannot_register(tmp_path):
+    """The parameter is gone from the whole chain, not just from the parser.
+
+    A flag removed while the parameter it fed survives is half a fix: the next
+    caller re-adds the flag because the plumbing still looks ready for it.
+    """
+    src = Path(__file__).resolve().parents[1] / "src" / "nsys_ai"
+    offenders = [
+        f"{path.relative_to(src)}:{i}"
+        for path in src.rglob("*.py")
+        for i, line in enumerate(path.read_text().splitlines(), 1)
+        if "loop_after" in line
+    ]
+    assert not offenders, f"loop_after survives at: {offenders}"
+
+
 def test_h100_preset_hint_names_a_command_that_parses():
     """The only recovery instruction on the preset path must still be runnable.
 

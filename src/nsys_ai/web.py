@@ -963,7 +963,6 @@ def serve_timeline(
     findings_path: str | None = None,
     auto_findings: list[dict] | None = None,
     loop_before: str | None = None,
-    loop_after: str | None = None,
     loop_h100_preset: bool = False,
     session: str | None = None,
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",

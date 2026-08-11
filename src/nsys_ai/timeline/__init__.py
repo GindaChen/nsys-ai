@@ -20,7 +20,6 @@ def run_timeline(
     device: int,
     trim: tuple[int, int] | None,
     min_ms: float = 0,
-    loop_after: str | None = None,
 ) -> None:
     """Launch the Textual horizontal timeline browser.
 
@@ -31,7 +30,7 @@ def run_timeline(
         return
     from .app import run_timeline as _run
 
-    _run(db_path, device, trim, min_ms=min_ms, loop_after=loop_after)
+    _run(db_path, device, trim, min_ms=min_ms)
 
 
 def _print_static_summary(

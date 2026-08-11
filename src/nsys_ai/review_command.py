@@ -308,7 +308,6 @@ def _open_session_web(
                 port=port,
                 open_browser=open_browser,
                 loop_before=before_path,
-                loop_after=after_path,
                 session=session_id,
                 session_root=session_root,
             )
