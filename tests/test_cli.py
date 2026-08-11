@@ -1016,6 +1016,51 @@ def test_getting_started_screen_names_the_loop_verbs():
         assert f"nsys-ai {verb}" in screen, f"help screen does not name `{verb}`"
 
 
+def test_every_dispatchable_command_is_visible_from_dash_dash_help():
+    """`nsys-ai --help` must not omit a command that works.
+
+    `main()` picks between two parsers by command name, so `--help` rendered
+    only one of them: five working commands (`summary`, `tui`, `viewer`,
+    `timeline`, `export-csv`, ...) appeared on the getting-started screen and
+    nowhere in `--help`, and seven appeared in `--help` and not on the screen.
+    A reader had no way to tell which list was authoritative.
+
+    The getting-started screen stays a curated selection -- that is what it is
+    for, and it says so. `--help` is the one that must be complete.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    missing = sorted(
+        name for name in _declared_subcommands() if name not in result.stdout
+    )
+    assert not missing, (
+        "these commands dispatch but are invisible from `--help`:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_the_legacy_routing_set_matches_the_parser_that_serves_it():
+    """A routed command that is not registered there is an `invalid choice`.
+
+    The set lived as a literal inside `main()`, tied to neither parser. It is
+    deliberately a subset -- the legacy parser also registers `doctor`, `info`
+    and `skill`, which the primary parser owns and must keep -- so it cannot be
+    derived, only checked.
+    """
+    from nsys_ai.cli.parsers import LEGACY_ROUTED_COMMANDS, _build_legacy_parser
+
+    registered: set[str] = set()
+    for action in _build_legacy_parser()._subparsers._group_actions:  # noqa: SLF001
+        registered.update(action.choices)
+
+    unregistered = sorted(LEGACY_ROUTED_COMMANDS - registered)
+    assert not unregistered, (
+        f"routed to the legacy parser but not registered on it: {unregistered}"
+    )
+
+
 def test_getting_started_screen_only_advertises_commands_that_exist():
     """Every `nsys-ai <verb>` the screen shows must be a real subcommand.
 
