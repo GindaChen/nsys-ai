@@ -935,6 +935,10 @@ def _cmd_diff(args, _profile):
     # (no symlink dereference), matching SessionStore / build_local_profile_reference.
     session_before_path = None
     session_after_path = None
+    # Defaulted here rather than in the parser so the default stays visible next
+    # to the only code that writes it. A CI job runs in a checkout, so a record
+    # it cannot redirect is a record it cannot keep out of the repo under test.
+    decision_out_path = getattr(args, "decision_out", None) or "diff.json"
     if decision is not None:
         if getattr(args, "chat", False):
             print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
@@ -943,10 +947,13 @@ def _cmd_diff(args, _profile):
             print("Error: --reason is required with --accept/--reject", file=sys.stderr)
             sys.exit(2)
         if getattr(args, "output", None) and os.path.abspath(args.output) == os.path.abspath(
-            "diff.json"
+            decision_out_path
         ):
             print(
-                "Error: --output diff.json conflicts with the decision record path",
+                f"Error: --output and the decision record would both write "
+                f"{decision_out_path}. -o writes the rendered report in --format; the "
+                "decision record is a separate JSON artifact. Point one of them "
+                "elsewhere with --decision-out.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1128,7 +1135,7 @@ def _cmd_diff(args, _profile):
                 gate_summary,
                 decision=decision,
                 reason=reason or "",
-                path="diff.json",
+                path=decision_out_path,
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)

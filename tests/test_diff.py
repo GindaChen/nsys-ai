@@ -1212,6 +1212,75 @@ def test_diff_cli_decision_missing_reason_is_refused(tmp_path):
     assert not (tmp_path / "diff.json").exists()
 
 
+def test_diff_cli_decision_can_be_written_outside_the_working_directory(tmp_path):
+    """A tool advertised for CI must be able to run in a checkout without dirtying it.
+
+    The decision record was hardcoded to ``diff.json`` beside wherever the
+    command ran, with no way to redirect it. In CI that directory is the
+    repository under test.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+    destination = tmp_path / "artifacts" / "decision.json"
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--accept",
+        "--reason",
+        "verified",
+        "--decision-out",
+        str(destination),
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(destination.read_text(encoding="utf-8"))["decision"]["status"] == "accepted"
+    assert not (tmp_path / "diff.json").exists(), "the record was still left in the CWD"
+
+
+def test_diff_cli_decision_defaults_to_the_working_directory(tmp_path):
+    """Without the flag nothing moves; this is a redirect, not a relocation."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before, after, "--accept", "--reason", "verified",
+        cwd=tmp_path, env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "diff.json").exists()
+
+
+def test_diff_cli_refuses_to_write_report_and_decision_to_one_path(tmp_path):
+    """Two artifacts, one name: say which is which and how to separate them.
+
+    ``-o`` writes the rendered report in ``--format``; the decision record is a
+    separate JSON artifact. The old message named the collision without naming
+    a way out, because there was none.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before, after, "--format", "json", "--accept", "--reason", "v",
+        "-o", "same.json", "--decision-out", "same.json",
+        cwd=tmp_path, env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 2
+    assert "--decision-out" in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_diff_cli_decision_low_comparability_stamps_inconclusive(tmp_path):
     before = tmp_path / "before.sqlite"
     after = tmp_path / "after.sqlite"

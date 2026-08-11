@@ -926,12 +926,20 @@ def _build_parser():
     decision.add_argument(
         "--accept",
         action="store_true",
-        help="Persist an accepted user decision to diff.json (requires --reason)",
+        help="Persist an accepted user decision (requires --reason; see --decision-out)",
     )
     decision.add_argument(
         "--reject",
         action="store_true",
-        help="Persist a rejected user decision to diff.json (requires --reason)",
+        help="Persist a rejected user decision (requires --reason; see --decision-out)",
+    )
+    p.add_argument(
+        "--decision-out",
+        default=None,
+        metavar="PATH",
+        help="Where --accept/--reject writes the decision record "
+        "(default: diff.json in the working directory). Distinct from -o, which "
+        "writes the rendered report in --format",
     )
     p.add_argument(
         "--reason",
