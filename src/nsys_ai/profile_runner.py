@@ -255,6 +255,57 @@ def build_local_profile_reference(
         raise ProfileError(str(exc)) from None
 
 
+def observed_gpu_count(path: str | os.PathLike[str]) -> int:
+    """Number of GPUs that recorded kernels in an exported profile.
+
+    Read from the kernel table's device ids, which is the only statement the
+    capture itself makes about how many GPUs the run used: a machine can expose
+    eight and a run can touch one.
+    """
+    connection = sqlite3.connect(os.fspath(path), check_same_thread=False)
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        with Profile._from_conn(connection) as profile:
+            return len(profile.meta.devices or ())
+    finally:
+        connection.close()
+
+
+def check_expected_gpu_count(spec: RunSpec, sqlite_path: Path) -> str | None:
+    """Return why ``expected_gpu_count`` is unmet, or None when it holds.
+
+    ``expected_gpu_count`` was recorded into the RunSpec and never read, so a
+    single-GPU capture declared as eight was published with the declaration
+    intact and every consumer downstream — per-GPU scaling, MFU, the diff's
+    topology check — inherited a falsehood the artifact asserted about itself.
+    A declaration the capture contradicts fails the capture.
+
+    ``expected_rank_count`` stays unchecked here on purpose: a rank is a
+    process in a distributed job, one local capture watches one launch, and
+    counting processes in the export would answer a different question under
+    the same name.
+    """
+    expected = spec.expected_gpu_count
+    if expected is None:
+        return None
+    try:
+        observed = observed_gpu_count(sqlite_path)
+    except (NsysAiError, OSError, *DB_ERRORS) as exc:
+        # The declaration was asked for and cannot be checked, so it is not
+        # satisfied. Failing closed keeps "unverifiable" out of the success
+        # path, where it would be indistinguishable from "verified".
+        return (
+            f"declared expected_gpu_count={expected} could not be checked against the "
+            f"capture: {type(exc).__name__}"
+        )
+    if observed != expected:
+        return (
+            f"declared expected_gpu_count={expected} but the capture recorded kernels on "
+            f"{observed} GPU(s)"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class RunTimings:
     """Wall-clock durations for the stages completed by a run."""
@@ -542,6 +593,16 @@ class LocalProfileRunner:
                 report=report_path,
                 sqlite=sqlite_path,
                 detail=f"profile validation failed: {type(exc).__name__}",
+            )
+        gpu_count_detail = check_expected_gpu_count(spec, sqlite_path)
+        if gpu_count_detail is not None:
+            validation_seconds = time.monotonic() - validation_started
+            return result(
+                RunStatus.INVALID_PROFILE,
+                return_code=return_code,
+                report=report_path,
+                sqlite=sqlite_path,
+                detail=gpu_count_detail,
             )
         validation_seconds = time.monotonic() - validation_started
         return result(
