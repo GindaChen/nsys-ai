@@ -60,8 +60,14 @@ def build_executive_summary(summary: ProfileDiffSummary) -> str:
         )
 
     delta_ns = summary.after.total_gpu_ns - summary.before.total_gpu_ns
-    direction = "faster" if delta_ns < 0 else "slower"
-    total_str = f"Total GPU time went {direction} by {_fmt_delta_ns(delta_ns)}."
+    if delta_ns == 0:
+        total_str = "Total GPU time was unchanged."
+    else:
+        # The direction word carries the sign, so the magnitude must not carry
+        # it again: "went faster by -46.37ms" is a double negative that reads
+        # as the opposite of what was measured.
+        direction = "faster" if delta_ns < 0 else "slower"
+        total_str = f"Total GPU time went {direction} by {_fmt_ns(abs(delta_ns))}."
 
     parts = [total_str]
 
@@ -128,12 +134,16 @@ def generate_diff_narrative(
     """
     executive_summary = build_executive_summary(summary)
 
-    # An empty side is refused before the model is ever asked. The prompt payload
-    # lists "Top improvements" from the same deltas, and the instruction tells the
-    # model to mention them, so an LLM handed this would narrate the vanished
-    # kernels as a win directly beneath the deterministic refusal. There is
-    # nothing here to narrate: no comparison was made.
-    if empty_kernel_sides(summary.before, summary.after):
+    # An empty side, or a pair under the comparability minimum, is refused
+    # before the model is ever asked. The prompt payload lists "Top
+    # improvements" from the same deltas, and the instruction tells the model to
+    # mention them, so an LLM handed this would narrate arithmetic as a win
+    # directly beneath the deterministic refusal -- which the renderers then
+    # discard, so the call is billed and shown to nobody. There is nothing here
+    # to narrate: no comparison was made.
+    from nsys_ai.diff_render import is_incomparable
+
+    if empty_kernel_sides(summary.before, summary.after) or is_incomparable(summary):
         return DiffNarrative(
             executive_summary=executive_summary,
             ai_narrative=None,
