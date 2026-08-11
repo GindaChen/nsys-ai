@@ -50,11 +50,11 @@ ENGINE_DEPENDENT_SKILLS = {"schema_inspect"}
 # abstains outright there. Teaching the SQLite path to classify kernel names is
 # a feature, not an arithmetic fix, so these cells stay out of the comparison.
 #
-# ``tc_achieved_pct`` is NOT in that category and is excluded under protest:
-# ``nvtx_layer_breakdown`` reports 0.0 on sqlite3 and 100.0 on the cache for the
-# same regions, because a missing capability is summed as zero instead of
-# staying unknown. That is a wrong answer, not an unavailable one -- issue #418.
-# It is listed here so the rest of the sweep can run; remove it with the fix.
+# ``tc_achieved_pct`` joined that category rather than leaving it. It used to
+# read 0.0 on sqlite3 against 100.0 on the cache -- a wrong answer, not an
+# unavailable one, because the missing capability was summed as zero (#418).
+# With that fixed the sqlite3 side reports None, and the divergence is now the
+# honest one this list is for: one engine measures, the other says it cannot.
 CAPABILITY_COLUMNS = frozenset(
     {
         "is_tc_eligible",

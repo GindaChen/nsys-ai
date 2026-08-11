@@ -463,6 +463,13 @@ def _execute(conn, **kwargs):
             "nccl_ns": 0,
             "tc_eligible_ns": 0,
             "tc_active_ns": 0,
+            # Tracked apart from the sums, because "nothing was eligible" and
+            # "eligibility could not be measured" are different answers that
+            # both total zero. Summing `tc_elig or 0` conflated them on the
+            # first row and left the guard below unreachable, so a connection
+            # with no Tensor Core columns reported 0.0% achieved where the
+            # cache reported 100.0% for the same regions.
+            "tc_unmeasurable": False,
             "count": 0,
             "max_ns": 0,
             "nvtx_depth": -1,
@@ -511,8 +518,14 @@ def _execute(conn, **kwargs):
         stats["total_ns"] += total_ns or 0
         stats["compute_ns"] += compute_ns or 0
         stats["nccl_ns"] += nccl_ns or 0
-        stats["tc_eligible_ns"] += tc_elig or 0
-        stats["tc_active_ns"] += tc_act or 0
+        if tc_elig is None or tc_act is None:
+            # Absorbing: a group that mixes measured and unmeasured leaves
+            # cannot be averaged without understating the denominator, and a
+            # quiet understatement reads as a real low achievement.
+            stats["tc_unmeasurable"] = True
+        else:
+            stats["tc_eligible_ns"] += tc_elig
+            stats["tc_active_ns"] += tc_act
         stats["count"] += count
         if (max_ns or 0) > stats["max_ns"]:
             stats["max_ns"] = max_ns or 0
@@ -564,9 +577,9 @@ def _execute(conn, **kwargs):
                 "compute_ms": round(compute_ns / 1e6, 2),
                 "nccl_ms": round(nccl_ns / 1e6, 2),
                 "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
-                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1)
-                if tc_elig
-                else (None if tc_elig is None else 0.0),
+                "tc_achieved_pct": None
+                if stats["tc_unmeasurable"]
+                else (round(100 * tc_act / tc_elig, 1) if tc_elig else 0.0),
                 "avg_kernel_ms": round(total_ns / count / 1e6, 3) if count else 0,
                 "max_kernel_ms": round(stats["max_ns"] / 1e6, 3),
                 "top_kernels": top_kernels,

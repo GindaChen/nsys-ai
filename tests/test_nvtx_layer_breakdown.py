@@ -517,3 +517,52 @@ def test_root_cause_layer_outlier_no_fire():
     ]
     findings = _check_layer_outlier(layer_data)
     assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tensor Core attribution: unmeasurable is not zero
+# ---------------------------------------------------------------------------
+
+
+def test_tc_achieved_is_unknown_not_zero_without_the_capability(tmp_path):
+    """A connection that cannot classify kernels must not report 0% achieved.
+
+    The cache's ``kernels`` view synthesises ``is_tc_eligible`` / ``uses_tc`` by
+    matching kernel names; a raw sqlite3 connection has neither column, so the
+    skill's fallback yields None for both totals. Those Nones were summed as
+    ``tc_elig or 0``, which erased the unknown on the first row and made the
+    guard that checked for it unreachable -- so the same regions of the same
+    profile read 0.0% on sqlite3 and 100.0% through the cache, with nothing to
+    tell the reader which they had.
+    """
+    import shutil
+    import sqlite3 as _sqlite3
+    from pathlib import Path
+
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.skills.registry import get_skill
+
+    source = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+    profile_path = tmp_path / source.name
+    shutil.copyfile(source, profile_path)
+
+    skill = get_skill("nvtx_layer_breakdown")
+    plain = _sqlite3.connect(str(profile_path))
+    try:
+        rows = [r for r in skill.execute(plain) if isinstance(r, dict)]
+    finally:
+        plain.close()
+
+    assert rows, "fixture produced no layer rows to judge"
+    reported = [r["tc_achieved_pct"] for r in rows if "tc_achieved_pct" in r]
+    assert reported, "the column vanished; this test no longer guards anything"
+    assert all(value is None for value in reported), (
+        f"unmeasurable Tensor Core achievement reported as a number: {reported[:6]}"
+    )
+
+    # ...and the engine that *can* measure it still does, so this is a fix for
+    # the wrong answer rather than the removal of a right one.
+    with profile_mod.open(str(profile_path)) as prof:
+        cached = [r for r in skill.execute(prof.query_conn()) if isinstance(r, dict)]
+    measured = [r.get("tc_achieved_pct") for r in cached]
+    assert any(isinstance(value, (int, float)) for value in measured), measured
