@@ -850,7 +850,7 @@ def stream_agent_loop(
     single-threaded ``nsys-ai diff --chat`` REPL.
 
     *skill_names* — optional list of skill file paths relative to the
-    ``docs/agent_skills/`` directory (e.g. ``["skills/mfu.md"]``). When
+    ``src/nsys_ai/agent_skills/`` directory (e.g. ``["skills/mfu.md"]``). When
     provided, their contents are concatenated and appended to the system
     prompt as a SESSION SKILL CONTEXT block.  Uses ``prompt_loader``
     internally; missing files are silently ignored.
@@ -1289,7 +1289,7 @@ def chat_completion_stream(body_bytes: bytes):
     ui_context = payload.get("ui_context") or {}
     profile_path = payload.get("profile_path")
     # skill_context: optional list of skill paths (e.g. ["skills/mfu.md"]).
-    # When provided, those files are loaded from docs/agent_skills/ and appended
+    # When provided, those files are loaded from src/nsys_ai/agent_skills/ and appended
     # to the system prompt as SESSION SKILL CONTEXT. Unknown paths are silently ignored.
     skill_context: list[str] | None = payload.get("skill_context") or None
     effective_profile = profile_path if profile_path else None

@@ -2,7 +2,7 @@
 
 **CRITICAL: Read `PRINCIPLES.md` first before executing any step.**
 
-Validate that the `docs/agent_skills/` directory is internally consistent and
+Validate that the `src/nsys_ai/agent_skills/` directory is internally consistent and
 complete. Analogous to `cli-anything:validate` — checks structure, not analysis output.
 
 Use `/nsys:validate` to validate an **analysis result**.
@@ -35,10 +35,10 @@ For each check: mark ✓ (pass) or ✗ (fail) and explain why.
 
 ### Category 1: Directory Structure (5 checks)
 
-- [ ] S1.1 `docs/agent_skills/PRINCIPLES.md` exists
-- [ ] S1.2 `docs/agent_skills/INDEX.md` exists
-- [ ] S1.3 `docs/agent_skills/skills/` directory exists with ≥ 5 skill files
-- [ ] S1.4 `docs/agent_skills/commands/` directory exists with ≥ 4 command files
+- [ ] S1.1 `src/nsys_ai/agent_skills/PRINCIPLES.md` exists
+- [ ] S1.2 `src/nsys_ai/agent_skills/INDEX.md` exists
+- [ ] S1.3 `src/nsys_ai/agent_skills/skills/` directory exists with ≥ 5 skill files
+- [ ] S1.4 `src/nsys_ai/agent_skills/commands/` directory exists with ≥ 4 command files
 - [ ] S1.5 `src/nsys_ai/prompt_loader.py` exists and imports without error
 
 ### Category 2: PRINCIPLES.md Content (5 checks)

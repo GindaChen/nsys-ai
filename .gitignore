@@ -2,6 +2,9 @@ node_modules/
 __pycache__/
 *.egg-info/
 dist/
+# `python -m build` leaves this beside dist/; only dist/ was ignored, so a
+# `git add -A` after building a wheel swept the whole staging tree into a commit.
+build/
 .pytest_cache/
 .DS_Store
 .venv/

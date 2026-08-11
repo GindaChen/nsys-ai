@@ -44,7 +44,21 @@ all = ["nsys-ai[agent,tui,chat,cutracer]"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-nsys_ai = ["templates/*.html", "templates/*.css", "templates/*.js", "prompts/*.txt", "data/*.md"]
+nsys_ai = [
+    "templates/*.html",
+    "templates/*.css",
+    "templates/*.js",
+    "prompts/*.txt",
+    "data/*.md",
+    # persona.py reads this at import time, so a wheel without it cannot even
+    # import nsys_ai.agent.persona -- FileNotFoundError, not a degradation.
+    "agent/*.md",
+    # The agent skill context chat.py and diff_tools.py load. Absent from the
+    # wheel, a pip user got the AI paths with less context than a source
+    # checkout gives, silently and without choosing it.
+    "agent_skills/*.md",
+    "agent_skills/**/*.md",
+]
 
 [tool.ruff]
 line-length = 100
