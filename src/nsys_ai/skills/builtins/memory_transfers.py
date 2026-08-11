@@ -158,10 +158,25 @@ WITH baseline AS (
     WHERE k.copyKind = 1 AND k.deviceId = {device} {trim_clause}
 )
 SELECT
-    CAST((k.start - b.min_start) / 1000000000.0 AS INT) AS second,
+    -- Elapsed whole seconds since the first H2D copy. Both operands are kept
+    -- integral on purpose: subtracting the remainder floors the value exactly,
+    -- so the bucket does not depend on how the engine rounds. Casting a
+    -- fractional value instead would split the profile differently per engine
+    -- (0.6 truncates to 0 under SQLite, rounds to 1 under DuckDB), putting the
+    -- same copies in different buckets. (k.start - b.min_start) is never
+    -- negative, so flooring and truncating agree here.
+    CAST(
+        (k.start - b.min_start - ((k.start - b.min_start) % 1000000000))
+        / 1000000000 AS INT
+    ) AS second,
     COUNT(*) AS ops,
     SUM(k.bytes) / 1e6 AS total_mb,
-    COALESCE(SUM(k.bytes) / NULLIF(SUM(k.[end] - k.start), 0), 0) * 1e9 / 1e9 AS avg_gbps,
+    -- Bytes per nanosecond is already GB/s. Cast the numerator to DOUBLE
+    -- first: both sums are integers, and SQLite truncates integer division
+    -- to 0 where DuckDB promotes to a real quotient.
+    COALESCE(
+        CAST(SUM(k.bytes) AS DOUBLE) / NULLIF(SUM(k.[end] - k.start), 0), 0
+    ) AS avg_gbps,
     MIN(k.start) AS window_start,
     MAX(k.[end]) AS window_end
 FROM {memcpy_table} k CROSS JOIN baseline b
