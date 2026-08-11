@@ -12,16 +12,19 @@ other's rows and change findings without any error.
 """
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 from nsys_ai.skills.registry import get_skill
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+
+@pytest.fixture(scope="module")
+def fixture(profile_copy):
+    """A writable copy: opening a profile writes helper indexes into the file."""
+    return profile_copy("h100_2gpu_1s.sqlite")
 
 
-def test_identical_params_hit_the_cache():
+def test_identical_params_hit_the_cache(fixture):
     skill = get_skill("top_kernels")
     calls = []
     original = skill.execute_fn
@@ -31,7 +34,7 @@ def test_identical_params_hit_the_cache():
         return original(conn, **kwargs)
 
     skill.execute_fn = counting
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         first = skill.execute(conn, limit=5)
         second = skill.execute(conn, limit=5)
@@ -43,14 +46,14 @@ def test_identical_params_hit_the_cache():
     assert first == second
 
 
-def test_different_params_are_never_served_a_cached_result():
+def test_different_params_are_never_served_a_cached_result(fixture):
     """The failure a name-only key would cause, asserted directly.
 
     `gpu_idle_gaps` is called at limit=1 and limit=5 in the same build. If the
     key ignored parameters the second caller would receive the first's rows.
     """
     skill = get_skill("gpu_idle_gaps")
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         few = [r for r in skill.execute(conn, device=0, limit=1) if not r.get("_summary")]
         many = [r for r in skill.execute(conn, device=0, limit=5) if not r.get("_summary")]
@@ -64,7 +67,7 @@ def test_different_params_are_never_served_a_cached_result():
     )
 
 
-def test_a_defaulted_parameter_shares_an_entry_with_an_explicit_one():
+def test_a_defaulted_parameter_shares_an_entry_with_an_explicit_one(fixture):
     """The key is built from resolved parameters, after defaults are applied.
 
     Keying on raw kwargs would treat an omitted `limit` and an explicit `limit`
@@ -80,7 +83,7 @@ def test_a_defaulted_parameter_shares_an_entry_with_an_explicit_one():
         return original(conn, **kwargs)
 
     skill.execute_fn = counting
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         skill.execute(conn)
         skill.execute(conn, limit=default_limit)
@@ -91,14 +94,14 @@ def test_a_defaulted_parameter_shares_an_entry_with_an_explicit_one():
     assert len(calls) == 1, f"defaulted and explicit {default_limit} did not share an entry"
 
 
-def test_a_cached_result_cannot_be_corrupted_by_its_consumer():
+def test_a_cached_result_cannot_be_corrupted_by_its_consumer(fixture):
     """Rows are copied out, because consumers mutate them in place.
 
     Without the copy, one caller adding a key would change what every later
     caller sees — a bug that would surface far from here.
     """
     skill = get_skill("top_kernels")
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         first = skill.execute(conn, limit=3)
         first[0]["_injected_by_consumer"] = True
@@ -109,7 +112,7 @@ def test_a_cached_result_cannot_be_corrupted_by_its_consumer():
     assert "_injected_by_consumer" not in second[0], "the cache handed out a shared row"
 
 
-def test_a_second_reader_does_not_share_rows_with_the_first():
+def test_a_second_reader_does_not_share_rows_with_the_first(fixture):
     """The read-side copy, which the store-side test does not reach.
 
     That test poisons the *first*, uncached list, so it only exercises the copy
@@ -117,7 +120,7 @@ def test_a_second_reader_does_not_share_rows_with_the_first():
     the classic "would pass with the body deleted".
     """
     skill = get_skill("top_kernels")
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         skill.execute(conn, limit=3)          # populate
         second = skill.execute(conn, limit=3)  # first cached read
@@ -131,7 +134,7 @@ def test_a_second_reader_does_not_share_rows_with_the_first():
     )
 
 
-def test_sql_only_skills_are_cached_too():
+def test_sql_only_skills_are_cached_too(fixture):
     """The store used to sit inside the execute_fn branch only.
 
     SQL-only skills therefore built a cache key and then took a guaranteed miss
@@ -140,7 +143,7 @@ def test_sql_only_skills_are_cached_too():
     """
     skill = get_skill("stream_concurrency")
     assert skill.execute_fn is None, "this skill is no longer SQL-only; pick another"
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         skill.execute(conn, limit=5)
         import nsys_ai.connection as connection
@@ -156,12 +159,12 @@ def test_sql_only_skills_are_cached_too():
     assert cached, "a SQL-only skill produced no cache entry"
 
 
-def test_separate_connections_do_not_share_results():
+def test_separate_connections_do_not_share_results(fixture, profile_copy):
     """The cache is per connection, so two profiles cannot bleed into each other."""
-    other = Path(__file__).resolve().parent / "fixtures" / "healthy_1pct.sqlite"
+    other = profile_copy("healthy_1pct.sqlite")
     skill = get_skill("top_kernels")
 
-    a = sqlite3.connect(FIXTURE)
+    a = sqlite3.connect(fixture)
     b = sqlite3.connect(other)
     try:
         rows_a = skill.execute(a, limit=3)
@@ -176,7 +179,7 @@ def test_separate_connections_do_not_share_results():
 
 
 @pytest.mark.parametrize("profile", ["h100_2gpu_1s", "healthy_1pct"])
-def test_the_build_executes_fewer_skills_without_changing_findings(profile):
+def test_the_build_executes_fewer_skills_without_changing_findings(profile, profile_copy):
     """The whole point: less work, same answer.
 
     Findings were compared byte-for-byte against the pre-memo implementation on
@@ -206,7 +209,7 @@ def test_the_build_executes_fewer_skills_without_changing_findings(profile):
         sk.execute_fn = make(sk.name, sk.execute_fn)
 
     try:
-        with Profile(str(FIXTURE.parent / f"{profile}.sqlite")) as prof:
+        with Profile(str(profile_copy(f"{profile}.sqlite"))) as prof:
             report = EvidenceBuilder(prof, device=0).build()
     finally:
         for sk in registry.all_skills():
