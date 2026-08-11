@@ -217,7 +217,9 @@ def main():
         else:
             # Human-readable output
             print(f"Error [{e.error_code}]: {e}", file=sys.stderr)
-        sys.exit(1)
+        # 1 = the command did not run to completion; 2 = it was asked for
+        # something it cannot parse or accept.
+        sys.exit(e.exit_code)
     except RuntimeError as e:
         # Backward compatibility: catch plain RuntimeError from legacy code
         print(f"Error: {e}", file=sys.stderr)

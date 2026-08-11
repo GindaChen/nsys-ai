@@ -827,6 +827,23 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _bind_local_server(port: int, handler):
+    """Bind 127.0.0.1:*port*, falling back to a free port when it is taken.
+
+    A busy port is an ordinary condition — another viewer is already running —
+    so every local server here answers it the same way instead of letting the
+    bind error reach the user as a traceback.
+    """
+    try:
+        return _ThreadedHTTPServer(("127.0.0.1", port), handler)
+    except OSError:
+        if port == 0:
+            raise
+        server = _ThreadedHTTPServer(("127.0.0.1", 0), handler)
+        print(f"Port {port} in use, using port {server.server_address[1]} instead.")
+        return server
+
+
 def serve(prof, device: int, trim: tuple[int, int], *, port: int = 8142, open_browser: bool = True):
     """Start a local HTTP server serving the interactive HTML viewer.
     If the requested port is in use, tries port 0 (system assigns a free port) and opens that URL.
@@ -834,13 +851,7 @@ def serve(prof, device: int, trim: tuple[int, int], *, port: int = 8142, open_br
     html = generate_html(prof, device, trim)
     _ViewerHandler.html_bytes = html.encode("utf-8")
 
-    try:
-        server = _ThreadedHTTPServer(("127.0.0.1", port), _ViewerHandler)
-    except OSError:
-        if port == 0:
-            raise
-        server = _ThreadedHTTPServer(("127.0.0.1", 0), _ViewerHandler)
-        print(f"Port {port} in use, using port {server.server_address[1]} instead.")
+    server = _bind_local_server(port, _ViewerHandler)
     open_url = f"http://127.0.0.1:{server.server_address[1]}" if open_browser else None
     _run_server(server, open_url, prof)
 
@@ -1197,10 +1208,13 @@ def serve_timeline(
 
         threading.Thread(target=_warm_nvtx, name="timeline-nvtx-warmup", daemon=True).start()
 
-    server = _ThreadedHTTPServer(("127.0.0.1", port), _ViewerHandler)
-    actual_url = f"http://127.0.0.1:{server.server_address[1]}"
-    print(f"Timeline viewer at {actual_url}")
     try:
+        # Binding is inside the try: if it fails, the caller's `with` closes the
+        # Profile, and closing a DuckDB connection out from under the background
+        # worker is a segfault rather than an exception.
+        server = _bind_local_server(port, _ViewerHandler)
+        actual_url = f"http://127.0.0.1:{server.server_address[1]}"
+        print(f"Timeline viewer at {actual_url}")
         _run_server(server, actual_url if open_browser else None, prof)
     finally:
         # Keep the Profile alive until the background worker has stopped using
@@ -1346,7 +1360,7 @@ def serve_evidence(
     _EvidenceHandler._prebuilt_data = prebuilt
     _ViewerHandler._prebuilt_nvtx_mode = "full"
 
-    server = _ThreadedHTTPServer(("127.0.0.1", port), _EvidenceHandler)
+    server = _bind_local_server(port, _EvidenceHandler)
     actual_url = f"http://127.0.0.1:{server.server_address[1]}"
     print(f"Evidence viewer at {actual_url}")
     print(f"  {len(findings_data)} finding(s): {title}")
