@@ -65,7 +65,7 @@ nsys-ai loop --h100-preset --trim 49 90 --port 8144
 
 | Flag | Purpose |
 |------|---------|
-| `--h100-preset` | Auto-fill baseline + candidate paths from the HF cache |
+| `--h100-preset` | Auto-fill the baseline path from the HF cache |
 | `--trim START END` | **Viewer + diagnose** time window in **seconds** (optional but speeds up large traces) |
 | `--port` | HTTP port (default `8144`) |
 | `--no-browser` | Print URL only; do not open a tab |
@@ -90,7 +90,7 @@ Work top-to-bottom in the loop sidebar. The primary button advances the suggeste
 |------|--------|----------------|
 | **1. Diagnose** | Run diagnose on baseline | Local evidence builder runs; findings appear in the findings sidebar |
 | **2. Propose** | Enter change + expected impact, save | Text is stored in loop state (no code is modified) |
-| **3. Re-profile** | Set candidate `.sqlite` path | Registers the after profile (preset fills `perf_h100_sp1_fa3.sqlite` when using `--h100-preset`) |
+| **3. Re-profile** | Set candidate `.sqlite` path | The browser does not register a candidate. Capture with `nsys-ai profile`, then publish with `nsys-ai diff <before> <after> --session` |
 | **4. Diff** | Run diff | Compares baseline vs candidate; **All steps & status** panel appears with verdict and stats |
 | **5. Decide** | Accept or reject | Records your decision in session state only |
 

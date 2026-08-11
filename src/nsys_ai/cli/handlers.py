@@ -1506,14 +1506,12 @@ def _cmd_loop(args, _profile):
 
     trim = _parse_trim(args)
     before_path = getattr(args, "before", None)
-    after_path = getattr(args, "after", None)
     if getattr(args, "h100_preset", False):
         from nsys_ai.loop_state import detect_h100_replay_preset
 
         preset = detect_h100_replay_preset()
         if preset:
             before_path = before_path or preset.get("before_path")
-            after_path = after_path or preset.get("after_path")
         elif not before_path:
             from nsys_ai.loop_state import h100_preset_download_hint
 
@@ -1530,17 +1528,10 @@ def _cmd_loop(args, _profile):
     if not Path(before_path).exists():
         print(f"Error: before profile not found: {before_path}", file=sys.stderr)
         print(
-            "Pass a real .sqlite/.nsys-rep path. Example: nsys-ai loop data/before.sqlite --after data/after.sqlite",
+            "Pass a real .sqlite/.nsys-rep path. Example: nsys-ai loop data/before.sqlite",
             file=sys.stderr,
         )
         sys.exit(1)
-    if after_path:
-        after_path = str(Path(after_path).expanduser())
-        if not Path(after_path).exists():
-            print(f"Error: after profile not found: {after_path}", file=sys.stderr)
-            print("Omit --after to enter the candidate path later in the web UI.", file=sys.stderr)
-            sys.exit(1)
-
     if args.surface == "timeline-web":
         from nsys_ai.web import serve_timeline
 
@@ -1562,7 +1553,6 @@ def _cmd_loop(args, _profile):
                 port=args.port,
                 open_browser=not args.no_browser,
                 loop_before=before_path,
-                loop_after=after_path,
                 loop_h100_preset=bool(getattr(args, "h100_preset", False)),
                 session=getattr(args, "session", None),
             )
@@ -1579,7 +1569,6 @@ def _cmd_loop(args, _profile):
             gpu,
             trim,
             min_ms=0,
-            loop_after=after_path,
             session=session,
         )
         return
@@ -1593,7 +1582,6 @@ def _cmd_loop(args, _profile):
         trim,
         max_depth=-1,
         min_ms=0,
-        loop_after=after_path,
         session=session,
     )
 
