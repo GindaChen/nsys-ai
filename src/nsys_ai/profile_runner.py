@@ -127,17 +127,24 @@ def _assert_profile_descriptor_unchanged(
         raise ProfileError("local profile changed during validation")
 
 
-def build_local_profile_reference(
+def read_local_profile_under_guard(
     path: str | os.PathLike[str],
     *,
     resolved_secrets: Mapping[str, str] | None = None,
-) -> LocalProfileReference:
-    """Validate an existing SQLite export and return its local reference.
+) -> tuple[LocalProfileReference, int]:
+    """Validate an existing SQLite export; return its reference and GPU count.
 
     The source profile is opened in direct, read-only analysis mode. The
     function does not export, copy, cache, or publish the profile or create a
     session. ``resolved_secrets`` lets callers reject a declared secret that
     would otherwise be persisted as part of the absolute local path.
+
+    The device count comes back alongside the reference because it is read here
+    and nowhere cheaper: this open goes through a pinned descriptor whose
+    identity is asserted unchanged afterwards, and ``profile.meta`` is already
+    materialised for ``kernel_count``. A caller that re-opens the path to count
+    devices pays for a second full ``GROUP BY deviceId`` scan and gets its
+    answer from a file the swap guard no longer covers.
     """
     path_conversion_failed = False
     try:
@@ -196,6 +203,7 @@ def build_local_profile_reference(
     validation_succeeded = False
     unexpected_error: Exception | None = None
     kernel_count = None
+    device_count = 0
     profile_id = None
     schema_version = None
     product_version = None
@@ -209,6 +217,7 @@ def build_local_profile_reference(
         connection.execute("PRAGMA query_only = ON")
         with Profile._from_conn(connection) as profile:
             kernel_count = profile.meta.kernel_count
+            device_count = len(profile.meta.devices or ())
             profile_id = get_profile_id(
                 profile.conn, fallback_path=str(profile_path)
             )
@@ -250,28 +259,25 @@ def build_local_profile_reference(
         kernel_count=kernel_count,
     )
     try:
-        return validate_local_profile_reference(reference, require_file=True)
+        validated = validate_local_profile_reference(reference, require_file=True)
     except (TypeError, ValueError) as exc:
         raise ProfileError(str(exc)) from None
+    return validated, device_count
 
 
-def observed_gpu_count(path: str | os.PathLike[str]) -> int:
-    """Number of GPUs that recorded kernels in an exported profile.
-
-    Read from the kernel table's device ids, which is the only statement the
-    capture itself makes about how many GPUs the run used: a machine can expose
-    eight and a run can touch one.
-    """
-    connection = sqlite3.connect(os.fspath(path), check_same_thread=False)
-    try:
-        connection.execute("PRAGMA query_only = ON")
-        with Profile._from_conn(connection) as profile:
-            return len(profile.meta.devices or ())
-    finally:
-        connection.close()
+def build_local_profile_reference(
+    path: str | os.PathLike[str],
+    *,
+    resolved_secrets: Mapping[str, str] | None = None,
+) -> LocalProfileReference:
+    """The reference alone, for the callers that do not need the GPU count."""
+    reference, _ = read_local_profile_under_guard(
+        path, resolved_secrets=resolved_secrets
+    )
+    return reference
 
 
-def check_expected_gpu_count(spec: RunSpec, sqlite_path: Path) -> str | None:
+def check_expected_gpu_count(spec: RunSpec, observed: int | None) -> str | None:
     """Return why ``expected_gpu_count`` is unmet, or None when it holds.
 
     ``expected_gpu_count`` was recorded into the RunSpec and never read, so a
@@ -288,15 +294,13 @@ def check_expected_gpu_count(spec: RunSpec, sqlite_path: Path) -> str | None:
     expected = spec.expected_gpu_count
     if expected is None:
         return None
-    try:
-        observed = observed_gpu_count(sqlite_path)
-    except (NsysAiError, OSError, *DB_ERRORS) as exc:
+    if observed is None:
         # The declaration was asked for and cannot be checked, so it is not
         # satisfied. Failing closed keeps "unverifiable" out of the success
         # path, where it would be indistinguishable from "verified".
         return (
             f"declared expected_gpu_count={expected} could not be checked against the "
-            f"capture: {type(exc).__name__}"
+            "capture"
         )
     if observed != expected:
         return (
@@ -582,7 +586,7 @@ class LocalProfileRunner:
         progress(RunStage.VALIDATING)
         validation_started = time.monotonic()
         try:
-            reference = build_local_profile_reference(
+            reference, observed_gpus = read_local_profile_under_guard(
                 sqlite_path, resolved_secrets=resolved_secrets
             )
         except (NsysAiError, OSError, *DB_ERRORS) as exc:
@@ -594,7 +598,7 @@ class LocalProfileRunner:
                 sqlite=sqlite_path,
                 detail=f"profile validation failed: {type(exc).__name__}",
             )
-        gpu_count_detail = check_expected_gpu_count(spec, sqlite_path)
+        gpu_count_detail = check_expected_gpu_count(spec, observed_gpus)
         if gpu_count_detail is not None:
             validation_seconds = time.monotonic() - validation_started
             return result(
