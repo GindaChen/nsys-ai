@@ -9,7 +9,7 @@ import stat
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 
 from .annotation import EvidenceReport, Finding, validate_evidence_report_payload
@@ -351,6 +351,51 @@ def _derive_session_id_from_profile(
     return resolve_session_id(None, before=before)
 
 
+def _capture_runspec_beside(profile_path: str | os.PathLike[str] | None) -> RunSpec | None:
+    """The RunSpec ``nsys-ai profile`` wrote beside a capture, if it is there."""
+    if not profile_path:
+        return None
+    try:
+        sibling = Path(os.fspath(profile_path)).resolve().parent / "runspec.json"
+        if not sibling.is_file():
+            return None
+        return RunSpec.from_dict(json.loads(sibling.read_text(encoding="utf-8")))
+    except (AttributeError, OSError, RunSpecError, TypeError, ValueError):
+        # The comparison below is advisory. An unreadable or foreign sibling
+        # means there is nothing to compare against, not that the supplied
+        # RunSpec is wrong.
+        return None
+
+
+def _unrelated_runspec_warning(supplied: RunSpec, captured: RunSpec) -> str | None:
+    """Say so when the supplied RunSpec cannot be verifying the same workload.
+
+    The recorded lineage was never compared to anything: a RunSpec from an
+    entirely different program was accepted and written into the proposal as
+    the path by which the change would be verified. This does not refuse it --
+    a caller may legitimately verify with a narrower harness than the capture
+    ran -- but an unrelated argv is worth saying out loud, because the proposal
+    asserts the opposite.
+    """
+    supplied_program = PurePosixPath(supplied.argv[0]).name if supplied.argv else ""
+    captured_program = PurePosixPath(captured.argv[0]).name if captured.argv else ""
+    if not supplied_program or not captured_program:
+        return None
+    if supplied_program == captured_program:
+        return None
+    shared = {token for token in supplied.argv if not token.startswith("-")} & {
+        token for token in captured.argv if not token.startswith("-")
+    }
+    if shared:
+        return None
+    return (
+        "the RunSpec names a workload with nothing in common with the capture "
+        f"this finding came from (given `{' '.join(supplied.argv)}`, captured "
+        f"`{' '.join(captured.argv)}`). The proposal records it as the way this "
+        "change will be verified; check that it is."
+    )
+
+
 def run_propose(
     *,
     finding_id: str,
@@ -424,6 +469,20 @@ def run_propose(
         except (TypeError, ValueError) as exc:
             detail = _redact_message(str(exc), resolved_secrets or {})
             raise ProposeCommandError(f"invalid evidence report: {detail}") from exc
+
+    # The findings name the capture they came from, and `nsys-ai profile` wrote
+    # that capture's own RunSpec beside it. Comparing the two is the only point
+    # in the loop where a supplied verification path can be checked against the
+    # workload it claims to verify. `--profile` is session-only, so the report
+    # is the source in both modes.
+    if runspec is not None and not adopted_runspec:
+        captured_runspec = _capture_runspec_beside(
+            profile_path or getattr(report, "profile_path", None)
+        )
+        if captured_runspec is not None:
+            lineage_warning = _unrelated_runspec_warning(runspec, captured_runspec)
+            if lineage_warning:
+                print(f"Warning: {lineage_warning}", file=sys.stderr)
 
     finding = _select_finding(report, finding_id)
     proposal = generate_proposal(

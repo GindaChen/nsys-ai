@@ -293,18 +293,37 @@ def run_optimize(
 
     snapshot = _load_snapshot(store, resolved_id)
     if snapshot is not None:
-        if _decision_recorded(snapshot):
-            print(
-                "Loop already complete; reporting the recorded decision.", file=stdout
-            )
-            _print_recorded_decision(resolved_id, snapshot, session_root, stdout=stdout)
-            return 0
+        # Before anything is reused or reported, the inputs this run was given
+        # must be the inputs the session was built from. The session records
+        # both; neither was compared to anything, so the recorded state won over
+        # a contradicting argument silently -- including on the completed-loop
+        # path below, which would report a decision reached by verifying a
+        # different workload than the caller just named.
         recorded_before = snapshot.state.before_profile
         if recorded_before is not None and recorded_before != before_ref:
             raise OptimizeCommandError(
                 f"session {resolved_id} was opened on a different before profile "
                 f"({recorded_before.path}); pass --session with a new id"
             )
+        recorded_runspec = snapshot.runspec
+        if (
+            recorded_runspec is not None
+            and workload
+            and tuple(recorded_runspec.argv) != tuple(workload)
+        ):
+            raise OptimizeCommandError(
+                f"session {resolved_id} verified a different workload.\n"
+                f"  recorded: {' '.join(recorded_runspec.argv)}\n"
+                f"  given:    {' '.join(workload)}\n"
+                "A decision recorded against one workload does not carry to another. "
+                "Pass --session with a new id to verify this one."
+            )
+        if _decision_recorded(snapshot):
+            print(
+                "Loop already complete; reporting the recorded decision.", file=stdout
+            )
+            _print_recorded_decision(resolved_id, snapshot, session_root, stdout=stdout)
+            return 0
 
     # Step 1 — diagnose.
     if snapshot is None or snapshot.findings is None:

@@ -292,6 +292,43 @@ def test_optimize_refuses_a_session_opened_on_another_profile(tmp_path):
         )
 
 
+def test_optimize_refuses_a_session_that_verified_another_workload(tmp_path):
+    """A decision recorded against one workload does not carry to another.
+
+    The session records the RunSpec it verified, and nothing compared it to the
+    workload the caller just supplied — so resuming a completed session with a
+    different command reported the prior decision as though it applied.
+    """
+    after_reference = build_local_profile_reference(AFTER)
+    code, _out, err = _run(tmp_path, _succeeding_runner(after_reference))
+    assert code == 0, err
+    assert _snapshot(tmp_path).runspec.argv == ("./axpy", "20")
+
+    with pytest.raises(OptimizeCommandError, match="verified a different workload"):
+        run_optimize(
+            before_path=BEFORE,
+            repo=tmp_path,
+            workload=["./bench_matmul", "4096"],
+            session_id=SESSION_ID,
+            session_root=_session_root(tmp_path),
+            cwd=tmp_path,
+            runner_factory=_exploding_runner(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+
+
+def test_optimize_reports_the_recorded_decision_for_the_same_workload(tmp_path):
+    """The guard must not break resume, which is the whole point of the session."""
+    after_reference = build_local_profile_reference(AFTER)
+    code, _out, err = _run(tmp_path, _succeeding_runner(after_reference))
+    assert code == 0, err
+
+    code, out, _err = _run(tmp_path, _exploding_runner())
+    assert code == 0
+    assert "Loop already complete" in out
+
+
 def test_optimize_rejects_a_repo_that_is_not_a_directory(tmp_path):
     """--repo names the directory the verification run executes in."""
     missing = tmp_path / "not-a-repo"
