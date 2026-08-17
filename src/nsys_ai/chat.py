@@ -760,6 +760,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             api_messages.append({"role": m["role"], "content": m["content"]})
 
     if profile_path and conn:
+        dispatcher_events: list[dict] = []
         try:
             from .tool_dispatch import ToolDispatcher
 
@@ -772,7 +773,6 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 local_finding_counter += 1
                 return local_finding_counter
 
-            dispatcher_events: list[dict] = []
             content, actions = run_agent_loop(
                 model=model,
                 api_messages=api_messages,
@@ -795,10 +795,15 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             ]
             return {"content": content, "actions": actions, "findings": findings}
         except Exception as e:
+            findings = [
+                event["finding"]
+                for event in dispatcher_events
+                if event.get("type") == "finding" and isinstance(event.get("finding"), dict)
+            ]
             return {
                 "content": f"LLM error: {_friendly_error(model, e)}",
                 "actions": [],
-                "findings": [],
+                "findings": findings,
             }
         finally:
             conn.close()

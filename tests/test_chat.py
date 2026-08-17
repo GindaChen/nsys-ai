@@ -348,6 +348,39 @@ def test_chat_completion_profile_finding_event_is_returned(monkeypatch):
     conn.close.assert_called_once()
 
 
+def test_chat_completion_preserves_findings_when_followup_llm_fails(monkeypatch):
+    """A later provider failure must not erase an already emitted finding."""
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, "/profile.sqlite", "system", lambda _sql: "[]"),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    fn = MagicMock(name="function")
+    fn.name = "submit_finding"
+    fn.arguments = json.dumps({"label": "slow kernel"})
+    tc = MagicMock(id="finding-call", function=fn)
+    tool_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=[tc]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [tool_response, RuntimeError("provider unavailable")]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        body = json.dumps(
+            {"profile_path": "/profile.sqlite", "messages": [{"role": "user", "content": "mark"}]}
+        ).encode("utf-8")
+        out = chat_mod.chat_completion(body)
+
+    assert out["findings"][0]["label"] == "slow kernel"
+    assert out["actions"] == []
+    conn.close.assert_called_once()
+
+
 def test_sse_event():
     """_sse_event produces valid SSE line format."""
     raw = chat_mod._sse_event("text", {"chunk": "hi"})
