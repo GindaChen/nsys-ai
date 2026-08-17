@@ -307,6 +307,80 @@ def test_chat_completion_tool_calls_mock(monkeypatch):
     assert out["actions"][0]["target_name"] == "kernel_a"
 
 
+def test_chat_completion_profile_finding_event_is_returned(monkeypatch):
+    """Non-streaming chat propagates finding overlays and preserves the index."""
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, "/profile.sqlite", "system", lambda _sql: "[]"),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    fn = MagicMock(name="function")
+    fn.name = "submit_finding"
+    fn.arguments = json.dumps({"label": "slow kernel", "severity": "warning"})
+    tc = MagicMock(id="finding-call", function=fn)
+    tool_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=[tc]))]
+    )
+    final_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="done", tool_calls=[]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [tool_response, final_response]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        body = json.dumps(
+            {
+                "profile_path": "/profile.sqlite",
+                "findings_count": 4,
+                "messages": [{"role": "user", "content": "mark it"}],
+            }
+        ).encode("utf-8")
+        out = chat_mod.chat_completion(body)
+
+    assert out["findings"][0]["index"] == 5
+    assert out["findings"][0]["label"] == "slow kernel"
+    assert out["actions"] == []
+    conn.close.assert_called_once()
+
+
+def test_chat_completion_preserves_findings_when_followup_llm_fails(monkeypatch):
+    """A later provider failure must not erase an already emitted finding."""
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, "/profile.sqlite", "system", lambda _sql: "[]"),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    fn = MagicMock(name="function")
+    fn.name = "submit_finding"
+    fn.arguments = json.dumps({"label": "slow kernel"})
+    tc = MagicMock(id="finding-call", function=fn)
+    tool_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=[tc]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [tool_response, RuntimeError("provider unavailable")]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        body = json.dumps(
+            {"profile_path": "/profile.sqlite", "messages": [{"role": "user", "content": "mark"}]}
+        ).encode("utf-8")
+        out = chat_mod.chat_completion(body)
+
+    assert out["findings"][0]["label"] == "slow kernel"
+    assert out["actions"] == []
+    conn.close.assert_called_once()
+
+
 def test_sse_event():
     """_sse_event produces valid SSE line format."""
     raw = chat_mod._sse_event("text", {"chunk": "hi"})
@@ -419,6 +493,100 @@ def test_run_agent_loop_query_error_rolls_back_failed_batch(monkeypatch):
     assert mock_lt.completion.call_count == 1
     assert all(not message.get("tool_calls") for message in api_messages)
     assert all(message.get("role") != "tool" for message in api_messages)
+
+
+def test_tool_result_failed_detects_nested_abstention():
+    assert chat_mod._tool_result_failed(
+        json.dumps(
+            {
+                "device_id": 0,
+                "collectives": [{"_abstained": True, "reason": "no NCCL tables"}],
+            }
+        )
+    )
+    assert not chat_mod._tool_result_failed(json.dumps({"collectives": []}))
+
+
+def test_run_agent_loop_sql_alone_cannot_ground_a_profile_answer():
+    query_fn = MagicMock()
+    query_fn.name = "query_profile_db"
+    query_fn.arguments = '{"sql_query": "SELECT 1"}'
+    query_call = MagicMock(id="db1", function=query_fn)
+    query_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=[query_call]))]
+    )
+    answer_response = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(
+                    content="SQL proves NCCL is the bottleneck.", tool_calls=[]
+                )
+            )
+        ]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [query_response, answer_response]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        content, _ = chat_mod.run_agent_loop(
+            model="gpt-4o",
+            api_messages=[{"role": "system", "content": "s"}],
+            query_runner=lambda _sql: "[{\"value\": 1}]",
+        )
+
+    assert "cannot answer this profile question" in content
+    assert "SQL proves" not in content
+    assert mock_lt.completion.call_count == 2
+
+
+def test_run_agent_loop_uses_registry_for_profile_tools(minimal_nsys_conn):
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    def tool_call(call_id, name, arguments):
+        fn = MagicMock()
+        fn.name = name
+        fn.arguments = json.dumps(arguments)
+        return MagicMock(id=call_id, function=fn)
+
+    # Deliberately put the pure calculation before the SQL call: grounding
+    # must not depend on provider tool-call ordering.
+    first = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "mfu1",
+                            "compute_mfu",
+                            {
+                                "step_time_s": 1.0,
+                                "model_flops_per_step": 1e12,
+                                "peak_tflops": 100.0,
+                            },
+                        ),
+                        tool_call("db1", "query_profile_db", {"sql_query": "SELECT 1"}),
+                    ],
+                )
+            )
+        ]
+    )
+    final = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="Grounded web result.", tool_calls=[]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [first, final]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        content, _ = chat_mod.run_agent_loop(
+            model="gpt-4o",
+            api_messages=[{"role": "system", "content": "s"}],
+            query_runner=lambda _sql: "[{\"value\": 1}]",
+            dispatcher=ToolDispatcher(conn=minimal_nsys_conn),
+        )
+
+    assert content == "Grounded web result."
+    assert mock_lt.completion.call_count == 2
 
 
 def test_run_agent_loop_exits_after_navigate(monkeypatch):
@@ -1469,6 +1637,7 @@ def test_stream_agent_loop_sibling_failure_suppresses_valid_ui_response(monkeypa
 
 
 def test_stream_agent_loop_assembles_id_from_later_chunk(monkeypatch):
+    """A successfully assembled SQL call still cannot ground a diagnosis alone."""
     first_delta = {
         "content": None,
         "tool_calls": [
@@ -1532,7 +1701,8 @@ def test_stream_agent_loop_assembles_id_from_later_chunk(monkeypatch):
 
     text = "".join(event.get("content", "") for event in events if event["type"] == "text")
     assert queries == ["SELECT 1"]
-    assert text == "Grounded answer."
+    assert "cannot answer this profile question" in text
+    assert "Grounded answer." not in text
 
 
 def test_stream_agent_loop_rejects_diff_answer_without_tool_evidence():

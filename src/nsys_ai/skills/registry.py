@@ -67,12 +67,21 @@ def all_skills() -> list[Skill]:
     return sorted(_SKILLS.values(), key=lambda s: s.name)
 
 
-def run_skill(skill_name: str, conn: sqlite3.Connection, **kwargs) -> str:
-    """Look up and run a skill, returning formatted text.
+def run_skill(
+    skill_name: str,
+    conn: sqlite3.Connection,
+    *,
+    raw: bool = False,
+    **kwargs,
+) -> str | list[dict]:
+    """Look up and run a skill, returning formatted text or raw rows.
 
     The first parameter is ``skill_name`` (not ``name``) so it never collides
     with a skill that exposes its own ``name`` parameter (e.g. ``region_mfu``),
     which would otherwise raise "got multiple values for argument 'name'".
+
+    ``raw=True`` is for structured callers such as the chat tool dispatcher.
+    The default remains formatted text for the CLI and the public agent wrapper.
     """
     skill = get_skill(skill_name)
     if not skill:
@@ -81,7 +90,8 @@ def run_skill(skill_name: str, conn: sqlite3.Connection, **kwargs) -> str:
             f"Unknown skill '{skill_name}'. Available: {', '.join(available)}",
             available=available,
         )
-    return skill.run(conn, **kwargs)
+    rows = skill.execute(conn, **kwargs)
+    return rows if raw else skill.format_rows(rows)
 
 
 def skill_catalog() -> str:
