@@ -1065,18 +1065,12 @@ def test_root_cause_readme_coverage_claim_matches_wiring():
     If this fails, docs/root-causes/README.md and the pipeline have diverged;
     update both together.
     """
-    import inspect
-    import re
+    from nsys_ai.skill_packs import DIAGNOSE_DEFAULT, EVIDENCE_OVERLAY
 
-    from nsys_ai.agent.loop import Agent
-    from nsys_ai.evidence_builder import EvidenceBuilder
+    core_skills = set(DIAGNOSE_DEFAULT)
+    assert len(core_skills) >= 10, f"DIAGNOSE_DEFAULT looks wrong: {core_skills}"
 
-    src = inspect.getsource(Agent.analyze)
-    body = src.split("core_skills = [", 1)[1].split("]", 1)[0]
-    core_skills = set(re.findall(r'"([a-z0-9_]+)"', body))
-    assert len(core_skills) >= 10, f"core_skills parse looks wrong: {core_skills}"
-
-    pipeline = {skill for skill, _params in EvidenceBuilder._SKILL_PIPELINE.values()}
+    pipeline = {skill for skill, _params in EVIDENCE_OVERLAY.values()}
     declared = core_skills | pipeline
 
     # "Five of the detection skills named above run on every `agent analyze`."

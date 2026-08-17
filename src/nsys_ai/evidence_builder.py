@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from .annotation import EvidenceReport, Finding, SkippedAnalysis, rank_findings
 from .profile import Profile
+from .skill_packs import EVIDENCE_OVERLAY
 
 _log = logging.getLogger(__name__)
 
@@ -76,30 +77,7 @@ class EvidenceBuilder:
         self.trim = trim or tuple(prof.meta.time_range)
 
     # Map analyzer_name -> (skill_name, params)
-    _SKILL_PIPELINE = {
-        "slow_iterations": ("iteration_timing", {}),
-        "idle_gaps": ("gpu_idle_gaps", {"limit": 5, "min_gap_ns": 1000000}),
-        "nccl_stalls": ("kernel_instances", {"name": "nccl", "limit": 3}),
-        "kernel_hotspots": ("kernel_instances", {"limit": 3}),
-        "top_kernel_aggregates": ("top_kernels", {"limit": 15}),
-        "overlap_ratio": ("overlap_breakdown", {}),
-        "memory_anomalies": ("memory_bandwidth", {"limit": 5}),
-        "h2d_spikes": ("h2d_distribution", {}),
-        "kernel_launch_overhead": ("kernel_launch_overhead", {}),
-        "nccl_breakdown": ("nccl_breakdown", {}),
-        "nccl_compile_context_breakdown": ("nccl_compile_context_breakdown", {}),
-        # Profile-level bound class. Contributes the verdict only and reports
-        # no headroom by design (the reasoning lives in
-        # critical_path._to_findings). It therefore ranks below every
-        # headroom-bearing finding — read the verdict from the finding itself,
-        # not from its position.
-        "bound_class": ("critical_path", {}),
-        # Roll-up characterization of the whole profile (comm-bound,
-        # sync-bound, idle-dominant, coverage gaps). Reads only the
-        # already-assembled manifest dict, so its findings are
-        # independent of the other pipeline entries' to_findings status.
-        "profile_health": ("profile_health_manifest", {}),
-    }
+    _SKILL_PIPELINE = EVIDENCE_OVERLAY
 
     def build(self, only: list[str] | None = None) -> EvidenceReport:
         """Run analyzers (via skill pipeline) and return a combined EvidenceReport.
