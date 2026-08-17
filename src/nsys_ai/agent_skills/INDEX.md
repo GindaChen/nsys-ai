@@ -119,7 +119,7 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1 5 -o analysis.md
 cat analysis.md
 
 # Workflow 4: Visual evidence for human verification
-# See docs/agent_skills/commands/evidence_schema.md for Finding JSON format
+# See src/nsys_ai/agent_skills/commands/evidence_schema.md for Finding JSON format
 
 # 4a: Agent-driven evidence (recommended)
 #     Full agent loop: collect → reason → conclude → write findings → view

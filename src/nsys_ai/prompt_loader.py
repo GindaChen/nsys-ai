@@ -16,9 +16,13 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-# Resolve the default skills directory relative to this file:
-#   src/nsys_ai/prompt_loader.py  →  ../../../docs/agent_skills
-_DEFAULT_SKILLS_DIR = Path(__file__).parent.parent.parent / "docs" / "agent_skills"
+# Beside this file, inside the package. It used to be computed from the source
+# checkout layout -- ``__file__.parent.parent.parent / "docs" / "agent_skills"``
+# -- which from an installed wheel walks up out of the package entirely and
+# lands on a path like ``/usr/lib/python3.12/docs/agent_skills``. That
+# directory was not package data either, so every user who installed from PyPI
+# got the AI paths with none of this context, silently.
+_DEFAULT_SKILLS_DIR = Path(__file__).with_name("agent_skills")
 
 # Allow override via environment variable for testing and packaged installs.
 SKILLS_DIR: Path = Path(os.environ.get("NSYS_AI_SKILLS_DIR", str(_DEFAULT_SKILLS_DIR)))

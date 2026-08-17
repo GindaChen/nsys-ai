@@ -110,7 +110,7 @@ When a user asks "what's my MFU?":
 ## File Map
 
 ```
-docs/agent_skills/
+src/nsys_ai/agent_skills/
 ├── QUICKSTART.md      ← you are here
 ├── PRINCIPLES.md      ← rules + error handling + acceptance checklist
 ├── INDEX.md           ← routing table (loads in ~3 seconds of context)

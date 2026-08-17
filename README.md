@@ -347,7 +347,7 @@ A few common ones:
 | `profile_health_manifest` | One-shot health summary (run this first) |
 
 Skills are extensible — add one by dropping a Python file that exports a `SKILL`
-constant. See [`skill list`](docs/agent_skills/commands/skill.md) for the full
+constant. See [`skill list`](src/nsys_ai/agent_skills/commands/skill.md) for the full
 catalog.
 
 ## AI analysis (optional)
