@@ -2,6 +2,11 @@
 
 Design-only gate for issue #268. No production code in this change.
 
+The design has since landed, so the "measured absence today" readings below are a
+record of the state it was designed against, not of current code. Where they name
+`loop_after`, that parameter no longer exists: the session store replaced it and
+the surfaces now open a session instead.
+
 AST-counted on this worktree (`feat/issue-268-session-wiring`):
 
 | type | fields | source |

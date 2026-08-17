@@ -1571,7 +1571,6 @@ def _cmd_timeline_web(args, _profile):
             findings_path=getattr(args, "findings", None),
             auto_findings=auto_findings,
             loop_before=getattr(args, "loop_before", None),
-            loop_after=getattr(args, "loop_after", None),
             loop_h100_preset=getattr(args, "h100_preset", False),
             session=getattr(args, "session", None),
         )

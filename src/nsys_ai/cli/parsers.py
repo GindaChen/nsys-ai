@@ -712,11 +712,10 @@ def _build_parser():
         "--auto-analyze", action="store_true", help="Run AI analysis on startup and show findings"
     )
     p.add_argument("--loop-before", default=None, help="Loop mode before profile path")
-    p.add_argument("--loop-after", default=None, help="Loop mode after profile path")
     p.add_argument(
         "--h100-preset",
         action="store_true",
-        help="Auto-fill H100 replay before/after paths when available",
+        help="Auto-fill the H100 replay baseline path when available",
     )
     p.add_argument(
         "--session",

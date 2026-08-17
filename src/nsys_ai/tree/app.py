@@ -144,7 +144,6 @@ class NsysTreeApp(App):
         max_depth: int = -1,
         min_ms: float = 0,
         json_roots: list[dict] | None = None,
-        loop_after: str | None = None,
         session: str | None = None,
     ) -> None:
         super().__init__()
@@ -892,7 +891,6 @@ def run_tui(
     trim: tuple[int, int] | None,
     max_depth: int = -1,
     min_ms: float = 0,
-    loop_after: str | None = None,
     session: str | None = None,
 ) -> None:
     """Launch the Textual NVTX tree browser."""
@@ -902,7 +900,6 @@ def run_tui(
         trim,
         max_depth=max_depth,
         min_ms=min_ms,
-        loop_after=loop_after,
         session=session,
     )
     app.run()

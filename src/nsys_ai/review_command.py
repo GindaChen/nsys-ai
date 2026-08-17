@@ -199,14 +199,12 @@ def _resume_review(
 
     if web:
         before = snapshot.state.before_profile
-        after = snapshot.state.after_profile
         if before is None:
             raise ReviewCommandError(
                 f"session {session_id} has no before profile to open in --web"
             )
         return _open_session_web(
             before_path=before.path,
-            after_path=after.path if after is not None else None,
             session_id=session_id,
             gpu=None,
             trim=None,
@@ -284,7 +282,6 @@ def _print_decision_path(
 def _open_session_web(
     *,
     before_path: str,
-    after_path: str | None,
     session_id: str,
     gpu: int | None,
     trim: tuple[int, int] | None,
@@ -308,7 +305,6 @@ def _open_session_web(
                 port=port,
                 open_browser=open_browser,
                 loop_before=before_path,
-                loop_after=after_path,
                 session=session_id,
                 session_root=session_root,
             )
