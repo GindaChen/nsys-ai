@@ -7,7 +7,7 @@ resolution, kernel attribution, and interval math.
 Requires user-provided theoretical_flops (model FLOPs per step).
 """
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, requires_nvtx
 
 
 def _execute(conn, **kwargs):
@@ -16,6 +16,10 @@ def _execute(conn, **kwargs):
     name = kwargs.get("name", "")
     theoretical_flops = float(kwargs.get("theoretical_flops", 0))
     source = kwargs.get("source", "nvtx")
+    if source != "kernel":
+        unavailable = requires_nvtx(conn, needs="Region MFU attribution")
+        if unavailable:
+            return unavailable
     peak_tflops = kwargs.get("peak_tflops")
     if peak_tflops is not None:
         peak_tflops = float(peak_tflops)
@@ -28,7 +32,7 @@ def _execute(conn, **kwargs):
 
     result = compute_region_mfu_from_conn(
         conn,
-        profile_path=None,
+        profile_path=kwargs.get("profile_path"),
         name=name,
         theoretical_flops=theoretical_flops,
         source=source,
@@ -195,6 +199,7 @@ SKILL = Skill(
     execute_fn=_execute,
     format_fn=_format,
     to_findings_fn=_to_findings,
+    required_tables=("kernel",),
     params=[
         SkillParam("name", "NVTX region or kernel name to analyze", "str", True, None),
         SkillParam(

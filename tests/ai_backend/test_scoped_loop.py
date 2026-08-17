@@ -41,7 +41,7 @@ def _make_text_response(text: str):
 
 
 def test_run_agent_loop_db_query_then_answer():
-    """Loop should execute query_profile_db once, then return final answer."""
+    """Exploratory SQL alone must not become a grounded final answer."""
     mock_lt = MagicMock()
     mock_lt.completion.side_effect = [
         _make_tool_response("query_profile_db", '{"sql_query":"SELECT 1"}', "db1"),
@@ -64,7 +64,8 @@ def test_run_agent_loop_db_query_then_answer():
             max_turns=3,
         )
 
-    assert content == "Done."
+    assert "cannot answer this profile question" in content
+    assert "Done." not in content
     assert actions == []
     assert queries == ["SELECT 1"]
 

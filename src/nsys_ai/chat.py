@@ -42,6 +42,7 @@ from .ai.backend.profile_db_tool import (
     query_profile_db,
 )
 from .diff_tools import TOOLS_DIFF_OPENAI, build_diff_system_prompt
+from .skills.base import is_abstention_row
 
 _log = logging.getLogger(__name__)
 _telemetry_log = logging.getLogger("nsys_ai.telemetry")
@@ -164,7 +165,19 @@ def _tool_result_failed(content: str) -> bool:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return False
-    return isinstance(payload, dict) and bool(payload.get("error"))
+
+    def _contains_unavailable(value) -> bool:
+        if is_abstention_row(value):
+            return True
+        if isinstance(value, dict):
+            return bool(value.get("error")) or any(
+                _contains_unavailable(child) for child in value.values()
+            )
+        if isinstance(value, list):
+            return any(_contains_unavailable(child) for child in value)
+        return False
+
+    return _contains_unavailable(payload)
 
 
 def _cannot_answer_from_profile(reason: str | None = None) -> str:
@@ -367,6 +380,7 @@ def run_agent_loop(
     query_runner: Callable[[str], str] | None = None,
     max_turns: int = 5,
     ui_context: dict | None = None,
+    dispatcher=None,
 ) -> tuple[str, list]:
     """Run a multi-turn agent loop until the model stops calling tools.
 
@@ -376,6 +390,9 @@ def run_agent_loop(
         tools:         OpenAI-style tool spec list; defaults to :func:`_tools_openai`.
         query_runner:  Callable ``(sql: str) -> str`` for ``query_profile_db``.
                        Pass ``None`` to treat DB calls as no-ops.
+        dispatcher: Optional canonical profile-tool dispatcher. Web callers
+                    provide this so non-streaming chat uses the same registry
+                    path as the streaming loop.
         max_turns:     Maximum number of LLM round-trips.
         ui_context:    Structured UI state available to ``answer_from_ui_context``.
 
@@ -394,6 +411,7 @@ def run_agent_loop(
     grounding_attempted = False
     evidence_ready = False
     grounding_failure: str | None = None
+    exploratory_query_succeeded = False
 
     for _ in range(max_turns):
         _compact_old_tool_results(api_messages)
@@ -464,6 +482,7 @@ def run_agent_loop(
         control_response: str | None = None
         turn_grounding_succeeded = False
         turn_tool_failed = False
+        compute_mfu_succeeded = False
         for tc_id, name, args_str in tc_list:
             if not name or not tc_id:
                 grounding_failure = "Invalid tool call: missing name or id."
@@ -510,7 +529,10 @@ def run_agent_loop(
                                 "supports the answer, state that the question cannot be answered.]"
                             )
                     else:
-                        turn_grounding_succeeded = True
+                        # Exploratory SQL is intentionally not sufficient to
+                        # ground a profile diagnosis. A registered analysis
+                        # skill must provide the evidence path.
+                        exploratory_query_succeeded = True
                         consecutive_db_errors = 0
                 else:
                     result = "Not executed (no profile loaded)."
@@ -525,23 +547,38 @@ def run_agent_loop(
                     }
                 )
             else:
-                # Tools only implemented in the streaming path get an explicit message
-                if name in {
-                    "get_gpu_peak_tflops",
-                    "compute_mfu",
-                    "compute_region_mfu",
-                    "compute_theoretical_flops",
-                }:
-                    tool_result = (
-                        f"Tool '{name}' is only supported in the streaming API path "
-                        "and cannot be executed in this non-streaming request."
-                    )
+                if dispatcher is not None and dispatcher.knows(name):
+                    dispatched = dispatcher.dispatch(name, args_str)
+                    tool_failed = _tool_result_failed(dispatched.content)
+                    if tool_failed:
+                        grounding_failure = dispatched.content
+                        turn_tool_failed = True
+                    if name in _PROFILE_GROUNDING_TOOLS:
+                        grounding_attempted = True
+                        if not tool_failed and name != "query_profile_db":
+                            turn_grounding_succeeded = True
+                    if name == "compute_mfu" and not tool_failed:
+                        compute_mfu_succeeded = True
+                    tool_result = dispatched.content
                 else:
-                    tool_result = "Not executed."
-                if name in _PROFILE_GROUNDING_TOOLS:
-                    grounding_attempted = True
-                grounding_failure = tool_result
-                turn_tool_failed = True
+                    # Tools unavailable to this compatibility wrapper get an
+                    # explicit response rather than silently being skipped.
+                    if name in {
+                        "get_gpu_peak_tflops",
+                        "compute_mfu",
+                        "compute_region_mfu",
+                        "compute_theoretical_flops",
+                    }:
+                        tool_result = (
+                            f"Tool '{name}' is only supported in the streaming API path "
+                            "and cannot be executed in this non-streaming request."
+                        )
+                    else:
+                        tool_result = "Not executed."
+                    if name in _PROFILE_GROUNDING_TOOLS:
+                        grounding_attempted = True
+                    grounding_failure = tool_result
+                    turn_tool_failed = True
                 api_messages.append(
                     {
                         "role": "tool",
@@ -550,6 +587,16 @@ def run_agent_loop(
                         "content": tool_result,
                     }
                 )
+
+        if (
+            not turn_tool_failed
+            and exploratory_query_succeeded
+            and compute_mfu_succeeded
+        ):
+            # The pure calculation is grounded because its profile-derived
+            # input was retrieved in this conversation, independent of tool
+            # call ordering within the batch.
+            turn_grounding_succeeded = True
 
         if turn_tool_failed:
             evidence_ready = False
@@ -709,6 +756,8 @@ def chat_completion(body_bytes: bytes) -> dict | None:
 
     if profile_path and conn:
         try:
+            from .tool_dispatch import ToolDispatcher
+
             content, actions = run_agent_loop(
                 model=model,
                 api_messages=api_messages,
@@ -716,6 +765,11 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 query_runner=query_runner,
                 max_turns=5,
                 ui_context=ui_context,
+                dispatcher=ToolDispatcher(
+                    conn=conn,
+                    sqlite_path=sqlite_path,
+                    query_runner=query_runner,
+                ),
             )
             return {"content": content, "actions": actions}
         except Exception as e:
@@ -933,6 +987,7 @@ def stream_agent_loop(
     grounding_attempted = False
     evidence_ready = False
     grounding_failure: str | None = None
+    exploratory_query_succeeded = False
 
     try:
         for _ in range(max_turns):
@@ -1106,6 +1161,7 @@ def stream_agent_loop(
             control_response: str | None = None
             turn_grounding_succeeded = False
             turn_tool_failed = False
+            compute_mfu_succeeded = False
             for tid, name, args_str in tc_list:
                 if not name or not tid:
                     grounding_failure = "Invalid tool call: missing name or id."
@@ -1140,8 +1196,21 @@ def stream_agent_loop(
                         turn_tool_failed = True
                     if name in grounding_tools:
                         grounding_attempted = True
-                        if not tool_failed:
+                        # Exploratory SQL can support a registered analysis,
+                        # but it cannot ground a diagnosis by itself.
+                        if not tool_failed and name != "query_profile_db":
                             turn_grounding_succeeded = True
+                        if name == "query_profile_db" and not tool_failed:
+                            exploratory_query_succeeded = True
+                    elif name == "query_profile_db":
+                        grounding_attempted = True
+                        if not tool_failed:
+                            exploratory_query_succeeded = True
+                    elif name == "compute_mfu":
+                        # A pure MFU calculation is grounded only when its
+                        # profile-derived input was retrieved first.
+                        if not tool_failed:
+                            compute_mfu_succeeded = True
                     yield from tr.events
                     if not tr.skip_tool_message:
                         api_messages.append(
@@ -1171,6 +1240,15 @@ def stream_agent_loop(
                             "content": "Not executed.",
                         }
                     )
+
+            if (
+                not turn_tool_failed
+                and exploratory_query_succeeded
+                and compute_mfu_succeeded
+            ):
+                # Resolve the dependency after the whole tool batch so the
+                # model's tool-call ordering cannot change grounding.
+                turn_grounding_succeeded = True
 
             if turn_tool_failed:
                 evidence_ready = False

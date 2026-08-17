@@ -224,10 +224,8 @@ class ToolDispatcher:
         return ToolResult(content=json.dumps(result), events=events)
 
     def _handle_region_mfu(self, args: dict) -> ToolResult:
-        from .region_mfu import compute_region_mfu_from_conn
-
         events = [{"type": "system", "content": "Running compute_region_mfu..."}]
-        if self._conn is None or self._sqlite_path is None:
+        if self._conn is None:
             result = {
                 "error": {
                     "code": "PROFILE_NOT_LOADED",
@@ -266,27 +264,44 @@ class ToolDispatcher:
                     }
                 }
             else:
-                result = compute_region_mfu_from_conn(
-                    self._conn,
-                    self._sqlite_path,
-                    region_name,
-                    flops_val,
-                    source=str(args.get("source") or "nvtx"),
-                    peak_tflops=(
-                        float(args["peak_tflops"])
-                        if "peak_tflops" in args and args["peak_tflops"] is not None
-                        else None
-                    ),
-                    num_gpus=int(args.get("num_gpus") or 1),
-                    occurrence_index=int(args.get("occurrence_index") or 1),
-                    device_id=(
-                        int(args["device_id"])
-                        if "device_id" in args and args["device_id"] is not None
-                        else None
-                    ),
-                    match_mode=str(args.get("match_mode") or "contains"),
+                rows = self._run_registered_skill(
+                    "region_mfu",
+                    {
+                        "name": region_name,
+                        "theoretical_flops": flops_val,
+                        "profile_path": self._sqlite_path,
+                        "source": str(args.get("source") or "nvtx"),
+                        "peak_tflops": (
+                            float(args["peak_tflops"])
+                            if "peak_tflops" in args and args["peak_tflops"] is not None
+                            else None
+                        ),
+                        "num_gpus": int(args.get("num_gpus") or 1),
+                        "occurrence_index": int(args.get("occurrence_index") or 1),
+                        "device_id": (
+                            int(args["device_id"])
+                            if "device_id" in args and args["device_id"] is not None
+                            else None
+                        ),
+                        "match_mode": str(args.get("match_mode") or "contains"),
+                    },
                 )
+                result = rows[0] if len(rows) == 1 else rows
         return ToolResult(content=json.dumps(result), events=events)
+
+    def _run_registered_skill(self, skill_name: str, args: dict) -> list[dict]:
+        """Execute a profile skill through the canonical registry.
+
+        CLI callers keep the registry's formatted-text default. Chat tools need
+        the same rows as structured JSON, so the registry exposes that result
+        explicitly instead of each tool importing an analysis implementation.
+        """
+        if self._conn is None:
+            return [{"error": "No profile loaded"}]
+
+        from .skills import registry
+
+        return registry.run_skill(skill_name, self._conn, raw=True, **args)
 
     def _handle_submit_finding(self, args: dict) -> ToolResult:
         explicit_index = args.get("index")
@@ -313,75 +328,73 @@ class ToolDispatcher:
 
     def _handle_gpu_overlap_stats(self, args: dict) -> ToolResult:
         events = [{"type": "system", "content": "Computing GPU overlap stats..."}]
-        if not self._sqlite_path:
+        if self._conn is None:
             result = {"error": "No profile loaded"}
             return ToolResult(content=json.dumps(result), events=events)
 
         try:
-            from .overlap import overlap_analysis as _overlap_fn
             from .profile import Profile
+            from .skills.base import is_abstention
 
-            _prof = None
-            try:
-                _prof = Profile(self._sqlite_path)
-                _devices = _prof.meta.devices or [0]
-                _start_s = args.get("start_s")
-                _end_s = args.get("end_s")
-                _trim = (
-                    (int(float(_start_s) * 1e9), int(float(_end_s) * 1e9))
-                    if _start_s is not None and _end_s is not None
-                    else None
+            _prof = Profile._from_conn(self._conn)
+            _devices = _prof.meta.devices or [0]
+            _start_s = args.get("start_s")
+            _end_s = args.get("end_s")
+            _skill_args = {}
+            if _start_s is not None and _end_s is not None:
+                _skill_args["trim_start_ns"] = int(float(_start_s) * 1e9)
+                _skill_args["trim_end_ns"] = int(float(_end_s) * 1e9)
+
+            _per_gpu = []
+            _unavailable = []
+            for _dev in _devices:
+                _rows = self._run_registered_skill(
+                    "overlap_breakdown", {"device": _dev, **_skill_args}
                 )
-                _per_gpu = []
-                for _dev in _devices:
-                    _oa = _overlap_fn(_prof, _dev, _trim)
-                    if isinstance(_oa, dict) and "error" not in _oa:
+                if _rows and isinstance(_rows[0], dict):
+                    _oa = _rows[0]
+                    if is_abstention(_rows):
+                        _unavailable.extend(_rows)
+                    elif "error" not in _oa:
+                        _oa = dict(_oa)
                         _oa["gpu_id"] = _dev
                         _gpu_info = _prof.meta.gpu_info.get(_dev)
                         if _gpu_info:
                             _oa["gpu_name"] = _gpu_info.name
                         _per_gpu.append(_oa)
-                result = {
-                    "device_count": len(_devices),
-                    "per_gpu": _per_gpu,
-                }
-            finally:
-                if _prof is not None:
-                    _prof.close()
+            result = {
+                "device_count": len(_devices),
+                "per_gpu": _per_gpu,
+            }
+            if _unavailable:
+                result["unavailable"] = _unavailable
         except Exception as _e:
             result = {"error": str(_e)}
         return ToolResult(content=json.dumps(result), events=events)
 
     def _handle_nccl_breakdown(self, args: dict) -> ToolResult:
         events = [{"type": "system", "content": "Analyzing NCCL collectives..."}]
-        if not self._sqlite_path:
+        if self._conn is None:
             result = {"error": "No profile loaded"}
             return ToolResult(content=json.dumps(result), events=events)
 
         try:
-            from .overlap import nccl_breakdown as _nccl_fn
             from .profile import Profile
 
-            _prof = None
-            try:
-                _prof = Profile(self._sqlite_path)
-                _devices = _prof.meta.devices or [0]
-                _dev = args.get("device_id", _devices[0])
-                _start_s = args.get("start_s")
-                _end_s = args.get("end_s")
-                _trim = (
-                    (int(float(_start_s) * 1e9), int(float(_end_s) * 1e9))
-                    if _start_s is not None and _end_s is not None
-                    else None
-                )
-                _rows = _nccl_fn(_prof, int(_dev), _trim)
-                result = {
-                    "device_id": _dev,
-                    "collectives": _rows,
-                }
-            finally:
-                if _prof is not None:
-                    _prof.close()
+            _prof = Profile._from_conn(self._conn)
+            _devices = _prof.meta.devices or [0]
+            _dev = args.get("device_id", _devices[0])
+            _skill_args = {"device": int(_dev)}
+            _start_s = args.get("start_s")
+            _end_s = args.get("end_s")
+            if _start_s is not None and _end_s is not None:
+                _skill_args["trim_start_ns"] = int(float(_start_s) * 1e9)
+                _skill_args["trim_end_ns"] = int(float(_end_s) * 1e9)
+            _rows = self._run_registered_skill("nccl_breakdown", _skill_args)
+            result = {
+                "device_id": _dev,
+                "collectives": _rows,
+            }
         except Exception as _e:
             result = {"error": str(_e)}
         return ToolResult(content=json.dumps(result), events=events)

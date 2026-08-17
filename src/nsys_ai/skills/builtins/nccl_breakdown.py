@@ -425,6 +425,7 @@ SKILL = Skill(
     execute_fn=_execute,
     format_fn=_format,
     to_findings_fn=_to_findings,
+    required_tables=("kernel",),
     params=[
         SkillParam("device", "GPU device ID", "int", False, 0),
     ],
