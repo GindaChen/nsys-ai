@@ -207,6 +207,44 @@ def _session_finding_sink(
     return publish
 
 
+def _runner_prefill(system_prompt: str, conn, messages: list) -> tuple[str, bool]:
+    """Return the Web prompt plus whether usable runner evidence was found."""
+    question = next(
+        (str(message.get("content") or "") for message in reversed(messages)
+         if message.get("role") == "user"),
+        "",
+    )
+    if not question:
+        return system_prompt, False
+    try:
+        from .agent.runner import _is_usable_evidence_row, run_question_evidence
+
+        evidence, selected = run_question_evidence(conn, question, use_llm=False)
+        payload = json.dumps(
+            {"selected_skills": selected, "evidence": evidence},
+            default=str,
+            indent=2,
+        )
+        prompt = (
+            f"{system_prompt}\n\nDETERMINISTIC RUNNER PREFILL (not user input):\n"
+            "Use only usable rows as workload evidence; report abstentions as unavailable.\n"
+            f"{payload}"
+        )
+        grounded = any(
+            any(_is_usable_evidence_row(row) for row in rows)
+            for rows in evidence.values()
+        )
+        return prompt, grounded
+    except Exception:
+        _log.debug("Runner evidence prefill failed", exc_info=True)
+        return system_prompt, False
+
+
+def _add_runner_prefill(system_prompt: str, conn, messages: list) -> str:
+    """Add deterministic runner evidence to a Web chat system prompt."""
+    return _runner_prefill(system_prompt, conn, messages)[0]
+
+
 _CONTROL_RESPONSE_TOOLS = frozenset(
     {"request_clarification", "answer_from_ui_context"}
 )
@@ -451,6 +489,7 @@ def run_agent_loop(
     ui_context: dict | None = None,
     dispatcher=None,
     event_sink: list[dict] | None = None,
+    prefill_grounded: bool = False,
 ) -> tuple[str, list]:
     """Run a multi-turn agent loop until the model stops calling tools.
 
@@ -465,6 +504,8 @@ def run_agent_loop(
                     path as the streaming loop.
         event_sink: Optional list receiving dispatcher side-effect events,
                     including finding overlays.
+        prefill_grounded: Whether deterministic runner evidence was supplied
+                    in the system prompt.
         max_turns:     Maximum number of LLM round-trips.
         ui_context:    Structured UI state available to ``answer_from_ui_context``.
 
@@ -481,7 +522,7 @@ def run_agent_loop(
     consecutive_db_errors = 0
     profile_grounding_required = query_runner is not None
     grounding_attempted = False
-    evidence_ready = False
+    evidence_ready = prefill_grounded
     grounding_failure: str | None = None
     exploratory_query_succeeded = False
 
@@ -831,6 +872,8 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             api_messages.append({"role": m["role"], "content": m["content"]})
 
     if profile_path and conn:
+        system_prompt, prefill_grounded = _runner_prefill(system_prompt, conn, messages)
+        api_messages[0]["content"] = system_prompt
         dispatcher_events: list[dict] = []
         finding_sink = _session_finding_sink(
             session_id, session_root, profile_path=profile_path
@@ -860,6 +903,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 max_turns=5,
                 ui_context=ui_context,
                 event_sink=dispatcher_events,
+                prefill_grounded=prefill_grounded,
                 dispatcher=ToolDispatcher(
                     conn=conn,
                     sqlite_path=sqlite_path,
@@ -984,6 +1028,7 @@ def stream_agent_loop(
     findings_count: int = 0,
     session_id: str | None = None,
     session_root: str | None = None,
+    prefill_evidence: bool = False,
 ):
     """UI-agnostic streaming agent loop — yields event dicts.
 
@@ -1087,6 +1132,11 @@ def stream_agent_loop(
     for m in messages:
         if m.get("role") and m.get("content") is not None:
             api_messages.append({"role": m["role"], "content": m["content"]})
+    prefill_grounded = False
+    if prefill_evidence and conn is not None:
+        api_messages[0]["content"], prefill_grounded = _runner_prefill(
+            api_messages[0]["content"], conn, messages
+        )
 
     usage: dict = {}
     turn_count = 0
@@ -1113,7 +1163,7 @@ def stream_agent_loop(
     grounding_required = use_diff or query_runner is not None
     grounding_tools = _DIFF_GROUNDING_TOOLS if use_diff else _PROFILE_GROUNDING_TOOLS
     grounding_attempted = False
-    evidence_ready = False
+    evidence_ready = prefill_grounded
     grounding_failure: str | None = None
     exploratory_query_succeeded = False
 
@@ -1519,6 +1569,7 @@ def chat_completion_stream(body_bytes: bytes):
             findings_count=findings_count,
             session_id=session_id,
             session_root=session_root,
+            prefill_evidence=True,
         ):
             t = ev.get("type")
             if t == "text":
