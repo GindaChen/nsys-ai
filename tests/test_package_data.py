@@ -13,7 +13,7 @@ the package instead and checks each data file against the declared globs.
 from __future__ import annotations
 
 import ast
-import fnmatch
+import glob
 import re
 from pathlib import Path
 
@@ -41,8 +41,28 @@ def _declared_globs() -> list[str]:
     return ast.literal_eval(match.group(1))
 
 
+def _files_the_globs_actually_reach(globs: list[str]) -> set[str]:
+    """Expand the globs the way setuptools does, not the way fnmatch would.
+
+    ``fnmatch`` lets ``*`` cross a directory separator, so
+    ``agent_skills/*.md`` appears to match ``agent_skills/commands/mfu.md``
+    while setuptools' ``glob`` matches only the three files at the top level.
+    Checking with the looser oracle would let someone delete the recursive
+    pattern, keep a green test, and ship a wheel missing twenty files -- this
+    bug again, with a passing guard over it.
+    """
+    reached: set[str] = set()
+    for pattern in globs:
+        reached.update(
+            Path(match).as_posix()
+            for match in glob.glob(pattern, root_dir=PACKAGE, recursive=True)
+        )
+    return reached
+
+
 def test_every_shipped_data_file_is_declared_as_package_data():
     globs = _declared_globs()
+    declared = _files_the_globs_actually_reach(globs)
     undeclared = []
     for path in sorted(PACKAGE.rglob("*")):
         if not path.is_file() or path.suffix == ".py":
@@ -50,7 +70,7 @@ def test_every_shipped_data_file_is_declared_as_package_data():
         if path.suffix in _IGNORED_SUFFIXES or "__pycache__" in path.parts:
             continue
         relative = path.relative_to(PACKAGE).as_posix()
-        if not any(fnmatch.fnmatch(relative, pattern) for pattern in globs):
+        if relative not in declared:
             undeclared.append(relative)
     assert not undeclared, (
         "these files ship in the source tree but are not in "
