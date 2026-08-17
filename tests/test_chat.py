@@ -436,6 +436,25 @@ def test_sse_event():
     assert "hi" in raw.decode("utf-8")
 
 
+def test_runner_prefill_counts_as_grounding_for_non_streaming_loop(monkeypatch):
+    response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="prefilled answer", tool_calls=[]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.return_value = response
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        content, actions = chat_mod.run_agent_loop(
+            model="gpt-4o",
+            api_messages=[{"role": "system", "content": "runner evidence"}],
+            query_runner=lambda _sql: "unused",
+            prefill_grounded=True,
+        )
+
+    assert content == "prefilled answer"
+    assert actions == []
+
+
 # --- 11.8.4 Stage 1: stream_agent_loop headless integration tests ---
 
 

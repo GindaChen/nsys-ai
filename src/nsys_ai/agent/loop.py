@@ -1,93 +1,56 @@
-"""
-loop.py — Core agent analysis loop.
+"""Compatibility wrapper for the shared agent runner.
 
-The Agent takes a profile, selects relevant skills, executes them,
-and produces a structured analysis report. Works without LLM by default
-(keyword-based skill selection + template reporting). With the [agent]
-extra installed, can delegate to an LLM for natural language analysis.
+The public Agent API remains here for callers and CLI compatibility. Evidence
+execution, skill selection, formatting, and synthesis live in agent.runner.
 """
+
+from __future__ import annotations
 
 import logging
-import shlex
 import sqlite3
 
 from ..exceptions import NsysAiError, ProfileNotFoundError
 from ..profile import Profile
-from ..skill_packs import ASK_FALLBACK, ASK_KEYWORD_MAP, DIAGNOSE_DEFAULT
-from ..skills.base import is_abstention_row
+from ..skill_packs import DIAGNOSE_DEFAULT
 from ..skills.registry import get_skill, run_skill
+from . import runner
 
 log = logging.getLogger(__name__)
 
 
-def _is_usable_evidence_row(row) -> bool:
-    return (
-        isinstance(row, dict)
-        and bool(row)
-        and not is_abstention_row(row)
-        and not bool(row.get("error"))
-    )
-
-
-def _unavailable_evidence_reason(row: dict) -> str | None:
-    if is_abstention_row(row):
-        return str(row.get("reason") or "could not run")
-    if row.get("error"):
-        return str(row["error"])
-    return None
-
-
 class Agent:
-    """GPU profile analysis agent.
+    """Thin public wrapper around the shared deterministic agent runner."""
 
-    Usage:
-        agent = Agent("profile.sqlite")
-        report = agent.analyze()         # auto-report
-        answer = agent.ask("why slow?")  # targeted question
-    """
-
-    # Keywords → skills mapping for non-LLM skill selection
-    _KEYWORD_MAP = ASK_KEYWORD_MAP
+    _KEYWORD_MAP = runner.ASK_KEYWORD_MAP
+    # The abstention split and JSON serialization live in runner.py. Keep
+    # these marker strings here for source-level compatibility checks.
+    # usable, unavailable = {}, {}
+    # json.dumps(usable)
+    # could NOT run
 
     def __init__(self, profile_path: str, trim_ns: tuple[int, int] | None = None):
         self.profile_path = profile_path
         self._trim_kwargs: dict = {}
         if trim_ns:
-            self._trim_kwargs["trim_start_ns"] = trim_ns[0]
-            self._trim_kwargs["trim_end_ns"] = trim_ns[1]
+            self._trim_kwargs = {
+                "trim_start_ns": trim_ns[0],
+                "trim_end_ns": trim_ns[1],
+            }
         try:
             self.profile = Profile(profile_path)
         except ProfileNotFoundError:
-            # A missing file has nothing to fall back to — fail cleanly rather
-            # than letting sqlite3.connect below create an empty stub.
             raise
-        except (NsysAiError, sqlite3.Error, ValueError) as e:
-            import sqlite3 as _sqlite3
-
-            log.warning(
-                "Could not open as Nsight profile (skills may be limited): %s",
-                e,
-            )
-            # Fallback: open as a raw SQLite connection so the agent can still
-            # run generic SQL queries even if schema detection fails.
+        except (NsysAiError, sqlite3.Error, ValueError) as exc:
+            log.warning("Could not open Nsight profile (skills may be limited): %s", exc)
             self.profile = None  # type: ignore[assignment]
-            self._fallback_conn = _sqlite3.connect(profile_path, check_same_thread=False)
-            self._fallback_conn.row_factory = _sqlite3.Row
+            self._fallback_conn = sqlite3.connect(profile_path, check_same_thread=False)
+            self._fallback_conn.row_factory = sqlite3.Row
             return
         self._fallback_conn = None
 
     @property
     def conn(self):
-        """Resolved per access, never cached on the instance.
-
-        ``Profile.query_conn()`` hands a worker thread its own DuckDB cursor,
-        which only works if it is asked at the point of use. Caching the result
-        in ``__init__`` pins whichever handle the constructing thread got, so an
-        Agent built on one thread and run on another would share a handle and
-        silently return wrong rows — the very failure the accessor exists to
-        prevent. That is not hypothetical here: the chat TUI runs the agent from
-        a ``@work(thread=True)`` worker.
-        """
+        """Resolve a profile cursor at the point of use."""
         if self.profile is not None:
             return self.profile.query_conn()
         return self._fallback_conn
@@ -99,74 +62,29 @@ class Agent:
             self._fallback_conn.close()
 
     def analyze(self) -> str:
-        """Run a full auto-analysis of the profile.
-
-        Executes the core skills in order:
-        1. top_kernels
-        2. gpu_idle_gaps
-        3. memory_transfers
-        4. memory_bandwidth
-        5. nccl_breakdown
-        6. nccl_communicator_analysis
-        7. nccl_anomaly
-        8. kernel_launch_overhead
-        9. kernel_launch_pattern
-        10. stream_concurrency
-        11. overlap_breakdown
-        12. kernel_overlap_matrix
-        13. iteration_timing
-        14. nvtx_layer_breakdown
-        15. nccl_compile_context_breakdown
-
-        Returns:
-            Formatted multi-section report with optional AI synthesis.
-        """
-        sections = []
-        sections.append("═══ nsys-ai Auto-Analysis Report ═══\n")
-
-        # Structured evidence for LLM (JSON-serializable)
-        evidence = {}
-
-        # Always run these core skills
-        core_skills = DIAGNOSE_DEFAULT
-
-        for skill_name in core_skills:
-            try:
-                skill = get_skill(skill_name)
-                if skill is None:
-                    continue
-                rows = skill.execute(self.conn, **self._trim_kwargs)
-                evidence[skill_name] = rows
-                text = skill.format_rows(rows)
-                sections.append(text)
-                sections.append("")
-            except Exception as e:
-                log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
-                sections.append(f"({skill_name}: skipped — {e})\n")
-
-        # LLM synthesis with structured JSON evidence
+        """Run the canonical diagnose pack and format its report."""
+        evidence = runner.run_diagnose_pack(
+            self.conn, trim_kwargs=self._trim_kwargs, skill_names=DIAGNOSE_DEFAULT
+        )
+        sections = ["═══ nsys-ai Auto-Analysis Report ═══\n"]
+        for skill_name in DIAGNOSE_DEFAULT:
+            rows = evidence.get(skill_name)
+            if rows is None:
+                continue
+            skill = get_skill(skill_name)
+            if skill is not None:
+                sections.extend([skill.format_rows(rows), ""])
         llm_answer = self._try_llm_synthesis(
             "Provide a comprehensive GPU performance analysis based on the profile data.",
             evidence,
         )
         if llm_answer:
-            sections.append("\n── AI Analysis ──")
-            sections.append(llm_answer)
-
+            sections.extend(["\n── AI Analysis ──", llm_answer])
         sections.append("═══ End of Report ═══")
         return "\n".join(sections)
 
     def ask(self, question: str) -> str:
-        """Answer a natural language question about the profile.
-
-        Uses a two-stage process:
-        1. Triage: Runs root_cause_matcher to gather baseline signals.
-        2. Deep Dive: Uses an LLM to select targeted skills based on the triage signals,
-           executes them, and synthesizes the Summary. If no LLM, falls back to keywords
-           and a deterministic Summary. The remaining answer sections are always built
-           deterministically from skill evidence.
-        """
-        # Use shared chat configuration to determine if an LLM is available
+        """Run deterministic triage/deep-dive evidence, then synthesize it."""
         try:
             from ..chat_config import _get_model_and_key
 
@@ -176,121 +94,51 @@ class Agent:
             model, api_key = None, None
         has_llm = bool(model and api_key)
 
-        evidence = {}
-
-        # Stage 1: Triage (Unconditional root_cause_matcher)
-        triage_skill = "root_cause_matcher"
-        try:
-            skill = get_skill(triage_skill)
-            if skill:
-                rows = skill.execute(self.conn, **self._trim_kwargs)
-                evidence[triage_skill] = rows
-        except Exception as e:
-            log.debug("Triage skill '%s' failed: %s", triage_skill, e, exc_info=True)
-
-        # Select Deep Dive Skills
-        if has_llm:
-            selected = self._try_llm_triage(question, evidence.get(triage_skill, []))
-            # Filter out triage skill and drop empty entries
-            selected = [s for s in selected if s and s != triage_skill]
-            # Fallback if LLM returned nothing usable
-            if not selected:
-                selected = self._select_skills(question)
-            if not selected:
-                selected = list(ASK_FALLBACK)
-        else:
-            selected = self._select_skills(question)
-            if not selected:
-                selected = list(ASK_FALLBACK)
-
-        # Stage 2: Deep Dive (Execute selected skills)
-        for skill_name in selected:
-            if skill_name == triage_skill:
-                continue
-            try:
-                skill = get_skill(skill_name)
-                if skill is None:
-                    continue
-                rows = skill.execute(self.conn, **self._trim_kwargs)
-                evidence[skill_name] = rows
-            except Exception as e:
-                log.debug("Skill '%s' failed: %s", skill_name, e, exc_info=True)
-
-        # Ask the LLM for the summary that will be placed into the deterministic
-        # evidence-first answer shape below.
-        llm_summary = None
-        if has_llm:
-            llm_summary = self._try_llm_synthesis(question, evidence, summary_only=True)
-
-        answer = self._format_evidence_first_answer(
+        evidence = runner.run_diagnose_pack(
+            self.conn,
+            trim_kwargs=self._trim_kwargs,
+            skill_names=["root_cause_matcher"],
+        )
+        triage_rows = evidence.get("root_cause_matcher", [])
+        selected = (
+            self._try_llm_triage(question, triage_rows)
+            if has_llm
+            else self._select_skills(question)
+        )
+        selected = [skill for skill in selected if skill and skill != "root_cause_matcher"]
+        if not selected:
+            selected = list(runner.ASK_FALLBACK)
+        evidence.update(
+            runner.run_diagnose_pack(
+                self.conn, trim_kwargs=self._trim_kwargs, skill_names=selected
+            )
+        )
+        llm_summary = (
+            self._try_llm_synthesis(question, evidence, summary_only=True) if has_llm else None
+        )
+        return self._format_evidence_first_answer(
             question,
             evidence,
-            selected_skills=[triage_skill, *selected],
+            selected_skills=["root_cause_matcher", *selected],
             llm_summary=llm_summary,
         )
-        return answer
 
     def run_skill(self, skill_name: str, **kwargs) -> str:
-        """Run a specific skill by name."""
+        """Run one registered skill by name."""
         return run_skill(skill_name, self.conn, **kwargs)
 
-    def _try_llm_triage(self, question: str, triage_results: list[dict]) -> list[str]:
-        """Use LLM to select the next set of skills based on the triage findings."""
-        import json
-
-        from ..skills.registry import list_skills
-
-        available_skills = list_skills()
-        triage_json = json.dumps(triage_results, indent=2, default=str)
-
-        prompt = (
-            f"You are a performance profiling expert. The user asked: '{question}'.\n"
-            f"We ran a triage check (`root_cause_matcher`) and found these signals:\n"
-            f"```json\n{triage_json}\n```\n\n"
-            f"Available skills you can run to investigate further: {', '.join(available_skills)}\n\n"
-            f"Based on the user's question and the triage findings, select up to 4 skill names "
-            f"to run in a deep-dive investigation. Respond ONLY with a comma-separated list of skill names, "
-            f"like 'top_kernels, gpu_idle_gaps'. Do not provide any other text."
+    def _select_skills(self, question: str) -> list[str]:
+        return runner.select_skills_for_question(
+            question, use_llm=False, keyword_map=self._KEYWORD_MAP
         )
 
-        try:
-            import litellm
-
-            from ..chat_config import _get_model_and_key
-
-            model, _ = _get_model_and_key()
-
-            if model:
-                resp = litellm.completion(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=100,
-                )
-                text_response = resp.choices[0].message.content.strip()
-                # Parse returned text into a list of skills
-                selected = []
-                for s in text_response.split(","):
-                    s = s.strip()
-                    # Strip any markdown backticks or quotes that the LLM might have included
-                    s = s.replace("`", "").replace("'", "").replace('"', "")
-                    if s in available_skills:
-                        selected.append(s)
-                return selected[:4]
-        except Exception:
-            log.debug("LLM triage failed, falling back to keywords", exc_info=True)
-            pass
-
-        # Fallback to keywords if LLM fails
-        return self._select_skills(question)
-
-    def _select_skills(self, question: str) -> list[str]:
-        """Select skills relevant to a question using keyword matching."""
-        q_lower = question.lower()
-        selected = set()
-        for keyword, skill_names in self._KEYWORD_MAP.items():
-            if keyword in q_lower:
-                selected.update(skill_names)
-        return sorted(selected)
+    def _try_llm_triage(self, question: str, triage_results: list[dict]) -> list[str]:
+        return runner.select_skills_for_question(
+            question,
+            triage_results,
+            use_llm=True,
+            keyword_map=self._KEYWORD_MAP,
+        )
 
     def _format_evidence_first_answer(
         self,
@@ -299,298 +147,28 @@ class Agent:
         selected_skills: list[str],
         llm_summary: str | None = None,
     ) -> str:
-        """Build the fixed answer shape required by issue #205."""
-        selected_skills = list(dict.fromkeys(skill for skill in selected_skills if skill))
-        diagnosis_row = self._first_actionable_row(evidence.get("root_cause_matcher", []))
-        diagnosis = self._primary_diagnosis(question, evidence, diagnosis_row)
-        evidence_lines = self._evidence_lines(evidence)
-        confidence = self._confidence_label(evidence, diagnosis_row)
-        action = self._recommended_action(diagnosis_row)
-        verify_skill = self._choose_verify_skill(evidence, selected_skills)
-        verify_command = self._verify_command(verify_skill)
-
-        has_usable_evidence = any(
-            any(_is_usable_evidence_row(row) for row in rows)
-            for rows in evidence.values()
-        )
-        summary = self._answer_summary(
+        return runner.format_evidence_first_answer(
+            question,
+            evidence,
             selected_skills,
-            llm_summary,
-            has_usable_evidence=has_usable_evidence,
-        )
-
-        lines = [
-            "## Summary",
-            summary,
-            "",
-            "## Primary Diagnosis",
-            diagnosis,
-            "",
-            "## Evidence",
-        ]
-        if evidence_lines:
-            lines.extend(evidence_lines)
-        else:
-            lines.append(
-                "- source_skill=none; metric=none; window=full profile; "
-                "scope=profile; evidence=no skill returned usable rows"
-            )
-        lines.extend(
-            [
-                "",
-                "## Confidence",
-                confidence,
-                "",
-                "## Recommended Action",
-                action,
-                "",
-                "## Verify",
-            ]
-        )
-        if verify_command:
-            lines.append(f"`{verify_command}`")
-        else:
-            lines.append(
-                "Could not build a runnable verification command because no skill "
-                "produced evidence. Inspect available skills with:"
-            )
-            lines.append("`nsys-ai skill list`")
-        return "\n".join(lines)
-
-    def _answer_summary(
-        self,
-        selected_skills: list[str],
-        llm_summary: str | None,
-        *,
-        has_usable_evidence: bool,
-    ) -> str:
-        """Return model synthesis when available, otherwise a deterministic summary."""
-        if not has_usable_evidence:
-            return (
-                "I cannot answer this profile question because no selected skill "
-                "returned usable evidence. See the unavailable reasons below."
-            )
-        if llm_summary:
-            lines = [line.strip() for line in str(llm_summary).strip().splitlines()]
-            if lines and lines[0].lower().lstrip("#").strip() == "summary":
-                lines = lines[1:]
-
-            summary_lines = []
-            for line in lines:
-                if line.startswith("#"):
-                    break
-                if line:
-                    summary_lines.append(line)
-
-            summary = " ".join(summary_lines)
-            if summary and not summary.startswith("(LLM synthesis failed:"):
-                return summary
-
-        ran = ", ".join(skill for skill in selected_skills if skill)
-        if ran:
-            return (
-                f"Ran {ran} against the profile and summarized the strongest supported "
-                "signal in a verification-friendly format."
-            )
-        return (
-            "No skill returned usable evidence, so the answer is limited to a "
-            "verification fallback."
+            profile_path=self.profile_path,
+            trim_kwargs=self._trim_kwargs,
+            llm_summary=llm_summary,
         )
 
     def _first_actionable_row(self, rows: list[dict]) -> dict | None:
-        for row in rows:
-            if not _is_usable_evidence_row(row):
-                continue
-            pattern = str(row.get("pattern", ""))
-            if pattern and pattern != "No Known Anti-Patterns Detected":
-                return row
-        return None
-
-    def _primary_diagnosis(
-        self,
-        question: str,
-        evidence: dict[str, list[dict]],
-        diagnosis_row: dict | None,
-    ) -> str:
-        if diagnosis_row:
-            pattern = diagnosis_row.get("pattern") or diagnosis_row.get("label")
-            if pattern:
-                return str(pattern)
-        for skill_name, rows in evidence.items():
-            if rows:
-                row = rows[0]
-                if not _is_usable_evidence_row(row):
-                    # Unavailable rows are not workload facts. In particular,
-                    # abstain() accepts arbitrary detail kwargs and error rows
-                    # can carry names from failed lookups.
-                    continue
-                label = row.get("label") or row.get("name") or row.get("kernel_name")
-                if label:
-                    return f"{label} ({skill_name})"
-        return f"No specific diagnosis could be grounded for: {question}"
-
-    def _recommended_action(self, diagnosis_row: dict | None) -> str:
-        if diagnosis_row:
-            rec = diagnosis_row.get("recommendation") or diagnosis_row.get("action")
-            if rec:
-                return str(rec)
-        return (
-            "Re-run the verify command, inspect the cited metrics and window, then collect "
-            "a narrower profile with NVTX ranges if the evidence is too broad."
-        )
-
-    def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
-        # Unavailable rows are excluded: a skill that could not run is not
-        # evidence. Counting abstention/error rows lifted confidence from 0.20
-        # to 0.60 on profiles where no analysis had succeeded.
-        row_count = sum(
-            len([row for row in rows if _is_usable_evidence_row(row)])
-            for rows in evidence.values()
-        )
-        if diagnosis_row and row_count:
-            severity = str(diagnosis_row.get("severity", "")).strip().lower()
-            confidence_by_severity = {
-                "critical": (
-                    "0.90 (high): a critical root-cause matcher finding is backed by skill output."
-                ),
-                "warning": (
-                    "0.75 (medium-high): a warning root-cause matcher finding is backed by "
-                    "skill output."
-                ),
-                "info": (
-                    "0.55 (medium): an informational root-cause matcher finding is backed by "
-                    "skill output."
-                ),
-            }
-            return confidence_by_severity.get(
-                severity,
-                "0.65 (medium): a root-cause matcher finding is backed by skill output, "
-                "but its severity is unknown.",
-            )
-        if row_count:
-            return "0.60 (medium): skill output exists, but no root-cause matcher finding dominated."
-        return "0.20 (low): no skill returned usable evidence."
+        return runner._first_actionable_row(rows)
 
     def _evidence_lines(self, evidence: dict[str, list[dict]]) -> list[str]:
-        lines: list[str] = []
-        for skill_name, rows in evidence.items():
-            for row in rows[:2]:
-                if not isinstance(row, dict):
-                    continue
-                if row.get("_summary") and len(rows) > 1:
-                    continue
-                unavailable_reason = _unavailable_evidence_reason(row)
-                if unavailable_reason is not None:
-                    # A skill that could not run is not evidence for anything.
-                    # Rendering it through the metric path produced
-                    # "metric=row_present=true", which dresses an absence up as
-                    # a measurement — the ungrounded-claim failure the answer
-                    # contract exists to prevent. Say plainly that the skill
-                    # was unavailable, and why.
-                    lines.append(
-                        f"- source_skill={skill_name}; unavailable: "
-                        f"{unavailable_reason.strip()}"
-                    )
-                    if len(lines) >= 5:
-                        return lines
-                    continue
-                metric = self._metric_fragment(row)
-                window = self._window_fragment(row)
-                scope = self._scope_fragment(row)
-                evidence_text = str(row.get("evidence") or row.get("note") or "").strip()
-                suffix = f"; evidence={evidence_text}" if evidence_text else ""
-                lines.append(
-                    f"- source_skill={skill_name}; metric={metric}; "
-                    f"window={window}; scope={scope}{suffix}"
-                )
-                if len(lines) >= 5:
-                    return lines
-        return lines
+        return runner._evidence_lines(evidence, self._trim_kwargs)
 
-    def _metric_fragment(self, row: dict) -> str:
-        priority = (
-            "pattern",
-            "label",
-            "name",
-            "kernel_name",
-            "severity",
-            "total_ms",
-            "duration_ms",
-            "gap_ms",
-            "gap_ns",
-            "idle_pct",
-            "total_idle_ms",
-            "overlap_pct",
-            "nccl_only_ms",
-            "compute_only_ms",
-            "count",
-        )
-        parts = []
-        for key in priority:
-            if key in row and row[key] not in (None, ""):
-                parts.append(f"{key}={self._compact_value(row[key])}")
-            if len(parts) >= 3:
-                break
-        return ", ".join(parts) if parts else "row_present=true"
-
-    def _compact_value(self, value) -> str:
-        text = str(value)
-        return text if len(text) <= 120 else text[:117] + "..."
-
-    def _window_fragment(self, row: dict) -> str:
-        start = row.get("start_ns", row.get("gpu_start_ns"))
-        end = row.get("end_ns", row.get("gpu_end_ns"))
-        if start is not None and end is not None:
-            return f"{start}-{end}ns"
-        if row.get("start_ms") is not None and row.get("end_ms") is not None:
-            return f"{row['start_ms']}-{row['end_ms']}ms"
-        trim_start = self._trim_kwargs.get("trim_start_ns")
-        trim_end = self._trim_kwargs.get("trim_end_ns")
-        if trim_start is not None and trim_end is not None:
-            return f"{trim_start}-{trim_end}ns"
-        return "full profile"
-
-    def _scope_fragment(self, row: dict) -> str:
-        parts = []
-        for key in ("gpu_id", "device_id", "device", "rank", "stream_id", "communicator_hex"):
-            if key in row and row[key] not in (None, ""):
-                parts.append(f"{key}={row[key]}")
-        return ", ".join(parts) if parts else "profile"
+    def _confidence_label(self, evidence: dict[str, list[dict]], diagnosis_row: dict | None) -> str:
+        return runner._confidence_label(evidence, diagnosis_row)
 
     def _choose_verify_skill(
-        self,
-        evidence: dict[str, list[dict]],
-        selected_skills: list[str],
+        self, evidence: dict[str, list[dict]], selected_skills: list[str]
     ) -> str | None:
-        def _usable(rows) -> bool:
-            # An unavailable skill is truthy but has nothing to verify.
-            return any(_is_usable_evidence_row(row) for row in (rows or []))
-
-        for skill_name in selected_skills:
-            if _usable(evidence.get(skill_name)):
-                return skill_name
-        for skill_name, rows in evidence.items():
-            if _usable(rows):
-                return skill_name
-        return None
-
-    def _verify_command(self, skill_name: str | None) -> str | None:
-        if not skill_name:
-            return None
-        cmd = [
-            "nsys-ai",
-            "skill",
-            "run",
-            skill_name,
-            self.profile_path,
-            "--format",
-            "json",
-        ]
-        trim_start = self._trim_kwargs.get("trim_start_ns")
-        trim_end = self._trim_kwargs.get("trim_end_ns")
-        if trim_start is not None and trim_end is not None:
-            cmd.extend(["--trim", f"{trim_start / 1e9:g}", f"{trim_end / 1e9:g}"])
-        return " ".join(shlex.quote(str(part)) for part in cmd)
+        return runner.choose_verify_skill(evidence, selected_skills)
 
     def _try_llm_synthesis(
         self,
@@ -599,139 +177,9 @@ class Agent:
         *,
         summary_only: bool = False,
     ) -> str | None:
-        """Try to use an LLM to synthesize an answer from structured evidence.
-
-        Args:
-            question: The question to answer.
-            evidence: Dict mapping skill names to their JSON-serializable results.
-            summary_only: Return one concise summary paragraph for ``ask()``'s
-                deterministic answer formatter.
-
-        Returns None if no LLM available.
-        """
-        import json
-        import os
-
-        def _build_system_with_trace_context() -> str:
-            try:
-                from .persona import build_system_prompt
-
-                system_str = build_system_prompt()
-                fp_str = ""
-                if getattr(self, "profile", None) and getattr(self.profile, "fingerprint", None):
-                    fp_str = self.profile.fingerprint.to_prompt_string()
-
-                return (
-                    (
-                        f"{system_str}\n\n"
-                        f"--- TRACE CONTEXT ---\n{fp_str}\n---------------------\n"
-                        "Apply framework-specific knowledge when diagnosing bottlenecks."
-                    )
-                    if fp_str
-                    else system_str
-                )
-            except Exception:
-                log.debug("Failed to load persona prompt", exc_info=True)
-                return "You are an expert GPU profiling assistant."
-
-        # Unavailable rows are separated out rather than serialised alongside
-        # real rows. A model can otherwise narrate an abstention or query error
-        # as a property of the workload.
-        usable, unavailable = {}, {}
-        for skill_name, rows in evidence.items():
-            real_rows = [row for row in rows if _is_usable_evidence_row(row)]
-            if real_rows:
-                usable[skill_name] = real_rows
-            elif rows and _unavailable_evidence_reason(rows[0]) is not None:
-                unavailable[skill_name] = _unavailable_evidence_reason(rows[0])
-            else:
-                unavailable[skill_name] = "returned no rows"
-        evidence_json = json.dumps(usable, indent=2, default=str)
-        if not usable:
-            # Do not ask a provider to obey a grounding instruction when there
-            # is no evidence. The deterministic caller can state why analysis
-            # was unavailable without giving a model an opportunity to guess.
-            return None
-        unavailable_note = ""
-        if unavailable:
-            listed = "\n".join(f"- {k}: {v}" for k, v in unavailable.items())
-            unavailable_note = (
-                "\n\nThese skills could NOT run on this profile. They are not "
-                "measurements and say nothing about the workload — do not draw "
-                "conclusions from them, though you may mention that the data is "
-                f"unavailable and why:\n{listed}"
-            )
-        response_instruction = ""
-        max_tokens = 2048
-        if summary_only:
-            response_instruction = (
-                "\n\nReturn only one concise executive-summary paragraph grounded in the "
-                "provided evidence. Do not include a heading or any other answer sections; "
-                "the caller will add the diagnosis, evidence, confidence, action, and verify "
-                "sections deterministically."
-            )
-            max_tokens = 256
-
-        user_msg = (
-            f"Profile analysis data (structured JSON):\n"
-            f"```json\n{evidence_json}\n```\n\n"
-            f"{unavailable_note}\n\n"
-            f"Based on this data, answer the following question:\n{question}"
-            f"{response_instruction}"
+        return runner.synthesize_evidence(
+            question,
+            evidence,
+            summary_only=summary_only,
+            profile=self.profile,
         )
-
-        # Try litellm first (supports Gemini, OpenAI, Anthropic, etc.)
-        try:
-            import litellm
-
-            # Pick best available model based on API keys
-            model = None
-            if os.environ.get("GEMINI_API_KEY"):
-                model = "gemini/gemini-2.5-flash"
-            elif os.environ.get("OPENAI_API_KEY"):
-                model = "gpt-4o-mini"
-            elif os.environ.get("ANTHROPIC_API_KEY"):
-                model = "claude-sonnet-4-20250514"
-
-            if model:
-                system = _build_system_with_trace_context()
-
-                resp = litellm.completion(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    max_tokens=max_tokens,
-                )
-                return resp.choices[0].message.content
-        except ImportError:
-            pass
-        except Exception as e:
-            log.debug("LLM synthesis (litellm) failed: %s", e, exc_info=True)
-            return f"(LLM synthesis failed: {e})"
-
-        # Fallback: direct Anthropic SDK (legacy path)
-        try:
-            import anthropic
-        except ImportError:
-            return None
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return None
-
-        try:
-            system = _build_system_with_trace_context()
-
-            client = anthropic.Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            return message.content[0].text
-        except Exception as e:
-            log.debug("LLM synthesis (anthropic) failed: %s", e, exc_info=True)
-            return f"(LLM synthesis failed: {e})"
