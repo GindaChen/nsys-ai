@@ -13,6 +13,7 @@ import sqlite3
 
 from ..exceptions import NsysAiError, ProfileNotFoundError
 from ..profile import Profile
+from ..skill_packs import ASK_FALLBACK, ASK_KEYWORD_MAP, DIAGNOSE_DEFAULT
 from ..skills.base import is_abstention_row
 from ..skills.registry import get_skill, run_skill
 
@@ -46,88 +47,7 @@ class Agent:
     """
 
     # Keywords → skills mapping for non-LLM skill selection
-    _KEYWORD_MAP = {
-        "kernel": ["top_kernels", "kernel_launch_overhead"],
-        "hotspot": ["top_kernels"],
-        "slow": ["top_kernels", "gpu_idle_gaps"],
-        "bubble": ["gpu_idle_gaps"],
-        "idle": ["gpu_idle_gaps"],
-        "gap": ["gpu_idle_gaps"],
-        "stall": ["gpu_idle_gaps", "nccl_anomaly"],
-        "memory": ["memory_transfers", "memory_bandwidth"],
-        "transfer": ["memory_transfers", "memory_bandwidth"],
-        "h2d": ["memory_transfers", "memory_bandwidth"],
-        "copy": ["memory_transfers", "memory_bandwidth"],
-        "bandwidth": ["memory_bandwidth"],
-        "nccl": [
-            "nccl_breakdown",
-            "nccl_communicator_analysis",
-            "overlap_breakdown",
-            "kernel_overlap_matrix",
-            "nccl_anomaly",
-        ],
-        "allreduce": ["nccl_breakdown", "nccl_communicator_analysis", "nccl_anomaly"],
-        "collective": ["nccl_breakdown", "nccl_communicator_analysis", "nccl_anomaly"],
-        "distributed": [
-            "nccl_breakdown",
-            "nccl_communicator_analysis",
-            "overlap_breakdown",
-            "kernel_overlap_matrix",
-            "nccl_anomaly",
-        ],
-        "multi-gpu": [
-            "nccl_breakdown",
-            "nccl_communicator_analysis",
-            "overlap_breakdown",
-            "kernel_overlap_matrix",
-        ],
-        "communicator": ["nccl_communicator_analysis", "nccl_breakdown"],
-        "rank": ["nccl_communicator_analysis", "nccl_breakdown"],
-        "tensor parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
-        "pipeline parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
-        "data parallel": ["nccl_communicator_analysis", "nccl_breakdown"],
-        "anomaly": ["nccl_anomaly"],
-        "outlier": ["nccl_anomaly"],
-        "overlap": ["overlap_breakdown", "kernel_overlap_matrix"],
-        "matrix": ["kernel_overlap_matrix"],
-        "contention": ["kernel_overlap_matrix", "stream_concurrency"],
-        "hidden": ["kernel_overlap_matrix", "overlap_breakdown"],
-        "nvtx": ["nvtx_kernel_map", "nvtx_layer_breakdown"],
-        "source": ["nvtx_kernel_map"],
-        "attribution": ["nvtx_kernel_map"],
-        "mapping": ["nvtx_kernel_map"],
-        "layer": ["nvtx_layer_breakdown"],
-        "launch": ["kernel_launch_overhead", "kernel_launch_pattern"],
-        "overhead": ["kernel_launch_overhead"],
-        "dispatch": ["kernel_launch_pattern"],
-        "pattern": ["kernel_launch_pattern"],
-        "burst": ["kernel_launch_pattern"],
-        "stream": ["stream_concurrency"],
-        "concurrency": ["stream_concurrency"],
-        "parallel": ["stream_concurrency"],
-        "serial": ["stream_concurrency"],
-        "cpu": ["thread_utilization", "cpu_gpu_pipeline"],
-        "thread": ["thread_utilization"],
-        "utilization": ["thread_utilization", "stream_concurrency"],
-        "pipeline": ["cpu_gpu_pipeline"],
-        "starvation": ["cpu_gpu_pipeline"],
-        "queue": ["cpu_gpu_pipeline"],
-        "schema": ["schema_inspect"],
-        "table": ["schema_inspect"],
-        "mfu": ["region_mfu", "theoretical_flops"],
-        "flops": ["theoretical_flops"],
-        "efficiency": ["region_mfu"],
-        "iteration": ["iteration_timing"],
-        "iter": ["iteration_timing"],
-        "training": ["iteration_timing"],
-        "step": ["iteration_timing"],
-        "diagnosis": ["root_cause_matcher"],
-        "root-cause": ["root_cause_matcher"],
-        "why": ["root_cause_matcher"],
-        "speedup": ["speedup_estimator"],
-        "estimate": ["speedup_estimator"],
-        "projection": ["speedup_estimator"],
-    }
+    _KEYWORD_MAP = ASK_KEYWORD_MAP
 
     def __init__(self, profile_path: str, trim_ns: tuple[int, int] | None = None):
         self.profile_path = profile_path
@@ -208,23 +128,7 @@ class Agent:
         evidence = {}
 
         # Always run these core skills
-        core_skills = [
-            "top_kernels",
-            "gpu_idle_gaps",
-            "memory_transfers",
-            "memory_bandwidth",
-            "nccl_breakdown",
-            "nccl_communicator_analysis",
-            "nccl_anomaly",
-            "kernel_launch_overhead",
-            "kernel_launch_pattern",
-            "stream_concurrency",
-            "overlap_breakdown",
-            "kernel_overlap_matrix",
-            "iteration_timing",
-            "nvtx_layer_breakdown",
-            "nccl_compile_context_breakdown",
-        ]
+        core_skills = DIAGNOSE_DEFAULT
 
         for skill_name in core_skills:
             try:
@@ -293,11 +197,11 @@ class Agent:
             if not selected:
                 selected = self._select_skills(question)
             if not selected:
-                selected = ["top_kernels", "gpu_idle_gaps"]
+                selected = list(ASK_FALLBACK)
         else:
             selected = self._select_skills(question)
             if not selected:
-                selected = ["top_kernels", "gpu_idle_gaps"]
+                selected = list(ASK_FALLBACK)
 
         # Stage 2: Deep Dive (Execute selected skills)
         for skill_name in selected:
