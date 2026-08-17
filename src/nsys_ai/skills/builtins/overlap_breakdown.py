@@ -10,7 +10,7 @@ import logging
 
 from nsys_ai.connection import DB_ERRORS
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, is_abstention
 
 _log = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def _execute(conn, **kwargs):
         sync_skill = get_skill("sync_cost_analysis")
         if sync_skill:
             sync_data = sync_skill.execute(conn, **kwargs)
-            if sync_data and "error" not in sync_data[0]:
+            if sync_data and not is_abstention(sync_data) and "error" not in sync_data[0]:
                 result["sync_ms"] = sync_data[0].get("total_sync_wall_ms", 0)
     except Exception:
         _log.debug("Failed to enrich sync cost", exc_info=True)

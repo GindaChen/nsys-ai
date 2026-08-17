@@ -15,10 +15,14 @@ def sync_skill():
 def test_sync_analysis_without_tables(sync_skill):
     conn = sqlite3.connect(":memory:")
 
+    from nsys_ai.skills.base import is_abstention
+
     rows = sync_skill.execute(conn)
-    assert len(rows) == 1
-    assert "error" in rows[0]
-    assert "not found" in rows[0]["error"]
+    assert is_abstention(rows)
+    assert set(rows[0]["missing_tables"]) == {
+        "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION",
+        "ENUM_CUPTI_SYNC_TYPE",
+    }
 
 
 def test_sync_analysis_math(sync_skill):
@@ -204,7 +208,9 @@ def test_sync_analysis_device_filter_on_missing_tables_reports_not_found(sync_sk
     must still report 'Synchronization tables not found', not 'no deviceId column'.
     The latter message is misleading when the table itself is missing."""
     conn = sqlite3.connect(":memory:")
+    from nsys_ai.skills.base import is_abstention
+
     rows = sync_skill.execute(conn, device=0)
-    assert "error" in rows[0]
-    assert "not found" in rows[0]["error"].lower()
-    assert "deviceid" not in rows[0]["error"].lower()
+    assert is_abstention(rows)
+    assert "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION" in rows[0]["missing_tables"]
+    assert "deviceid" not in rows[0]["reason"].lower()

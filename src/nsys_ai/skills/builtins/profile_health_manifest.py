@@ -13,7 +13,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 
-from ..base import Skill, SkillParam, is_abstention_row
+from ..base import Skill, SkillParam, is_abstention, is_abstention_row
 
 _log = logging.getLogger(__name__)
 
@@ -533,7 +533,7 @@ def _execute(conn, **kwargs):
     sync_summary = {}
     try:
         sync_data = _safe_skill_run("sync_cost_analysis", conn, **trim_kwargs)
-        if sync_data and "error" not in sync_data[0]:
+        if sync_data and not is_abstention(sync_data) and "error" not in sync_data[0]:
             sync_summary = sync_data[0]
     except Exception as exc:
         _log.debug("manifest: sync_cost_analysis failed: %s", exc)

@@ -269,6 +269,7 @@ SKILL = Skill(
     sql="",
     execute_fn=_execute_sync_analysis,
     format_fn=_format_sync_analysis,
+    required_tables=("sync", "sync_type"),
     params=[
         SkillParam(
             "device",

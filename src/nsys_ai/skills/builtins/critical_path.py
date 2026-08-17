@@ -43,7 +43,7 @@ import logging
 
 from nsys_ai.connection import DB_ERRORS, is_safe_identifier, wrap_connection
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, is_abstention
 
 _log = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ def _cpu_attribution(conn, device: int, trim) -> dict:
         sync_skill = get_skill("sync_cost_analysis")
         if sync_skill is not None:
             sync_rows = sync_skill.execute(conn, **passthrough)
-            if sync_rows and "error" not in sync_rows[0]:
+            if sync_rows and not is_abstention(sync_rows) and "error" not in sync_rows[0]:
                 attribution["sync_wall_ms"] = sync_rows[0].get("total_sync_wall_ms", 0.0)
     except Exception:
         _log.debug("critical_path sync attribution failed", exc_info=True)
