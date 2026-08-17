@@ -20,17 +20,29 @@ def run_timeline(
     device: int,
     trim: tuple[int, int] | None,
     min_ms: float = 0,
+    session: str | None = None,
 ) -> None:
     """Launch the Textual horizontal timeline browser.
 
     Falls back to a text kernel summary when stdout is not a TTY (e.g. piped).
     """
     if not sys.stdout.isatty():
+        # See the note in nsys_ai.tree.run_tui: the summary opens no session,
+        # so silently accepting --session would report success for work that
+        # never happened.
+        if session is not None:
+            named = f"--session {session}" if session else "--session"
+            print(
+                f"Warning: {named} was ignored: stdout is not a "
+                "terminal, so the static summary ran instead of the loop "
+                "surface. No session was opened and no decision was recorded.",
+                file=sys.stderr,
+            )
         _print_static_summary(db_path, device, trim, min_ms)
         return
     from .app import run_timeline as _run
 
-    _run(db_path, device, trim, min_ms=min_ms)
+    _run(db_path, device, trim, min_ms=min_ms, session=session)
 
 
 def _print_static_summary(
@@ -51,8 +63,12 @@ def _print_static_summary(
 
     try:
         with _profile.open(db_path) as prof:
-            trim_ns = trim or (prof.meta.time_range[0], prof.meta.time_range[1])
-            raw = prof.kernels(device, trim_ns)
+            # `Profile.kernels` reads a falsy window as the whole capture
+            # (profile.py:590), so no resolution is needed here. The copy that
+            # used to sit on this line is why the static timeline quietly
+            # worked while the interactive one rendered nothing from the same
+            # argument: only one of the two knew the rule.
+            raw = prof.kernels(device, trim)
             # Filter by min_ms (duration in ms)
             min_ns = int(min_ms * 1e6)
             kernels = [k for k in raw if (k["end"] - k["start"]) >= min_ns]

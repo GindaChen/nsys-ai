@@ -1,9 +1,13 @@
 """Basic smoke tests for nsys-ai package."""
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_help():
@@ -374,6 +378,227 @@ def test_loop_rejects_after(tmp_path):
     assert result.returncode == 2, result.stderr
     assert "unrecognized arguments: --after" in result.stderr, result.stderr
     assert "Traceback" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("surface", ["tree", "timeline"])
+def test_loop_runs_every_surface_it_advertises(tmp_path, surface):
+    """Two of `loop`'s three surfaces died on the way in, with no test either.
+
+    The handler passes `session=` to the package-level `run_tui`/`run_timeline`,
+    and neither wrapper accepted it -- so `--surface tree` and
+    `--surface timeline` raised `TypeError` before doing any work, for every
+    profile and every invocation. `--surface` is advertised in `loop --help`,
+    which is the only reason anyone would type it.
+
+    stdout is captured here, so both surfaces take their non-TTY fallback.
+    That is the path CI and any piped use hits, and it is where the second
+    failure lived: the static tree read the trim window as a pair and `loop`
+    passes none, so it printed "Error loading profile" and still exited 0.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "nsys_ai", "loop",
+            str(fixtures / "mfu_2gpu_before.sqlite"),
+            "--surface", surface,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    # Not `stderr == ""`: a cold Parquet cache writes "[nsys-ai] Cache ready"
+    # there, so a fresh clone would fail this on progress output rather than on
+    # a defect. Match the sibling tests and assert the absence of a crash.
+    assert "Traceback" not in result.stderr, result.stderr
+    assert "Error loading profile" not in result.stderr, result.stderr
+
+    # Assert a non-zero count, not merely non-empty output. An empty timeline
+    # still prints "Timeline summary: GPU 0  0 kernels", so `stdout.strip()`
+    # is satisfied by exactly the failure this test exists to catch. (An empty
+    # tree does render as "", so that half would have bitten -- the asymmetry
+    # is the point.)
+    if surface == "timeline":
+        counts = re.findall(r"(\d+) kernels", result.stdout)
+        assert counts, result.stdout
+        assert int(counts[0]) > 0, f"timeline reported {counts[0]} kernels"
+    else:
+        assert "📦" in result.stdout, result.stdout[:400]
+
+
+@pytest.mark.parametrize(
+    ("surface", "entry"),
+    [("tree", "run_tui"), ("timeline", "run_timeline")],
+)
+def test_loop_hands_its_surfaces_a_resolved_trim_window(monkeypatch, surface, entry):
+    """The surfaces cannot represent "no trim", so the handler must resolve it.
+
+    `build_nvtx_tree` subscripts the window, and both TUI apps coerce None to
+    `(0, 0)` -- which selects nothing on a capture clock that starts at 60 s.
+    So passing None through rendered an empty tree and an empty timeline, and
+    the capture in front of the user simply looked like it had no work in it.
+
+    This asserts at the handler rather than through the CLI on purpose: a
+    subprocess captures stdout, which sends both surfaces down their non-TTY
+    fallback, so it cannot see what the interactive path is handed.
+    """
+    import nsys_ai.timeline as timeline_pkg
+    import nsys_ai.tree as tree_pkg
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.cli import handlers
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "mfu_2gpu_before.sqlite"
+    with profile_mod.open(str(fixture)) as prof:
+        expected = (int(prof.meta.time_range[0]), int(prof.meta.time_range[1]))
+
+    seen = {}
+
+    def _capture(_path, _gpu, trim, **kwargs):
+        seen["trim"] = trim
+
+    monkeypatch.setattr(tree_pkg, "run_tui", _capture)
+    monkeypatch.setattr(timeline_pkg, "run_timeline", _capture)
+
+    args = SimpleNamespace(
+        before=str(fixture), surface=surface, gpu=None, trim=None,
+        session=None, h100_preset=False, port=None, no_browser=True,
+    )
+    handlers._cmd_loop(args, profile_mod)
+
+    assert seen["trim"] == expected, (
+        f"{entry} was handed {seen['trim']!r}; the whole capture is {expected!r}"
+    )
+
+
+@pytest.mark.parametrize("surface", ["tree", "timeline"])
+def test_loop_defaults_to_a_device_the_capture_recorded_on(monkeypatch, tmp_path, surface):
+    """Defaulting to GPU 0 renders nothing for a capture that has no GPU 0.
+
+    A rank pinned across GPUs 1-7 is ordinary in a distributed run, and every
+    committed fixture happens to record on device 0 -- so the whole test corpus
+    could not express this, and `--surface timeline` reported
+    "GPU 0  0 kernels" against a real 7-GPU capture full of work.
+
+    The fixture is copied and remapped rather than read, because the committed
+    ones are not to be written to.
+    """
+    import sqlite3
+
+    import nsys_ai.timeline as timeline_pkg
+    import nsys_ai.tree as tree_pkg
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.cli import handlers
+
+    source = Path(__file__).resolve().parent / "fixtures" / "mfu_2gpu_before.sqlite"
+    remapped = tmp_path / "no_gpu_zero.sqlite"
+    shutil.copyfile(source, remapped)
+    with sqlite3.connect(remapped) as conn:
+        # 0 -> 3 and 1 -> 4, applied high-to-low so the two do not collide.
+        conn.execute("UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET deviceId = 4 WHERE deviceId = 1")
+        conn.execute("UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET deviceId = 3 WHERE deviceId = 0")
+    with profile_mod.open(str(remapped)) as prof:
+        assert prof.meta.devices == [3, 4], prof.meta.devices
+
+    seen = {}
+
+    def _capture(_path, gpu, _trim, **kwargs):
+        seen["gpu"] = gpu
+
+    monkeypatch.setattr(tree_pkg, "run_tui", _capture)
+    monkeypatch.setattr(timeline_pkg, "run_timeline", _capture)
+
+    args = SimpleNamespace(
+        before=str(remapped), surface=surface, gpu=None, trim=None,
+        session=None, h100_preset=False, port=None, no_browser=True,
+    )
+    handlers._cmd_loop(args, profile_mod)
+
+    assert seen["gpu"] == 3, f"defaulted to GPU {seen['gpu']}, which recorded nothing"
+
+
+@pytest.mark.parametrize("surface", ["tree", "timeline"])
+def test_loop_says_so_when_a_piped_surface_cannot_run_the_session(tmp_path, surface):
+    """Exit 0 with a rendered view would otherwise read as "the loop ran".
+
+    Piped, both surfaces fall back to a static render that opens no session and
+    records no decision -- verified: no `.nsys-ai/` is created. The session is
+    what `loop` is for, so dropping it silently reports success for work that
+    did not happen.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "nsys_ai", "loop",
+            str(fixtures / "mfu_2gpu_before.sqlite"),
+            "--surface", surface, "--session", "piped-demo",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "piped-demo" in result.stderr, result.stderr
+    assert "was ignored" in result.stderr, result.stderr
+    assert not (tmp_path / ".nsys-ai").exists(), "a session was opened after all"
+
+
+def test_trim_resolution_always_yields_a_pair(tmp_path):
+    """Consumers subscript the window without checking, so None is not an option.
+
+    `viewer.generate_html` does `trim[0] / 1e9` and `_build_single_thread_tree`
+    does `trim[0] - pad`. Returning None for a capture whose kernel span is
+    degenerate turned `open --viewer web` into the same
+    "'NoneType' object is not subscriptable" the resolution exists to prevent.
+    """
+    import sqlite3
+
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.cli.handlers import _resolve_trim_window
+
+    source = Path(__file__).resolve().parent / "fixtures" / "mfu_2gpu_before.sqlite"
+    degenerate = tmp_path / "degenerate.sqlite"
+    shutil.copyfile(source, degenerate)
+    with sqlite3.connect(degenerate) as conn:
+        conn.execute(
+            "DELETE FROM CUPTI_ACTIVITY_KIND_KERNEL WHERE rowid NOT IN "
+            "(SELECT rowid FROM CUPTI_ACTIVITY_KIND_KERNEL LIMIT 1)"
+        )
+        conn.execute("UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET [end] = start")
+
+    with profile_mod.open(str(degenerate)) as prof:
+        lo, hi = prof.meta.time_range
+        assert hi <= lo, f"fixture is not degenerate: {(lo, hi)}"
+        window = _resolve_trim_window(None, prof)
+
+    # A pair, and the same pair `open` produced before the resolution moved
+    # into a helper. Narrowing a degenerate span to (0, 0) would be a behaviour
+    # change, not a safety net: (0, 0) is truthy, so it filters rather than
+    # meaning "no window".
+    assert window == (int(lo), int(hi)), window
+
+
+def test_loop_reports_a_bad_trim_as_a_trim_error(tmp_path):
+    """A window outside the capture is not "could not open before profile".
+
+    `_resolve_trim_window` raises TrimOutOfRangeError, which cli/app.py renders
+    with its error code and exit status. Catching it beside the profile open
+    relabelled it and dropped both, so `loop` disagreed with `tui` about the
+    same mistake.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "nsys_ai", "loop",
+            str(fixtures / "mfu_2gpu_before.sqlite"),
+            "--surface", "tree", "--trim", "0", "1",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "TRIM_OUT_OF_RANGE" in result.stderr, result.stderr
+    assert "could not open before profile" not in result.stderr, result.stderr
 
 
 def test_timeline_web_rejects_loop_after(tmp_path):

@@ -467,6 +467,34 @@ def _check_trim_window(trim, prof):
     )
 
 
+def _resolve_trim_window(trim, prof) -> tuple[int, int]:
+    """Check *trim* against *prof*, and turn "no trim" into the whole capture.
+
+    Always returns a pair. Every consumer subscripts it without checking --
+    ``viewer.generate_html`` does ``trim[0] / 1e9`` (viewer.py:81) and
+    ``_build_single_thread_tree`` does ``trim[0] - pad`` (nvtx_tree.py:120) --
+    so handing back None turns a degenerate capture into the same
+    ``'NoneType' object is not subscriptable`` this function exists to prevent.
+    ``open`` used to inline exactly this and always produced a pair; keeping
+    that guarantee is the whole point of centralising it.
+
+    The span is passed through as-is rather than special-cased. A capture with
+    no kernels already yields ``(0, 0)`` because ``ProfileMeta.time_range`` is
+    ``(min_start or 0, max_end or 0)`` (profile.py:478), and intercepting a
+    degenerate span to return ``(0, 0)`` instead would be a narrower window
+    than the caller had before -- ``(0, 0)`` is a truthy pair, so
+    ``Profile.kernels`` filters on it rather than reading it as "no window".
+    """
+    _check_trim_window(trim, prof)
+    if trim is not None:
+        return trim
+    time_range = getattr(getattr(prof, "meta", None), "time_range", None)
+    if not time_range:
+        return (0, 0)
+    lo_ns, hi_ns = time_range
+    return (int(lo_ns), int(hi_ns))
+
+
 def _check_trim_window_for_path(trim, path, _profile):
     """``_check_trim_window`` for handlers that have not opened the profile yet."""
     if trim is None:
@@ -1564,10 +1592,7 @@ def _cmd_open(args, _profile):
         gpu = (
             args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
         )
-        trim_ns = _parse_trim(args)
-        _check_trim_window(trim_ns, prof)
-        if trim_ns is None:
-            trim_ns = (int(prof.meta.time_range[0]), int(prof.meta.time_range[1]))
+        trim_ns = _resolve_trim_window(_parse_trim(args), prof)
         port = args.port if args.port is not None else 8142
         if args.viewer == "web":
             serve(prof, gpu, trim_ns, port=port, open_browser=not args.no_browser)
@@ -1673,10 +1698,34 @@ def _cmd_loop(args, _profile):
 
     session = getattr(args, "session", None)
 
+    # Resolve the window before the surface starts, the way `open` does. These
+    # surfaces cannot represent "no trim", and the profile is closed first so
+    # the TUI does not run with a live connection open behind it.
+    try:
+        prof_ctx = _profile.open(before_path)
+    except Exception as exc:
+        print(f"Error: could not open before profile: {before_path}", file=sys.stderr)
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # Only the open is guarded. _resolve_trim_window raises TrimOutOfRangeError,
+    # an NsysAiError that cli/app.py renders with its code, its exit status and
+    # the NSYS_AI_AGENT JSON form -- catching it here would relabel a bad
+    # --trim as "could not open before profile" and lose all three.
+    with prof_ctx as prof:
+        trim = _resolve_trim_window(trim, prof)
+        # Default to a device the capture actually recorded on, the way `open`
+        # does. A run pinned to GPUs 1-7 -- one rank per device, rank 0 driving
+        # elsewhere -- has no device 0, and defaulting to it printed
+        # "GPU 0  0 kernels" for a capture holding 6460 kernels.
+        gpu = (
+            args.gpu
+            if args.gpu is not None
+            else (prof.meta.devices[0] if prof.meta.devices else 0)
+        )
+
     if args.surface == "timeline":
         from nsys_ai.timeline import run_timeline
 
-        gpu = args.gpu if args.gpu is not None else 0
         run_timeline(
             before_path,
             gpu,
@@ -1688,7 +1737,6 @@ def _cmd_loop(args, _profile):
 
     from nsys_ai.tree import run_tui
 
-    gpu = args.gpu if args.gpu is not None else 0
     run_tui(
         before_path,
         gpu,
