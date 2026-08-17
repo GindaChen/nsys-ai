@@ -931,10 +931,29 @@ def _cmd_diff(args, _profile):
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
+    if session is not None and getattr(args, "decision_out", None):
+        # The session owns its own diff.json. Accepting the option here and
+        # writing nothing would leave a CI job reading a file that was never
+        # created, with nothing said about why.
+        print(
+            "Error: --decision-out cannot be combined with --session; the session "
+            "records its decision in its own store",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # Keep session profile paths as caller spelling normalized with abspath
     # (no symlink dereference), matching SessionStore / build_local_profile_reference.
     session_before_path = None
     session_after_path = None
+    # Defaulted here rather than in the parser so the default stays visible next
+    # to the only code that writes it. A CI job runs in a checkout, so a record
+    # it cannot redirect is a record it cannot keep out of the repo under test.
+    # expanduser because the shell does not: CI invokes this without one, and a
+    # literal "~/..." would be created as a directory named "~" in the checkout
+    # this option exists to keep clean.
+    decision_out_path = os.path.expanduser(
+        getattr(args, "decision_out", None) or "diff.json"
+    )
     if decision is not None:
         if getattr(args, "chat", False):
             print("Error: --accept/--reject cannot be used with --chat", file=sys.stderr)
@@ -942,11 +961,19 @@ def _cmd_diff(args, _profile):
         if not reason or not reason.strip():
             print("Error: --reason is required with --accept/--reject", file=sys.stderr)
             sys.exit(2)
-        if getattr(args, "output", None) and os.path.abspath(args.output) == os.path.abspath(
-            "diff.json"
+        # Only when a record is actually written here. Under --session it goes
+        # into the store, so there is nothing for -o to collide with, and the
+        # remedy this names would move a path that is never written.
+        if (
+            session is None
+            and getattr(args, "output", None)
+            and os.path.abspath(args.output) == os.path.abspath(decision_out_path)
         ):
             print(
-                "Error: --output diff.json conflicts with the decision record path",
+                f"Error: --output and the decision record would both write "
+                f"{decision_out_path}. -o writes the rendered report in --format; the "
+                "decision record is a separate JSON artifact. Point one of them "
+                "elsewhere with --decision-out.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1128,10 +1155,20 @@ def _cmd_diff(args, _profile):
                 gate_summary,
                 decision=decision,
                 reason=reason or "",
-                path="diff.json",
+                path=decision_out_path,
             )
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        except OSError as exc:
+            # --decision-out is caller-supplied, so an unwritable directory, a
+            # path naming a directory, or a missing permission is a
+            # configuration problem: exit 2 like every other one here, never 1,
+            # which a CI job reads as "the gate failed".
+            print(
+                f"Error: cannot write the decision record to {decision_out_path}: {exc}",
+                file=sys.stderr,
+            )
             sys.exit(2)
         for warning in decision_warnings:
             print(f"Warning: {warning}", file=sys.stderr)

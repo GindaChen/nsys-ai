@@ -248,7 +248,9 @@ timestamp, and the decider taken from your git `user.email`, and moves the sessi
 phase. Use `--accept` for the other outcome. Either flag requires `--reason`, and a session accepts
 exactly one decision.
 
-Drop `--session` and the same flags write a `diff.json` in the working directory instead — the right
+Drop `--session` and the same flags write a `diff.json` in the working directory instead — or wherever
+`--decision-out PATH` names, which is what a CI job wants so the checkout it is testing stays clean.
+This is the right
 choice for a one-off comparison you are not tracking as a session.
 
 ## What the session directory holds

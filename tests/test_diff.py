@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import site
 import sqlite3
 import subprocess
 import sys
@@ -1210,6 +1211,155 @@ def test_diff_cli_decision_missing_reason_is_refused(tmp_path):
     assert result.returncode == 2
     assert "--reason is required" in result.stderr
     assert not (tmp_path / "diff.json").exists()
+
+
+def test_diff_cli_decision_can_be_written_outside_the_working_directory(tmp_path):
+    """A tool advertised for CI must be able to run in a checkout without dirtying it.
+
+    The decision record was hardcoded to ``diff.json`` beside wherever the
+    command ran, with no way to redirect it. In CI that directory is the
+    repository under test.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+    destination = tmp_path / "artifacts" / "decision.json"
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--accept",
+        "--reason",
+        "verified",
+        "--decision-out",
+        str(destination),
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(destination.read_text(encoding="utf-8"))["decision"]["status"] == "accepted"
+    assert not (tmp_path / "diff.json").exists(), "the record was still left in the CWD"
+
+
+def test_diff_cli_decision_defaults_to_the_working_directory(tmp_path):
+    """Without the flag nothing moves; this is a redirect, not a relocation."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before, after, "--accept", "--reason", "verified",
+        cwd=tmp_path, env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "diff.json").exists()
+
+
+def test_diff_cli_unwritable_decision_path_is_a_configuration_error(tmp_path):
+    """Exit 2, not 1: a CI job reads 1 as "the performance gate failed".
+
+    ``--decision-out`` is caller-supplied, so an unwritable directory is a
+    misconfiguration. Letting the OSError escape gave a traceback and exit 1 --
+    indistinguishable from a real regression, on the exact path CI uses.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+    unwritable = tmp_path / "readonly"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+
+    try:
+        result = _run_diff_cli(
+            before, after, "--accept", "--reason", "verified",
+            "--decision-out", str(unwritable / "decision.json"),
+            cwd=tmp_path, env=_decision_cli_env(tmp_path),
+        )
+    finally:
+        unwritable.chmod(0o700)
+
+    assert result.returncode == 2, result.stderr
+    assert "cannot write the decision record" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_diff_cli_decision_out_expands_a_home_relative_path(tmp_path):
+    """CI invokes this without a shell, so nothing else expands the tilde.
+
+    Left literal, ``atomic_write_bytes`` created a directory named ``~`` in the
+    working directory -- the pollution the option exists to prevent.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _decision_cli_env(tmp_path)
+    env["HOME"] = str(home)
+    # Relocating HOME also relocates the per-user site-packages the runtime
+    # dependencies may live in, so keep the original one importable.
+    env["PYTHONPATH"] = os.pathsep.join([env["PYTHONPATH"], site.getusersitepackages()])
+
+    result = _run_diff_cli(
+        before, after, "--accept", "--reason", "verified",
+        "--decision-out", "~/artifacts/decision.json",
+        cwd=tmp_path, env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "artifacts" / "decision.json").exists()
+    assert not (tmp_path / "~").exists(), "a directory named ~ was created in the CWD"
+
+
+def test_diff_cli_rejects_decision_out_with_session(tmp_path):
+    """The session owns its record; accepting the flag and writing nothing lies.
+
+    A CI job that passed both exited 0 and then failed reading a file that was
+    never created, with nothing in stderr explaining why.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before, after, "--session", "--accept", "--reason", "verified",
+        "--decision-out", str(tmp_path / "elsewhere.json"),
+        cwd=tmp_path, env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "--decision-out cannot be combined with --session" in result.stderr
+    assert not (tmp_path / "elsewhere.json").exists()
+
+
+def test_diff_cli_refuses_to_write_report_and_decision_to_one_path(tmp_path):
+    """Two artifacts, one name: say which is which and how to separate them.
+
+    ``-o`` writes the rendered report in ``--format``; the decision record is a
+    separate JSON artifact. The old message named the collision without naming
+    a way out, because there was none.
+    """
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before, after, "--format", "json", "--accept", "--reason", "v",
+        "-o", "same.json", "--decision-out", "same.json",
+        cwd=tmp_path, env=_decision_cli_env(tmp_path),
+    )
+
+    assert result.returncode == 2
+    assert "--decision-out" in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_diff_cli_decision_low_comparability_stamps_inconclusive(tmp_path):
