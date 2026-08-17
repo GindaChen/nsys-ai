@@ -40,6 +40,14 @@ uv.lock
 # Local baseline snapshot store (nsys-ai baseline tag)
 .nsys-ai-baselines/
 
+# Session store the loop writes into whatever directory it is run from:
+# .nsys-ai/sessions/<id>/{session,findings,proposal,diff}.json plus lock files.
+# The captures under .nsys-ai/profiles/ are already covered by *.sqlite above;
+# these JSON artifacts were not, so running `loop` or `diagnose --session` in a
+# checkout left untracked files behind. A runtime store, not configuration --
+# a settings file would live at .nsys-ai.toml, which this does not match.
+.nsys-ai/
+
 # Agent tool state — contributor-local, not part of the repo.
 # .claude/ holds per-machine permission allowlists and live git worktrees
 # (~85 MB of checked-out profiles) alongside any local skills; .agent/ is the

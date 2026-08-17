@@ -49,17 +49,31 @@ def run_tui(
     trim: tuple[int, int] | None,
     max_depth: int = -1,
     min_ms: float = 0,
+    session: str | None = None,
 ) -> None:
     """Launch the Textual NVTX tree browser.
 
     Falls back to a Rich static tree when stdout is not a TTY (e.g. piped).
     """
     if not sys.stdout.isatty():
+        # Say so. The static tree opens no session and records no decision, so
+        # a caller that passed --session and read exit 0 would otherwise
+        # conclude the loop had run. Unlike max_depth and min_ms, which only
+        # shape the render, this discards what the caller asked the command to
+        # do.
+        if session is not None:
+            named = f"--session {session}" if session else "--session"
+            print(
+                f"Warning: {named} was ignored: stdout is not a "
+                "terminal, so the static tree ran instead of the loop surface. "
+                "No session was opened and no decision was recorded.",
+                file=sys.stderr,
+            )
         _print_static_tree(db_path, device, trim)
         return
     from .app import run_tui as _run
 
-    _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms)
+    _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms, session=session)
 
 
 def _print_static_tree(
