@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 import threading
 import time
@@ -679,6 +680,29 @@ def test_declared_gpu_count_the_capture_meets_succeeds(tmp_path, fake_nsys):
 
     assert result.status is RunStatus.SUCCEEDED, result.detail
     assert result.profile is not None
+
+
+def test_an_unreadable_capture_fails_the_run_rather_than_the_declaration(
+    tmp_path, fake_nsys, monkeypatch
+):
+    """"Could not be checked" must never reach the success path.
+
+    The guarded read either yields a count or raises, so the fail-closed rule
+    lives here rather than in a "count is unknown" branch of the comparison,
+    which no caller could reach. A capture that cannot be read is invalid
+    whether or not a declaration was made.
+    """
+    from nsys_ai import profile_runner
+
+    def _explode(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(profile_runner, "read_local_profile_under_guard", _explode)
+    result = _run(tmp_path, fake_nsys, expected_gpu_count=8)
+
+    assert result.status is RunStatus.INVALID_PROFILE
+    assert result.detail == "profile validation failed: OperationalError"
+    assert result.profile is None
 
 
 def test_the_gpu_count_is_read_from_the_guarded_handle(tmp_path, fake_nsys):

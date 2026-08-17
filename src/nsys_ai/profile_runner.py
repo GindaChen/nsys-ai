@@ -277,7 +277,7 @@ def build_local_profile_reference(
     return reference
 
 
-def check_expected_gpu_count(spec: RunSpec, observed: int | None) -> str | None:
+def check_expected_gpu_count(spec: RunSpec, observed: int) -> str | None:
     """Return why ``expected_gpu_count`` is unmet, or None when it holds.
 
     ``expected_gpu_count`` was recorded into the RunSpec and never read, so a
@@ -290,18 +290,15 @@ def check_expected_gpu_count(spec: RunSpec, observed: int | None) -> str | None:
     process in a distributed job, one local capture watches one launch, and
     counting processes in the export would answer a different question under
     the same name.
+
+    The count is required rather than optional: it is read inside the guarded
+    window, which either yields a number or raises, and the caller turns that
+    raise into ``INVALID_PROFILE``. Accepting None here would restate a
+    fail-closed rule that no caller can reach and no test can pin.
     """
     expected = spec.expected_gpu_count
     if expected is None:
         return None
-    if observed is None:
-        # The declaration was asked for and cannot be checked, so it is not
-        # satisfied. Failing closed keeps "unverifiable" out of the success
-        # path, where it would be indistinguishable from "verified".
-        return (
-            f"declared expected_gpu_count={expected} could not be checked against the "
-            "capture"
-        )
     if observed != expected:
         return (
             f"declared expected_gpu_count={expected} but the capture recorded kernels on "
