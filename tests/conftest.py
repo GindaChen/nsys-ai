@@ -7,6 +7,7 @@ All fixtures here are available to every test module without explicit imports.
 import hashlib
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,38 @@ def _fixture_digests() -> dict[str, str]:
     }
 
 
+def _already_modified_fixtures() -> list[str]:
+    """Fixture files git already reports as modified, newest state on disk.
+
+    Digests only catch a write that happens during this session. A checkout
+    that is already dirty -- from a run before this guard existed, or from a
+    run that went red and was simply repeated -- would compare clean against
+    itself forever, which is the state the churn kept being committed from.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "ls-files", "--modified", "--", str(FIXTURE_DIR)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []  # no git (an sdist, a vendored copy): nothing to compare against
+    if completed.returncode != 0:
+        return []
+    return sorted(
+        Path(line).name for line in completed.stdout.splitlines() if line.strip()
+    )
+
+
+def _fixture_change_report(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Names that differ between two digest snapshots, in either direction."""
+    return sorted(
+        name for name in before.keys() | after.keys() if before.get(name) != after.get(name)
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _committed_fixtures_are_left_alone():
     """Fail the session if a test wrote into a committed fixture.
@@ -57,9 +90,18 @@ def _committed_fixtures_are_left_alone():
     to open a fixture directly reintroduces the churn silently, and the only
     signal is an unexplained binary diff in someone's review.
     """
+    stale = _already_modified_fixtures()
+    if stale:
+        raise AssertionError(
+            "committed fixtures are already modified before this session ran: "
+            + ", ".join(stale)
+            + ". A dirty checkout hides later writes, because the guard would "
+            "compare them against the dirty bytes. Restore them with "
+            "`git checkout -- tests/fixtures/`."
+        )
     before = _fixture_digests()
     yield
-    changed = sorted(name for name, digest in _fixture_digests().items() if before.get(name) != digest)
+    changed = _fixture_change_report(before, _fixture_digests())
     if changed:
         raise AssertionError(
             "the suite rewrote committed fixtures in place: "
