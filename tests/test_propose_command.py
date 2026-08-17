@@ -889,7 +889,7 @@ def _evidence_for(path: Path, capture: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_a_runspec_unrelated_to_the_capture_is_said_out_loud(tmp_path, capsys):
+def test_a_runspec_unrelated_to_the_capture_is_said_out_loud(tmp_path):
     """The proposal records the RunSpec as the way the change will be verified.
 
     A RunSpec from an entirely different program was accepted and written in as
@@ -902,22 +902,26 @@ def test_a_runspec_unrelated_to_the_capture_is_said_out_loud(tmp_path, capsys):
     unrelated = tmp_path / "unrelated.json"
     _write_runspec(unrelated, argv=("./bench_axpy", "--n", "1024"))
 
+    stderr = io.StringIO()
     code = propose_command.run_propose(
         finding_id="f1",
         findings_path=str(findings),
         runspec_path=str(unrelated),
         output=str(tmp_path / "proposal.json"),
         stdout=io.StringIO(),
+        stderr=stderr,
     )
 
     assert code == 0
-    stderr = capsys.readouterr().err
-    assert "nothing in common with the capture" in stderr, stderr
-    assert "./bench_axpy --n 1024" in stderr
-    assert "python train.py" in stderr
+    # The warning goes to the caller's stream, not the process one, so a caller
+    # that redirects stdout to a file still sees it.
+    written = stderr.getvalue()
+    assert "nothing in common with the capture" in written, written
+    assert "./bench_axpy --n 1024" in written
+    assert "python train.py" in written
 
 
-def test_a_runspec_that_matches_the_capture_says_nothing(tmp_path, capsys):
+def test_a_runspec_that_matches_the_capture_says_nothing(tmp_path):
     """Advisory means quiet when there is nothing to advise."""
     profile = _capture_with_runspec(tmp_path / "capture", ("python", "train.py"))
     findings = tmp_path / "findings.json"
@@ -925,18 +929,20 @@ def test_a_runspec_that_matches_the_capture_says_nothing(tmp_path, capsys):
     same = tmp_path / "same.json"
     _write_runspec(same, argv=("python", "train.py"))
 
+    stderr = io.StringIO()
     propose_command.run_propose(
         finding_id="f1",
         findings_path=str(findings),
         runspec_path=str(same),
         output=str(tmp_path / "proposal.json"),
         stdout=io.StringIO(),
+        stderr=stderr,
     )
 
-    assert "nothing in common" not in capsys.readouterr().err
+    assert "nothing in common" not in stderr.getvalue()
 
 
-def test_a_narrower_harness_sharing_a_target_says_nothing(tmp_path, capsys):
+def test_a_narrower_harness_sharing_a_target_says_nothing(tmp_path):
     """Verifying with a tighter harness than the capture ran is legitimate."""
     profile = _capture_with_runspec(tmp_path / "capture", ("python", "train.py"))
     findings = tmp_path / "findings.json"
@@ -944,18 +950,20 @@ def test_a_narrower_harness_sharing_a_target_says_nothing(tmp_path, capsys):
     narrow = tmp_path / "narrow.json"
     _write_runspec(narrow, argv=("pytest", "train.py", "-k", "step"))
 
+    stderr = io.StringIO()
     propose_command.run_propose(
         finding_id="f1",
         findings_path=str(findings),
         runspec_path=str(narrow),
         output=str(tmp_path / "proposal.json"),
         stdout=io.StringIO(),
+        stderr=stderr,
     )
 
-    assert "nothing in common" not in capsys.readouterr().err
+    assert "nothing in common" not in stderr.getvalue()
 
 
-def test_no_runspec_beside_the_capture_means_no_claim(tmp_path, capsys):
+def test_no_runspec_beside_the_capture_means_no_claim(tmp_path):
     """Most captures have no sibling; absence must not read as a mismatch."""
     profile = _capture_with_runspec(tmp_path / "bare", None)
     findings = tmp_path / "findings.json"
@@ -963,12 +971,14 @@ def test_no_runspec_beside_the_capture_means_no_claim(tmp_path, capsys):
     spec = tmp_path / "spec.json"
     _write_runspec(spec, argv=("./bench_axpy",))
 
+    stderr = io.StringIO()
     propose_command.run_propose(
         finding_id="f1",
         findings_path=str(findings),
         runspec_path=str(spec),
         output=str(tmp_path / "proposal.json"),
         stdout=io.StringIO(),
+        stderr=stderr,
     )
 
-    assert "nothing in common" not in capsys.readouterr().err
+    assert "nothing in common" not in stderr.getvalue()

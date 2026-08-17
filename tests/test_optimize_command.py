@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -160,9 +162,9 @@ def _stub_nsys_probe(monkeypatch):
 def _run(tmp_path, runner_factory, **overrides):
     stdout, stderr = io.StringIO(), io.StringIO()
     code = run_optimize(
-        before_path=BEFORE,
+        before_path=overrides.pop("before_path", BEFORE),
         repo=tmp_path,
-        workload=["./axpy", "20"],
+        workload=overrides.pop("workload", ["./axpy", "20"]),
         session_id=SESSION_ID,
         trim=None,
         session_root=_session_root(tmp_path),
@@ -304,7 +306,7 @@ def test_optimize_refuses_a_session_that_verified_another_workload(tmp_path):
     assert code == 0, err
     assert _snapshot(tmp_path).runspec.argv == ("./axpy", "20")
 
-    with pytest.raises(OptimizeCommandError, match="verified a different workload"):
+    with pytest.raises(OptimizeCommandError, match="verified a different workload") as excinfo:
         run_optimize(
             before_path=BEFORE,
             repo=tmp_path,
@@ -316,6 +318,60 @@ def test_optimize_refuses_a_session_that_verified_another_workload(tmp_path):
             stdout=io.StringIO(),
             stderr=io.StringIO(),
         )
+    # The refusal has to name both sides; "they differ" is not actionable.
+    message = str(excinfo.value)
+    assert "./axpy 20" in message
+    assert "./bench_matmul 4096" in message
+
+
+def test_optimize_resumes_a_python_workload_re_run_unchanged(tmp_path):
+    """The recorded argv is normalized, so the raw tokens cannot be compared.
+
+    `normalize_workload` inserts the interpreter for the documented `train.py`
+    shorthand. Comparing the recorded argv against the raw workload made every
+    re-run of a Python workload -- the primary case this tool exists for --
+    look like a different command and refused to resume.
+    """
+    _seed_findings(tmp_path)
+    after_reference = build_local_profile_reference(AFTER)
+    python_workload = ["train.py", "--epochs", "3"]
+
+    code, _out, err = _run(
+        tmp_path, _succeeding_runner(after_reference), workload=python_workload
+    )
+    assert code == 0, err
+    recorded = _snapshot(tmp_path).runspec.argv
+    assert recorded == (sys.executable, "train.py", "--epochs", "3")
+
+    # The byte-identical command again: the loop reports its decision, not an error.
+    code2, out2, err2 = _run(
+        tmp_path, _exploding_runner(), workload=python_workload
+    )
+    assert code2 == 0, err2
+    assert "Loop already complete" in out2
+
+
+def test_optimize_accepts_the_same_capture_reached_by_another_path(tmp_path):
+    """The session id derives from profile_id, so the path must not gate it.
+
+    A moved artifact directory, a symlink, or a container mount reaches the same
+    capture by a different absolute path. Comparing whole references -- which
+    carry `path` -- rejected the very session that path resolves to.
+    """
+    _seed_findings(tmp_path)
+    after_reference = build_local_profile_reference(AFTER)
+    code, _out, err = _run(tmp_path, _succeeding_runner(after_reference))
+    assert code == 0, err
+
+    relocated = tmp_path / "moved" / "before.sqlite"
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(BEFORE, relocated)
+
+    code2, out2, err2 = _run(
+        tmp_path, _exploding_runner(), before_path=relocated
+    )
+    assert code2 == 0, err2
+    assert "Loop already complete" in out2
 
 
 def test_optimize_reports_the_recorded_decision_for_the_same_workload(tmp_path):

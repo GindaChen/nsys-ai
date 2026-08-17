@@ -406,6 +406,7 @@ def run_propose(
     output: str | os.PathLike[str] | None = None,
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
     environment: Mapping[str, str] = os.environ,
 ) -> int:
     """Generate one Proposal from a findings file or a session findings artifact.
@@ -482,7 +483,9 @@ def run_propose(
         if captured_runspec is not None:
             lineage_warning = _unrelated_runspec_warning(runspec, captured_runspec)
             if lineage_warning:
-                print(f"Warning: {lineage_warning}", file=sys.stderr)
+                # The caller's stream, not the process one: a caller that sends
+                # stdout to a file still needs to see this.
+                print(f"Warning: {lineage_warning}", file=stderr)
 
     finding = _select_finding(report, finding_id)
     proposal = generate_proposal(
@@ -536,6 +539,7 @@ def run_propose_command(
     args: Any,
     *,
     stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
     environment: Mapping[str, str] = os.environ,
 ) -> int:
     """Adapt an argparse Namespace to :func:`run_propose`."""
@@ -546,7 +550,7 @@ def run_propose_command(
     if findings is None and session is None:
         print(
             "nsys-ai propose: error: the following arguments are required: findings",
-            file=sys.stderr,
+            file=stderr,
         )
         return 2
     return run_propose(
@@ -557,5 +561,6 @@ def run_propose_command(
         runspec_path=getattr(args, "runspec", None),
         output=getattr(args, "output", None),
         stdout=stdout,
+        stderr=stderr,
         environment=environment,
     )

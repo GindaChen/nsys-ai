@@ -300,21 +300,28 @@ def run_optimize(
         # path below, which would report a decision reached by verifying a
         # different workload than the caller just named.
         recorded_before = snapshot.state.before_profile
-        if recorded_before is not None and recorded_before != before_ref:
+        # Compare identity, not the reference: the session id is derived from
+        # profile_id alone, so the same capture reached by another path -- a
+        # moved artifact directory, a symlink, a container mount -- resolves to
+        # this session and must not be told it is a different profile.
+        if (
+            recorded_before is not None
+            and recorded_before.profile_id != before_ref.profile_id
+        ):
             raise OptimizeCommandError(
                 f"session {resolved_id} was opened on a different before profile "
                 f"({recorded_before.path}); pass --session with a new id"
             )
         recorded_runspec = snapshot.runspec
-        if (
-            recorded_runspec is not None
-            and workload
-            and tuple(recorded_runspec.argv) != tuple(workload)
-        ):
+        # The recorded argv was built from the normalized workload, so the raw
+        # tokens are the wrong side of this comparison: normalization inserts
+        # the interpreter for the documented `train.py` shorthand, which would
+        # make every re-run of a Python workload look like a different one.
+        if recorded_runspec is not None and tuple(recorded_runspec.argv) != normalized:
             raise OptimizeCommandError(
                 f"session {resolved_id} verified a different workload.\n"
                 f"  recorded: {' '.join(recorded_runspec.argv)}\n"
-                f"  given:    {' '.join(workload)}\n"
+                f"  given:    {' '.join(normalized)}\n"
                 "A decision recorded against one workload does not carry to another. "
                 "Pass --session with a new id to verify this one."
             )
@@ -524,6 +531,7 @@ def _publish_proposal(
                 runspec_path=handle_path,
                 session_root=session_root,
                 stdout=stdout,
+                stderr=stderr,
                 environment=environment,
             )
         except (ProposeCommandError, RunSpecError, ProfileError, ValueError) as exc:
