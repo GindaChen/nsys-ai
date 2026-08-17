@@ -307,6 +307,47 @@ def test_chat_completion_tool_calls_mock(monkeypatch):
     assert out["actions"][0]["target_name"] == "kernel_a"
 
 
+def test_chat_completion_profile_finding_event_is_returned(monkeypatch):
+    """Non-streaming chat propagates finding overlays and preserves the index."""
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, "/profile.sqlite", "system", lambda _sql: "[]"),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    fn = MagicMock(name="function")
+    fn.name = "submit_finding"
+    fn.arguments = json.dumps({"label": "slow kernel", "severity": "warning"})
+    tc = MagicMock(id="finding-call", function=fn)
+    tool_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=[tc]))]
+    )
+    final_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="done", tool_calls=[]))]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [tool_response, final_response]
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        if "litellm" in chat_mod.__dict__:
+            del chat_mod.__dict__["litellm"]
+        body = json.dumps(
+            {
+                "profile_path": "/profile.sqlite",
+                "findings_count": 4,
+                "messages": [{"role": "user", "content": "mark it"}],
+            }
+        ).encode("utf-8")
+        out = chat_mod.chat_completion(body)
+
+    assert out["findings"][0]["index"] == 5
+    assert out["findings"][0]["label"] == "slow kernel"
+    assert out["actions"] == []
+    conn.close.assert_called_once()
+
+
 def test_sse_event():
     """_sse_event produces valid SSE line format."""
     raw = chat_mod._sse_event("text", {"chunk": "hi"})

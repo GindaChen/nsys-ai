@@ -381,6 +381,7 @@ def run_agent_loop(
     max_turns: int = 5,
     ui_context: dict | None = None,
     dispatcher=None,
+    event_sink: list[dict] | None = None,
 ) -> tuple[str, list]:
     """Run a multi-turn agent loop until the model stops calling tools.
 
@@ -393,6 +394,8 @@ def run_agent_loop(
         dispatcher: Optional canonical profile-tool dispatcher. Web callers
                     provide this so non-streaming chat uses the same registry
                     path as the streaming loop.
+        event_sink: Optional list receiving dispatcher side-effect events,
+                    including finding overlays.
         max_turns:     Maximum number of LLM round-trips.
         ui_context:    Structured UI state available to ``answer_from_ui_context``.
 
@@ -549,6 +552,8 @@ def run_agent_loop(
             else:
                 if dispatcher is not None and dispatcher.knows(name):
                     dispatched = dispatcher.dispatch(name, args_str)
+                    if event_sink is not None:
+                        event_sink.extend(dispatched.events)
                     tool_failed = _tool_result_failed(dispatched.content)
                     if tool_failed:
                         grounding_failure = dispatched.content
@@ -725,7 +730,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     try:
         payload = json.loads(body_bytes.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return {"content": "Invalid request body.", "actions": []}
+        return {"content": "Invalid request body.", "actions": [], "findings": []}
 
     try:
         import litellm
@@ -747,7 +752,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             profile_path, messages, ui_context
         )
     except (RuntimeError, NsysAiError) as e:
-        return {"content": f"Profile error: {e}", "actions": []}
+        return {"content": f"Profile error: {e}", "actions": [], "findings": []}
 
     api_messages = [{"role": "system", "content": system_prompt}]
     for m in messages:
@@ -758,6 +763,16 @@ def chat_completion(body_bytes: bytes) -> dict | None:
         try:
             from .tool_dispatch import ToolDispatcher
 
+            local_finding_counter = payload.get("findings_count", 0)
+            if not isinstance(local_finding_counter, int) or local_finding_counter < 0:
+                local_finding_counter = 0
+
+            def _next_finding_index() -> int:
+                nonlocal local_finding_counter
+                local_finding_counter += 1
+                return local_finding_counter
+
+            dispatcher_events: list[dict] = []
             content, actions = run_agent_loop(
                 model=model,
                 api_messages=api_messages,
@@ -765,15 +780,26 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 query_runner=query_runner,
                 max_turns=5,
                 ui_context=ui_context,
+                event_sink=dispatcher_events,
                 dispatcher=ToolDispatcher(
                     conn=conn,
                     sqlite_path=sqlite_path,
                     query_runner=query_runner,
+                    finding_counter=_next_finding_index,
                 ),
             )
-            return {"content": content, "actions": actions}
+            findings = [
+                event["finding"]
+                for event in dispatcher_events
+                if event.get("type") == "finding" and isinstance(event.get("finding"), dict)
+            ]
+            return {"content": content, "actions": actions, "findings": findings}
         except Exception as e:
-            return {"content": f"LLM error: {_friendly_error(model, e)}", "actions": []}
+            return {
+                "content": f"LLM error: {_friendly_error(model, e)}",
+                "actions": [],
+                "findings": [],
+            }
         finally:
             conn.close()
 
@@ -785,11 +811,15 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             tool_choice="auto",
         )
     except Exception as e:
-        return {"content": f"LLM error: {_friendly_error(model, e)}", "actions": []}
+        return {
+            "content": f"LLM error: {_friendly_error(model, e)}",
+            "actions": [],
+            "findings": [],
+        }
 
     choice = response.choices[0] if response.choices else None
     if not choice:
-        return {"content": "", "actions": []}
+        return {"content": "", "actions": [], "findings": []}
     message = choice.message
     if isinstance(message, dict):
         content = (message.get("content") or "").strip()
@@ -809,7 +839,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             action = _parse_tool_call(name, args_str)
             if action:
                 actions.append(action)
-    return {"content": content, "actions": actions}
+    return {"content": content, "actions": actions, "findings": []}
 
 
 # ---------------------------------------------------------------------------
