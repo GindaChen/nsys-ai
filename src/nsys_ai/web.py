@@ -793,6 +793,10 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(body.decode("utf-8"))
             stream_requested = payload.get("stream") is True
+            if isinstance(payload, dict) and self.__class__._session_id is not None:
+                payload["session_id"] = self.__class__._session_id
+                payload["session_root"] = self.__class__._session_root
+                body = json.dumps(payload).encode("utf-8")
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             pass
         try:

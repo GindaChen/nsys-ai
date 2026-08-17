@@ -13,6 +13,7 @@ Public names are re-exported from the sub-modules so that existing callers
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -138,6 +139,74 @@ _DIFF_GROUNDING_TOOLS = frozenset(
         "get_gpu_peak_tflops",
     }
 )
+
+
+def _prompt_sha256(messages: list) -> str:
+    """Fingerprint the initial model prompt for durable LLM provenance."""
+    canonical = json.dumps(
+        messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _finding_from_tool_payload(payload: dict):
+    """Convert the visual-tool payload into the validated Finding model."""
+    from .annotation import Finding
+
+    required = {"type", "label", "start_ns", "severity"}
+    missing = sorted(required - payload.keys())
+    if missing:
+        raise ValueError(f"finding is missing required fields: {', '.join(missing)}")
+    normalized = dict(payload)
+    if isinstance(normalized.get("stream"), int):
+        normalized["stream"] = str(normalized["stream"])
+    return Finding.from_dict(normalized)
+
+
+def _session_finding_sink(
+    session_id: str | None,
+    session_root: str | None,
+    *,
+    profile_path: str | None = None,
+):
+    """Return a sink that appends one LLM finding through SessionStore."""
+    if not session_id:
+        return None
+
+    from .annotation import EvidenceReport
+    from .session_store import SessionStore
+
+    store = SessionStore(session_root or ".nsys-ai/sessions")
+
+    def publish(payload: dict) -> None:
+        # Acquire the writer before reading the snapshot so concurrent chat
+        # requests cannot append from the same stale findings list.
+        with store.writer(session_id) as writer:
+            snapshot = store.load(session_id)
+            before = snapshot.state.before_profile
+            if before is None:
+                raise ValueError("LLM finding publication requires a before profile")
+            if profile_path and os.path.abspath(os.path.expanduser(profile_path)) != os.path.abspath(
+                os.path.expanduser(before.path)
+            ):
+                raise ValueError("LLM finding profile does not match the session before profile")
+            existing = snapshot.findings
+            finding = _finding_from_tool_payload(payload)
+            report = EvidenceReport(
+                title=existing.title if existing is not None else "LLM findings",
+                profile_path=before.path,
+                profile_id=before.profile_id,
+                findings=[
+                    *(existing.findings if existing is not None else []),
+                    finding,
+                ],
+                skipped=list(existing.skipped) if existing is not None else [],
+            )
+            writer.publish_findings(report, before_profile=before)
+
+    return publish
+
+
 _CONTROL_RESPONSE_TOOLS = frozenset(
     {"request_clarification", "answer_from_ui_context"}
 )
@@ -724,7 +793,7 @@ def _prepare_session(
 def chat_completion(body_bytes: bytes) -> dict | None:
     """Handle a POST ``/api/chat`` request body.
 
-    Returns ``{"content": str, "actions": list}`` or ``None`` for 501
+    Returns content, actions, and findings, or None for 501
     (LLM not configured / not installed).
     """
     try:
@@ -744,6 +813,8 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     messages = payload.get("messages") or []
     ui_context = payload.get("ui_context") or {}
     profile_path = payload.get("profile_path")
+    session_id = payload.get("session_id")
+    session_root = payload.get("session_root")
 
     from nsys_ai.exceptions import NsysAiError
 
@@ -761,6 +832,14 @@ def chat_completion(body_bytes: bytes) -> dict | None:
 
     if profile_path and conn:
         dispatcher_events: list[dict] = []
+        finding_sink = _session_finding_sink(
+            session_id, session_root, profile_path=profile_path
+        )
+        finding_provenance = {
+            "source": "llm",
+            "model": model,
+            "prompt_sha256": _prompt_sha256(api_messages),
+        }
         try:
             from .tool_dispatch import ToolDispatcher
 
@@ -786,6 +865,8 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                     sqlite_path=sqlite_path,
                     query_runner=query_runner,
                     finding_counter=_next_finding_index,
+                    finding_sink=finding_sink,
+                    finding_provenance=finding_provenance,
                 ),
             )
             findings = [
@@ -901,6 +982,8 @@ def stream_agent_loop(
     max_turns: int = 5,
     skill_names: list[str] | None = None,
     findings_count: int = 0,
+    session_id: str | None = None,
+    session_root: str | None = None,
 ):
     """UI-agnostic streaming agent loop — yields event dicts.
 
@@ -943,6 +1026,8 @@ def stream_agent_loop(
     provided, their contents are concatenated and appended to the system
     prompt as a SESSION SKILL CONTEXT block.  Uses ``prompt_loader``
     internally; missing files are silently ignored.
+    *session_id* / *session_root* — when supplied, submit_finding appends
+    through SessionStore instead of remaining a UI-only overlay.
     """
     try:
         import litellm
@@ -1014,6 +1099,14 @@ def stream_agent_loop(
         sqlite_path=sqlite_path,
         query_runner=query_runner,
         finding_counter=_next_finding_index,
+        finding_sink=_session_finding_sink(
+            session_id, session_root, profile_path=profile_path
+        ),
+        finding_provenance={
+            "source": "llm",
+            "model": model,
+            "prompt_sha256": _prompt_sha256(api_messages),
+        },
         mode="diff" if use_diff else "profile",
         diff_context=diff_context,
     )
@@ -1401,6 +1494,8 @@ def chat_completion_stream(body_bytes: bytes):
     messages = payload.get("messages") or []
     ui_context = payload.get("ui_context") or {}
     profile_path = payload.get("profile_path")
+    session_id = payload.get("session_id")
+    session_root = payload.get("session_root")
     # skill_context: optional list of skill paths (e.g. ["skills/mfu.md"]).
     # When provided, those files are loaded from src/nsys_ai/agent_skills/ and appended
     # to the system prompt as SESSION SKILL CONTEXT. Unknown paths are silently ignored.
@@ -1422,6 +1517,8 @@ def chat_completion_stream(body_bytes: bytes):
             max_turns=5,
             skill_names=skill_context,
             findings_count=findings_count,
+            session_id=session_id,
+            session_root=session_root,
         ):
             t = ev.get("type")
             if t == "text":

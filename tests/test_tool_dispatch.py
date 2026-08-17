@@ -80,3 +80,40 @@ def test_query_profile_db_remains_exploratory_tool(minimal_nsys_conn):
     result = dispatcher.dispatch("query_profile_db", '{"sql_query":"SELECT 1"}')
 
     assert result.content == "exploratory:SELECT 1"
+
+
+def test_submit_finding_uses_session_sink_and_preserves_confidence():
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    persisted = []
+    dispatcher = ToolDispatcher(
+        finding_counter=lambda: 7,
+        finding_sink=persisted.append,
+        finding_provenance={
+            "source": "llm",
+            "model": "test-model",
+            "prompt_sha256": "a" * 64,
+        },
+    )
+    result = dispatcher.dispatch(
+        "submit_finding",
+        json.dumps(
+            {
+                "type": "region",
+                "label": "NCCL stall",
+                "start_ns": 10,
+                "end_ns": 20,
+                "severity": "warning",
+                "confidence": 0.75,
+            }
+        ),
+    )
+
+    assert json.loads(result.content)["index"] == 7
+    assert result.events[0]["finding"]["index"] == 7
+    assert persisted[0]["confidence"] == 0.75
+    assert persisted[0]["provenance"] == {
+        "source": "llm",
+        "model": "test-model",
+        "prompt_sha256": "a" * 64,
+    }

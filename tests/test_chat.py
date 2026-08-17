@@ -381,6 +381,53 @@ def test_chat_completion_preserves_findings_when_followup_llm_fails(monkeypatch)
     conn.close.assert_called_once()
 
 
+def test_session_finding_sink_publishes_validated_llm_report(tmp_path):
+    from nsys_ai.profile_reference import LocalProfileReference
+    from nsys_ai.session_store import SessionStore
+
+    before_path = tmp_path / "before.sqlite"
+    before_path.write_bytes(b"before")
+    before = LocalProfileReference(
+        path=str(before_path),
+        profile_id="nsys2:sha256:" + "b" * 64,
+        schema_version="3.25.0",
+        product_version="2026.2.1.106",
+        kernel_count=1,
+    )
+    store = SessionStore(tmp_path / "sessions")
+    store.create("llm-findings", before_profile=before)
+
+    sink = chat_mod._session_finding_sink(
+        "llm-findings", str(store.root), profile_path=str(before_path)
+    )
+    sink(
+        {
+            "type": "region",
+            "label": "NCCL stall",
+            "start_ns": 10,
+            "end_ns": 20,
+            "severity": "warning",
+            "confidence": 0.8,
+            "stream": 7,
+            "provenance": {
+                "source": "llm",
+                "model": "test-model",
+                "prompt_sha256": "c" * 64,
+            },
+        }
+    )
+
+    report = store.load("llm-findings").findings
+    assert report is not None
+    assert report.findings[0].confidence == 0.8
+    assert report.findings[0].stream == "7"
+    assert report.findings[0].provenance == {
+        "source": "llm",
+        "model": "test-model",
+        "prompt_sha256": "c" * 64,
+    }
+
+
 def test_sse_event():
     """_sse_event produces valid SSE line format."""
     raw = chat_mod._sse_event("text", {"chunk": "hi"})
