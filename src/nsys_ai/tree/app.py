@@ -201,6 +201,8 @@ class NsysTreeApp(App):
             device=self._device,
             ui_context_fn=self._build_ui_context,
             on_action_fn=self._handle_ai_action,
+            session_id=self._session_id,
+            session_root=self._session_root,
         )
         yield Footer()
 

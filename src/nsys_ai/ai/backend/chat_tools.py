@@ -304,6 +304,15 @@ TOOL_SUBMIT_FINDING = {
                     "enum": ["critical", "warning", "info"],
                     "description": "critical=red, warning=yellow, info=blue",
                 },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": (
+                        "Optional confidence in this stated finding. "
+                        "If omitted, no confidence is recorded."
+                    ),
+                },
                 "note": {
                     "type": "string",
                     "description": "Explanation text shown in sidebar card and tooltip",

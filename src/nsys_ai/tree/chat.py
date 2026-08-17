@@ -64,6 +64,8 @@ class ChatPanel(Widget):
         device: int = 0,
         ui_context_fn: Callable[[], dict] | None = None,
         on_action_fn: Callable[[dict], None] | None = None,
+        session_id: str | None = None,
+        session_root: str = ".nsys-ai/sessions",
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -71,6 +73,8 @@ class ChatPanel(Widget):
         self._device = device
         self._ui_context_fn = ui_context_fn or (lambda: {})
         self._on_action_fn = on_action_fn or (lambda _: None)
+        self._session_id = session_id
+        self._session_root = session_root
         self._history: list[dict] = []
         self._lock = threading.Lock()
         self._cancel_event = threading.Event()
@@ -200,6 +204,8 @@ class ChatPanel(Widget):
                 tools=chat_mod._tools_openai(),
                 profile_path=self._db_path,
                 max_turns=5,
+                session_id=self._session_id,
+                session_root=self._session_root,
             )
             for ev in stream:
                 if self._cancel_event.is_set():

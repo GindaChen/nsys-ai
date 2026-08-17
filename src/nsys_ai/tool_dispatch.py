@@ -76,6 +76,8 @@ class ToolDispatcher:
         sqlite_path: str | None = None,
         query_runner: Callable[[str], str] | None = None,
         finding_counter: Callable[[], int] | None = None,
+        finding_sink: Callable[[dict], None] | None = None,
+        finding_provenance: dict | None = None,
         max_consecutive_db_errors: int = 3,
         mode: str = "profile",
         diff_context=None,
@@ -84,6 +86,8 @@ class ToolDispatcher:
         self._sqlite_path = sqlite_path
         self._query_runner = query_runner
         self._finding_counter = finding_counter
+        self._finding_sink = finding_sink
+        self._finding_provenance = dict(finding_provenance or {})
         self._consecutive_db_errors = 0
         self._max_consecutive_db_errors = max_consecutive_db_errors
         self._mode = mode
@@ -314,6 +318,12 @@ class ToolDispatcher:
 
         finding_payload = dict(args)
         finding_payload["index"] = finding_index
+
+        if self._finding_sink is not None:
+            persisted_payload = dict(args)
+            persisted_payload["provenance"] = dict(self._finding_provenance)
+            self._finding_sink(persisted_payload)
+            finding_payload["provenance"] = dict(self._finding_provenance)
 
         events = [{"type": "finding", "finding": finding_payload}]
         result = {
