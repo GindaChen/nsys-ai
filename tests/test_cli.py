@@ -414,6 +414,20 @@ def test_no_surface_still_takes_a_candidate_it_cannot_register(tmp_path):
     ]
     assert not offenders, f"loop_after survives at: {offenders}"
 
+    # The name is only half of it. `_open_session_web` kept an `after_path`
+    # parameter after its one use was deleted, and its caller kept computing a
+    # value to hand it -- plumbing that still looks ready for the flag, which
+    # is exactly how the flag comes back. Ruff's enabled rules do not flag an
+    # unused argument, so nothing else catches this.
+    import inspect
+
+    from nsys_ai.review_command import _open_session_web
+
+    accepted = set(inspect.signature(_open_session_web).parameters)
+    assert not accepted & {"after_path", "after", "loop_after"}, (
+        f"_open_session_web still takes a candidate it cannot register: {sorted(accepted)}"
+    )
+
 
 def test_h100_preset_hint_names_a_command_that_parses():
     """The only recovery instruction on the preset path must still be runnable.
