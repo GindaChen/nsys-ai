@@ -18,7 +18,7 @@ import sqlite3
 
 from nsys_ai.connection import DB_ERRORS, wrap_connection
 
-from ..base import Skill, SkillParam
+from ..base import Skill, SkillParam, abstain, is_abstention
 
 _log = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 evidence += f" ({pct}% of profile)"
 
             # If Sync Cost Analysis indicates massive CPU blockage, overwrite the guess!
-            if sync_data and "error" not in sync_data[0]:
+            if sync_data and not is_abstention(sync_data) and "error" not in sync_data[0]:
                 sync_ms = sync_data[0].get("total_sync_wall_ms", 0)
                 sync_density = sync_data[0].get("sync_density_pct", 0)
                 # If sync time accounts for more than half of the idle time, or > 15% of profile:
@@ -449,7 +449,9 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     findings += _check_sync_apis(conn, **kwargs)
     findings += _check_sync_memcpy(conn, **kwargs)
     findings += _check_pageable_memcpy(conn, **kwargs)
-    findings += _check_sync_memset(conn, **kwargs)
+    memset_findings = _check_sync_memset(conn, **kwargs)
+    if not is_abstention(memset_findings):
+        findings += memset_findings
 
     if not findings:
         findings.append(
@@ -933,7 +935,16 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
     runtime_tbl = tables.get("runtime")
     memset_tbl = tables.get("memset")
     if not runtime_tbl or not memset_tbl:
-        return []
+        missing = []
+        if not runtime_tbl:
+            missing.append("CUPTI_ACTIVITY_KIND_RUNTIME")
+        if not memset_tbl:
+            missing.append("CUPTI_ACTIVITY_KIND_MEMSET")
+        return abstain(
+            "Synchronous memset detection cannot run because this profile has "
+            f"no {', '.join(missing)} table.",
+            missing_tables=missing,
+        )
 
     try:
         # Step 1: find nameIds for sync cudaMemset (NOT async)

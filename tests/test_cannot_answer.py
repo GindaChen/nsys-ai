@@ -225,20 +225,10 @@ def test_row_2_a_bare_empty_list_when_the_table_is_absent(
     assert is_cannot_answer(payload), payload
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#345: sync_cost_analysis emits an untyped error key beside zero-valued "
-    "data columns, so a reader sees both an answer and a failure",
-)
 def test_row_3_an_error_key_beside_real_looking_zeros(
     profile_without_activity_tables: Path, tmp_path: Path
 ):
-    """Row 3: a data row whose numbers are zero because nothing was read.
-
-    The row carries `total_sync_wall_ms: 0.0` — which a consumer will plot — and
-    an `error` key it has no reason to look for. Zero synchronization cost is a
-    finding; not having looked is not.
-    """
+    """Row 3: the missing synchronization tables are a typed abstention."""
     result = _cli(
         "skill", "run", "sync_cost_analysis", str(profile_without_activity_tables),
         "--format", "json", cwd=tmp_path,

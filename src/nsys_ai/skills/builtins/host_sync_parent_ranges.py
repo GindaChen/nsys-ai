@@ -239,6 +239,7 @@ SKILL = Skill(
     category="nvtx",
     execute_fn=_execute,
     format_fn=_format,
+    required_tables=("nvtx",),
     params=[
         SkillParam("limit", "Max parent ranges to return", "int", False, 5),
         SkillParam(

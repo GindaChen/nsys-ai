@@ -58,35 +58,19 @@ def _params_key(resolved: dict) -> str:
 # those four the guard never fires, at any profile, ever. Their uses are Python
 # f-strings inside ``execute_fn`` bodies, which the guard has no way to read.
 #
-# What those four do instead is per-skill, and mostly not the abstention
-# contract — issue #345 tracks closing that, and this note exists to keep the
-# gap visible until it is. ``nvtx_table`` is the nearest to right:
-# ``requires_nvtx``, ``requires_pushpop_nvtx`` and ``resolve_nvtx_table`` below
-# are the shared resolve-and-abstain helpers and seven skills abstain through one
-# of them — but ``gc_impact`` skips its NVTX half silently, and
-# ``host_sync_parent_ranges`` falls back to the literal ``NVTX_EVENTS`` and
-# reports the resulting failure as a data row with an ``error`` key.
-# For ``memset_table``, ``sync_table`` and ``sync_type_table`` nothing calls
-# ``abstain`` at all: ``pipeline_bubble_metrics`` skips, ``root_cause_matcher``
-# returns ``[]``, and ``sync_cost_analysis`` probes only the sync table and
-# returns a zero-valued ``error`` row when it is absent. ``sync_type_table`` is
-# the worst of the three, because it is unprobed and load-bearing: its resolved
-# name reaches the main query's ``LEFT JOIN {type_table}`` in
-# ``sync_cost_analysis``, under a local named ``type_table`` — which is why
-# grepping for ``sync_type`` does not find it. Drop ``ENUM_CUPTI_SYNC_TYPE``
-# from tests/fixtures/h100_2gpu_1s.sqlite and leave the sync table in place, and
-# the skill reports "Synchronization tables not found in profile" with zeroes,
-# naming the table that is present rather than the one that is not. So a missing
-# table on these paths is silence, an untyped error row, or a wrong one, rather
-# than either an abstention or a raised ``no such table`` — which is exactly the
-# ambiguity :func:`abstain` exists to remove.
+# The execute_fn paths now declare hard requirements on ``Skill.required_tables``
+# where the whole skill cannot answer without them: ``sync_cost_analysis``
+# requires both sync tables and ``host_sync_parent_ranges`` requires NVTX. The
+# NVTX half of ``gc_impact`` remains optional because its runtime-derived rows
+# are still useful without annotation. Likewise ``pipeline_bubble_metrics``
+# keeps its partial result when memset is absent, and the memset checker inside
+# ``root_cause_matcher`` returns an abstention that its parent filters rather
+# than turning into a finding. This distinction is intentional: partial
+# coverage is not the same as a skill-level abstention.
 #
-# Extending the guard is not a one-liner, which is why this is documented rather
-# than fixed here: an ``execute_fn`` builds its own SQL, so covering it needs a
-# per-skill declaration of the tables it requires.
-# ``test_the_table_guard_covers_only_sql_templates`` pins the split above so this
-# note cannot quietly go stale — a template that starts using one of the other
-# four makes it fail, and the note is what should be corrected.
+# ``test_the_table_guard_covers_only_sql_templates`` pins the split above, and
+# the execute_fn abstention tests pin the declared requirements and the two
+# legitimate partial-result cases.
 ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
     "kernel_table": ("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
     "runtime_table": ("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
@@ -466,6 +450,9 @@ class Skill:
         tags:        Search tags for skill discovery
         execute_fn:  Optional Python callable(conn, **kwargs) → list[dict].
                      When set, used instead of sql for execution.
+        required_tables: Activity-table resolver keys required before execution.
+                         Used for execute_fn skills whose SQL is not visible to
+                         the generic template guard.
     """
 
     name: str
@@ -478,6 +465,7 @@ class Skill:
     tags: list[str] = field(default_factory=list)
     execute_fn: Callable | None = None
     to_findings_fn: Callable | None = None
+    required_tables: tuple[str, ...] = ()
 
     def execute(self, conn: sqlite3.Connection, **kwargs) -> list[dict]:
         """Run the skill against a connection.
@@ -505,6 +493,28 @@ class Skill:
         from ..connection import wrap_connection
 
         adapter = wrap_connection(conn)
+
+        # SQL skills can infer required activity tables from their template,
+        # but execute_fn skills build SQL in Python and need to declare the
+        # same contract explicitly. Check before parameter resolution and
+        # memoization so a missing table is visible as an abstention rather
+        # than silence or an untyped database error.
+        if self.required_tables:
+            tables = adapter.resolve_activity_tables()
+            missing = [
+                canonical
+                for _placeholder, (table_key, canonical) in ACTIVITY_TABLE_PLACEHOLDERS.items()
+                if table_key in self.required_tables and not tables.get(table_key)
+            ]
+            if missing:
+                names = ", ".join(sorted(set(missing)))
+                return abstain(
+                    f"This profile has no {names} table, so '{self.name}' cannot "
+                    "run. Either the capture did not trace that activity kind, "
+                    "or the export names it something this version does not "
+                    "recognise as a variant.",
+                    missing_tables=sorted(set(missing)),
+                )
 
         # Apply parameter defaults and required checks for all skill types.
         # Start from the provided kwargs so we preserve any extra arguments.

@@ -9,7 +9,7 @@ import sqlite3
 
 from nsys_ai.connection import wrap_connection
 
-from ..base import Skill
+from ..base import Skill, abstain, is_abstention
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,20 @@ def _format(rows):
 
 def _execute(conn, **kwargs):
     tables = wrap_connection(conn).resolve_activity_tables()
-    kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+    kernel_table = tables.get("kernel")
     memcpy_table = tables.get("memcpy")
     memset_table = tables.get("memset")
+
+    if not kernel_table and not memcpy_table and not memset_table:
+        return abstain(
+            "This profile has no kernel, memcpy, or memset activity table, so "
+            "pipeline bubble metrics cannot be calculated.",
+            missing_tables=[
+                "CUPTI_ACTIVITY_KIND_KERNEL",
+                "CUPTI_ACTIVITY_KIND_MEMCPY",
+                "CUPTI_ACTIVITY_KIND_MEMSET",
+            ],
+        )
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
@@ -156,7 +167,6 @@ def _execute(conn, **kwargs):
                 "active_ms": round(active_ns / 1e6, 2),
                 "bubble_ms": round(bubble_ns / 1e6, 2),
                 "bubble_pct": round(bubble_pct, 2),
-                "sync_ms": 0.0,
             }
         )
 
@@ -168,7 +178,7 @@ def _execute(conn, **kwargs):
             sync_skill = get_skill("sync_cost_analysis")
             if sync_skill:
                 sync_data = sync_skill.execute(conn, **kwargs)
-                if sync_data and "error" not in sync_data[0]:
+                if sync_data and not is_abstention(sync_data) and "error" not in sync_data[0]:
                     results[0]["sync_ms"] = sync_data[0].get("total_sync_wall_ms", 0)
         except Exception as exc:
             logger.debug(f"Failed to fetch sync cost data: {exc}")
