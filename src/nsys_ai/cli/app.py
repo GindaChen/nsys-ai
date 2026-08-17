@@ -94,6 +94,8 @@ def show_help():
     print("    1. Profile:  nsys-ai profile -- python train.py")
     print("    2. Explore:  nsys-ai open <profile.sqlite>")
     print()
+    print("  This screen is a task-organised selection. `nsys-ai --help` lists every command.")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -164,27 +166,12 @@ def _normalize_optimize_command(argv: list[str]) -> list[str]:
 
 
 def main():
-    from .parsers import _build_legacy_parser, _build_parser
+    from .parsers import LEGACY_ROUTED_COMMANDS, _build_legacy_parser, _build_parser
 
     sys.argv = _normalize_default_profile_command(sys.argv)
     sys.argv = _normalize_optimize_command(sys.argv)
 
-    legacy_commands = {
-        "analyze",
-        "summary",
-        "overlap",
-        "nccl",
-        "iters",
-        "tree",
-        "markdown",
-        "search",
-        "export-csv",
-        "export-json",
-        "viewer",
-        "timeline-html",
-        "tui",
-        "timeline",
-    }
+    legacy_commands = LEGACY_ROUTED_COMMANDS
     use_legacy_skill_mgmt = (
         len(sys.argv) > 2 and sys.argv[1] == "skill" and sys.argv[2] in {"add", "remove", "save"}
     )

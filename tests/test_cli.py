@@ -1,5 +1,6 @@
 """Basic smoke tests for nsys-ai package."""
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1068,6 +1069,86 @@ def test_getting_started_screen_names_the_loop_verbs():
     screen = _help_screen()
     for verb in ("optimize", "diagnose", "propose", "diff", "review", "loop", "doctor", "baseline"):
         assert f"nsys-ai {verb}" in screen, f"help screen does not name `{verb}`"
+
+
+def test_every_dispatchable_command_is_visible_from_dash_dash_help():
+    """`nsys-ai --help` must not omit a command that works.
+
+    `main()` picks between two parsers by command name, so `--help` rendered
+    only one of them: five working commands (`summary`, `tui`, `viewer`,
+    `timeline`, `export-csv`, ...) appeared on the getting-started screen and
+    nowhere in `--help`, and seven appeared in `--help` and not on the screen.
+    A reader had no way to tell which list was authoritative.
+
+    The getting-started screen stays a curated selection -- that is what it is
+    for, and it says so. `--help` is the one that must be complete.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+
+    # Read the two lists `--help` actually presents, rather than searching the
+    # whole page for each name. Searching false-passes on prose: `viewer`
+    # occurs in "Serve interactive web viewer" and `timeline` in "Open web
+    # timeline UI", so both stay "present" after the epilog naming them is
+    # deleted -- which is the regression this test exists to catch.
+    # Horizontal whitespace only: `\s` spans newlines, so a greedy run would
+    # swallow the following help line and drop the command it names.
+    listed = set(
+        re.findall(r"^[ \t]{2,}([a-z][a-z0-9-]*)[ \t]{2,}\S", result.stdout, re.MULTILINE)
+    )
+    epilog = result.stdout.split("also available:", 1)
+    assert len(epilog) == 2, f"--help no longer carries the epilog:\n{result.stdout}"
+    also_available = {
+        name.strip() for name in epilog[1].split("\n\n", 1)[0].split(",") if name.strip()
+    }
+
+    missing = sorted(_declared_subcommands() - listed - also_available)
+    assert not missing, (
+        "these commands dispatch but are invisible from `--help`:\n  "
+        + "\n  ".join(missing)
+    )
+    stale = sorted(also_available - _declared_subcommands())
+    assert not stale, (
+        "`--help` advertises commands that do not dispatch:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_the_legacy_routing_set_matches_the_parser_that_serves_it():
+    """The routed set is exactly the commands only the legacy parser has.
+
+    Asserting equality rather than containment is the point. A subset check
+    passes for the two ways this actually breaks: a command routed to a parser
+    that does not register it (`invalid choice`), and a command only the legacy
+    parser registers that nothing routes to it (unreachable, and invisible on
+    every help surface). It also passes for the set derived the naive way --
+    every name the legacy parser registers -- which would silently reroute
+    `doctor`, `info`, `evidence`, `help` and `skill` to a different
+    implementation than the one users get today.
+    """
+    from nsys_ai.cli.parsers import (
+        LEGACY_ROUTED_COMMANDS,
+        _build_legacy_parser,
+        _build_parser,
+    )
+
+    def _subcommands(parser) -> set[str]:
+        names: set[str] = set()
+        for action in parser._subparsers._group_actions:  # noqa: SLF001
+            names.update(action.choices)
+        return names
+
+    legacy = _subcommands(_build_legacy_parser())
+    primary = _subcommands(_build_parser())
+
+    assert LEGACY_ROUTED_COMMANDS == legacy - primary, (
+        "the routing set must be exactly the commands only the legacy parser "
+        f"registers.\n  routed but unregistered: {sorted(LEGACY_ROUTED_COMMANDS - legacy)}"
+        f"\n  legacy-only but unreachable: {sorted(legacy - primary - LEGACY_ROUTED_COMMANDS)}"
+        f"\n  routed though the primary parser owns it: "
+        f"{sorted(LEGACY_ROUTED_COMMANDS & primary)}"
+    )
 
 
 def test_getting_started_screen_only_advertises_commands_that_exist():

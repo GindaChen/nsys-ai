@@ -483,10 +483,46 @@ def _register_agent_parser(sub):
 # ---------------------------------------------------------------------------
 
 
+#: The commands ``main()`` sends to the legacy parser instead of the primary
+#: one. This is a routing decision, not a registration fact: the legacy parser
+#: also registers ``doctor``, ``info``, ``skill`` and others that the primary
+#: parser owns, so it cannot be derived from that parser's choices. It lived as
+#: a literal inside ``main()``, where nothing tied it to either parser and
+#: nothing showed it to a user -- these commands work and were absent from
+#: ``--help``, leaving a reader unable to tell which of two lists was
+#: authoritative.
+LEGACY_ROUTED_COMMANDS = frozenset(
+    {
+        "analyze",
+        "summary",
+        "overlap",
+        "nccl",
+        "iters",
+        "tree",
+        "markdown",
+        "search",
+        "export-csv",
+        "export-json",
+        "viewer",
+        "timeline-html",
+        "tui",
+        "timeline",
+    }
+)
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="nsys-ai",
         description="Web-first Nsight Systems analysis CLI (with AI backend tools)",
+        # Named here because they are dispatched but not registered on this
+        # parser, so they were absent from `--help` while working perfectly.
+        epilog=(
+            "also available:\n  "
+            + ", ".join(sorted(LEGACY_ROUTED_COMMANDS))
+            + "\n\nrun `nsys-ai help` for a task-organised introduction."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(
         dest="command",
