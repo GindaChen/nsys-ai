@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 import threading
 import time
@@ -202,17 +203,24 @@ def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
 def test_runner_reuses_public_profile_reference_factory(
     tmp_path, fake_nsys, monkeypatch
 ):
+    """The runner must not re-implement the guarded read.
+
+    It goes through the shared reader, which pins a descriptor, asserts the
+    file did not change under it, and returns the reference and the device
+    count from that one open. `build_local_profile_reference` is the thin
+    wrapper over the same reader for callers that need only the reference.
+    """
     import nsys_ai.profile_runner as profile_runner
 
     calls = []
-    real_factory = profile_runner.build_local_profile_reference
+    real_reader = profile_runner.read_local_profile_under_guard
 
-    def recording_factory(path, *, resolved_secrets=None):
+    def recording_reader(path, *, resolved_secrets=None):
         calls.append((Path(path), dict(resolved_secrets or {})))
-        return real_factory(path, resolved_secrets=resolved_secrets)
+        return real_reader(path, resolved_secrets=resolved_secrets)
 
     monkeypatch.setattr(
-        profile_runner, "build_local_profile_reference", recording_factory
+        profile_runner, "read_local_profile_under_guard", recording_reader
     )
     result = _run(tmp_path, fake_nsys)
 
@@ -674,10 +682,65 @@ def test_declared_gpu_count_the_capture_meets_succeeds(tmp_path, fake_nsys):
     assert result.profile is not None
 
 
-def test_observed_gpu_count_reads_the_devices_that_recorded_kernels(tmp_path, fake_nsys):
-    """A machine can expose eight GPUs and a run can touch one."""
-    from nsys_ai.profile_runner import observed_gpu_count
+def test_an_unreadable_capture_fails_the_run_rather_than_the_declaration(
+    tmp_path, fake_nsys, monkeypatch
+):
+    """"Could not be checked" must never reach the success path.
+
+    The guarded read either yields a count or raises, so the fail-closed rule
+    lives here rather than in a "count is unknown" branch of the comparison,
+    which no caller could reach. A capture that cannot be read is invalid
+    whether or not a declaration was made.
+    """
+    from nsys_ai import profile_runner
+
+    def _explode(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(profile_runner, "read_local_profile_under_guard", _explode)
+    result = _run(tmp_path, fake_nsys, expected_gpu_count=8)
+
+    assert result.status is RunStatus.INVALID_PROFILE
+    assert result.detail == "profile validation failed: OperationalError"
+    assert result.profile is None
+
+
+def test_the_gpu_count_is_read_from_the_guarded_handle(tmp_path, fake_nsys):
+    """A machine can expose eight GPUs and a run can touch one.
+
+    The count comes back from the same guarded open that builds the reference.
+    It used to be a second `sqlite3.connect` by path, made after the pinned
+    descriptor was closed -- so the number validation acted on was read from
+    whatever sat at that path by then, outside the swap guard, at the cost of a
+    second full `GROUP BY deviceId` scan.
+    """
+    from nsys_ai.profile_runner import read_local_profile_under_guard
 
     result = _run(tmp_path, fake_nsys)
     assert result.status is RunStatus.SUCCEEDED
-    assert observed_gpu_count(result.sqlite_path) == 1
+    reference, observed = read_local_profile_under_guard(result.sqlite_path)
+    assert observed == 1
+    assert reference.kernel_count > 0
+
+
+def test_the_capture_is_opened_once_for_reference_and_gpu_count(tmp_path, fake_nsys, monkeypatch):
+    """One guarded open, not two: the second was by path and unguarded."""
+    import sqlite3 as _sqlite3
+
+    from nsys_ai import profile_runner
+
+    result = _run(tmp_path, fake_nsys)
+    assert result.status is RunStatus.SUCCEEDED
+
+    opened: list[str] = []
+    real_connect = _sqlite3.connect
+
+    def _record(target, *args, **kwargs):
+        opened.append(str(target))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(profile_runner.sqlite3, "connect", _record)
+    profile_runner.read_local_profile_under_guard(result.sqlite_path)
+
+    by_path = [target for target in opened if not target.startswith("file:/proc/self/fd/")]
+    assert not by_path, f"the capture was reopened outside the descriptor guard: {by_path}"
