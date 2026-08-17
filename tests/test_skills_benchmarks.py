@@ -100,7 +100,8 @@ def test_pipeline_bubble_metrics_duckdb(duckdb_conn):
 
 
 def test_pipeline_bubble_metrics_no_tables_graceful(minimal_nsys_conn):
-    """Test pipeline bubble metrics falls back gracefully if activity tables are omitted."""
+    """Test pipeline bubble metrics abstains if all activity tables are omitted."""
+    from nsys_ai.skills.base import is_abstention
     from nsys_ai.skills.registry import get_skill
 
     minimal_nsys_conn.execute("DROP TABLE CUPTI_ACTIVITY_KIND_KERNEL")
@@ -109,7 +110,7 @@ def test_pipeline_bubble_metrics_no_tables_graceful(minimal_nsys_conn):
 
     skill = get_skill("pipeline_bubble_metrics")
     rows = skill.execute(minimal_nsys_conn)
-    assert rows == []
+    assert is_abstention(rows)
 
 
 def _use_a100(conn):

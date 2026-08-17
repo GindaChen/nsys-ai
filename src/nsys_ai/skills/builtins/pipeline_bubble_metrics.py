@@ -9,7 +9,7 @@ import sqlite3
 
 from nsys_ai.connection import wrap_connection
 
-from ..base import Skill, is_abstention
+from ..base import Skill, abstain, is_abstention
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,20 @@ def _format(rows):
 
 def _execute(conn, **kwargs):
     tables = wrap_connection(conn).resolve_activity_tables()
-    kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
+    kernel_table = tables.get("kernel")
     memcpy_table = tables.get("memcpy")
     memset_table = tables.get("memset")
+
+    if not kernel_table and not memcpy_table and not memset_table:
+        return abstain(
+            "This profile has no kernel, memcpy, or memset activity table, so "
+            "pipeline bubble metrics cannot be calculated.",
+            missing_tables=[
+                "CUPTI_ACTIVITY_KIND_KERNEL",
+                "CUPTI_ACTIVITY_KIND_MEMCPY",
+                "CUPTI_ACTIVITY_KIND_MEMSET",
+            ],
+        )
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")

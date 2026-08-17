@@ -2,7 +2,7 @@
 
 from nsys_ai.connection import DB_ERRORS, wrap_connection
 
-from ..base import Skill
+from ..base import Skill, abstain
 
 
 def _format(rows):
@@ -27,43 +27,45 @@ def _format(rows):
 def _execute(conn, **kwargs):
     adapter = wrap_connection(conn)
     tables = adapter.resolve_activity_tables()
-    runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+    runtime_table = tables.get("runtime")
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
 
-    try:
-        adapter.execute(f"SELECT 1 FROM {runtime_table} LIMIT 1")
-    except DB_ERRORS:
-        return []
-
     # --- Part 1: CUDA Memory APIs from Runtime table ---
-    params_r = []
-    trim_clause_r = ""
-    if trim_start is not None and trim_end is not None:
-        trim_clause_r = 'AND r.start >= ? AND r."end" <= ?'
-        params_r.extend([trim_start, trim_end])
-
-    sql_runtime = f"""
-        SELECT
-            s.value AS event_name,
-            COUNT(*) AS occurrences,
-            ROUND(SUM(r."end" - r.start) / 1e6, 2) AS total_ms,
-            ROUND(MAX(r."end" - r.start) / 1e6, 2) AS max_ms,
-            ROUND(AVG(r."end" - r.start) / 1e6, 2) AS avg_ms
-        FROM {runtime_table} r
-        JOIN StringIds s ON r.nameId = s.id
-        WHERE (s.value LIKE '%cudaFree%'
-           OR s.value LIKE '%cuMemFree%'
-           OR s.value LIKE '%cudaMalloc%'
-           OR s.value LIKE '%cuMemAlloc%')
-          {trim_clause_r}
-        GROUP BY s.value
-        ORDER BY total_ms DESC, event_name ASC
-    """
-    rows_runtime = adapter.execute(sql_runtime, params_r).fetchall()
     cols = ["event_name", "occurrences", "total_ms", "max_ms", "avg_ms"]
-    results = [dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows_runtime]
+    results = []
+    if runtime_table:
+        params_r = []
+        trim_clause_r = ""
+        if trim_start is not None and trim_end is not None:
+            trim_clause_r = 'AND r.start >= ? AND r."end" <= ?'
+            params_r.extend([trim_start, trim_end])
+
+        sql_runtime = f"""
+            SELECT
+                s.value AS event_name,
+                COUNT(*) AS occurrences,
+                ROUND(SUM(r."end" - r.start) / 1e6, 2) AS total_ms,
+                ROUND(MAX(r."end" - r.start) / 1e6, 2) AS max_ms,
+                ROUND(AVG(r."end" - r.start) / 1e6, 2) AS avg_ms
+            FROM {runtime_table} r
+            JOIN StringIds s ON r.nameId = s.id
+            WHERE (s.value LIKE '%cudaFree%'
+               OR s.value LIKE '%cuMemFree%'
+               OR s.value LIKE '%cudaMalloc%'
+               OR s.value LIKE '%cuMemAlloc%')
+              {trim_clause_r}
+            GROUP BY s.value
+            ORDER BY total_ms DESC, event_name ASC
+        """
+        try:
+            rows_runtime = adapter.execute(sql_runtime, params_r).fetchall()
+        except DB_ERRORS:
+            rows_runtime = []
+        results.extend(
+            dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows_runtime
+        )
 
     # --- Part 2: NVTX events mentioning GC ---
     nvtx_table = tables.get("nvtx")
@@ -126,6 +128,12 @@ def _execute(conn, **kwargs):
     # total_ms alone would faithfully preserve whatever arbitrary order the
     # engine returned for tied rows.
     results.sort(key=lambda x: (-(x.get("total_ms") or 0), str(x.get("event_name") or "")))
+    if not runtime_table and not nvtx_table:
+        return abstain(
+            "This profile has neither a runtime nor an NVTX table, so GC and "
+            "memory-allocation stalls cannot be analysed.",
+            missing_tables=["CUPTI_ACTIVITY_KIND_RUNTIME", "NVTX_EVENTS"],
+        )
     return results
 
 

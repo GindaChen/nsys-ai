@@ -22,6 +22,36 @@ def test_missing_required_execute_fn_table_abstains(skill_name):
     assert "no" in rows[0]["reason"].lower()
 
 
+def test_gc_keeps_nvtx_result_without_runtime_table():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE NVTX_EVENTS (
+            start INTEGER, [end] INTEGER, text TEXT, textId INTEGER,
+            eventType INTEGER
+        );
+        INSERT INTO StringIds VALUES (1, 'GC collection generation 2');
+        INSERT INTO NVTX_EVENTS VALUES (100, 200, NULL, 1, 59);
+        """
+    )
+
+    rows = get_skill("gc_impact").execute(conn)
+
+    assert not is_abstention(rows)
+    assert rows[0]["event_name"] == "GC collection generation 2"
+
+
+def test_gc_abstains_without_runtime_or_nvtx_tables():
+    rows = get_skill("gc_impact").execute(sqlite3.connect(":memory:"))
+
+    assert is_abstention(rows)
+    assert set(rows[0]["missing_tables"]) == {
+        "CUPTI_ACTIVITY_KIND_RUNTIME",
+        "NVTX_EVENTS",
+    }
+
+
 def test_sync_cost_analysis_requires_sync_type_table():
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -44,6 +74,20 @@ def test_pipeline_bubble_keeps_partial_result_without_memset(minimal_nsys_conn):
     assert rows
     assert not is_abstention(rows)
     assert "bubble_pct" in rows[0]
+
+
+def test_pipeline_bubble_abstains_without_any_activity_table(minimal_nsys_conn):
+    for table in (
+        "CUPTI_ACTIVITY_KIND_KERNEL",
+        "CUPTI_ACTIVITY_KIND_MEMCPY",
+        "CUPTI_ACTIVITY_KIND_MEMSET",
+    ):
+        minimal_nsys_conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+    rows = get_skill("pipeline_bubble_metrics").execute(minimal_nsys_conn)
+
+    assert is_abstention(rows)
+    assert "CUPTI_ACTIVITY_KIND_KERNEL" in rows[0]["missing_tables"]
 
 
 def test_pipeline_bubble_does_not_fabricate_sync_zero(minimal_nsys_conn):
