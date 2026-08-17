@@ -4,9 +4,111 @@ conftest.py — Shared pytest fixtures for nsys-ai tests.
 All fixtures here are available to every test module without explicit imports.
 """
 
+import hashlib
+import shutil
 import sqlite3
+import subprocess
+from pathlib import Path
 
 import pytest
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(scope="session")
+def profile_copy(tmp_path_factory):
+    """Return a factory giving a *writable* copy of a committed fixture.
+
+    Opening a profile writes ``_nsysai_*`` helper indexes into the file, so a
+    test that opens a committed fixture directly grows it on disk -- 2.2 MB to
+    3.9 MB for ``h100_2gpu_1s.sqlite`` -- and the churn then follows whoever ran
+    the suite into their next commit. Nothing pins fixture bytes, so it breaks
+    no test, which is exactly why it kept coming back.
+
+    Copies are made once per session and shared, because building the cache for
+    one costs more than every test that reads it.
+    """
+    made: dict[str, Path] = {}
+    root = tmp_path_factory.mktemp("committed_profiles")
+
+    def _copy(name: str) -> Path:
+        if name not in made:
+            destination = root / name
+            # copyfile, not copy: copy carries the source mode across, and a
+            # read-only source would hand back a copy nothing can index either.
+            shutil.copyfile(FIXTURE_DIR / name, destination)
+            made[name] = destination
+        return made[name]
+
+    return _copy
+
+
+def _fixture_digests() -> dict[str, str]:
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(FIXTURE_DIR.glob("*.sqlite"))
+    }
+
+
+def _already_modified_fixtures() -> list[str]:
+    """Fixture files git already reports as modified, newest state on disk.
+
+    Digests only catch a write that happens during this session. A checkout
+    that is already dirty -- from a run before this guard existed, or from a
+    run that went red and was simply repeated -- would compare clean against
+    itself forever, which is the state the churn kept being committed from.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "ls-files", "--modified", "--", str(FIXTURE_DIR)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []  # no git (an sdist, a vendored copy): nothing to compare against
+    if completed.returncode != 0:
+        return []
+    return sorted(
+        Path(line).name for line in completed.stdout.splitlines() if line.strip()
+    )
+
+
+def _fixture_change_report(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Names that differ between two digest snapshots, in either direction."""
+    return sorted(
+        name for name in before.keys() | after.keys() if before.get(name) != after.get(name)
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _committed_fixtures_are_left_alone():
+    """Fail the session if a test wrote into a committed fixture.
+
+    The guard is the part that makes the copies stick: without it the next test
+    to open a fixture directly reintroduces the churn silently, and the only
+    signal is an unexplained binary diff in someone's review.
+    """
+    stale = _already_modified_fixtures()
+    if stale:
+        raise AssertionError(
+            "committed fixtures are already modified before this session ran: "
+            + ", ".join(stale)
+            + ". A dirty checkout hides later writes, because the guard would "
+            "compare them against the dirty bytes. Restore them with "
+            "`git checkout -- tests/fixtures/`."
+        )
+    before = _fixture_digests()
+    yield
+    changed = _fixture_change_report(before, _fixture_digests())
+    if changed:
+        raise AssertionError(
+            "the suite rewrote committed fixtures in place: "
+            + ", ".join(changed)
+            + ". Open a copy instead -- the `profile_copy` fixture in conftest.py "
+            "hands you one. Restore them with `git checkout -- tests/fixtures/`."
+        )
 
 # ---------------------------------------------------------------------------
 # Minimal in-memory SQLite database that mimics an Nsight Systems export.

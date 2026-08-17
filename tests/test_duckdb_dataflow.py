@@ -27,7 +27,6 @@ that breaks the arrangement fails here rather than silently on a user's profile.
 import shutil
 import sqlite3
 import traceback
-from pathlib import Path
 
 import pytest
 
@@ -37,7 +36,11 @@ from nsys_ai.profile import Profile  # noqa: E402
 from nsys_ai.skills.registry import get_skill  # noqa: E402
 from nsys_ai.sql_compat import sqlite_to_duckdb  # noqa: E402
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "h100_2gpu_1s.sqlite"
+
+@pytest.fixture(scope="module")
+def fixture(profile_copy):
+    """A writable copy: opening a profile writes helper indexes into the file."""
+    return profile_copy("h100_2gpu_1s.sqlite")
 
 
 def _classify(stack) -> str:
@@ -55,7 +58,7 @@ def _classify(stack) -> str:
     return "direct"
 
 
-def test_sql_bypassing_the_rewriter_never_needs_rewriting():
+def test_sql_bypassing_the_rewriter_never_needs_rewriting(fixture):
     """The guard that keeps the dual-dialect arrangement safe.
 
     17 skill files write ``k.[end]`` — SQLite bracket syntax DuckDB rejects — and
@@ -81,7 +84,7 @@ def test_sql_bypassing_the_rewriter_never_needs_rewriting():
     try:
         from nsys_ai.evidence_builder import EvidenceBuilder
 
-        with Profile(str(FIXTURE)) as prof:
+        with Profile(str(fixture)) as prof:
             EvidenceBuilder(prof, device=0).build()
     finally:
         duckdb.DuckDBPyConnection.execute = original
@@ -92,7 +95,7 @@ def test_sql_bypassing_the_rewriter_never_needs_rewriting():
     )
 
 
-def test_every_known_table_variant_is_reachable_on_the_cached_path():
+def test_every_known_table_variant_is_reachable_on_the_cached_path(fixture):
     """The alias views are the actual compatibility layer.
 
     ``parquet_cache._ALIASES`` maps each short name to every Nsight variant, and
@@ -109,7 +112,7 @@ def test_every_known_table_variant_is_reachable_on_the_cached_path():
     from nsys_ai.parquet_cache import _ALIASES
 
     unreachable = []
-    with Profile(str(FIXTURE)) as prof:
+    with Profile(str(fixture)) as prof:
         if prof.db is None:  # pragma: no cover - cache build failed
             pytest.skip("DuckDB cache unavailable")
         present = {r[0] for r in prof.db.execute("SHOW TABLES").fetchall()}
@@ -127,7 +130,7 @@ def test_every_known_table_variant_is_reachable_on_the_cached_path():
     )
 
 
-def test_an_unknown_future_table_suffix_still_analyses(tmp_path):
+def test_an_unknown_future_table_suffix_still_analyses(tmp_path, fixture):
     """Nsight adds versioned tables between releases; _ALIASES stops at _V3.
 
     A capture whose kernel table is ``_V4`` must still produce results — the ETL
@@ -135,7 +138,7 @@ def test_an_unknown_future_table_suffix_still_analyses(tmp_path):
     the cache is built from it and the analysis proceeds.
     """
     profile = tmp_path / "v4.sqlite"
-    shutil.copy(FIXTURE, profile)
+    shutil.copy(fixture, profile)
     conn = sqlite3.connect(profile)
     try:
         conn.execute(
@@ -153,7 +156,7 @@ def test_an_unknown_future_table_suffix_still_analyses(tmp_path):
     assert rows[0].get("kernel_name"), f"kernels came back unnamed: {rows[0]}"
 
 
-def test_both_engines_return_the_same_answer_for_a_dual_path_skill():
+def test_both_engines_return_the_same_answer_for_a_dual_path_skill(fixture):
     """``sync_cost_analysis`` has a DuckDB route and a SQLite route.
 
     Divergence between the two is the defect class that produced the cached-vs-
@@ -161,12 +164,12 @@ def test_both_engines_return_the_same_answer_for_a_dual_path_skill():
     """
     skill = get_skill("sync_cost_analysis")
 
-    with Profile(str(FIXTURE)) as prof:
+    with Profile(str(fixture)) as prof:
         if prof.db is None:  # pragma: no cover
             pytest.skip("DuckDB cache unavailable")
         via_duckdb = skill.execute(prof.db, device=0)
 
-    conn = sqlite3.connect(FIXTURE)
+    conn = sqlite3.connect(fixture)
     try:
         via_sqlite = skill.execute(conn, device=0)
     finally:
