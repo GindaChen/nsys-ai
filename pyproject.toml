@@ -30,15 +30,17 @@ classifiers = [
 
 [project.scripts]
 nsys-ai = "nsys_ai.__main__:main"
+nsys-ai-mcp = "nsys_ai.mcp_server:main"
 
 [project.optional-dependencies]
 agent = ["anthropic>=0.20.0", "litellm>=1.0.0"]
+mcp = ["mcp>=1.0.0,<2"]
 ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
 tui = ["textual>=8.0.0"]                        # backward compat; textual is now core (tree + timeline)
 chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (tui extra kept for compat)
 cutracer = ["cutracer>=0.2.0"]                  # CUTracer CLI + instruction-level analysis
 dev = ["pytest>=8.2,<9", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.25,<1"]
-all = ["nsys-ai[agent,tui,chat,cutracer]"]
+all = ["nsys-ai[agent,tui,chat,cutracer,mcp]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
