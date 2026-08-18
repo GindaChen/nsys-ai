@@ -289,6 +289,25 @@ def test_profile_parquetdir_backend_opens_and_aliases(tmp_path):
         assert prof.db.execute("SELECT COUNT(*) FROM cuda_device").fetchone()[0] == 2
 
 
+def test_top_kernels_runs_against_raw_parquetdir(tmp_path):
+    parquetdir = _create_parquetdir_profile(tmp_path / "synthetic.parquetdir")
+    skill = get_skill("top_kernels")
+    assert skill is not None
+    with Profile(parquetdir, backend="parquetdir") as prof:
+        rows = skill.execute(prof.db, limit=2)
+        enriched_columns = {
+            row[0] for row in prof.db.execute("DESCRIBE kernels").fetchall()
+        }
+        raw_columns = {
+            row[0]
+            for row in prof.db.execute("DESCRIBE CUPTI_ACTIVITY_KIND_KERNEL").fetchall()
+        }
+
+    assert rows[0]["kernel_name"] == "ncclDevKernel_AllReduce"
+    assert {"name", "demangled", "is_tc_eligible", "uses_tc"} <= enriched_columns
+    assert "name" not in raw_columns
+
+
 def test_schema_inspect_runs_on_parquetdir_backend(tmp_path):
     parquetdir = _create_parquetdir_profile(tmp_path / "synthetic.parquetdir")
     skill = get_skill("schema_inspect")
