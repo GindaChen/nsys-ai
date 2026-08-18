@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Thin ordinary-CI wrapper. All comparison and threshold semantics remain in
+# `nsys-ai diff`; this only fixes the machine-readable CI contract.
+set -euo pipefail
+
+python_bin="${PYTHON:-python3}"
+exec "$python_bin" -m nsys_ai diff "$@" --format json --no-ai --exit-on-regression
