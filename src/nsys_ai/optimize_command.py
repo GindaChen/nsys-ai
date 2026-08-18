@@ -106,7 +106,9 @@ def _resume_command(
     )
 
 
-def _select_finding_id(report: EvidenceReport) -> str | None:
+def _select_finding_id(
+    report: EvidenceReport, *, decided_ids: set[str] | frozenset[str] = frozenset()
+) -> str | None:
     """Pick the finding to propose from: ranked order, actionable first.
 
     ``findings`` arrives already ranked by :func:`rank_findings`, so the first
@@ -116,10 +118,10 @@ def _select_finding_id(report: EvidenceReport) -> str | None:
     suggested action") rather than turning it into "no finding id".
     """
     for finding in report.findings:
-        if finding.id and finding.suggested_actions:
+        if finding.id and finding.id not in decided_ids and finding.suggested_actions:
             return finding.id
     for finding in report.findings:
-        if finding.id:
+        if finding.id and finding.id not in decided_ids:
             return finding.id
     return None
 
@@ -167,7 +169,23 @@ def _print_recorded_decision(
     reason = projected.get("decision_reason") or ""
     if reason:
         print(f"Reason: {reason}", file=stdout)
-    print(f"Diff artifact: {directory / 'diff.json'}", file=stdout)
+    artifact = projected.get("decision_path") or directory / "diff.json"
+    print(f"Decision artifact: {artifact}", file=stdout)
+
+
+def _session_quiescent(snapshot: SessionSnapshot) -> bool:
+    """Return whether every identified finding has one durable decision."""
+    if snapshot.findings is None or not snapshot.findings.findings:
+        return False
+    finding_ids = {finding.id for finding in snapshot.findings.findings if finding.id}
+    if len(finding_ids) != len(snapshot.findings.findings):
+        return False
+    decided_ids = {
+        decision.get("finding_id")
+        for decision in snapshot.decisions
+        if decision.get("finding_id")
+    }
+    return finding_ids.issubset(decided_ids)
 
 
 def _print_verification_plan(
@@ -331,6 +349,13 @@ def run_optimize(
             )
             _print_recorded_decision(resolved_id, snapshot, session_root, stdout=stdout)
             return 0
+        if _session_quiescent(snapshot):
+            print(
+                "Loop already complete; reporting the recorded decisions.",
+                file=stdout,
+            )
+            _print_recorded_decision(resolved_id, snapshot, session_root, stdout=stdout)
+            return 0
 
     # Step 1 — diagnose.
     if snapshot is None or snapshot.findings is None:
@@ -363,8 +388,22 @@ def run_optimize(
 
     # Step 2 — propose, or reuse the proposal this session already carries.
     if snapshot.proposal is None:
-        finding_id = _select_finding_id(snapshot.findings)
+        decided_ids = {
+            str(decision["finding_id"])
+            for decision in snapshot.decisions
+            if decision.get("finding_id")
+        }
+        finding_id = _select_finding_id(snapshot.findings, decided_ids=decided_ids)
         if finding_id is None:
+            if snapshot.decisions:
+                print(
+                    "Loop already complete; no undecided finding remains to propose.",
+                    file=stdout,
+                )
+                _print_recorded_decision(
+                    resolved_id, snapshot, session_root, stdout=stdout
+                )
+                return 0
             return stopped(
                 "no finding carries a stable id, so there is nothing to propose "
                 "from; re-run diagnose or open the session with "
@@ -499,8 +538,20 @@ def run_optimize(
         print(f"Warning: {warning}", file=stderr)
 
     snapshot = _load_snapshot(store, resolved_id)
-    if snapshot is None or not _decision_recorded(snapshot):
+    if snapshot is None:
         return stopped("the decision was not persisted to diff.json")
+    if not _decision_recorded(snapshot):
+        if snapshot.decisions:
+            latest = snapshot.decisions[-1]
+            status = str(latest.get("status") or "")
+            if status == "rejected":
+                print(
+                    "Decision recorded for finding "
+                    f"{latest.get('finding_id')}; session remains open for another finding.",
+                    file=stdout,
+                )
+                return 0
+        return stopped("the decision was not persisted to the session")
     _print_recorded_decision(resolved_id, snapshot, session_root, stdout=stdout)
     return 0
 

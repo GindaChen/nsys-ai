@@ -198,15 +198,24 @@ def test_optimize_reaches_a_recorded_decision_without_a_supplied_after_profile(t
     assert out.index("-- Proposal --") < out.index("Profile Diff")
 
     snapshot = _snapshot(tmp_path)
-    assert snapshot.state.phase == "accept"
-    assert snapshot.state.after_profile == after_reference
-    decision = snapshot.diff["decision"]
-    assert decision["status"] in {"accepted", "rejected"}
-    assert decision["reason"].startswith("diff verdict ")
-    payload = json.loads(
-        (_session_root(tmp_path) / SESSION_ID / "diff.json").read_text(encoding="utf-8")
-    )
-    assert payload["decision"]["reason"] == decision["reason"]
+    if snapshot.state.phase == "accept":
+        assert snapshot.state.after_profile == after_reference
+        decision = snapshot.diff["decision"]
+        assert decision["status"] == "accepted"
+        assert decision["reason"].startswith("diff verdict ")
+        payload = json.loads(
+            (_session_root(tmp_path) / SESSION_ID / "diff.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert payload["decision"]["reason"] == decision["reason"]
+    else:
+        assert snapshot.state.phase == "propose"
+        assert snapshot.state.after_profile is None
+        assert snapshot.diff is None
+        assert snapshot.decisions[-1]["status"] == "rejected"
+        assert snapshot.decisions[-1]["reason"].startswith("diff verdict ")
+        assert "session remains open for another finding" in out
 
 
 def test_optimize_reports_an_already_decided_session_without_re_profiling(tmp_path):
@@ -274,7 +283,9 @@ def test_optimize_resumes_from_the_session_after_a_failed_capture(tmp_path):
     assert "Step 2/5 propose" not in err2
     assert len(runner.specs) == 1
     assert runner.specs[0] == interrupted.runspec
-    assert _snapshot(tmp_path).state.phase == "accept"
+    resumed = _snapshot(tmp_path)
+    assert resumed.state.phase == "propose"
+    assert resumed.decisions[-1]["status"] == "rejected"
 
 
 def test_optimize_refuses_a_session_opened_on_another_profile(tmp_path):
@@ -374,15 +385,16 @@ def test_optimize_accepts_the_same_capture_reached_by_another_path(tmp_path):
     assert "Loop already complete" in out2
 
 
-def test_optimize_reports_the_recorded_decision_for_the_same_workload(tmp_path):
-    """The guard must not break resume, which is the whole point of the session."""
+def test_optimize_resumes_after_a_rejection_for_the_same_workload(tmp_path):
+    """A rejected finding leaves the same session available for the next one."""
     after_reference = build_local_profile_reference(AFTER)
     code, _out, err = _run(tmp_path, _succeeding_runner(after_reference))
     assert code == 0, err
 
-    code, out, _err = _run(tmp_path, _exploding_runner())
+    code, out, err = _run(tmp_path, _succeeding_runner(after_reference))
     assert code == 0
-    assert "Loop already complete" in out
+    assert "Decision recorded" in out or "Loop already complete" in out
+    assert not err.startswith("Stopped:")
 
 
 def test_optimize_rejects_a_repo_that_is_not_a_directory(tmp_path):

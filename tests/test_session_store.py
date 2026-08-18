@@ -329,6 +329,7 @@ def test_complete_session_round_trip_uses_exact_layout_and_local_references(tmp_
         "findings.json",
         "proposal.json",
         "diff.json",
+        "decisions.json",
         "logs",
     }
     assert not list(session_dir.rglob("*.sqlite"))
@@ -363,6 +364,71 @@ def test_complete_session_round_trip_uses_exact_layout_and_local_references(tmp_
     assert json.loads((session_dir / "diff.json").read_text())["schema_version"] == (
         DIFF_SCHEMA_VERSION
     )
+
+
+def test_rejected_finding_reopens_session_for_a_different_finding(tmp_path):
+    before = _profile_reference(tmp_path / "before.sqlite", "before")
+    after = _profile_reference(tmp_path / "after.sqlite", "after")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("multi-finding", before_profile=before)
+    runspec = RunSpec(argv=("python3", "train.py"), cwd=str(tmp_path))
+    first = _finding(before, "f1")
+    second = _finding(before, "f2")
+    report = EvidenceReport(
+        "diagnosis",
+        profile_path=before.path,
+        profile_id=before.profile_id,
+        findings=[first, second],
+    )
+    first_proposal = generate_proposal(first, runspec)
+    second_proposal = generate_proposal(second, runspec)
+
+    with store.writer("multi-finding") as writer:
+        writer.publish_runspec(runspec)
+        writer.publish_findings(report)
+        writer.publish_proposal(first_proposal)
+        writer.publish_after_profile(after)
+        writer.publish_diff(_diff(before, after))
+        state, rejected, _warnings = writer.publish_decision(
+            "reject",
+            "first finding was not actionable",
+            decider="test@example.com",
+            decided_at="2026-08-06T00:00:00Z",
+        )
+
+    assert state.phase == "propose"
+    assert rejected["decision"]["status"] == "rejected"
+    snapshot = store.load("multi-finding")
+    assert snapshot.proposal is None
+    assert snapshot.diff is None
+    assert snapshot.state.after_profile is None
+    assert snapshot.decisions == (
+        {
+            "finding_id": "f1",
+            "status": "rejected",
+            "reason": "first finding was not actionable",
+            "decider": "test@example.com",
+            "decided_at": "2026-08-06T00:00:00Z",
+        },
+    )
+    assert (store.root / "multi-finding" / "decisions.json").is_file()
+    with store.writer("multi-finding") as writer:
+        with pytest.raises(ValueError, match="already has a recorded session decision"):
+            writer.publish_proposal(first_proposal)
+        writer.publish_proposal(second_proposal)
+        writer.publish_after_profile(after)
+        writer.publish_diff(_diff(before, after))
+        final_state, _accepted, _warnings = writer.publish_decision(
+            "accept",
+            "second finding verified",
+            decider="test@example.com",
+            decided_at="2026-08-06T00:01:00Z",
+        )
+
+    assert final_state.phase == "accept"
+    snapshot = store.load("multi-finding")
+    assert [decision["finding_id"] for decision in snapshot.decisions] == ["f1", "f2"]
+    assert snapshot.diff["decision"]["status"] == "accepted"
 
 
 def test_active_writer_conflict_is_observed_from_a_second_process(tmp_path):

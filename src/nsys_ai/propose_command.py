@@ -32,7 +32,7 @@ _SESSION_TOP_LEVEL_SIGNATURE = frozenset(
 )
 _SESSION_PROFILE_SIGNATURE = frozenset({"before", "after"})
 _SESSION_ARTIFACT_SIGNATURE = frozenset(
-    {"runspec", "findings", "proposal", "diff"}
+    {"runspec", "findings", "proposal", "diff", "decisions"}
 )
 _SESSION_CONTROL_KEYS = frozenset({"session_id", "phase"})
 _SESSION_STRUCTURE_KEYS = frozenset({"profiles", "artifacts"})
@@ -488,6 +488,13 @@ def run_propose(
                 print(f"Warning: {lineage_warning}", file=stderr)
 
     finding = _select_finding(report, finding_id)
+    if session_id is not None and any(
+        decision.get("finding_id") == finding_id for decision in snapshot.decisions
+    ):
+        raise ProposeCommandError(
+            f"finding {finding_id!r} already has a recorded session decision; "
+            "choose another finding"
+        )
     proposal = generate_proposal(
         finding,
         runspec,
