@@ -1018,6 +1018,9 @@ def resolve_profile(
     nsys_executable: str = "nsys",
 ) -> ProfileResolution:
     """Resolve one profile input according to the shared ingest policy."""
+    path = os.fspath(path)
+    if not isinstance(path, str):
+        raise TypeError("profile path must be a string or path-like object")
     if not os.path.exists(path):
         raise ProfileNotFoundError(f"profile not found: {path}")
 
