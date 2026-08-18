@@ -60,6 +60,96 @@ def test_existing_profile_reference_matches_profile_and_evidence_identity(
     assert reference.kernel_count == 5
 
 
+def test_parquetdir_reference_records_source_and_resolved_storage(tmp_path):
+    from test_parquetdir_backend import _create_parquetdir_profile
+
+    cache = Path(_create_parquetdir_profile(tmp_path / "mock.parquetdir"))
+
+    reference = build_local_profile_reference(cache)
+
+    assert reference.storage_kind == "parquetdir"
+    assert reference.path == str(cache.absolute())
+    assert reference.resolved_path == str(cache.absolute())
+    assert reference.profile_id.startswith("nsys2:")
+    assert reference.kernel_count > 0
+
+
+def test_nsys_rep_reference_validation_accepts_parquetdir_resolution(tmp_path):
+    source = tmp_path / "profile.nsys-rep"
+    resolved = tmp_path / "profile.parquetdir"
+    source.write_bytes(b"capture")
+    resolved.mkdir()
+    (resolved / "kernels.parquet").write_bytes(b"parquet")
+    reference = LocalProfileReference(
+        path=str(source),
+        profile_id=VALID_PROFILE_ID,
+        schema_version=None,
+        product_version=None,
+        kernel_count=1,
+        storage_kind="nsys-rep",
+        resolved_path=str(resolved),
+    )
+
+    assert validate_local_profile_reference(reference, require_file=True) is reference
+
+
+def test_parquetdir_reference_rejects_symlink_parquet_file(tmp_path):
+    parquetdir = tmp_path / "profile.parquetdir"
+    parquetdir.mkdir()
+    target = tmp_path / "outside.parquet"
+    target.write_bytes(b"parquet")
+    (parquetdir / "kernels.parquet").symlink_to(target)
+    reference = LocalProfileReference(
+        path=str(parquetdir),
+        profile_id=VALID_PROFILE_ID,
+        schema_version=None,
+        product_version=None,
+        kernel_count=1,
+        storage_kind="parquetdir",
+        resolved_path=str(parquetdir),
+    )
+
+    with pytest.raises(ValueError, match="symlink parquet files"):
+        validate_local_profile_reference(reference, require_file=True)
+
+
+@pytest.mark.parametrize("source_kind", ["rep", "parquetdir", "parquet_file"])
+def test_profile_reference_rejects_symlinked_ingest_source_before_profile(
+    tmp_path, monkeypatch, source_kind
+):
+    import nsys_ai.profile_runner as profile_runner
+
+    real_source = tmp_path / "real.nsys-rep"
+    real_source.write_bytes(b"capture")
+    source = tmp_path / "input.nsys-rep"
+    source.symlink_to(real_source)
+    if source_kind == "parquetdir":
+        real_source = tmp_path / "real.parquetdir"
+        real_source.mkdir()
+        (real_source / "kernels.parquet").write_bytes(b"parquet")
+        source = tmp_path / "input.parquetdir"
+        source.symlink_to(real_source, target_is_directory=True)
+    elif source_kind == "parquet_file":
+        source = tmp_path / "input.parquetdir"
+        source.mkdir()
+        parquet_target = tmp_path / "kernels.parquet"
+        parquet_target.write_bytes(b"parquet")
+        (source / "kernels.parquet").symlink_to(parquet_target)
+
+    called = False
+    real_profile = profile_runner.Profile
+
+    def unexpected_profile(*args, **kwargs):
+        nonlocal called
+        called = True
+        return real_profile(*args, **kwargs)
+
+    monkeypatch.setattr(profile_runner, "Profile", unexpected_profile)
+    with pytest.raises(ProfileError):
+        build_local_profile_reference(source)
+    assert not called
+
+
 def test_existing_profile_reference_has_no_local_artifact_or_cache_side_effects(
     minimal_nsys_db_path, tmp_path
 ):
@@ -93,7 +183,6 @@ def test_relative_profile_path_is_normalized_without_copying(
     [
         ("", "must not be empty"),
         (b"profile.sqlite", "must be a path string"),
-        ("profile.nsys-rep", "must name a .sqlite file"),
         ("bad\x00.sqlite", "must not contain NUL bytes"),
     ],
 )

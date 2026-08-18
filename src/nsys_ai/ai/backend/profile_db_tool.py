@@ -326,10 +326,19 @@ def open_profile_readonly(path: str):
     ``kernels`` view; raw sqlite3 does not.
     """
     from nsys_ai import parquet_cache
+    from nsys_ai.profile import resolve_profile
 
-    db, _err = parquet_cache.open_with_direct_fallback(
-        path, parquet_cache.open_auto_db, log=_log
+    resolution = resolve_profile(path)
+    if resolution.backend == "parquetdir":
+        return parquet_cache.open_parquetdir_db(resolution.resolved_path)
+    path = resolution.resolved_path
+
+    primary = (
+        parquet_cache.open_direct_sqlite
+        if resolution.cache_mode == "direct"
+        else parquet_cache.open_auto_db
     )
+    db, _err = parquet_cache.open_with_direct_fallback(path, primary, log=_log)
     if db is not None:
         return db
 

@@ -352,6 +352,8 @@ def test_complete_session_round_trip_uses_exact_layout_and_local_references(tmp_
     assert manifest["profiles"]["before"] == {
         "kind": "local",
         "path": before.path,
+        "storage_kind": before.storage_kind,
+        "resolved_path": before.resolved_path,
         "profile_id": before.profile_id,
         "export_schema_version": before.schema_version,
         "product_version": before.product_version,
@@ -429,6 +431,19 @@ def test_rejected_finding_reopens_session_for_a_different_finding(tmp_path):
     snapshot = store.load("multi-finding")
     assert [decision["finding_id"] for decision in snapshot.decisions] == ["f1", "f2"]
     assert snapshot.diff["decision"]["status"] == "accepted"
+
+
+def test_legacy_session_profile_reference_defaults_to_sqlite_path(tmp_path):
+    profile = _profile_reference(tmp_path / "legacy.sqlite", "legacy")
+    payload = SessionState(session_id="legacy", before_profile=profile).to_dict()
+    payload["profiles"]["before"].pop("storage_kind")
+    payload["profiles"]["before"].pop("resolved_path")
+
+    restored = SessionState.from_dict(payload)
+
+    assert restored.before_profile is not None
+    assert restored.before_profile.storage_kind == "sqlite"
+    assert restored.before_profile.resolved_path == restored.before_profile.path
 
 
 def test_active_writer_conflict_is_observed_from_a_second_process(tmp_path):
