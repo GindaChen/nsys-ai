@@ -30,6 +30,14 @@ def _cmd_profile(args, _profile):
 def _cmd_propose(args, _profile):
     """Generate a deterministic proposal artifact from one finding."""
     from nsys_ai.propose_command import run_propose_command
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
+    if location is not None:
+        args.session = location.session_id
+        args.session_root = location.root
 
     exit_code = run_propose_command(args)
     if exit_code:
@@ -39,11 +47,17 @@ def _cmd_propose(args, _profile):
 def _cmd_diagnose(args, _profile):
     """Thin front door: default evidence pack → session findings."""
     from nsys_ai.diagnose_command import DiagnoseCommandError, run_diagnose
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
 
     try:
         exit_code = run_diagnose(
             profile_path=getattr(args, "profile", None),
-            session_id=getattr(args, "session", None),
+            session_id=location.session_id if location is not None else None,
+            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", 0) or 0,
             trim=_parse_trim(args),
             web=bool(getattr(args, "web", False)),
@@ -60,12 +74,18 @@ def _cmd_diagnose(args, _profile):
 def _cmd_review(args, _profile):
     """Thin front door: canonical before/after diff, or resume a session."""
     from nsys_ai.review_command import ReviewCommandError, run_review
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
 
     try:
         exit_code = run_review(
             before_path=getattr(args, "before", None),
             after_path=getattr(args, "after", None),
-            session_id=getattr(args, "session", None),
+            session_id=location.session_id if location is not None else None,
+            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", None),
             trim=_parse_trim(args),
             web=bool(getattr(args, "web", False)),
@@ -82,6 +102,11 @@ def _cmd_review(args, _profile):
 def _cmd_optimize(args, _profile):
     """Front door over the loop: diagnose -> propose -> capture -> diff -> decision."""
     from nsys_ai.optimize_command import OptimizeCommandError, run_optimize
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
 
     workload = list(getattr(args, "workload", None) or [])
     if not workload:
@@ -108,7 +133,8 @@ def _cmd_optimize(args, _profile):
             before_path=args.profile,
             repo=args.repo,
             workload=workload,
-            session_id=getattr(args, "session", None),
+            session_id=location.session_id if location is not None else None,
+            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
             nsys=getattr(args, "nsys", "nsys"),
             gpu=getattr(args, "gpu", 0) or 0,
             trim=_parse_trim(args),
@@ -955,7 +981,12 @@ def _cmd_diff(args, _profile):
     elif getattr(args, "reject", False):
         decision = "rejected"
     reason = getattr(args, "reason", None)
-    session = getattr(args, "session", None)
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    raw_session = getattr(args, "session", None)
+    location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
+    session = location.session_id if location is not None else raw_session
+    session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
@@ -1244,6 +1275,7 @@ def _cmd_diff(args, _profile):
                 session_id=session_id,
                 diff=diff_payload,
                 after_profile=after_ref,
+                root=session_root,
             )
         except (TypeError, ValueError, ProfileError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1259,6 +1291,7 @@ def _cmd_diff(args, _profile):
                     session_id=session_id,
                     decision=decision,
                     reason=reason,
+                    root=session_root,
                 )
             except (TypeError, ValueError) as exc:
                 print(f"Error: {exc}", file=sys.stderr)
@@ -1602,7 +1635,15 @@ def _cmd_open(args, _profile):
 
 
 def _cmd_timeline_web(args, _profile):
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
     from nsys_ai.web import serve_timeline
+
+    raw_session = getattr(args, "session", None)
+    location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
+    session_value = (
+        location.session_id if location is not None else raw_session
+    )
+    session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
@@ -1633,7 +1674,8 @@ def _cmd_timeline_web(args, _profile):
             auto_findings=auto_findings,
             loop_before=getattr(args, "loop_before", None),
             loop_h100_preset=getattr(args, "h100_preset", False),
-            session=getattr(args, "session", None),
+            session=session_value,
+            session_root=session_root,
         )
 
 
@@ -1642,6 +1684,12 @@ def _cmd_loop(args, _profile):
     from pathlib import Path
 
     trim = _parse_trim(args)
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    raw_session = getattr(args, "session", None)
+    location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
+    session = location.session_id if location is not None else raw_session
+    session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
     before_path = getattr(args, "before", None)
     if getattr(args, "h100_preset", False):
         from nsys_ai.loop_state import detect_h100_replay_preset
@@ -1691,11 +1739,10 @@ def _cmd_loop(args, _profile):
                 open_browser=not args.no_browser,
                 loop_before=before_path,
                 loop_h100_preset=bool(getattr(args, "h100_preset", False)),
-                session=getattr(args, "session", None),
+                session=session,
+                session_root=session_root,
             )
         return
-
-    session = getattr(args, "session", None)
 
     # Resolve the window before the surface starts, the way `open` does. These
     # surfaces cannot represent "no trim", and the profile is closed first so
@@ -1731,6 +1778,7 @@ def _cmd_loop(args, _profile):
             trim,
             min_ms=0,
             session=session,
+            session_root=session_root,
         )
         return
 
@@ -1743,6 +1791,7 @@ def _cmd_loop(args, _profile):
         max_depth=-1,
         min_ms=0,
         session=session,
+        session_root=session_root,
     )
 
 
@@ -1815,7 +1864,12 @@ def _cmd_evidence(args, _profile):
         flush=True,
     )
 
-    session = getattr(args, "session", None)
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    raw_session = getattr(args, "session", None)
+    location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
+    session = location.session_id if location is not None else raw_session
+    session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
     profile_path = args.profile
     if session is not None:
         # Absolute path keeps EvidenceReport.profile_id aligned with
@@ -1877,6 +1931,7 @@ def _cmd_evidence(args, _profile):
                     session_id=session_id,
                     report=report,
                     before_profile=before,
+                    root=session_root,
                 )
             except (TypeError, ValueError, ProfileError) as exc:
                 print(f"Error: {exc}", file=sys.stderr, flush=True)
@@ -2295,7 +2350,8 @@ def _cmd_agent(args, _profile):
         finally:
             agent.close()
     elif args.agent_action == "ask":
-        agent = Agent(args.profile)
+        profile_path = _resolve_ask_profile(args)
+        agent = Agent(profile_path)
         try:
             print(agent.ask(args.question))
         finally:
@@ -2309,11 +2365,40 @@ def _cmd_ask(args, _profile):
     """Simplified alias for `agent ask`."""
     from nsys_ai.agent.loop import Agent
 
-    agent = Agent(args.profile)
+    profile_path = _resolve_ask_profile(args)
+    agent = Agent(profile_path)
     try:
         print(agent.ask(args.question))
     finally:
         agent.close()
+
+
+def _resolve_ask_profile(args) -> str:
+    """Resolve Ask's profile from an explicit path or a session handoff."""
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+    from nsys_ai.session_store import SessionStore
+
+    profile_path = getattr(args, "profile", None)
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
+    if profile_path:
+        return profile_path
+    if location is None:
+        print(
+            "Error: ask requires a profile, or --session <dir> with a recorded before profile",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    snapshot = SessionStore(location.root).load(location.session_id)
+    before = snapshot.state.before_profile
+    if before is None:
+        print(
+            f"Error: session {location.session_id} has no before profile",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return before.path
 
 
 def _cmd_agent_guide(args, _profile):

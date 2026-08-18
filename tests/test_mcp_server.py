@@ -24,6 +24,21 @@ def test_skill_catalog_matches_registry():
     )
 
 
+def test_get_session_returns_the_shared_handoff_contract(tmp_path):
+    from nsys_ai.mcp_server import _get_session
+    from nsys_ai.session_store import SessionStore
+
+    session_dir = tmp_path / "mcp-handoff"
+    SessionStore(tmp_path).create("mcp-handoff")
+
+    payload = _get_session(str(session_dir))
+
+    assert payload["schema_version"] == "0.1"
+    assert payload["session"]["session_id"] == "mcp-handoff"
+    assert payload["findings"] is None
+    assert payload["diff"] is None
+
+
 def test_run_skill_returns_rows_and_canonical_findings(profile_copy):
     from nsys_ai.mcp_server import _run_skill
 
@@ -217,4 +232,4 @@ def test_mcp_registration_exposes_the_three_read_only_tools(monkeypatch):
     server = create_server()
 
     assert server is servers[0]
-    assert set(server.tools) == {"list_skills", "run_skill", "diff_profiles"}
+    assert set(server.tools) == {"list_skills", "get_session", "run_skill", "diff_profiles"}

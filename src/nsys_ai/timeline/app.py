@@ -166,6 +166,7 @@ class NsysTimelineApp(App):
         min_ms: float = 0,
         json_roots: list[dict] | None = None,
         session: str | None = None,
+        session_root: str = ".nsys-ai/sessions",
     ) -> None:
         super().__init__()
         self._db_path = db_path
@@ -177,7 +178,7 @@ class NsysTimelineApp(App):
         self._device = self._devices[0]  # backward compat for ChatPanel etc.
         self._trim = trim or (0, 0)
         self._session_id: str | None = None
-        self._session_root = ".nsys-ai/sessions"
+        self._session_root = session_root
         self._session_projection: dict | None = None
         # Always open a SessionStore session when a before profile path is
         # available (C1). from_json tests may omit db_path and skip open.
@@ -877,7 +878,12 @@ class NsysTimelineApp(App):
 
     def _open_session(self, session: str) -> None:
         from ..profile_runner import build_local_profile_reference
-        from ..session_cli import project_loop_state, resolve_session_id, session_dir
+        from ..session_cli import (
+            project_loop_state,
+            resolve_session_id,
+            resolve_session_location,
+            session_dir,
+        )
         from ..session_store import SessionExistsError, SessionStore
 
         if not self._db_path:
@@ -886,7 +892,12 @@ class NsysTimelineApp(App):
                 "the session id"
             )
         before_ref = build_local_profile_reference(self._db_path)
-        session_id = resolve_session_id(session or None, before=before_ref)
+        location = resolve_session_location(session, root=self._session_root)
+        if location is not None:
+            session_id = location.session_id
+            self._session_root = str(location.root)
+        else:
+            session_id = resolve_session_id(None, before=before_ref)
         store = SessionStore(self._session_root)
         try:
             store.create(session_id, before_profile=before_ref)
@@ -1041,9 +1052,15 @@ def run_timeline(
     trim: tuple[int, int] | None,
     min_ms: float = 0,
     session: str | None = None,
+    session_root: str = ".nsys-ai/sessions",
 ) -> None:
     """Launch the Textual horizontal timeline browser."""
     app = NsysTimelineApp(
-        db_path, device, trim, min_ms=min_ms, session=session
+        db_path,
+        device,
+        trim,
+        min_ms=min_ms,
+        session=session,
+        session_root=session_root,
     )
     app.run()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,96 @@ from .session_store import (
     SessionState,
     SessionStore,
 )
+
+DEFAULT_SESSION_ROOT = ".nsys-ai/sessions"
+
+
+@dataclass(frozen=True)
+class SessionLocation:
+    """The canonical handoff location shared by every transport.
+
+    Older callers pass a session id and use ``.nsys-ai/sessions`` relative to
+    their working directory.  New callers can pass the session directory
+    itself (for example ``/tmp/run-001``), which makes the artifact directory
+    portable across CLI, TUI, Web, and plugin processes.
+    """
+
+    session_id: str
+    root: Path
+
+    @property
+    def directory(self) -> Path:
+        return self.root / self.session_id
+
+    def store(self) -> SessionStore:
+        return SessionStore(self.root)
+
+
+def resolve_session_location(
+    value: str | os.PathLike[str] | None,
+    *,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> SessionLocation | None:
+    """Resolve an id or an explicit session directory into one location.
+
+    A bare value remains a backwards-compatible id.  Absolute paths, paths
+    containing a directory component, and existing directories are treated as
+    the handoff directory itself; its basename is the SessionStore id and its
+    parent is the store root.  The directory need not exist yet, which lets
+    ``diagnose --session /path/to/new-session`` create it atomically.
+    """
+    if value is None or value == "":
+        return None
+    raw = os.fspath(value)
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("session must be a non-empty id or directory path")
+
+    candidate = Path(raw).expanduser()
+    explicit_directory = (
+        candidate.is_absolute()
+        or candidate.parent != Path(".")
+        or raw.startswith(".")
+    )
+    if explicit_directory:
+        directory = candidate.resolve(strict=False)
+        if directory.name in {"", ".", ".."}:
+            raise ValueError("session directory must have a session id basename")
+        return SessionLocation(directory.name, directory.parent)
+
+    return SessionLocation(raw, Path(root).expanduser().resolve(strict=False))
+
+
+def session_location(
+    value: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> SessionLocation:
+    """Resolve a required session id/path, raising a friendly ValueError."""
+    location = resolve_session_location(value, root=root)
+    if location is None:
+        raise ValueError("session is required")
+    return location
+
+
+def session_argument(
+    session_id: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> str:
+    """Return a re-runnable session argument for a user-facing hint."""
+    location = session_location(session_id, root=root)
+    default_root = Path(DEFAULT_SESSION_ROOT).expanduser().resolve(strict=False)
+    if location.root == default_root:
+        return location.session_id
+    return str(location.directory)
+
+
+def _normalize_target(
+    session_id: str | os.PathLike[str],
+    root: str | os.PathLike[str],
+) -> tuple[str, Path]:
+    location = session_location(session_id, root=root)
+    return location.session_id, location.root
 
 
 def session_id_from_profile_id(profile_id: str) -> str:
@@ -59,9 +150,10 @@ def publish_session_findings(
     session_id: str,
     report: EvidenceReport,
     before_profile: LocalProfileReference,
-    root: str | os.PathLike[str] = ".nsys-ai/sessions",
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
 ) -> SessionState:
     """Create the session if needed, then publish findings under a short writer lease."""
+    session_id, root = _normalize_target(session_id, root)
     if not isinstance(report, EvidenceReport):
         raise TypeError("report must be an EvidenceReport")
     store = SessionStore(root)
@@ -79,9 +171,10 @@ def publish_session_proposal(
     proposal: Proposal,
     runspec: RunSpec | None = None,
     resolved_secrets: Mapping[str, str] | None = None,
-    root: str | os.PathLike[str] = ".nsys-ai/sessions",
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
 ) -> SessionState:
     """Publish an optional RunSpec then the Proposal under one writer lease."""
+    session_id, root = _normalize_target(session_id, root)
     if not isinstance(proposal, Proposal):
         raise TypeError("proposal must be a Proposal")
     store = SessionStore(root)
@@ -96,7 +189,7 @@ def publish_session_diff(
     session_id: str,
     diff: Mapping[str, Any],
     after_profile: LocalProfileReference,
-    root: str | os.PathLike[str] = ".nsys-ai/sessions",
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
 ) -> SessionState:
     """Publish undecided diff.json via SessionWriter.
 
@@ -107,6 +200,7 @@ def publish_session_diff(
     must already match ``after_profile``; ``publish_diff`` re-validates the
     references.
     """
+    session_id, root = _normalize_target(session_id, root)
     if not isinstance(diff, Mapping):
         raise TypeError("diff must be a mapping")
     store = SessionStore(root)
@@ -145,7 +239,7 @@ def publish_session_decision(
     decision: str,
     reason: str,
     decider: str | None = None,
-    root: str | os.PathLike[str] = ".nsys-ai/sessions",
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
 ) -> SessionState:
     """Record accept/reject on a session's published diff.
 
@@ -155,6 +249,7 @@ def publish_session_decision(
     ``publish_decision`` raises if the diff is missing or the finding was already
     decided; both are surfaced to the caller unchanged.
     """
+    session_id, root = _normalize_target(session_id, root)
     if not reason or not reason.strip():
         raise ValueError("a decision requires a reason")
     store = SessionStore(root)
@@ -163,9 +258,46 @@ def publish_session_decision(
     return state
 
 
-def session_dir(session_id: str, root: str | os.PathLike[str] = ".nsys-ai/sessions") -> Path:
+def session_dir(
+    session_id: str,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> Path:
     """Return the on-disk directory for ``session_id`` under ``root``."""
-    return SessionStore(root).root / session_id
+    location = session_location(session_id, root=root)
+    return location.directory
+
+
+def load_session(
+    session: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> SessionSnapshot:
+    """Load a session through the transport-neutral handoff facade."""
+    location = session_location(session, root=root)
+    return location.store().load(location.session_id)
+
+
+def session_payload(
+    session: str | os.PathLike[str],
+    *,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> dict[str, Any]:
+    """Return the JSON-shaped handoff contract for plugin/MCP adapters.
+
+    This is a projection only: SessionStore remains the source of truth and
+    callers cannot mutate a session by changing the returned dictionaries.
+    """
+    location = session_location(session, root=root)
+    snapshot = location.store().load(location.session_id)
+    return {
+        "schema_version": "0.1",
+        "session": snapshot.state.to_dict(),
+        "findings": snapshot.findings.to_dict() if snapshot.findings else None,
+        "proposal": snapshot.proposal.to_dict() if snapshot.proposal else None,
+        "runspec": snapshot.runspec.to_dict() if snapshot.runspec else None,
+        "diff": dict(snapshot.diff) if snapshot.diff is not None else None,
+        "decisions": [dict(decision) for decision in snapshot.decisions],
+    }
 
 
 def project_loop_state(

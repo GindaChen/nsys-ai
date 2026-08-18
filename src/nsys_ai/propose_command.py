@@ -420,6 +420,13 @@ def run_propose(
         raise ProposeCommandError("findings path is required unless --session is given")
     if findings_path is not None and session_id is not None:
         raise ProposeCommandError("pass a findings path or --session, not both")
+    if session_id:
+        from .session_cli import resolve_session_location
+
+        location = resolve_session_location(session_id, root=session_root)
+        if location is not None:
+            session_id = location.session_id
+            session_root = location.root
     if session_id is not None and not session_id:
         if profile_path is None:
             raise ProposeCommandError(
@@ -570,4 +577,5 @@ def run_propose_command(
         stdout=stdout,
         stderr=stderr,
         environment=environment,
+        session_root=getattr(args, "session_root", ".nsys-ai/sessions"),
     )

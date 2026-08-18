@@ -68,6 +68,8 @@ from .session_cli import (
     project_loop_state,
     publish_session_diff,
     resolve_session_id,
+    resolve_session_location,
+    session_argument,
     session_dir,
 )
 from .session_store import SessionNotFoundError, SessionSnapshot, SessionStore
@@ -97,12 +99,18 @@ class OptimizeCommandError(NsysAiError):
 
 
 def _resume_command(
-    *, before_path: str, repo: str, session_id: str, workload: Sequence[str]
+    *,
+    before_path: str,
+    repo: str,
+    session_id: str,
+    session_root: str | os.PathLike[str],
+    workload: Sequence[str],
 ) -> str:
     """The single command that picks the loop up where it stopped."""
     return (
         f"nsys-ai optimize {before_path} --repo {repo} "
-        f"--session {session_id} -- {' '.join(workload)}"
+        f"--session {session_argument(session_id, root=session_root)} -- "
+        f"{' '.join(workload)}"
     )
 
 
@@ -295,11 +303,16 @@ def run_optimize(
     except ProfileCommandError as exc:
         raise OptimizeCommandError(str(exc)) from exc
 
+    location = resolve_session_location(session_id or None, root=session_root)
+    if location is not None:
+        session_id = location.session_id
+        session_root = location.root
     resolved_id = resolve_session_id(session_id or None, before=before_ref)
     resume = _resume_command(
         before_path=raw_before,
         repo=str(repo_path),
         session_id=resolved_id,
+        session_root=session_root,
         workload=normalized,
     )
     store = SessionStore(session_root)

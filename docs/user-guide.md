@@ -160,6 +160,21 @@ Three things to notice, because they are deliberate:
 
 Add `--web` to open the same session in the browser without recomputing anything.
 
+For a cross-process handoff, pass the session directory itself instead of an id:
+
+```console
+$ nsys-ai diagnose run-before/profile.sqlite --session /tmp/nsys-run-001
+$ nsys-ai review --session /tmp/nsys-run-001
+$ nsys-ai ask --session /tmp/nsys-run-001 "what is the bottleneck?"
+```
+
+The directory is the contract: its `session.json` and artifacts are opened by the CLI, Web, and
+TUI from any working directory. A bare value such as `--session run-001` remains supported and
+continues to mean `.nsys-ai/sessions/run-001` relative to the current directory.
+
+The optional MCP transport exposes the same read-only handoff as `get_session`; it returns the
+SessionStore projection rather than a second MCP-specific session schema.
+
 Two lower-level entry points remain available when you want them: `nsys-ai evidence build <profile>`
 runs the same analyzers and writes findings JSON to stdout or `-o` (add `--session` to publish, and
 `--analyzers` to pick a subset), and `nsys-ai skill list` / `nsys-ai skill run <name> <profile>` run a
@@ -268,6 +283,11 @@ Using `--session` throughout leaves a single directory describing the whole inve
 
 `session.json` records a hash of each artifact, so a file edited by hand is detectable rather than
 silently trusted.
+
+Only the short publication step takes the session writer lock. Analysis runs before that lock is
+acquired; concurrent writers receive a conflict instead of overwriting another transport's
+publication. Artifact files are written atomically and the store's recovery journal restores a
+coherent snapshot after an interrupted publication.
 
 ## Things worth knowing
 
