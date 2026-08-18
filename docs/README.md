@@ -22,6 +22,7 @@ Always check `nsys --version` on the target system and cross-reference with the 
 | [guided-loop-setup.md](./guided-loop-setup.md) | The same loop driven from the timeline web UI | Project Guide |
 | [doctor.md](./doctor.md) | Environment and profile health checks | Project Guide |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI | Project Guide |
+| [ci-diff-gate.md](./ci-diff-gate.md) | Capture, compare, and gate performance regressions in CI | Project Guide |
 | [01-cli-reference.md](./01-cli-reference.md) | CLI commands, flags, and example command lines | User Guide |
 | [02-sqlite-schema.md](./02-sqlite-schema.md) | SQLite export schema and common queries | Exporter Docs (v2022.4) |
 | [03-nvtx-annotations.md](./03-nvtx-annotations.md) | NVTX API for instrumenting applications | User Guide |
