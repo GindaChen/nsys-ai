@@ -386,7 +386,7 @@ def test_cli_session_accepts_relative_profile_paths(tmp_path: Path):
         )
 
 
-def test_cli_session_records_the_decision_on_the_session_diff(tmp_path: Path):
+def test_cli_session_records_a_rejected_finding_and_reopens_propose(tmp_path: Path):
     """--session and --accept/--reject compose: the loop's last step is reachable.
 
     They used to be mutually exclusive, and the error directed a CLI user to
@@ -422,15 +422,17 @@ def test_cli_session_records_the_decision_on_the_session_diff(tmp_path: Path):
     assert decided.returncode == 0, decided.stderr
 
     directory = session_dir(session_id, root=tmp_path / ".nsys-ai" / "sessions")
-    diff_payload = json.loads((directory / "diff.json").read_text(encoding="utf-8"))
-    decision = diff_payload.get("decision")
-    assert decision is not None, "session diff was left undecided"
+    history = json.loads(
+        (directory / "decisions.json").read_text(encoding="utf-8")
+    )
+    decision = history["decisions"][-1]
     assert decision["status"] == "rejected"
     assert decision["reason"] == "3x the launches for 2x the time"
 
     state = json.loads((directory / "session.json").read_text(encoding="utf-8"))
-    assert state["phase"] == "accept"
+    assert state["phase"] == "propose"
+    assert not (directory / "diff.json").exists()
 
-    # The session's diff.json is the record. A second copy in the working
+    # The session's decisions.json is the record. A second copy in the working
     # directory would be free to disagree with it.
     assert not (tmp_path / "diff.json").exists()

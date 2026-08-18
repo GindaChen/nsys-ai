@@ -233,6 +233,10 @@ def _print_decision_path(
         print(f"Verdict: {verdict}", file=stdout)
     else:
         print(f"Diff artifact: (none yet under {directory})", file=stdout)
+        if snapshot.decisions:
+            print(
+                f"Decision history: {directory / 'decisions.json'}", file=stdout
+            )
 
     decision = projected.get("decision")
     if decision:
@@ -244,8 +248,9 @@ def _print_decision_path(
         if reason:
             print(f"Reason: {reason}", file=stdout)
     elif snapshot.diff is not None:
-        # Both paths record the same decision on the session's diff.json. The
-        # CLI one is listed first because it needs no browser and is scriptable.
+        # Both paths record the same decision contract. Accepted decisions stay
+        # on diff.json; rejected findings are appended to decisions.json before
+        # the session reopens at propose.
         before_ref = getattr(snapshot.state, "before_profile", None)
         after_ref = getattr(snapshot.state, "after_profile", None)
         before_path = getattr(before_ref, "path", None) or "<before>"

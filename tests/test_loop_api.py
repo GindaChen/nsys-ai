@@ -213,8 +213,9 @@ def test_web_decision_survives_reload(tmp_path):
     assert status == 200
     assert reloaded["decision"] == "reject"
     assert reloaded["decision_reason"] == "regressed"
-    assert reloaded["decision_path"].endswith("diff.json")
-    assert (tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json").exists()
+    assert reloaded["decision_path"].endswith("decisions.json")
+    assert reloaded["phase"] == "propose"
+    assert not (tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json").exists()
 
 
 def test_web_decision_requires_reason(tmp_path):

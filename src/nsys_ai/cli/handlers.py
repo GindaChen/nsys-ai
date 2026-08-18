@@ -1174,9 +1174,9 @@ def _cmd_diff(args, _profile):
         )
         sys.exit(1)
 
-    # With --session the decision belongs to the session's own diff.json, recorded
-    # below through the store. Writing a second copy into the working directory
-    # would leave two records of one decision, free to disagree.
+    # With --session the decision belongs to the session store, recorded below
+    # through the writer. Accepted decisions remain on diff.json; rejected
+    # findings are appended to decisions.json and reopen the session for propose.
     if decision is not None and gate_summary is not None and session is None:
         try:
             decision_path, _, decision_warnings = write_diff_decision_json(
@@ -1250,9 +1250,8 @@ def _cmd_diff(args, _profile):
             sys.exit(2)
         print(f"Diff published to session {session_id}", file=sys.stderr)
         if decision is not None:
-            # The store permits exactly one decision, so a re-run of the same
-            # command reports why rather than silently leaving the session
-            # undecided.
+            # The store permits one decision per finding. A rejection is durable
+            # history and intentionally returns the session to propose.
             from nsys_ai.session_cli import publish_session_decision
 
             try:

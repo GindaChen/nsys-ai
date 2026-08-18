@@ -1753,7 +1753,61 @@ def test_interrupted_decision_publication_recovers_undecided_snapshot(
     assert recovered.diff["decision"] is None
     assert (session_dir / "diff.json").read_bytes() == diff_before
     assert (session_dir / "session.json").read_bytes() == manifest_before
+    assert not (session_dir / "decisions.json").exists()
     assert not (session_dir / ".transaction").exists()
+
+
+@pytest.mark.parametrize("interruption", ["after_artifact", "after_manifest"])
+def test_interrupted_rejection_reverts_all_session_artifacts(
+    monkeypatch, tmp_path, interruption
+):
+    import nsys_ai.session_store as session_store
+
+    store, before, after, _finding_value, _spec, _proposal = _reprofiled_session(
+        tmp_path, "rejection-recovery"
+    )
+    with store.writer("rejection-recovery") as writer:
+        writer.publish_diff(_diff(before, after))
+
+    session_dir = store.root / "rejection-recovery"
+    proposal_before = (session_dir / "proposal.json").read_bytes()
+    diff_before = (session_dir / "diff.json").read_bytes()
+    manifest_before = (session_dir / "session.json").read_bytes()
+    if interruption == "after_artifact":
+        manifest_path = session_dir / "session.json"
+        real_atomic_write_json = session_store.atomic_write_json
+
+        def fail_manifest(path, payload):
+            if Path(path) == manifest_path:
+                raise OSError("simulated crash after rejection artifacts")
+            return real_atomic_write_json(path, payload)
+
+        monkeypatch.setattr(session_store, "atomic_write_json", fail_manifest)
+    else:
+
+        def interrupt_cleanup(_session_id):
+            raise OSError("simulated crash after rejection manifest")
+
+        monkeypatch.setattr(store, "_finish_transaction", interrupt_cleanup)
+
+    with store.writer("rejection-recovery") as writer:
+        with pytest.raises(OSError, match="simulated crash"):
+            writer.publish_decision(
+                "reject",
+                "rejection must be recoverable",
+                decider="test@example.com",
+                decided_at="2026-08-06T00:00:00Z",
+            )
+
+    recovered = SessionStore(store.root).load("rejection-recovery")
+    assert recovered.state.phase == "diff"
+    assert recovered.proposal is not None
+    assert recovered.diff["decision"] is None
+    assert not recovered.decisions
+    assert (session_dir / "proposal.json").read_bytes() == proposal_before
+    assert (session_dir / "diff.json").read_bytes() == diff_before
+    assert (session_dir / "session.json").read_bytes() == manifest_before
+    assert not (session_dir / "decisions.json").exists()
 
 
 def test_manifest_cannot_regress_while_retaining_downstream_artifacts(tmp_path):

@@ -4063,7 +4063,9 @@ function loopSetBusy(busy) {
 
 function loopSuggestedPhase(state) {
     const s = state || LOOP_STATE || {};
-    if (s.decision) return 'accept';
+    // A rejected finding is persisted in decisions.json while the session
+    // returns to propose. Only the accept phase is terminal for this loop.
+    if (s.phase === 'accept' && s.decision) return 'accept';
     if (s.diff_summary) return 'accept';
     if (!s.diagnose_ran) return 'diagnose';
     if (!loopHasProposal(s)) return 'propose';
@@ -4191,7 +4193,9 @@ function loopSetStepUi(next) {
     const sectionProposal = document.getElementById('loopSectionProposal');
     const sectionDecide = document.getElementById('loopDecideSection');
     const sessionMode = loopIsSessionMode();
-    const decided = Boolean(LOOP_STATE && LOOP_STATE.decision);
+    const decided = Boolean(
+        LOOP_STATE && LOOP_STATE.decision && LOOP_STATE.phase === 'accept'
+    );
 
     // Session mode: CLI owns propose/reprofile inputs; keep them read-only.
     if (proposalEl) {
@@ -4206,7 +4210,7 @@ function loopSetStepUi(next) {
         afterEl.disabled = LOOP_BUSY || sessionMode || next !== 'reprofile';
         afterEl.readOnly = sessionMode;
     }
-    // C2: once a decision exists, disable accept/reject (store rejects a second write).
+    // C2: only a terminal accept decision disables the current action buttons.
     if (btnAccept) btnAccept.disabled = LOOP_BUSY || decided || next !== 'accept';
     if (btnReject) btnReject.disabled = LOOP_BUSY || decided || next !== 'accept';
 
@@ -4567,7 +4571,7 @@ async function loopSetDecision(decision) {
         loopSetError('Run diff before accepting or rejecting.');
         return;
     }
-    if (LOOP_STATE.decision) {
+    if (LOOP_STATE.phase === 'accept' && LOOP_STATE.decision) {
         loopSetError('A decision is already recorded for this session.');
         return;
     }

@@ -327,8 +327,8 @@ def test_cli_decision_visible_to_browser(tmp_path: Path):
         assert status == 200
         assert state["decision"] == "reject"
         assert state["decision_reason"] == "cli rejected before browser open"
-        assert state["decision_path"].endswith("diff.json")
-        assert state["phase"] == "accept"
+        assert state["decision_path"].endswith("decisions.json")
+        assert state["phase"] == "propose"
 
         status, again = _post(
             port,
@@ -336,7 +336,7 @@ def test_cli_decision_visible_to_browser(tmp_path: Path):
             {"decision": "accept", "reason": "should fail"},
         )
         assert status == 400
-        assert "decision" in again.get("error", "").lower()
+        assert "diff" in again.get("error", "").lower()
 
 
 def test_abstained_proposal_diff_session_names_cause_and_fix(tmp_path: Path):
