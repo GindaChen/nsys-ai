@@ -8,6 +8,7 @@ not acquire a new runtime dependency.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -15,19 +16,31 @@ from pathlib import Path
 from typing import Any
 
 from .annotation import PRODUCER, SCHEMA_VERSION
+from .connection import DB_ERRORS
 from .diff import diff_profiles, diff_profiles_all_gpus
 from .diff_render import to_diff_dict
-from .exceptions import SkillExecutionError, SkillNotFoundError, SkillParameterError
+from .exceptions import (
+    ExportToolMissingError,
+    NsysAiError,
+    ProfileNotFoundError,
+    SkillNotFoundError,
+    SkillParameterError,
+)
 from .fingerprint import get_profile_id
-from .profile import Profile, resolve_profile_path
+from .profile import Profile
 
 MAX_ROWS = 50
 MAX_DIFF_LIMIT = 50
+MAX_SKILL_PARAMS = 32
+MAX_PARAM_INT = 10**15
+MAX_PARAM_FLOAT = 10**18
+MAX_PARAM_STRING_CHARS = 4096
 # The SQL tool's 8,000-character cap is tuned for an LLM prompt. MCP returns
 # the canonical structured diff envelope, so it needs a larger bounded budget
 # while retaining an explicit payload guardrail.
 MCP_MAX_PAYLOAD_CHARS = 100_000
 _TRIM_KEYS = frozenset({"trim_start_ns", "trim_end_ns"})
+_READ_ERRORS = DB_ERRORS + (OSError, ValueError)
 
 
 def _error(code: str, message: str, **detail: Any) -> dict[str, Any]:
@@ -77,25 +90,47 @@ def _coerce_param(value: Any, param_type: Any) -> Any:
     if param_type is int or type_name in {"int", "integer"}:
         if isinstance(value, bool):
             raise ValueError("boolean is not a valid integer parameter")
-        return int(value)
+        parsed = int(value)
+        if abs(parsed) > MAX_PARAM_INT:
+            raise ValueError(f"integer parameter exceeds the {MAX_PARAM_INT} bound")
+        return parsed
     if param_type is float or type_name in {"float", "double"}:
         if isinstance(value, bool):
             raise ValueError("boolean is not a valid float parameter")
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed) or abs(parsed) > MAX_PARAM_FLOAT:
+            raise ValueError(f"float parameter must be finite and within ±{MAX_PARAM_FLOAT}")
+        return parsed
     if param_type is bool or type_name in {"bool", "boolean"}:
         if not isinstance(value, bool):
             raise ValueError("parameter must be a boolean")
         return value
     if not isinstance(value, str):
         raise ValueError("parameter must be a string")
+    if len(value) > MAX_PARAM_STRING_CHARS:
+        raise ValueError(
+            f"string parameter exceeds the {MAX_PARAM_STRING_CHARS}-character bound"
+        )
     return value
+
+
+def _validate_param_bound(name: str, value: Any, param_type: Any) -> Any:
+    """Apply the same safety limits to declared defaults and user parameters."""
+    parsed = _coerce_param(value, param_type)
+    if name == "limit" and parsed > MAX_ROWS:
+        raise ValueError(f"limit must not exceed {MAX_ROWS}")
+    return parsed
 
 
 def _resolve_skill_params(skill, params: Mapping[str, Any] | None) -> dict[str, Any]:
     if params is None:
-        return {}
+        params = {}
     if not isinstance(params, Mapping):
         raise ValueError("params must be an object")
+    if len(params) > MAX_SKILL_PARAMS:
+        raise ValueError(f"params must contain at most {MAX_SKILL_PARAMS} entries")
+    if any(not isinstance(name, str) for name in params):
+        raise ValueError("all parameter names must be strings")
 
     declared = {param.name: param for param in skill.params}
     allowed = set(declared) | _TRIM_KEYS
@@ -110,13 +145,24 @@ def _resolve_skill_params(skill, params: Mapping[str, Any] | None) -> dict[str, 
         if name in _TRIM_KEYS:
             if isinstance(value, bool):
                 raise ValueError(f"{name} must be an integer")
-            resolved[name] = int(value)
+            resolved[name] = _validate_param_bound(name, value, int)
         else:
-            resolved[name] = _coerce_param(value, declared[name].type)
+            resolved[name] = _validate_param_bound(name, value, declared[name].type)
+
+    # Skill.execute applies defaults internally. Copying safe defaults into the
+    # call makes the bound apply before SQL/Python execution as well, including
+    # a builtin whose declared default limit is larger than MAX_ROWS.
+    for param in skill.params:
+        if param.name not in resolved and param.default is not None:
+            resolved[param.name] = _validate_param_bound(
+                param.name, param.default, param.type
+            )
     return resolved
 
 
 def _cap_rows(rows: list[dict], max_rows: int) -> tuple[list[dict], bool]:
+    if isinstance(max_rows, bool) or not isinstance(max_rows, int):
+        raise ValueError("max_rows must be an integer")
     if max_rows < 0 or max_rows > MAX_ROWS:
         raise ValueError(f"max_rows must be between 0 and {MAX_ROWS}")
     if len(rows) <= max_rows:
@@ -134,10 +180,27 @@ def _cap_rows(rows: list[dict], max_rows: int) -> tuple[list[dict], bool]:
 
 @contextmanager
 def _open_readonly(path: str) -> Iterator[tuple[Any, str]]:
-    """Yield a direct-attach or SQLite ``mode=ro`` connection without a cache build."""
+    """Yield a read-only connection without exporting or building a sidecar."""
     from .parquet_cache import open_direct_sqlite, open_with_direct_fallback
 
-    resolved = resolve_profile_path(path)
+    source = Path(path)
+    if not source.exists():
+        raise ProfileNotFoundError(f"profile not found: {path}")
+    if source.suffix.lower() == ".nsys-rep":
+        sidecar = source.with_suffix(".sqlite")
+        if not sidecar.is_file() or sidecar.stat().st_size == 0:
+            raise ExportToolMissingError(
+                "MCP access to .nsys-rep is read-only and will not export a sidecar; "
+                "provide an up-to-date .sqlite export next to the capture"
+            )
+        if sidecar.stat().st_mtime < source.stat().st_mtime:
+            raise ExportToolMissingError(
+                "MCP access to .nsys-rep will not refresh a stale sidecar; "
+                "export an up-to-date .sqlite file before calling the server"
+            )
+        resolved = str(sidecar)
+    else:
+        resolved = str(source)
     conn, _error_detail = open_with_direct_fallback(resolved, open_direct_sqlite)
     if conn is None:
         uri = Path(resolved).resolve().as_uri() + "?mode=ro"
@@ -160,6 +223,11 @@ def _run_skill(
     from .skills.base import is_abstention
     from .skills.registry import all_skills, get_skill
 
+    try:
+        _cap_rows([], max_rows)
+    except ValueError as exc:
+        return _error("INVALID_PARAMETER", str(exc))
+
     skill = get_skill(skill_name)
     if skill is None:
         return SkillNotFoundError(
@@ -169,7 +237,7 @@ def _run_skill(
 
     try:
         skill_params = _resolve_skill_params(skill, params)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         return _error("INVALID_PARAMETER", str(exc), skill=skill.name)
 
     try:
@@ -209,7 +277,11 @@ def _run_skill(
             return _json_safe(payload)
     except SkillParameterError as exc:
         return exc.to_dict()
-    except (SkillExecutionError, sqlite3.Error, OSError, ValueError) as exc:
+    except NsysAiError as exc:
+        return exc.to_dict()
+    except _READ_ERRORS as exc:
+        return _error("SKILL_EXECUTION_ERROR", str(exc), skill=skill.name)
+    except Exception as exc:
         return _error("SKILL_EXECUTION_ERROR", str(exc), skill=skill.name)
 
 
@@ -264,7 +336,11 @@ def _diff_payload(
                         max_payload_chars=MCP_MAX_PAYLOAD_CHARS,
                     )
                 return _json_safe(payload)
-    except (OSError, sqlite3.Error, ValueError) as exc:
+    except NsysAiError as exc:
+        return exc.to_dict()
+    except _READ_ERRORS as exc:
+        return _error("DIFF_EXECUTION_ERROR", str(exc))
+    except Exception as exc:
         return _error("DIFF_EXECUTION_ERROR", str(exc))
 
 
