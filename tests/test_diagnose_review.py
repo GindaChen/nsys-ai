@@ -354,5 +354,9 @@ def test_undecided_review_names_the_cli_decision_path_and_it_runs(tmp_path: Path
     assert decided.returncode == 0, decided.stderr
 
     directory = session_dir(session_id, root=tmp_path / ".nsys-ai" / "sessions")
-    payload = json.loads((directory / "diff.json").read_text(encoding="utf-8"))
-    assert payload["decision"]["status"] == "rejected"
+    payload = json.loads(
+        (directory / "decisions.json").read_text(encoding="utf-8")
+    )
+    assert payload["decisions"][-1]["status"] == "rejected"
+    assert json.loads((directory / "session.json").read_text())["phase"] == "propose"
+    assert not (directory / "diff.json").exists()
