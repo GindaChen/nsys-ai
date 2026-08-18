@@ -313,6 +313,16 @@ def build_local_profile_reference(
             )
         except Exception:
             raise ProfileError("local profile path contains a resolved secret") from None
+        if profile_path.suffix.lower() == ".nsys-rep":
+            try:
+                inspect_local_profile_file(profile_path)
+            except ValueError as exc:
+                raise ProfileError(str(exc)) from None
+        elif profile_path.suffix.lower() in {".parquetdir", ".nsys-cache"} or profile_path.is_dir():
+            try:
+                inspect_local_parquetdir(str(profile_path), allow_missing=False)
+            except ValueError as exc:
+                raise ProfileError(str(exc)) from None
         try:
             with Profile(str(profile_path), ingest_policy=ingest_policy) as profile:
                 reference = LocalProfileReference(
