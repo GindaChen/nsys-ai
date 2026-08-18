@@ -197,7 +197,7 @@ def validate_local_profile_reference(
         raise ValueError("parquetdir profile reference path must name a directory")
 
     if storage_kind == "parquetdir":
-        _inspect_parquetdir(path, allow_missing=not require_file)
+        inspect_local_parquetdir(path, allow_missing=not require_file)
     else:
         inspect_local_profile_file(path, allow_missing=not require_file)
 
@@ -211,7 +211,7 @@ def validate_local_profile_reference(
     ):
         raise ValueError("local profile resolved_path must be a canonical absolute path")
     if storage_kind == "parquetdir" or resolved_path.lower().endswith(".parquetdir"):
-        _inspect_parquetdir(resolved_path, allow_missing=not require_file)
+        inspect_local_parquetdir(resolved_path, allow_missing=not require_file)
     else:
         inspect_local_profile_file(resolved_path, allow_missing=not require_file)
 
@@ -236,7 +236,7 @@ def validate_local_profile_reference(
     return reference
 
 
-def _inspect_parquetdir(path: str, *, allow_missing: bool) -> Path | None:
+def inspect_local_parquetdir(path: str, *, allow_missing: bool) -> Path | None:
     """Validate a canonical parquet directory without following symlinks."""
     parquet_path = Path(path)
     if not parquet_path.is_absolute() or os.path.normpath(path) != path:

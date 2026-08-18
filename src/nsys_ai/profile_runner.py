@@ -27,6 +27,7 @@ from .fingerprint import get_profile_id
 from .profile import Profile, resolve_profile_path
 from .profile_reference import (
     LocalProfileReference,
+    inspect_local_parquetdir,
     inspect_local_profile_file,
     profile_stat_signature,
     validate_local_profile_reference,
@@ -195,6 +196,21 @@ def read_local_profile_under_guard(
         raise ProfileError(
             f"local profile path contains a resolved secret{secret_error_detail}"
         )
+
+    # Validate the source before Profile can export, attach, or repair anything.
+    # The resolved output is checked again by the shared profile resolver.
+    if profile_path.suffix.lower() == ".nsys-rep":
+        try:
+            inspect_local_profile_file(profile_path)
+        except ValueError as exc:
+            raise ProfileError(str(exc)) from None
+    elif profile_path.suffix.lower() in {".parquetdir", ".nsys-cache"} or (
+        profile_path.is_dir() and profile_path.suffix.lower() != ".sqlite"
+    ):
+        try:
+            inspect_local_parquetdir(str(profile_path), allow_missing=False)
+        except ValueError as exc:
+            raise ProfileError(str(exc)) from None
 
     if profile_path.suffix.lower() != ".sqlite":
         raise ProfileError("local profile path must name a .sqlite file")

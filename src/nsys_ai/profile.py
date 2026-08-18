@@ -15,6 +15,7 @@ import subprocess  # nosec B404
 import threading
 import typing
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 # subprocess: nsys export (.nsys-rep→.sqlite) only; argv list, no shell.
@@ -31,6 +32,7 @@ from nsys_ai.exceptions import (
     ProfileNotFoundError,
     SchemaError,
 )
+from nsys_ai.profile_reference import inspect_local_parquetdir
 
 # Regex for safe SQL identifiers (table/column names).
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1025,9 +1027,11 @@ def resolve_profile(
             f"Unknown backend: {backend!r}. Expected 'auto', 'sqlite', or 'parquetdir'."
         )
     selected = policy if backend == "auto" else backend
-    if os.path.isdir(path):
-        if not any(name.endswith(".parquet") for name in os.listdir(path)):
-            raise ExportError(f"Parquet directory '{path}' does not contain any .parquet files.")
+    if os.path.isdir(path) or Path(path).suffix.lower() in {".parquetdir", ".nsys-cache"}:
+        try:
+            inspect_local_parquetdir(os.path.abspath(path), allow_missing=False)
+        except ValueError as exc:
+            raise ExportError(str(exc)) from exc
         if selected == "sqlite":
             raise ExportError(
                 "SQLite ingest policy cannot open a parquetdir; use NSYS_AI_INGEST=parquetdir."
@@ -1154,10 +1158,11 @@ def _resolve_sqlite_path(path: str, *, nsys_executable: str = "nsys") -> str:
 def _resolve_parquetdir_path(path: str, *, nsys_executable: str = "nsys") -> str:
     """Return a path to an Nsight `parquetdir` export."""
     if os.path.isdir(path):
-        parquet_files = [name for name in os.listdir(path) if name.endswith(".parquet")]
-        if parquet_files:
-            return path
-        raise ExportError(f"Parquet directory '{path}' does not contain any .parquet files.")
+        try:
+            inspect_local_parquetdir(str(os.path.abspath(path)), allow_missing=False)
+        except ValueError as exc:
+            raise ExportError(str(exc)) from exc
+        return path
 
     if not path.lower().endswith(".nsys-rep"):
         return path
@@ -1166,9 +1171,12 @@ def _resolve_parquetdir_path(path: str, *, nsys_executable: str = "nsys") -> str
     if (
         os.path.exists(path)
         and os.path.isdir(out)
-        and any(name.endswith(".parquet") for name in os.listdir(out))
         and os.path.getmtime(out) >= os.path.getmtime(path)
     ):
+        try:
+            inspect_local_parquetdir(str(os.path.abspath(out)), allow_missing=False)
+        except ValueError as exc:
+            raise ExportError(str(exc)) from exc
         return out
 
     nsys_exe = shutil.which(nsys_executable)
@@ -1210,10 +1218,12 @@ def _resolve_parquetdir_path(path: str, *, nsys_executable: str = "nsys") -> str
             "-o <out.parquetdir> --force-overwrite=true <file.nsys-rep>"
         ) from e
 
-    if not (os.path.isdir(out) and any(name.endswith(".parquet") for name in os.listdir(out))):
+    try:
+        inspect_local_parquetdir(str(os.path.abspath(out)), allow_missing=False)
+    except ValueError as exc:
         raise ExportError(
-            f"nsys export completed without error but did not produce a usable parquetdir at '{out}'."
-        )
+            f"nsys export completed without error: {exc}"
+        ) from exc
     return out
 
 

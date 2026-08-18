@@ -113,6 +113,43 @@ def test_parquetdir_reference_rejects_symlink_parquet_file(tmp_path):
         validate_local_profile_reference(reference, require_file=True)
 
 
+@pytest.mark.parametrize("source_kind", ["rep", "parquetdir", "parquet_file"])
+def test_profile_reference_rejects_symlinked_ingest_source_before_profile(
+    tmp_path, monkeypatch, source_kind
+):
+    import nsys_ai.profile_runner as profile_runner
+
+    real_source = tmp_path / "real.nsys-rep"
+    real_source.write_bytes(b"capture")
+    source = tmp_path / "input.nsys-rep"
+    source.symlink_to(real_source)
+    if source_kind == "parquetdir":
+        real_source = tmp_path / "real.parquetdir"
+        real_source.mkdir()
+        (real_source / "kernels.parquet").write_bytes(b"parquet")
+        source = tmp_path / "input.parquetdir"
+        source.symlink_to(real_source, target_is_directory=True)
+    elif source_kind == "parquet_file":
+        source = tmp_path / "input.parquetdir"
+        source.mkdir()
+        parquet_target = tmp_path / "kernels.parquet"
+        parquet_target.write_bytes(b"parquet")
+        (source / "kernels.parquet").symlink_to(parquet_target)
+
+    called = False
+    real_profile = profile_runner.Profile
+
+    def unexpected_profile(*args, **kwargs):
+        nonlocal called
+        called = True
+        return real_profile(*args, **kwargs)
+
+    monkeypatch.setattr(profile_runner, "Profile", unexpected_profile)
+    with pytest.raises(ProfileError):
+        build_local_profile_reference(source)
+    assert not called
+
+
 def test_existing_profile_reference_has_no_local_artifact_or_cache_side_effects(
     minimal_nsys_db_path, tmp_path
 ):
