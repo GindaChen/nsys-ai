@@ -1,0 +1,126 @@
+name: nsys-ai diff gate
+description: Run the canonical nsys-ai diff --gate command and publish its JSON verdict
+
+inputs:
+  after:
+    description: Candidate profile path (.sqlite or .nsys-rep)
+    required: true
+  before:
+    description: Baseline profile path; omit when against is supplied
+    required: false
+    default: ""
+  against:
+    description: Baseline reference, for example baseline:main
+    required: false
+    default: ""
+  gate:
+    description: Step-time regression threshold passed to diff --gate (percent)
+    required: false
+    default: ""
+  output:
+    description: JSON report path, relative to working-directory
+    required: false
+    default: diff.json
+  working-directory:
+    description: Directory containing the profiles and baseline store
+    required: false
+    default: .
+  package:
+    description: Package specifier to install when install is true
+    required: false
+    default: nsys-ai
+  install:
+    description: Install package before running the gate
+    required: false
+    default: "true"
+  extra-args:
+    description: Additional diff arguments, one argument per line
+    required: false
+    default: ""
+
+outputs:
+  verdict:
+    description: Verdict read from the canonical diff JSON
+    value: ${{ steps.diff.outputs.verdict }}
+  diff-json:
+    description: Path to the generated canonical diff JSON
+    value: ${{ steps.diff.outputs.diff-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install nsys-ai
+      if: inputs.install == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        NSYS_AI_PACKAGE: ${{ inputs.package }}
+      run: python -m pip install --disable-pip-version-check "$NSYS_AI_PACKAGE"
+
+    - name: Run diff gate
+      id: diff
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        NSYS_AI_AFTER: ${{ inputs.after }}
+        NSYS_AI_BEFORE: ${{ inputs.before }}
+        NSYS_AI_AGAINST: ${{ inputs.against }}
+        NSYS_AI_GATE: ${{ inputs.gate }}
+        NSYS_AI_OUTPUT: ${{ inputs.output }}
+        NSYS_AI_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -uo pipefail
+
+        if [[ -n "$NSYS_AI_BEFORE" && -n "$NSYS_AI_AGAINST" ]]; then
+          echo "before and against are mutually exclusive" >&2
+          exit 2
+        fi
+        if [[ -z "$NSYS_AI_AFTER" ]]; then
+          echo "after is required" >&2
+          exit 2
+        fi
+        if [[ -z "$NSYS_AI_OUTPUT" ]]; then
+          echo "output must not be empty" >&2
+          exit 2
+        fi
+
+        args=(diff)
+        if [[ -n "$NSYS_AI_AGAINST" ]]; then
+          args+=(--against "$NSYS_AI_AGAINST")
+        elif [[ -n "$NSYS_AI_BEFORE" ]]; then
+          args+=("$NSYS_AI_BEFORE")
+        else
+          echo "one of before or against is required" >&2
+          exit 2
+        fi
+        args+=("$NSYS_AI_AFTER" --format json --no-ai --exit-on-regression --output "$NSYS_AI_OUTPUT")
+        if [[ -n "$NSYS_AI_GATE" ]]; then
+          args+=(--gate "$NSYS_AI_GATE")
+        fi
+        while IFS= read -r extra; do
+          [[ -n "$extra" ]] && args+=("$extra")
+        done <<< "$NSYS_AI_EXTRA_ARGS"
+
+        mkdir -p "$(dirname -- "$NSYS_AI_OUTPUT")"
+        set +e
+        python -m nsys_ai "${args[@]}"
+        status=$?
+        set -e
+
+        if [[ -f "$NSYS_AI_OUTPUT" ]]; then
+          verdict="$(python - "$NSYS_AI_OUTPUT" <<'PY'
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as stream:
+            payload = json.load(stream)
+        print(payload.get("verdict", ""))
+        PY
+          )"
+          printf 'diff-json=%s\n' "$NSYS_AI_OUTPUT" >> "$GITHUB_OUTPUT"
+          printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
+        elif [[ "$status" -eq 0 ]]; then
+          echo "diff did not produce the requested JSON report" >&2
+          status=2
+        fi
+        exit "$status"
