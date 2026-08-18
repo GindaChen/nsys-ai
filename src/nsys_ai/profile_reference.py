@@ -7,23 +7,31 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .fingerprint import PROFILE_ID_VERSION
 
 LOCAL_PROFILE_ID_PATTERN = re.compile(
     rf"{re.escape(PROFILE_ID_VERSION)}:sha256:[0-9a-f]{{64}}"
 )
+StorageKind = Literal["nsys-rep", "parquetdir", "sqlite"]
 
 
 @dataclass(frozen=True)
 class LocalProfileReference:
-    """Validated identity and schema metadata for a local SQLite export."""
+    """Validated identity and schema metadata for one local profile input."""
 
     path: str
     profile_id: str
     schema_version: str | None
     product_version: str | None
     kernel_count: int
+    storage_kind: StorageKind = "sqlite"
+    resolved_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.resolved_path is None:
+            object.__setattr__(self, "resolved_path", self.path)
 
 
 def profile_stat_signature(metadata: os.stat_result) -> tuple[int, ...]:
@@ -178,9 +186,34 @@ def validate_local_profile_reference(
         or not Path(path).is_absolute()
     ):
         raise ValueError("local profile reference path must be an absolute path string")
-    if Path(path).suffix.lower() != ".sqlite":
-        raise ValueError("local profile reference path must name a .sqlite file")
-    inspect_local_profile_file(path, allow_missing=not require_file)
+    storage_kind = reference.storage_kind
+    if storage_kind not in {"nsys-rep", "parquetdir", "sqlite"}:
+        raise ValueError("local profile reference storage kind is invalid")
+    if storage_kind == "sqlite" and Path(path).suffix.lower() != ".sqlite":
+        raise ValueError("sqlite profile reference path must name a .sqlite file")
+    if storage_kind == "nsys-rep" and Path(path).suffix.lower() != ".nsys-rep":
+        raise ValueError("nsys-rep profile reference path must name a .nsys-rep file")
+    if storage_kind == "parquetdir" and not Path(path).is_dir():
+        raise ValueError("parquetdir profile reference path must name a directory")
+
+    if storage_kind == "parquetdir":
+        _inspect_parquetdir(path, allow_missing=not require_file)
+    else:
+        inspect_local_profile_file(path, allow_missing=not require_file)
+
+    resolved_path = reference.resolved_path or path
+    if (
+        not isinstance(resolved_path, str)
+        or not resolved_path
+        or "\x00" in resolved_path
+        or not Path(resolved_path).is_absolute()
+        or os.path.normpath(resolved_path) != resolved_path
+    ):
+        raise ValueError("local profile resolved_path must be a canonical absolute path")
+    if storage_kind == "parquetdir" or resolved_path.lower().endswith(".parquetdir"):
+        _inspect_parquetdir(resolved_path, allow_missing=not require_file)
+    else:
+        inspect_local_profile_file(resolved_path, allow_missing=not require_file)
 
     if not isinstance(reference.profile_id, str) or not LOCAL_PROFILE_ID_PATTERN.fullmatch(
         reference.profile_id
@@ -201,3 +234,23 @@ def validate_local_profile_reference(
     if reference.kernel_count <= 0:
         raise ValueError("local profile contains no GPU kernel activity")
     return reference
+
+
+def _inspect_parquetdir(path: str, *, allow_missing: bool) -> Path | None:
+    """Validate a canonical parquet directory without following symlinks."""
+    parquet_path = Path(path)
+    if not parquet_path.is_absolute() or os.path.normpath(path) != path:
+        raise ValueError("local profile parquetdir path must be canonical")
+    try:
+        if not parquet_path.exists():
+            if allow_missing:
+                return None
+            raise ValueError("local profile parquetdir does not exist")
+        resolved = parquet_path.resolve(strict=True)
+        if resolved != parquet_path or not parquet_path.is_dir():
+            raise ValueError("local profile parquetdir must be a canonical directory")
+        if not any(item.suffix.lower() == ".parquet" for item in parquet_path.iterdir()):
+            raise ValueError("local profile parquetdir contains no parquet files")
+        return resolved
+    except (OSError, RuntimeError):
+        raise ValueError("local profile parquetdir cannot be inspected") from None

@@ -161,6 +161,12 @@ def _spec(mode="valid", **overrides):
     return RunSpec(**values)
 
 
+@pytest.fixture(autouse=True)
+def sqlite_compat_ingest_policy(monkeypatch):
+    """Keep runner artifact tests on the explicit SQLite compatibility path."""
+    monkeypatch.setenv("NSYS_AI_INGEST", "sqlite")
+
+
 def _run(tmp_path, fake_nsys, mode="valid", **spec_overrides):
     runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
     return runner.run(_spec(mode, **spec_overrides))

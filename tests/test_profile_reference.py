@@ -60,6 +60,39 @@ def test_existing_profile_reference_matches_profile_and_evidence_identity(
     assert reference.kernel_count == 5
 
 
+def test_parquetdir_reference_records_source_and_resolved_storage(tmp_path):
+    from test_parquetdir_backend import _create_parquetdir_profile
+
+    cache = Path(_create_parquetdir_profile(tmp_path / "mock.parquetdir"))
+
+    reference = build_local_profile_reference(cache)
+
+    assert reference.storage_kind == "parquetdir"
+    assert reference.path == str(cache.absolute())
+    assert reference.resolved_path == str(cache.absolute())
+    assert reference.profile_id.startswith("nsys2:")
+    assert reference.kernel_count > 0
+
+
+def test_nsys_rep_reference_validation_accepts_parquetdir_resolution(tmp_path):
+    source = tmp_path / "profile.nsys-rep"
+    resolved = tmp_path / "profile.parquetdir"
+    source.write_bytes(b"capture")
+    resolved.mkdir()
+    (resolved / "kernels.parquet").write_bytes(b"parquet")
+    reference = LocalProfileReference(
+        path=str(source),
+        profile_id=VALID_PROFILE_ID,
+        schema_version=None,
+        product_version=None,
+        kernel_count=1,
+        storage_kind="nsys-rep",
+        resolved_path=str(resolved),
+    )
+
+    assert validate_local_profile_reference(reference, require_file=True) is reference
+
+
 def test_existing_profile_reference_has_no_local_artifact_or_cache_side_effects(
     minimal_nsys_db_path, tmp_path
 ):
@@ -93,7 +126,6 @@ def test_relative_profile_path_is_normalized_without_copying(
     [
         ("", "must not be empty"),
         (b"profile.sqlite", "must be a path string"),
-        ("profile.nsys-rep", "must name a .sqlite file"),
         ("bad\x00.sqlite", "must not contain NUL bytes"),
     ],
 )

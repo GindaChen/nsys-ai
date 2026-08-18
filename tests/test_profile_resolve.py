@@ -97,7 +97,7 @@ def test_resolve_nsys_rep_missing_nsys_reuses_blobless_sqlite(
         conn.commit()
 
     with caplog.at_level(logging.WARNING, logger="nsys_ai.profile"):
-        out = profile_mod.resolve_profile_path(str(rep))
+        out = profile_mod.resolve_profile_path(str(rep), backend="sqlite")
     assert out == str(sqlite_path)
     assert any("without NVTX payload blobs" in r.message for r in caplog.records)
 
@@ -126,7 +126,7 @@ def test_resolve_nsys_rep_success(monkeypatch, tmp_path: Path):
 
     rep = tmp_path / "foo.nsys-rep"
     rep.write_bytes(b"0")
-    out = profile_mod.resolve_profile_path(str(rep))
+    out = profile_mod.resolve_profile_path(str(rep), backend="sqlite")
     assert out.endswith(".sqlite")
     args = calls["args"]
     assert args[0] == "/opt/nsys"
@@ -155,7 +155,9 @@ def test_resolve_nsys_rep_uses_selected_executable(monkeypatch, tmp_path: Path):
     rep = tmp_path / "selected.nsys-rep"
     rep.write_bytes(b"report")
 
-    profile_mod.resolve_profile_path(str(rep), nsys_executable=selected)
+    profile_mod.resolve_profile_path(
+        str(rep), backend="sqlite", nsys_executable=selected
+    )
 
     assert which_calls == [selected]
 
@@ -190,6 +192,47 @@ def test_resolve_nsys_rep_parquetdir_success(monkeypatch, tmp_path: Path):
     assert "--include-blobs=true" in args
 
 
+def test_resolve_nsys_rep_defaults_to_parquetdir(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(profile_mod.shutil, "which", lambda name: "/opt/nsys")
+
+    def fake_run(args, **kwargs):
+        out_dir = Path(args[args.index("-o") + 1])
+        out_dir.mkdir()
+        (out_dir / "kernels.parquet").write_bytes(b"parquet")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
+    rep = tmp_path / "foo.nsys-rep"
+    rep.write_bytes(b"report")
+
+    resolution = profile_mod.resolve_profile(str(rep))
+    assert resolution.storage_kind == "nsys-rep"
+    assert resolution.backend == "parquetdir"
+    assert resolution.resolved_path.endswith(".parquetdir")
+
+
+def test_sqlite_ingest_policy_skips_cache_and_exports_sqlite(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("NSYS_AI_INGEST", "sqlite")
+    monkeypatch.setattr(profile_mod.shutil, "which", lambda name: "/opt/nsys")
+
+    def fake_run(args, **kwargs):
+        out = Path(args[args.index("-o") + 1])
+        out.write_bytes(b"sqlite")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(profile_mod.subprocess, "run", fake_run)
+    rep = tmp_path / "foo.nsys-rep"
+    rep.write_bytes(b"report")
+
+    resolution = profile_mod.resolve_profile(str(rep))
+    assert resolution.storage_kind == "nsys-rep"
+    assert resolution.backend == "sqlite"
+    assert resolution.cache_mode == "direct"
+    assert resolution.resolved_path.endswith(".sqlite")
+
+
 def test_resolve_nsys_rep_failure(monkeypatch, tmp_path: Path):
     """If nsys export fails, the stderr/stdout should be surfaced in a RuntimeError."""
     monkeypatch.setattr(profile_mod.shutil, "which", lambda name: "/opt/nsys")
@@ -202,7 +245,7 @@ def test_resolve_nsys_rep_failure(monkeypatch, tmp_path: Path):
     rep = tmp_path / "foo.nsys-rep"
     rep.write_bytes(b"0")
     with pytest.raises(ExportError) as exc:
-        profile_mod.resolve_profile_path(str(rep))
+        profile_mod.resolve_profile_path(str(rep), backend="sqlite")
     assert "nsys export failed" in str(exc.value)
     assert "nsys error" in str(exc.value)
 

@@ -1,7 +1,7 @@
 """
-profile.py — Open and query Nsight Systems SQLite databases.
+profile.py — Ingest and query Nsight Systems profiles.
 
-Provides a thin wrapper around the SQLite export with typed accessors
+Provides a thin wrapper around profile backends with typed accessors
 for kernels, NVTX events, CUDA runtime calls, and metadata.
 """
 
@@ -15,6 +15,7 @@ import subprocess  # nosec B404
 import threading
 import typing
 from dataclasses import dataclass, field
+from typing import Literal
 
 # subprocess: nsys export (.nsys-rep→.sqlite) only; argv list, no shell.
 if typing.TYPE_CHECKING:
@@ -33,6 +34,34 @@ from nsys_ai.exceptions import (
 
 # Regex for safe SQL identifiers (table/column names).
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+IngestPolicy = Literal["auto", "parquetdir", "sqlite"]
+StorageKind = Literal["nsys-rep", "parquetdir", "sqlite"]
+
+
+@dataclass(frozen=True)
+class ProfileResolution:
+    """The single ingest decision shared by every profile entry point."""
+
+    source_path: str
+    resolved_path: str
+    storage_kind: StorageKind
+    backend: Literal["sqlite", "parquetdir"]
+    cache_mode: Literal["auto", "direct"]
+
+
+def resolve_ingest_policy(policy: str | None = None) -> IngestPolicy:
+    """Return the explicit ingest policy, honoring ``NSYS_AI_INGEST``."""
+    value = (
+        policy
+        if policy is not None
+        else os.environ.get("NSYS_AI_INGEST", "auto").strip().lower()
+    )
+    if value not in {"auto", "parquetdir", "sqlite"}:
+        raise ValueError(
+            f"Unknown ingest policy: {value!r}. Expected 'auto', 'parquetdir', or 'sqlite'."
+        )
+    return value  # type: ignore[return-value]
 
 
 def _validate_table_name(name: str) -> str:
@@ -298,7 +327,7 @@ class ProfileMeta:
 
 
 class Profile:
-    """Handle to an opened Nsight Systems SQLite database.
+    """Handle to an opened Nsight Systems profile.
 
     Exposes two database connections:
       - ``self.conn`` (sqlite3.Connection | duckdb.DuckDBPyConnection): the primary
@@ -323,42 +352,60 @@ class Profile:
         path: str,
         *,
         cache_mode: str = "auto",
-        backend: str = "sqlite",
+        backend: str = "auto",
+        ingest_policy: str | None = None,
         progress: typing.Callable[[str, int, int], None] | None = None,
     ):
         if cache_mode not in ("auto", "parquet", "direct"):
             raise ValueError(
                 f"Unknown cache_mode: {cache_mode!r}. Expected 'auto', 'parquet', or 'direct'."
             )
-        if backend not in ("sqlite", "parquetdir"):
-            raise ValueError(f"Unknown backend: {backend!r}. Expected 'sqlite' or 'parquetdir'.")
+        if backend not in ("auto", "sqlite", "parquetdir"):
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Expected 'auto', 'sqlite', or 'parquetdir'."
+            )
         if backend == "parquetdir" and cache_mode != "auto":
             raise ValueError(
                 "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
             )
-        # Guard before sqlite3.connect, which would otherwise create an empty
-        # stub + cache for a missing path. Covers every entry path, including
-        # direct Profile(...) construction that bypasses resolve_profile_path.
-        if not os.path.exists(path):
-            raise ProfileNotFoundError(f"profile not found: {path}")
-        self.path = path
-        self.backend = backend
+        resolution = resolve_profile(
+            path,
+            backend=backend,
+            ingest_policy=ingest_policy,
+        )
+        if resolution.backend == "parquetdir" and cache_mode != "auto":
+            raise ValueError(
+                "cache_mode is not supported with backend='parquetdir'; use cache_mode='auto'."
+            )
+        if resolution.cache_mode == "direct" and cache_mode == "parquet":
+            raise ValueError(
+                "ingest policy 'sqlite' requires direct SQLite access; "
+                "cache_mode='parquet' is incompatible"
+            )
+        self.path = resolution.resolved_path
+        self.input_path = resolution.source_path
+        self.resolved_path = resolution.resolved_path
+        self.storage_kind = resolution.storage_kind
+        self.backend = resolution.backend
         self._lock = threading.Lock()
         self._owns_conn = True
-        if backend == "parquetdir":
-            self.db = parquet_cache.open_parquetdir_db(path)
+        if resolution.backend == "parquetdir":
+            self.db = parquet_cache.open_parquetdir_db(resolution.resolved_path)
             self.conn = self.db
         else:
-            self.conn = sqlite3.connect(path, check_same_thread=False)
+            self.conn = sqlite3.connect(resolution.resolved_path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
             # Three-tier open (cache / direct attach / raw sqlite3) lives in
             # parquet_cache.open_with_direct_fallback — also used by
             # open_profile_readonly and skill run, so a failed build cannot
             # drop only some entry points onto raw sqlite3 (issue #333).
-            if cache_mode == "direct":
+            effective_cache_mode = (
+                "direct" if resolution.cache_mode == "direct" else cache_mode
+            )
+            if effective_cache_mode == "direct":
                 # Force direct SQLite via DuckDB — zero ETL, instant startup
                 primary = parquet_cache.open_direct_sqlite
-            elif cache_mode == "parquet":
+            elif effective_cache_mode == "parquet":
                 # Original behaviour: block until cache is built.
                 # env_escape=False: this branch never reads
                 # NSYS_AI_CACHE_MODE, so the build banner must not tell the
@@ -374,7 +421,7 @@ class Profile:
                 # open_profile_readonly reach it without a Profile.
                 primary = functools.partial(parquet_cache.open_auto_db, progress=progress)
             self.db, err = parquet_cache.open_with_direct_fallback(
-                path, primary, log=self._log
+                resolution.resolved_path, primary, log=self._log
             )
             if err is not None:
                 self.cache_error = err
@@ -961,15 +1008,56 @@ class Profile:
         self.close()
 
 
+def resolve_profile(
+    path: str,
+    *,
+    backend: str = "auto",
+    ingest_policy: str | None = None,
+    nsys_executable: str = "nsys",
+) -> ProfileResolution:
+    """Resolve one profile input according to the shared ingest policy."""
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
+
+    policy = resolve_ingest_policy(ingest_policy)
+    if backend not in {"auto", "sqlite", "parquetdir"}:
+        raise ValueError(
+            f"Unknown backend: {backend!r}. Expected 'auto', 'sqlite', or 'parquetdir'."
+        )
+    selected = policy if backend == "auto" else backend
+    if os.path.isdir(path):
+        if not any(name.endswith(".parquet") for name in os.listdir(path)):
+            raise ExportError(f"Parquet directory '{path}' does not contain any .parquet files.")
+        if selected == "sqlite":
+            raise ExportError(
+                "SQLite ingest policy cannot open a parquetdir; use NSYS_AI_INGEST=parquetdir."
+            )
+        return ProfileResolution(path, path, "parquetdir", "parquetdir", "auto")
+
+    if path.lower().endswith(".nsys-rep"):
+        if selected in {"auto", "parquetdir"}:
+            resolved = _resolve_parquetdir_path(path, nsys_executable=nsys_executable)
+            return ProfileResolution(path, resolved, "nsys-rep", "parquetdir", "auto")
+        resolved = _resolve_sqlite_path(path, nsys_executable=nsys_executable)
+        return ProfileResolution(path, resolved, "nsys-rep", "sqlite", "direct")
+
+    if selected == "parquetdir":
+        raise ExportError(
+            "Parquetdir ingest requires a parquetdir directory or a .nsys-rep input."
+        )
+    cache_mode: Literal["auto", "direct"] = "direct" if selected == "sqlite" else "auto"
+    return ProfileResolution(path, path, "sqlite", "sqlite", cache_mode)
+
+
 def resolve_profile_path(
-    path: str, *, backend: str = "sqlite", nsys_executable: str = "nsys"
+    path: str, *, backend: str = "auto", nsys_executable: str = "nsys"
 ) -> str:
     """
     Resolve a profile path for the selected backend.
 
-    `backend='sqlite'` returns a `.sqlite` file, exporting from `.nsys-rep`
-    when needed. `backend='parquetdir'` returns a Parquet directory, exporting
-    from `.nsys-rep` when needed.
+    The default ``auto`` policy resolves `.nsys-rep` to a Parquet directory and
+    opens `.sqlite` through the cache/direct fallback. Explicit ``sqlite`` and
+    ``parquetdir`` backends remain available for compatibility and diagnostics.
 
     Exports always pass `--include-blobs=true` so NVTX payload-dependent
     analysis (for example communicator-aware NCCL diagnostics) remains available.
@@ -977,12 +1065,15 @@ def resolve_profile_path(
     Raises ProfileNotFoundError when *path* does not exist (e.g. a missing
     `.nsys-rep`, before any export is attempted).
     """
-    if not os.path.exists(path):
-        raise ProfileNotFoundError(f"profile not found: {path}")
-    if backend == "parquetdir":
-        return _resolve_parquetdir_path(path, nsys_executable=nsys_executable)
-    if not path.lower().endswith(".nsys-rep"):
-        return path
+    return resolve_profile(
+        path,
+        backend=backend,
+        nsys_executable=nsys_executable,
+    ).resolved_path
+
+
+def _resolve_sqlite_path(path: str, *, nsys_executable: str = "nsys") -> str:
+    """Resolve a ``.nsys-rep`` to its compatibility SQLite export."""
 
     # Reuse an existing up-to-date SQLite export if possible.
     out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
@@ -1182,19 +1273,16 @@ def get_first_gpu_name(conn) -> str:
 def open(
     path: str,
     *,
-    backend: str = "sqlite",
+    backend: str = "auto",
     cache_mode: str = "auto",
+    ingest_policy: str | None = None,
     progress: typing.Callable[[str, int, int], None] | None = None,
 ) -> Profile:
     """Open an Nsight Systems profile using the requested backend."""
-    path = resolve_profile_path(path, backend=backend)
-    # Heuristic: if the given path is an empty .sqlite stub but a sibling
-    # file without the .sqlite suffix exists and is a non-empty SQLite DB,
-    # prefer the sibling. This helps when users accidentally point nsys-ai
-    # at a placeholder file instead of the real Nsight export.
-    if backend == "sqlite" and path.endswith(".sqlite") and os.path.exists(path) and not os.path.getsize(path):
-        base = path[:-7]
-        if os.path.exists(base) and os.path.getsize(base) > 0:
-            path = base
-
-    return Profile(path, cache_mode=cache_mode, backend=backend, progress=progress)
+    return Profile(
+        path,
+        cache_mode=cache_mode,
+        backend=backend,
+        ingest_policy=ingest_policy,
+        progress=progress,
+    )

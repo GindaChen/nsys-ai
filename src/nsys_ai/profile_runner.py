@@ -165,8 +165,6 @@ def read_local_profile_under_guard(
         profile_path = Path(raw_path).expanduser().absolute()
     except (OSError, RuntimeError):
         raise ProfileError("local profile path cannot be normalized") from None
-    if profile_path.suffix.lower() != ".sqlite":
-        raise ProfileError("local profile path must name a .sqlite file")
     secret_error_detail: str | None = None
     try:
         validate_persisted_secret_strings(
@@ -198,6 +196,8 @@ def read_local_profile_under_guard(
             f"local profile path contains a resolved secret{secret_error_detail}"
         )
 
+    if profile_path.suffix.lower() != ".sqlite":
+        raise ProfileError("local profile path must name a .sqlite file")
     descriptor, before = _open_profile_descriptor(profile_path)
     connection: sqlite3.Connection | None = None
     validation_succeeded = False
@@ -257,6 +257,8 @@ def read_local_profile_under_guard(
         schema_version=schema_version,
         product_version=product_version,
         kernel_count=kernel_count,
+        storage_kind="sqlite",
+        resolved_path=str(profile_path),
     )
     try:
         validated = validate_local_profile_reference(reference, require_file=True)
@@ -269,8 +271,52 @@ def build_local_profile_reference(
     path: str | os.PathLike[str],
     *,
     resolved_secrets: Mapping[str, str] | None = None,
+    ingest_policy: str | None = None,
 ) -> LocalProfileReference:
-    """The reference alone, for the callers that do not need the GPU count."""
+    """Build a reference through the shared ingest policy."""
+    path_conversion_failed = False
+    try:
+        raw_path = os.fspath(path)
+    except Exception:
+        path_conversion_failed = True
+        raw_path = None
+    if path_conversion_failed:
+        raise ProfileError("local profile path must be a path string")
+    if not isinstance(raw_path, str):
+        raise ProfileError("local profile path must be a path string")
+    if not raw_path:
+        raise ProfileError("local profile path must not be empty")
+    if "\x00" in raw_path:
+        raise ProfileError("local profile path must not contain NUL bytes")
+    profile_path = Path(raw_path).expanduser().absolute()
+    if profile_path.suffix.lower() != ".sqlite":
+        try:
+            validate_persisted_secret_strings(
+                {"path": str(profile_path)},
+                resolved_secrets if resolved_secrets is not None else {},
+            )
+        except Exception:
+            raise ProfileError("local profile path contains a resolved secret") from None
+        try:
+            with Profile(str(profile_path), ingest_policy=ingest_policy) as profile:
+                reference = LocalProfileReference(
+                    path=str(profile.input_path),
+                    profile_id=get_profile_id(
+                        profile.conn,
+                        fallback_path=str(profile.input_path),
+                    ),
+                    schema_version=profile.schema.schema_version,
+                    product_version=profile.schema.version,
+                    kernel_count=profile.meta.kernel_count,
+                    storage_kind=profile.storage_kind,
+                    resolved_path=profile.resolved_path,
+                )
+        except (NsysAiError, OSError, *DB_ERRORS) as exc:
+            raise ProfileError(str(exc)) from None
+        try:
+            return validate_local_profile_reference(reference, require_file=True)
+        except (TypeError, ValueError) as exc:
+            raise ProfileError(str(exc)) from None
     reference, _ = read_local_profile_under_guard(
         path, resolved_secrets=resolved_secrets
     )

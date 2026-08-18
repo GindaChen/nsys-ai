@@ -1264,6 +1264,8 @@ def _profile_reference_to_dict(
     return {
         "kind": "local",
         "path": reference.path,
+        "storage_kind": reference.storage_kind,
+        "resolved_path": reference.resolved_path or reference.path,
         "profile_id": reference.profile_id,
         "export_schema_version": reference.schema_version,
         "product_version": reference.product_version,
@@ -1275,23 +1277,31 @@ def _profile_reference_from_dict(value: Any) -> LocalProfileReference | None:
     if value is None:
         return None
     payload = _require_mapping(value, "profile reference")
-    _require_exact_keys(
-        payload,
-        {
-            "kind",
-            "path",
-            "profile_id",
-            "export_schema_version",
-            "product_version",
-            "kernel_count",
-        },
-        "profile reference",
-    )
+    legacy_keys = {
+        "kind",
+        "path",
+        "profile_id",
+        "export_schema_version",
+        "product_version",
+        "kernel_count",
+    }
+    current_keys = legacy_keys | {"storage_kind", "resolved_path"}
+    actual_keys = set(payload)
+    if actual_keys == legacy_keys:
+        storage_kind = "sqlite"
+        resolved_path = payload.get("path")
+    elif actual_keys == current_keys:
+        storage_kind = payload.get("storage_kind")
+        resolved_path = payload.get("resolved_path")
+    else:
+        _require_exact_keys(payload, current_keys, "profile reference")
     if payload.get("kind") != "local":
         raise SessionCorruptError("profile reference kind must be 'local'")
     try:
         reference = LocalProfileReference(
             path=payload["path"],
+            storage_kind=storage_kind,
+            resolved_path=resolved_path,
             profile_id=payload["profile_id"],
             schema_version=payload["export_schema_version"],
             product_version=payload["product_version"],
