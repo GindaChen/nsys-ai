@@ -333,9 +333,12 @@ def open_profile_readonly(path: str):
         return parquet_cache.open_parquetdir_db(resolution.resolved_path)
     path = resolution.resolved_path
 
-    db, _err = parquet_cache.open_with_direct_fallback(
-        path, parquet_cache.open_auto_db, log=_log
+    primary = (
+        parquet_cache.open_direct_sqlite
+        if resolution.cache_mode == "direct"
+        else parquet_cache.open_auto_db
     )
+    db, _err = parquet_cache.open_with_direct_fallback(path, primary, log=_log)
     if db is not None:
         return db
 

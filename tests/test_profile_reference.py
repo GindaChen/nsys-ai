@@ -93,6 +93,26 @@ def test_nsys_rep_reference_validation_accepts_parquetdir_resolution(tmp_path):
     assert validate_local_profile_reference(reference, require_file=True) is reference
 
 
+def test_parquetdir_reference_rejects_symlink_parquet_file(tmp_path):
+    parquetdir = tmp_path / "profile.parquetdir"
+    parquetdir.mkdir()
+    target = tmp_path / "outside.parquet"
+    target.write_bytes(b"parquet")
+    (parquetdir / "kernels.parquet").symlink_to(target)
+    reference = LocalProfileReference(
+        path=str(parquetdir),
+        profile_id=VALID_PROFILE_ID,
+        schema_version=None,
+        product_version=None,
+        kernel_count=1,
+        storage_kind="parquetdir",
+        resolved_path=str(parquetdir),
+    )
+
+    with pytest.raises(ValueError, match="symlink parquet files"):
+        validate_local_profile_reference(reference, require_file=True)
+
+
 def test_existing_profile_reference_has_no_local_artifact_or_cache_side_effects(
     minimal_nsys_db_path, tmp_path
 ):

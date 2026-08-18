@@ -234,6 +234,22 @@ def test_runner_reuses_public_profile_reference_factory(
     assert calls == [(Path(result.sqlite_path), {})]
 
 
+def test_runner_keeps_sqlite_result_contract_under_auto_ingest(
+    tmp_path, fake_nsys, monkeypatch
+):
+    monkeypatch.setenv("NSYS_AI_INGEST", "auto")
+
+    result = _run(tmp_path, fake_nsys)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.sqlite_path is not None
+    assert result.sqlite_path.endswith(".sqlite")
+    assert result.profile is not None
+    assert result.profile.storage_kind == "sqlite"
+    assert result.profile.resolved_path == result.sqlite_path
+    assert not Path(result.sqlite_path).with_suffix(".parquetdir").exists()
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [

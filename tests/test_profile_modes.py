@@ -370,6 +370,25 @@ def test_open_profile_readonly_honours_the_cache_mode_override(
     )
 
 
+def test_open_profile_readonly_honours_sqlite_ingest_policy(
+    minimal_nsys_db_path, tmp_path, monkeypatch
+):
+    from nsys_ai.ai.backend.profile_db_tool import open_profile_readonly
+
+    db_path = _copy_fixture(minimal_nsys_db_path, tmp_path / "readonly_ingest.sqlite")
+    monkeypatch.setenv("NSYS_AI_INGEST", "sqlite")
+    with mock.patch(
+        "nsys_ai.parquet_cache.open_auto_db",
+        side_effect=AssertionError("sqlite ingest policy must not build a cache"),
+    ):
+        conn = open_profile_readonly(str(db_path))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_RUNTIME").fetchone()[0] >= 0
+    finally:
+        conn.close()
+    assert not _cache_dir_for(str(db_path)).exists()
+
+
 def test_a_declined_cache_says_so_at_warning(minimal_nsys_db_path, tmp_path, caplog):
     """A cache declined for disk reasons must be announced at WARNING, not INFO.
 

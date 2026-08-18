@@ -249,7 +249,12 @@ def _inspect_parquetdir(path: str, *, allow_missing: bool) -> Path | None:
         resolved = parquet_path.resolve(strict=True)
         if resolved != parquet_path or not parquet_path.is_dir():
             raise ValueError("local profile parquetdir must be a canonical directory")
-        if not any(item.suffix.lower() == ".parquet" for item in parquet_path.iterdir()):
+        parquet_files = [
+            item for item in parquet_path.iterdir() if item.suffix.lower() == ".parquet"
+        ]
+        if any(item.is_symlink() for item in parquet_files):
+            raise ValueError("local profile parquetdir cannot contain symlink parquet files")
+        if not parquet_files:
             raise ValueError("local profile parquetdir contains no parquet files")
         return resolved
     except (OSError, RuntimeError):

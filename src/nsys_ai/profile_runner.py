@@ -416,7 +416,9 @@ class LocalProfileRunner:
     classified as ``application_failed`` by inference; it is not a separately
     observed application exit code.
 
-    Export uses the existing blocking :func:`resolve_profile_path` API.  The
+    Export explicitly uses the SQLite compatibility backend because
+    ``RunResult.sqlite_path`` is an established result contract. The default
+    profile ingest policy remains parquetdir for user-supplied inputs. The
     cancellation token is consequently observed during capture, not while that
     shared export call is in progress. Progress callbacks are observers:
     ordinary callback exceptions are isolated from the run, while
@@ -609,8 +611,14 @@ class LocalProfileRunner:
         progress(RunStage.EXPORTING)
         export_started = time.monotonic()
         try:
+            # Keep the runner's established ``sqlite_path`` result meaningful;
+            # user-facing profile opens still use the shared auto policy.
             sqlite_path = Path(
-                resolve_profile_path(str(report_path), nsys_executable=executable)
+                resolve_profile_path(
+                    str(report_path),
+                    backend="sqlite",
+                    nsys_executable=executable,
+                )
             ).absolute()
             created_files.add(sqlite_path)
         except (NsysAiError, OSError, subprocess.SubprocessError) as exc:
