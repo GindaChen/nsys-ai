@@ -162,6 +162,8 @@ import json, sys
 from nsys_ai.session_store import SessionStore
 snapshot = SessionStore(sys.argv[1]).load(sys.argv[2])
 decision = snapshot.diff.get("decision") if snapshot.diff else None
+if decision is None and snapshot.decisions:
+    decision = snapshot.decisions[-1]
 print(json.dumps({
     "phase": snapshot.state.phase,
     "status": None if decision is None else decision.get("status"),
@@ -310,11 +312,11 @@ async def test_timeline_tui_decision_visible_to_new_cli_process(tmp_path: Path, 
     async with app.run_test(size=(120, 40)) as pilot:
         app.set_loop_decision("reject", "timeline TUI rejected regression")
         await pilot.pause()
-        assert app.analysis_phase == "accept"
+        assert app.analysis_phase == "propose"
         assert app._session_projection is not None
         assert app._session_projection["decision"] == "reject"
 
     reloaded = _reload_decision_in_new_process(tmp_path, session_id)
-    assert reloaded["phase"] == "accept"
+    assert reloaded["phase"] == "propose"
     assert reloaded["status"] == "rejected"
     assert reloaded["reason"] == "timeline TUI rejected regression"

@@ -149,10 +149,11 @@ def publish_session_decision(
 ) -> SessionState:
     """Record accept/reject on a session's published diff.
 
-    The store permits exactly one decision and requires the session to be in the
-    ``diff`` phase, so this is the terminal step of the loop. ``publish_decision``
-    raises if the diff is missing or already decided; both are surfaced to the
-    caller unchanged rather than being swallowed into a partial success.
+    The store permits one decision per finding. An accepted finding remains a
+    terminal session; a rejected finding is recorded in ``decisions.json`` and
+    returns the session to ``propose`` so another finding can be evaluated.
+    ``publish_decision`` raises if the diff is missing or the finding was already
+    decided; both are surfaced to the caller unchanged.
     """
     if not reason or not reason.strip():
         raise ValueError("a decision requires a reason")
@@ -176,7 +177,8 @@ def project_loop_state(
 
     Field dispositions follow docs/notes/session-wiring-design.md Deliverable 6.
     DERIVED fields come from artifacts at read time; DROP fields are omitted or
-    empty. ``decision_path`` is emitted only when ``diff["decision"]`` is set.
+    empty. ``decision_path`` is emitted only when a decision is recorded, either
+    in ``diff.json`` or in the session's ``decisions.json`` history.
     """
     from .loop_state import profile_display_name
 
@@ -227,6 +229,15 @@ def project_loop_state(
             # C5: path only when a decision has been recorded, not merely when
             # diff.json exists.
             decision_path = str(Path(session_dir_path) / "diff.json")
+    if decision is None and snapshot.decisions:
+        recorded = snapshot.decisions[-1]
+        status = str(recorded.get("status") or "").strip().lower()
+        if status == "accepted":
+            decision = "accept"
+        elif status == "rejected":
+            decision = "reject"
+        decision_reason = str(recorded.get("reason") or "")
+        decision_path = str(Path(session_dir_path) / "decisions.json")
 
     return {
         "session_mode": True,

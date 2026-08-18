@@ -402,4 +402,6 @@ async def test_loop_set_decision_empty_reason_uses_fallback(tmp_path, monkeypatc
         assert app._session_projection is not None
         assert app._session_projection["decision"] == "reject"
         assert app._session_projection["decision_reason"].strip()
-        assert (tmp_path / ".nsys-ai" / "sessions" / session_id / "diff.json").exists()
+        history = tmp_path / ".nsys-ai" / "sessions" / session_id / "decisions.json"
+        assert history.exists()
+        assert app._session_projection["decision_path"] == str(history)

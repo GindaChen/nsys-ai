@@ -66,6 +66,7 @@ from .runspec import (
 
 SESSION_SCHEMA_VERSION = "0.1"
 DIFF_SCHEMA_VERSION = EVIDENCE_SCHEMA_VERSION
+DECISIONS_SCHEMA_VERSION = "0.1"
 
 SessionPhase = Literal["diagnose", "propose", "reprofile", "diff", "accept"]
 _PHASES = frozenset({"diagnose", "propose", "reprofile", "diff", "accept"})
@@ -75,6 +76,7 @@ _ARTIFACT_PATHS = {
     "findings": "findings.json",
     "proposal": "proposal.json",
     "diff": "diff.json",
+    "decisions": "decisions.json",
 }
 _TRANSACTION_DIR = ".transaction"
 _TRANSACTION_STAGING_PREFIX = ".transaction.stage."
@@ -100,6 +102,8 @@ _DIFF_FIELDS = {
     "nvtx_improvements",
     "overlap",
 }
+_DECISION_FIELDS = {"finding_id", "status", "reason", "decider", "decided_at"}
+_UNSET = object()
 _DIFF_SIDE_FIELDS = {
     "path",
     "profile_id",
@@ -276,7 +280,14 @@ class SessionState:
         profiles = _require_mapping(payload.get("profiles"), "session profiles")
         _require_exact_keys(profiles, {"before", "after"}, "session profiles")
         artifacts_payload = _require_mapping(payload.get("artifacts"), "session artifacts")
-        _require_exact_keys(artifacts_payload, set(_ARTIFACT_PATHS), "session artifacts")
+        artifact_keys = set(artifacts_payload)
+        current_artifact_keys = set(_ARTIFACT_PATHS)
+        legacy_artifact_keys = current_artifact_keys - {"decisions"}
+        if artifact_keys not in {
+            frozenset(current_artifact_keys),
+            frozenset(legacy_artifact_keys),
+        }:
+            _require_exact_keys(artifacts_payload, current_artifact_keys, "session artifacts")
         artifacts: dict[str, ArtifactReference] = {}
         for name, value in artifacts_payload.items():
             if value is None:
@@ -323,6 +334,7 @@ class SessionSnapshot:
     findings: EvidenceReport | None
     proposal: Proposal | None
     diff: Mapping[str, Any] | None
+    decisions: tuple[Mapping[str, Any], ...] = ()
 
 
 class SessionStore:
@@ -392,6 +404,7 @@ class SessionStore:
         findings = None
         proposal = None
         diff = None
+        decisions: tuple[Mapping[str, Any], ...] = ()
         if "runspec" in state.artifacts:
             self._check_artifact_version(state, "runspec", RUNSPEC_SCHEMA_VERSION)
             self._verify_artifact(state, "runspec")
@@ -453,35 +466,66 @@ class SessionStore:
                 raise SessionCorruptError(f"invalid diff.json: {exc}") from exc
             diff = MappingProxyType(parsed_diff)
             _validate_diff_references(state, diff, error_type=SessionCorruptError)
-        snapshot = SessionSnapshot(state, runspec, findings, proposal, diff)
+        if "decisions" in state.artifacts:
+            self._check_artifact_version(
+                state, "decisions", DECISIONS_SCHEMA_VERSION
+            )
+            self._verify_artifact(state, "decisions")
+            decisions_payload = _read_json(
+                session_dir / "decisions.json", "decisions.json"
+            )
+            decisions = _validate_decisions_payload(
+                decisions_payload, error_type=SessionCorruptError
+            )
+        snapshot = SessionSnapshot(state, runspec, findings, proposal, diff, decisions)
         _validate_snapshot_invariants(snapshot)
         return snapshot
 
-    def _begin_transaction(self, session_id: str, artifact_name: str) -> None:
+    def _begin_transaction(
+        self, session_id: str, artifact_name: str | tuple[str, ...]
+    ) -> None:
         session_dir = self._session_dir(session_id)
         journal = session_dir / _TRANSACTION_DIR
         if journal.exists():
             raise SessionCorruptError("session has an unrecovered publication journal")
+        names = (artifact_name,) if isinstance(artifact_name, str) else artifact_name
+        if not names or any(name not in _ARTIFACT_PATHS for name in names):
+            raise SessionCorruptError("transaction references an unknown artifact")
         staging = Path(
             tempfile.mkdtemp(prefix=_TRANSACTION_STAGING_PREFIX, dir=session_dir)
         )
-        artifact_path = session_dir / _ARTIFACT_PATHS[artifact_name]
         try:
             atomic_write_bytes(
                 staging / "session.json", _read_bytes(session_dir / "session.json", "session.json")
             )
-            artifact_existed = artifact_path.is_file()
-            if artifact_existed:
-                atomic_write_bytes(
-                    staging / "artifact.json", _read_bytes(artifact_path, artifact_path.name)
-                )
-            atomic_write_json(
-                staging / "transaction.json",
-                {
-                    "artifact": artifact_name,
+            if len(names) == 1:
+                name = names[0]
+                artifact_path = session_dir / _ARTIFACT_PATHS[name]
+                artifact_existed = artifact_path.is_file()
+                if artifact_existed:
+                    atomic_write_bytes(
+                        staging / "artifact.json",
+                        _read_bytes(artifact_path, artifact_path.name),
+                    )
+                metadata: Mapping[str, Any] = {
+                    "artifact": name,
                     "artifact_existed": artifact_existed,
-                },
-            )
+                }
+            else:
+                entries = []
+                for name in names:
+                    artifact_path = session_dir / _ARTIFACT_PATHS[name]
+                    artifact_existed = artifact_path.is_file()
+                    if artifact_existed:
+                        atomic_write_bytes(
+                            staging / f"artifact-{name}.json",
+                            _read_bytes(artifact_path, artifact_path.name),
+                        )
+                    entries.append(
+                        {"name": name, "artifact_existed": artifact_existed}
+                    )
+                metadata = {"artifacts": entries}
+            atomic_write_json(staging / "transaction.json", metadata)
             fsync_directory(staging)
             os.replace(staging, journal)
             fsync_directory(session_dir)
@@ -520,26 +564,57 @@ class SessionStore:
                 _read_json(journal / "transaction.json", "transaction journal"),
                 "transaction journal",
             )
-            _require_exact_keys(
-                metadata,
-                {"artifact", "artifact_existed"},
-                "transaction journal",
-            )
-            artifact_name = metadata.get("artifact")
-            artifact_existed = metadata.get("artifact_existed")
-            if artifact_name not in _ARTIFACT_PATHS or not isinstance(
-                artifact_existed, bool
-            ):
-                raise SessionCorruptError("transaction journal metadata is invalid")
-            artifact_path = session_dir / _ARTIFACT_PATHS[artifact_name]
-            if artifact_existed:
-                atomic_write_bytes(
-                    artifact_path,
-                    _read_bytes(journal / "artifact.json", "journal artifact backup"),
+            if "artifact" in metadata:
+                _require_exact_keys(
+                    metadata,
+                    {"artifact", "artifact_existed"},
+                    "transaction journal",
                 )
+                entries = [
+                    {
+                        "name": metadata.get("artifact"),
+                        "artifact_existed": metadata.get("artifact_existed"),
+                        "backup": "artifact.json",
+                    }
+                ]
             else:
-                artifact_path.unlink(missing_ok=True)
-                fsync_directory(session_dir)
+                _require_exact_keys(metadata, {"artifacts"}, "transaction journal")
+                raw_entries = metadata.get("artifacts")
+                if not isinstance(raw_entries, list):
+                    raise SessionCorruptError("transaction journal metadata is invalid")
+                entries = [
+                    {
+                        "name": entry.get("name") if isinstance(entry, Mapping) else None,
+                        "artifact_existed": (
+                            entry.get("artifact_existed")
+                            if isinstance(entry, Mapping)
+                            else None
+                        ),
+                        "backup": (
+                            f"artifact-{entry.get('name')}.json"
+                            if isinstance(entry, Mapping)
+                            else ""
+                        ),
+                    }
+                    for entry in raw_entries
+                ]
+            for entry in entries:
+                artifact_name = entry["name"]
+                artifact_existed = entry["artifact_existed"]
+                backup = entry["backup"]
+                if artifact_name not in _ARTIFACT_PATHS or not isinstance(
+                    artifact_existed, bool
+                ):
+                    raise SessionCorruptError("transaction journal metadata is invalid")
+                artifact_path = session_dir / _ARTIFACT_PATHS[artifact_name]
+                if artifact_existed:
+                    atomic_write_bytes(
+                        artifact_path,
+                        _read_bytes(journal / backup, "journal artifact backup"),
+                    )
+                else:
+                    artifact_path.unlink(missing_ok=True)
+            fsync_directory(session_dir)
             atomic_write_bytes(
                 session_dir / "session.json",
                 _read_bytes(journal / "session.json", "journal manifest backup"),
@@ -692,7 +767,12 @@ class SessionWriter:
         def validate_snapshot(snapshot: SessionSnapshot) -> None:
             _require_phase(snapshot, {"diagnose"}, "publish findings")
             state = self._replace_state(
-                snapshot.state, before_profile=before_profile
+                snapshot.state,
+                before_profile=(
+                    before_profile
+                    if before_profile is not None
+                    else snapshot.state.before_profile
+                ),
             )
             _validate_findings_provenance(
                 state.before_profile, canonical_findings, error_type=ValueError
@@ -714,7 +794,9 @@ class SessionWriter:
             EVIDENCE_SCHEMA_VERSION,
             lambda path: atomic_write_json(path, payload),
             phase="diagnose",
-            before_profile=before_profile,
+            before_profile=(
+                before_profile if before_profile is not None else _UNSET
+            ),
             snapshot_validator=validate_snapshot,
         )
 
@@ -742,6 +824,13 @@ class SessionWriter:
                 proposal,
                 error_type=ValueError,
             )
+            if any(
+                decision.get("finding_id") == proposal.source_finding_id
+                for decision in snapshot.decisions
+            ):
+                raise ValueError(
+                    "finding already has a recorded session decision; choose another finding"
+                )
 
         return self._publish(
             "proposal",
@@ -805,28 +894,72 @@ class SessionWriter:
                 decided_at=decided_at,
             )
             _validate_diff_payload(candidate)
-            self.store._begin_transaction(self.session_id, "diff")
-            _path, payload = write_diff_json_from_diff_dict(
-                candidate,
-                path=self.store._session_dir(self.session_id) / "diff.json",
+            finding_id = snapshot.proposal.source_finding_id if snapshot.proposal else ""
+            if not finding_id:
+                raise ValueError(
+                    "the published proposal must identify a finding before recording a decision"
+                )
+            if any(
+                record.get("finding_id") == finding_id for record in snapshot.decisions
+            ):
+                raise ValueError(
+                    "finding already has a recorded session decision; choose another finding"
+                )
+            decision_record = {
+                "finding_id": finding_id,
+                "status": status,
+                "reason": candidate["decision"]["reason"],
+                "decider": candidate["decision"]["decider"],
+                "decided_at": candidate["decision"]["decided_at"],
+            }
+            decisions_payload = _decisions_payload(
+                (*snapshot.decisions, MappingProxyType(decision_record))
             )
+            session_dir = self.store._session_dir(self.session_id)
+            if status == "rejected":
+                self.store._begin_transaction(
+                    self.session_id, ("decisions", "proposal", "diff")
+                )
+                atomic_write_json(session_dir / "decisions.json", decisions_payload)
+                (session_dir / "proposal.json").unlink(missing_ok=True)
+                (session_dir / "diff.json").unlink(missing_ok=True)
+            else:
+                self.store._begin_transaction(self.session_id, ("decisions", "diff"))
+                atomic_write_json(session_dir / "decisions.json", decisions_payload)
+                write_diff_json_from_diff_dict(
+                    candidate,
+                    path=session_dir / "diff.json",
+                )
             artifacts = dict(snapshot.state.artifacts)
-            artifacts["diff"] = ArtifactReference(
-                _ARTIFACT_PATHS["diff"],
-                DIFF_SCHEMA_VERSION,
-                _sha256_file(
-                    self.store._session_dir(self.session_id) / "diff.json", "diff.json"
-                ),
+            artifacts["decisions"] = ArtifactReference(
+                _ARTIFACT_PATHS["decisions"],
+                DECISIONS_SCHEMA_VERSION,
+                _sha256_file(session_dir / "decisions.json", "decisions.json"),
             )
-            state = self._replace_state(
-                snapshot.state, phase="accept", artifacts=artifacts
-            )
+            if status == "rejected":
+                artifacts.pop("proposal", None)
+                artifacts.pop("diff", None)
+                state = self._replace_state(
+                    snapshot.state,
+                    phase="propose",
+                    after_profile=None,
+                    artifacts=artifacts,
+                )
+            else:
+                artifacts["diff"] = ArtifactReference(
+                    _ARTIFACT_PATHS["diff"],
+                    DIFF_SCHEMA_VERSION,
+                    _sha256_file(session_dir / "diff.json", "diff.json"),
+                )
+                state = self._replace_state(
+                    snapshot.state, phase="accept", artifacts=artifacts
+                )
             atomic_write_json(
-                self.store._session_dir(self.session_id) / "session.json",
+                session_dir / "session.json",
                 state.to_dict(),
             )
             self.store._finish_transaction(self.session_id)
-            return state, MappingProxyType(payload), tuple(warnings)
+            return state, MappingProxyType(candidate), tuple(warnings)
 
     def _publish(
         self,
@@ -835,7 +968,7 @@ class SessionWriter:
         publisher,
         *,
         phase: SessionPhase | None = None,
-        before_profile: LocalProfileReference | None = None,
+        before_profile: LocalProfileReference | None | object = _UNSET,
         snapshot_validator: Callable[[SessionSnapshot], None] | None = None,
     ) -> SessionState:
         self._ensure_open()
@@ -907,16 +1040,20 @@ class SessionWriter:
         state: SessionState,
         *,
         phase: SessionPhase | None = None,
-        before_profile: LocalProfileReference | None = None,
-        after_profile: LocalProfileReference | None = None,
-        artifacts: Mapping[str, ArtifactReference] | None = None,
+        before_profile: LocalProfileReference | None | object = _UNSET,
+        after_profile: LocalProfileReference | None | object = _UNSET,
+        artifacts: Mapping[str, ArtifactReference] | None | object = _UNSET,
     ) -> SessionState:
         return SessionState(
             session_id=state.session_id,
             phase=phase or state.phase,
-            before_profile=before_profile or state.before_profile,
-            after_profile=after_profile or state.after_profile,
-            artifacts=artifacts or state.artifacts,
+            before_profile=(
+                state.before_profile if before_profile is _UNSET else before_profile
+            ),
+            after_profile=(
+                state.after_profile if after_profile is _UNSET else after_profile
+            ),
+            artifacts=(state.artifacts if artifacts is _UNSET else artifacts),
         )
 
     def _ensure_open(self) -> None:
@@ -1057,6 +1194,12 @@ def _validate_snapshot_invariants(snapshot: SessionSnapshot) -> None:
         return
 
     if proposal is None:
+        if phase == "propose" and snapshot.decisions:
+            if state.after_profile is not None or diff is not None:
+                raise SessionCorruptError(
+                    "propose phase without a proposal cannot retain an after profile or diff artifact"
+                )
+            return
         raise SessionCorruptError(f"{phase} phase requires proposal.json")
     if phase == "propose":
         if state.after_profile is not None or diff is not None:
@@ -1643,6 +1786,61 @@ def _validate_diff_decision(diff: Mapping[str, Any]) -> bool:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"diff decision {field} must be a non-empty string")
     return True
+
+
+def _decisions_payload(
+    decisions: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": DECISIONS_SCHEMA_VERSION,
+        "decisions": [dict(decision) for decision in decisions],
+    }
+
+
+def _validate_decisions_payload(
+    payload: Any, *, error_type: type[Exception]
+) -> tuple[Mapping[str, Any], ...]:
+    try:
+        if not isinstance(payload, Mapping):
+            raise ValueError("decisions.json must be an object")
+        _require_exact_keys(payload, {"schema_version", "decisions"}, "decisions.json")
+        if payload.get("schema_version") != DECISIONS_SCHEMA_VERSION:
+            raise UnsupportedSessionVersionError(
+                "unsupported decisions.json schema_version "
+                f"{payload.get('schema_version')!r}"
+            )
+        values = payload.get("decisions")
+        if not isinstance(values, list):
+            raise ValueError("decisions.json decisions must be an array")
+        parsed: list[Mapping[str, Any]] = []
+        finding_ids: set[str] = set()
+        for index, value in enumerate(values):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"decision {index} must be an object")
+            if set(value) != _DECISION_FIELDS:
+                raise ValueError(
+                    f"decision {index} fields do not match schema"
+                )
+            finding_id = value.get("finding_id")
+            if not isinstance(finding_id, str) or not finding_id.strip():
+                raise ValueError(f"decision {index} finding_id must be non-empty")
+            if finding_id in finding_ids:
+                raise ValueError(f"finding {finding_id!r} has more than one decision")
+            finding_ids.add(finding_id)
+            if value.get("status") not in {"accepted", "rejected"}:
+                raise ValueError(f"decision {index} status is invalid")
+            for field_name in ("reason", "decider", "decided_at"):
+                field_value = value.get(field_name)
+                if not isinstance(field_value, str) or not field_value.strip():
+                    raise ValueError(
+                        f"decision {index} {field_name} must be non-empty"
+                    )
+            parsed.append(MappingProxyType(dict(value)))
+        return tuple(parsed)
+    except (SessionCorruptError, UnsupportedSessionVersionError):
+        raise
+    except (TypeError, ValueError) as exc:
+        raise error_type(str(exc)) from exc
 
 
 def _require_json_serializable(value: Any, label: str) -> None:
