@@ -1289,6 +1289,7 @@ def _table_has_column(db: duckdb.DuckDBPyConnection, table: str, column: str) ->
 def _create_existing_alias_views(db: duckdb.DuckDBPyConnection) -> None:
     """Create stable aliases for whatever canonical tables already exist."""
     existing_views = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
+    _create_enriched_kernel_view(db, existing_views)
     for short_name, aliases in _ALIASES.items():
         actual = None
         if short_name in existing_views:
@@ -1310,6 +1311,56 @@ def _create_existing_alias_views(db: duckdb.DuckDBPyConnection) -> None:
                 existing_views.add(alias)
             except duckdb.Error:
                 pass
+
+
+def _create_enriched_kernel_view(
+    db: duckdb.DuckDBPyConnection,
+    existing_views: set[str],
+) -> None:
+    """Expose the cache-compatible ``kernels`` view for raw parquetdir data.
+
+    The SQLite-to-Parquet cache builder writes an enriched ``kernels.parquet``
+    containing resolved names and Tensor Core classification. A raw Nsight
+    parquetdir export only contains the source activity table and string-id
+    references. Keep that raw table untouched, but make the stable ``kernels``
+    alias provide the same columns so skills can use either backend.
+    """
+    if "kernels" in existing_views or "StringIds" not in existing_views:
+        return
+    kernel_table = _find_table(
+        existing_views,
+        "CUPTI_ACTIVITY_KIND_KERNEL",
+    )
+    if kernel_table is None:
+        return
+
+    try:
+        db.execute(
+            f'''
+            CREATE VIEW "kernels" AS
+            SELECT k.*,
+                   COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name,
+                   d.value AS demangled,
+                   CAST(CASE
+                       WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
+                         OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                       THEN 1 ELSE 0
+                   END AS INTEGER) AS is_tc_eligible,
+                   CAST(CASE
+                       WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                       THEN 1 ELSE 0
+                   END AS INTEGER) AS uses_tc
+            FROM "{kernel_table}" k
+            LEFT JOIN "StringIds" s ON k.shortName = s.id
+            LEFT JOIN "StringIds" d ON k.demangledName = d.id
+            '''
+        )
+        existing_views.add("kernels")
+    except duckdb.Error:
+        # A raw export with an incomplete kernel/string-id schema should still
+        # open; the normal schema/skill diagnostics will report the missing
+        # capability instead of making parquetdir opening fail here.
+        pass
 
 
 def _register_parquetdir_tables(
