@@ -1085,11 +1085,11 @@ def test_diff_cli_derived_session_does_not_pollute_session_root(tmp_path):
         env=_decision_cli_env(tmp_path),
     )
 
-    # No session exists yet, so publishing is expected to fail after the
-    # deterministic diff has been memoized. The regression is the location of
-    # that memo, not the later SessionStore precondition.
+    # No session exists yet, so the command must fail before profile analysis or
+    # memo publication. In particular, it must not leave an orphan handoff that
+    # blocks a later evidence build using the same derived session id.
     assert result.returncode != 0
-    assert not (tmp_path / ".nsys-ai" / "sessions" / "indices").exists()
+    assert not (tmp_path / ".nsys-ai").exists()
 
 
 def test_diff_cli_gate_tightens_threshold_and_implies_exit(tmp_path):
