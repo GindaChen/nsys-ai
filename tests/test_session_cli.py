@@ -4,18 +4,77 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from nsys_ai.runspec import EnvironmentSpec, RunSpec
-from nsys_ai.session_cli import session_dir, session_id_from_profile_id
+from nsys_ai.session_cli import (
+    resolve_session_location,
+    session_argument,
+    session_dir,
+    session_id_from_profile_id,
+)
 from nsys_ai.session_store import SessionStore
 
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = ROOT / "tests" / "fixtures" / "mfu_2gpu_before.sqlite"
 AFTER = ROOT / "tests" / "fixtures" / "mfu_2gpu_after.sqlite"
+
+
+def test_session_location_supports_directory_handoff_and_legacy_ids(tmp_path: Path):
+    handoff = tmp_path / "portable-session"
+
+    location = resolve_session_location(handoff)
+
+    assert location is not None
+    assert location.session_id == "portable-session"
+    assert location.root == tmp_path
+    assert location.directory == handoff
+
+    legacy = resolve_session_location("legacy-session")
+    assert legacy is not None
+    assert legacy.session_id == "legacy-session"
+    assert legacy.root == Path(".nsys-ai/sessions").resolve()
+    assert resolve_session_location("tests").session_id == "tests"
+    assert session_argument("tests") == "tests"
+    assert session_argument(handoff) == str(handoff)
+
+    # An explicit directory must remain explicit even when it happens to sit
+    # below the default root; otherwise a copied handoff loses its location.
+    default_handoff = tmp_path / ".nsys-ai" / "sessions" / "run-001"
+    assert session_argument(default_handoff) == str(default_handoff.resolve())
+
+    spaced_handoff = tmp_path / "handoff dir" / "run-002"
+    assert session_argument(spaced_handoff) == shlex.quote(str(spaced_handoff.resolve()))
+
+
+def test_session_directory_can_be_used_by_publish_facade(tmp_path: Path):
+    from nsys_ai.annotation import EvidenceReport
+    from nsys_ai.profile_runner import build_local_profile_reference
+    from nsys_ai.session_cli import publish_session_findings
+
+    profile = BEFORE.resolve()
+    reference = build_local_profile_reference(profile)
+    report = EvidenceReport(
+        "diagnosis",
+        profile_path=reference.path,
+        profile_id=reference.profile_id,
+        findings=[],
+    )
+    handoff = tmp_path / "portable-session"
+
+    state = publish_session_findings(
+        session_id=handoff,
+        report=report,
+        before_profile=reference,
+    )
+
+    assert state.session_id == handoff.name
+    assert (handoff / "session.json").is_file()
+    assert (handoff / "findings.json").is_file()
 
 
 def _subprocess_environment(**extra: str) -> dict[str, str]:

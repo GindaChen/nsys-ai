@@ -12,6 +12,7 @@ from pathlib import Path
 
 from nsys_ai import web
 from nsys_ai.diagnose_command import run_diagnose
+from nsys_ai.profile_runner import build_local_profile_reference
 from nsys_ai.session_cli import session_dir
 from nsys_ai.session_store import SessionStore
 
@@ -79,6 +80,32 @@ def test_diagnose_then_review_pair_both_succeed(tmp_path: Path):
     assert session_payload["phase"] == "diagnose"
     assert "mode" not in session_payload
     assert not (sessions_root / session_id / "diff.json").exists()
+
+
+def test_diagnose_web_reopens_explicit_handoff_directory(tmp_path: Path, monkeypatch):
+    """The resume form must resolve the same explicit directory as creation."""
+    handoff = tmp_path / "portable-session"
+    reference = build_local_profile_reference(BEFORE.resolve())
+    SessionStore(tmp_path).create(handoff.name, before_profile=reference)
+    captured: dict[str, object] = {}
+
+    def fake_open_session_web(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("nsys_ai.diagnose_command._open_session_web", fake_open_session_web)
+
+    result = run_diagnose(
+        profile_path=None,
+        session_id=handoff,
+        web=True,
+        open_browser=False,
+        session_root=tmp_path / ".nsys-ai" / "sessions",
+    )
+
+    assert result == 0
+    assert captured["session_id"] == "portable-session"
+    assert captured["session_root"] == tmp_path
 
 
 def test_review_pair_without_session_does_not_create_nsys_ai(tmp_path: Path):

@@ -21,6 +21,7 @@ def run_timeline(
     trim: tuple[int, int] | None,
     min_ms: float = 0,
     session: str | None = None,
+    session_root: str = ".nsys-ai/sessions",
 ) -> None:
     """Launch the Textual horizontal timeline browser.
 
@@ -42,7 +43,14 @@ def run_timeline(
         return
     from .app import run_timeline as _run
 
-    _run(db_path, device, trim, min_ms=min_ms, session=session)
+    _run(
+        db_path,
+        device,
+        trim,
+        min_ms=min_ms,
+        session=session,
+        session_root=session_root,
+    )
 
 
 def _print_static_summary(

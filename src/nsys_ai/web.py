@@ -1029,7 +1029,12 @@ def serve_timeline(
         loop_before_path = loop_before or _profile_path
 
     from .profile_runner import build_local_profile_reference
-    from .session_cli import project_loop_state, resolve_session_id, session_dir
+    from .session_cli import (
+        project_loop_state,
+        resolve_session_id,
+        resolve_session_location,
+        session_dir,
+    )
     from .session_store import SessionExistsError, SessionStore
 
     before_for_id = loop_before_path or _profile_path
@@ -1039,7 +1044,13 @@ def serve_timeline(
             "the session id"
         )
     before_ref = build_local_profile_reference(before_for_id)
-    session_id = resolve_session_id(session or None, before=before_ref)
+    location = resolve_session_location(session or None, root=session_root)
+    if location is not None:
+        session_id = location.session_id
+        session_root = location.root
+        _ViewerHandler._session_root = os.fspath(session_root)
+    else:
+        session_id = resolve_session_id(None, before=before_ref)
     store = SessionStore(_ViewerHandler._session_root)
     try:
         store.create(session_id, before_profile=before_ref)

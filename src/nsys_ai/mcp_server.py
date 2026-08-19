@@ -84,6 +84,18 @@ def _list_skills() -> dict[str, Any]:
     }
 
 
+def _get_session(session: str) -> dict[str, Any]:
+    """Read the canonical SessionStore handoff without mutating it."""
+    from .session_cli import session_payload
+
+    try:
+        return _json_safe(session_payload(session))
+    except NsysAiError as exc:
+        return exc.to_dict()
+    except (OSError, TypeError, ValueError) as exc:
+        return _error("SESSION_READ_ERROR", str(exc))
+
+
 def _coerce_param(value: Any, param_type: Any) -> Any:
     """Validate the JSON value against the type declared by a SkillParam."""
     type_name = str(param_type).lower()
@@ -359,6 +371,11 @@ def create_server():
     def list_skills() -> dict[str, Any]:
         """List registered analysis skills and their parameter schemas."""
         return _list_skills()
+
+    @server.tool(name="get_session")
+    def get_session(session: str) -> dict[str, Any]:
+        """Read a CLI/Web/TUI session's canonical artifacts read-only."""
+        return _get_session(session)
 
     @server.tool(name="run_skill")
     def run_skill(

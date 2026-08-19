@@ -196,7 +196,7 @@ Concrete split:
 
 14. **Fingerprint cost on naive `str` → `LocalProfileReference` conversion** (Deliverable 5b). Calling `build_local_profile_reference` on every path touch re-opens SQLite and re-runs identity SQL including a full kernel `COUNT(*)`.
 
-15. **CWD-relative default session root (C1).** `SessionStore.__init__` defaults to `.nsys-ai/sessions` resolved from process CWD (`session_store.py:331-332`). A browser server started in a different directory than the CLI that created the session will not see it. C1 explicitly forbids a root flag; processes must share CWD (or an equivalent agreed working directory).
+15. **Portable session handoff (C1).** `SessionStore.__init__` still defaults to `.nsys-ai/sessions` resolved from process CWD (`session_store.py:331-332`), preserving the legacy id form. The transport contract also accepts the session directory itself; its parent becomes the store root, so a browser, TUI, plugin, or MCP process started in another directory can open the same artifacts without a root flag.
 
 ---
 
@@ -208,8 +208,8 @@ Under **C1** (decided; not re-opened):
 
 | piece | rule | how a web or TUI process gets it |
 |---|---|---|
-| `root` | Always `.nsys-ai/sessions` relative to the working directory. **No flag.** | Construct `SessionStore()` / `SessionStore(".nsys-ai/sessions")` (`session_store.py:331`). Same convention as `.git`. Web `serve_timeline` and both TUIs use process CWD. A CLI that created the session must have been run from that same working directory. |
-| `session_id` when `--session <id>` is given | Caller-supplied; validated by `_SESSION_ID` (`session_store.py:72`, `:927-930`) | Open contract must accept `--session <id>` (or an equivalent open argument) and pass it to `SessionStore.load` / `writer`. **Today:** `cli/parsers.py` has zero `session` strings — the flag does not exist yet; C1 says it must. |
+| `root` | Defaults to `.nsys-ai/sessions` relative to the working directory for legacy ids; an explicit session directory uses its parent. | Construct through `session_cli.resolve_session_location`, then pass the resulting root to `SessionStore` and Web/TUI. The directory form is the portable handoff. |
+| `session` when `--session <dir>` is given | The basename is the caller-supplied id, validated by `_SESSION_ID`; the directory parent is the root. A bare value remains a legacy id. | Open contract passes the normalized id/root to `SessionStore.load` / `writer`; MCP `get_session` returns the same projection without mutation. |
 | `session_id` when no id is given | **Derived** from the before profile's content id that `LocalProfileReference` already carries (`profile_reference.py:23`) | Open with a before profile path → `build_local_profile_reference(before_path)` once (`profile_runner.py:130`) → use `reference.profile_id` as `session_id`. Two processes pointed at the same profile land in the same session without passing anything between them. One session per before-profile is the intended model. |
 
 Measured absence today (not a design choice):

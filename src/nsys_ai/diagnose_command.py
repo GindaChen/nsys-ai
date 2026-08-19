@@ -14,7 +14,13 @@ from typing import TextIO
 from .exceptions import NsysAiError, ProfileError
 from .profile import Profile, resolve_profile_path
 from .profile_runner import build_local_profile_reference
-from .session_cli import publish_session_findings, resolve_session_id, session_dir
+from .session_cli import (
+    publish_session_findings,
+    resolve_session_id,
+    resolve_session_location,
+    session_argument,
+    session_dir,
+)
 from .session_store import SessionStore
 
 
@@ -27,7 +33,7 @@ class DiagnoseCommandError(NsysAiError):
 def run_diagnose(
     *,
     profile_path: str | os.PathLike[str] | None = None,
-    session_id: str | None = None,
+    session_id: str | os.PathLike[str] | None = None,
     gpu: int = 0,
     trim: tuple[int, int] | None = None,
     web: bool = False,
@@ -83,10 +89,16 @@ def run_diagnose(
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise DiagnoseCommandError(f"diagnose failed: {exc}") from exc
 
-    resolved_id = resolve_session_id(
+    requested_session = session_id
+    location = resolve_session_location(
         None if session_id == "" else session_id,
-        before=before,
+        root=session_root,
     )
+    if location is None:
+        resolved_id = resolve_session_id(None, before=before)
+    else:
+        resolved_id = location.session_id
+        session_root = location.root
     try:
         publish_session_findings(
             session_id=resolved_id,
@@ -98,6 +110,10 @@ def run_diagnose(
         raise DiagnoseCommandError(str(exc)) from exc
 
     directory = session_dir(resolved_id, root=session_root)
+    session_ref = session_argument(
+        requested_session if requested_session else resolved_id,
+        root=session_root,
+    )
     print(f"Session: {resolved_id}", file=stdout)
     print(f"Findings artifact: {directory / 'findings.json'}", file=stdout)
     print(f"── Evidence Findings ({len(report.findings)}) ──", file=stdout)
@@ -124,17 +140,17 @@ def run_diagnose(
     if top_id:
         print(
             "Next: nsys-ai propose --session "
-            f"{resolved_id} --finding-id {top_id} --runspec <runspec.json>",
+            f"{session_ref} --finding-id {top_id} --runspec <runspec.json>",
             file=stdout,
         )
     else:
         print(
             "Next: no actionable finding id to propose from; "
-            f"re-open with nsys-ai diagnose --session {resolved_id} --web",
+            f"re-open with nsys-ai diagnose --session {session_ref} --web",
             file=stdout,
         )
     print(
-        f"Or open the same session: nsys-ai diagnose --session {resolved_id} --web",
+        f"Or open the same session: nsys-ai diagnose --session {session_ref} --web",
         file=stdout,
     )
 
@@ -160,6 +176,11 @@ def _open_existing_session_web(
     session_root: str | os.PathLike[str],
     stderr: TextIO,
 ) -> int:
+    location = resolve_session_location(session_id, root=session_root)
+    if location is None:
+        raise DiagnoseCommandError("session is required")
+    session_id = location.session_id
+    session_root = location.root
     store = SessionStore(session_root)
     try:
         snapshot = store.load(session_id)

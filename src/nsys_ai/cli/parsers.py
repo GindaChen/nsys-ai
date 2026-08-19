@@ -196,7 +196,7 @@ def _register_optimize_parser(sub):
     p.add_argument(
         "--session",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
             "Session to create or resume (default: derived from the before "
             "profile content id, so re-running resumes the same session)"
@@ -472,8 +472,24 @@ def _register_agent_parser(sub):
         help="Output path for findings JSON (default: findings.json)",
     )
     sp_ask = agent_sub.add_parser("ask", help="Ask a question about a profile")
-    sp_ask.add_argument("profile", help="Path to .sqlite file")
+    sp_ask.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Path to profile (.sqlite or .nsys-rep); omit when using --session",
+    )
     sp_ask.add_argument("question", help="Natural language question")
+    sp_ask.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Use the before profile from a SessionStore directory. A bare "
+            "value remains a legacy session id."
+        ),
+    )
     p.set_defaults(handler=_cmd_agent)
     return p
 
@@ -579,10 +595,11 @@ def _build_parser():
         nargs="?",
         const="",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
             "Read findings from SessionStore and publish the proposal back. "
-            "Omit ID and pass --profile to derive the id from the before "
+            "Pass a session directory, or omit DIR and pass --profile to "
+            "derive the id from the before "
             "profile content id."
         ),
     )
@@ -617,10 +634,11 @@ def _build_parser():
         nargs="?",
         const="",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
-            "Session id to publish into (or reopen with --web). Omit ID to "
-            "derive it from the profile content id."
+            "Session directory to publish into (or reopen with --web). A bare "
+            "value is treated as a legacy id; omit DIR to derive it from the "
+            "profile content id."
         ),
     )
     p.add_argument(
@@ -686,10 +704,11 @@ def _build_parser():
         nargs="?",
         const="",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
-            "Resume an existing session and present its decision path. "
-            "Does not create a session; pair form is a comparison only."
+            "Resume an existing session directory and present its decision "
+            "path. A bare value remains a legacy id. Does not create a "
+            "session; pair form is a comparison only."
         ),
     )
     p.add_argument(
@@ -758,11 +777,11 @@ def _build_parser():
         nargs="?",
         const="",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
-            "Open a SessionStore session for read/render/decide. Omit ID to "
-            "derive it from the before profile content id. Root is always "
-            ".nsys-ai/sessions under the working directory."
+            "Open a SessionStore session for read/render/decide. Pass the "
+            "session directory, or omit DIR to derive a legacy id from the "
+            "before profile content id."
         ),
     )
     p.set_defaults(handler=_cmd_timeline_web)
@@ -800,12 +819,11 @@ def _build_parser():
         nargs="?",
         const="",
         default=None,
-        metavar="ID",
+        metavar="DIR",
         help=(
             "Open a SessionStore session for read/render/decide on any surface "
-            "(timeline-web, timeline, tree). Omit ID to derive it from the "
-            "before profile content id. Root is always .nsys-ai/sessions under "
-            "the working directory."
+            "(timeline-web, timeline, tree). Pass the session directory, or "
+            "omit DIR to derive a legacy id from the before profile content id."
         ),
     )
     p.set_defaults(handler=_cmd_loop)
@@ -815,8 +833,24 @@ def _build_parser():
     p.set_defaults(handler=_cmd_chat)
 
     p = sub.add_parser("ask", help="Ask AI a backend analysis question")
-    p.add_argument("profile", help="Path to .sqlite file")
+    p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Path to profile (.sqlite or .nsys-rep); omit when using --session",
+    )
     p.add_argument("question", help="Natural language question")
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Use the before profile from a SessionStore directory. A bare "
+            "value remains a legacy session id."
+        ),
+    )
     p.set_defaults(handler=_cmd_ask)
 
     p = sub.add_parser("agent-guide", help="Print machine-readable guide for AI agents")

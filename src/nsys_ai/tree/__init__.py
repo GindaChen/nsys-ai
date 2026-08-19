@@ -50,6 +50,7 @@ def run_tui(
     max_depth: int = -1,
     min_ms: float = 0,
     session: str | None = None,
+    session_root: str = ".nsys-ai/sessions",
 ) -> None:
     """Launch the Textual NVTX tree browser.
 
@@ -73,7 +74,15 @@ def run_tui(
         return
     from .app import run_tui as _run
 
-    _run(db_path, device, trim, max_depth=max_depth, min_ms=min_ms, session=session)
+    _run(
+        db_path,
+        device,
+        trim,
+        max_depth=max_depth,
+        min_ms=min_ms,
+        session=session,
+        session_root=session_root,
+    )
 
 
 def _print_static_tree(

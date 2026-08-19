@@ -21,7 +21,12 @@ from typing import TextIO
 from .exceptions import NsysAiError, ProfileError
 from .profile import Profile
 from .profile import open as open_profile
-from .session_cli import project_loop_state, session_dir
+from .session_cli import (
+    project_loop_state,
+    resolve_session_location,
+    session_argument,
+    session_dir,
+)
 from .session_store import SessionSnapshot, SessionStore
 
 
@@ -35,7 +40,7 @@ def run_review(
     *,
     before_path: str | os.PathLike[str] | None = None,
     after_path: str | os.PathLike[str] | None = None,
-    session_id: str | None = None,
+    session_id: str | os.PathLike[str] | None = None,
     gpu: int | None = None,
     trim: tuple[int, int] | None = None,
     web: bool = False,
@@ -68,6 +73,12 @@ def run_review(
     when ``gpu`` is ``None``. Next-step hints are written to ``stderr`` so a
     redirected stdout is exactly that report.
     """
+    requested_session = session_id
+    if session_id is not None:
+        location = resolve_session_location(session_id, root=session_root)
+        if location is not None:
+            session_id = location.session_id
+            session_root = location.root
     has_pair = before_path is not None or after_path is not None
     if session_id is not None and not has_pair:
         return _resume_review(
@@ -76,6 +87,7 @@ def run_review(
             port=port,
             open_browser=open_browser,
             session_root=session_root,
+            session_argument_value=requested_session,
             stdout=stdout,
             stderr=stderr,
         )
@@ -181,6 +193,7 @@ def _resume_review(
     port: int,
     open_browser: bool,
     session_root: str | os.PathLike[str],
+    session_argument_value: str | os.PathLike[str] | None = None,
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
@@ -195,7 +208,13 @@ def _resume_review(
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise ReviewCommandError(str(exc)) from exc
 
-    _print_decision_path(session_id, snapshot, session_root, stdout=stdout)
+    _print_decision_path(
+        session_id,
+        snapshot,
+        session_root,
+        session_argument_value=session_argument_value,
+        stdout=stdout,
+    )
 
     if web:
         before = snapshot.state.before_profile
@@ -221,9 +240,14 @@ def _print_decision_path(
     snapshot: SessionSnapshot,
     session_root: str | os.PathLike[str],
     *,
+    session_argument_value: str | os.PathLike[str] | None = None,
     stdout: TextIO,
 ) -> None:
     directory = session_dir(session_id, root=session_root)
+    session_ref = session_argument(
+        session_argument_value if session_argument_value is not None else session_id,
+        root=session_root,
+    )
     projected = project_loop_state(snapshot, session_dir_path=directory)
     print(f"Session: {session_id}", file=stdout)
     print(f"Phase: {projected.get('phase')}", file=stdout)
@@ -257,12 +281,12 @@ def _print_decision_path(
         after_path = getattr(after_ref, "path", None) or "<after>"
         print(
             "Decision path: undecided. Record it with: "
-            f"nsys-ai diff {before_path} {after_path} --session {session_id} "
+            f"nsys-ai diff {before_path} {after_path} --session {session_ref} "
             "--accept|--reject --reason TEXT",
             file=stdout,
         )
         print(
-            f"Or in the browser: nsys-ai review --session {session_id} --web",
+            f"Or in the browser: nsys-ai review --session {session_ref} --web",
             file=stdout,
         )
     else:
@@ -272,14 +296,14 @@ def _print_decision_path(
         if top_id:
             print(
                 "Decision path: no diff yet. Continue the loop with: "
-                f"nsys-ai propose --session {session_id} --finding-id {top_id} "
+                f"nsys-ai propose --session {session_ref} --finding-id {top_id} "
                 "--runspec <runspec.json>",
                 file=stdout,
             )
         else:
             print(
                 "Decision path: no diff yet. Finish propose → reprofile → "
-                f"diff --session {session_id} before a decision can be recorded.",
+                f"diff --session {session_ref} before a decision can be recorded.",
                 file=stdout,
             )
 
