@@ -22,7 +22,6 @@ from .diff_render import to_diff_dict
 from .exceptions import (
     ExportToolMissingError,
     NsysAiError,
-    ProfileNotFoundError,
     SkillNotFoundError,
     SkillParameterError,
 )
@@ -193,26 +192,40 @@ def _cap_rows(rows: list[dict], max_rows: int) -> tuple[list[dict], bool]:
 @contextmanager
 def _open_readonly(path: str) -> Iterator[tuple[Any, str]]:
     """Yield a read-only connection without exporting or building a sidecar."""
-    from .parquet_cache import open_direct_sqlite, open_with_direct_fallback
+    from .parquet_cache import (
+        open_direct_sqlite,
+        open_parquetdir_db,
+        open_with_direct_fallback,
+    )
+    from .profile import find_ingested_profile
 
-    source = Path(path)
-    if not source.exists():
-        raise ProfileNotFoundError(f"profile not found: {path}")
-    if source.suffix.lower() == ".nsys-rep":
-        sidecar = source.with_suffix(".sqlite")
-        if not sidecar.is_file() or sidecar.stat().st_size == 0:
-            raise ExportToolMissingError(
-                "MCP access to .nsys-rep is read-only and will not export a sidecar; "
-                "provide an up-to-date .sqlite export next to the capture"
-            )
-        if sidecar.stat().st_mtime < source.stat().st_mtime:
-            raise ExportToolMissingError(
-                "MCP access to .nsys-rep will not refresh a stale sidecar; "
-                "export an up-to-date .sqlite file before calling the server"
-            )
-        resolved = str(sidecar)
-    else:
-        resolved = str(source)
+    resolution = find_ingested_profile(path)
+    if resolution is None:
+        raise ExportToolMissingError(
+            "MCP access is read-only and will not export a profile; run "
+            f"`nsys-ai diagnose {path}` first to create a parquetdir or provide "
+            "an up-to-date SQLite export"
+        )
+    resolved = resolution.resolved_path
+    if resolution.backend == "parquetdir":
+        try:
+            conn = open_parquetdir_db(resolved)
+        except Exception:
+            # A directory can pass the cheap file-presence inspection while a
+            # parquet file is unreadable. A read-only MCP call must still use
+            # a current SQLite sidecar when one is available.
+            fallback = find_ingested_profile(path, backend="sqlite")
+            if fallback is None:
+                raise
+            resolution = fallback
+            resolved = resolution.resolved_path
+        else:
+            try:
+                yield conn, resolved
+            finally:
+                conn.close()
+            return
+
     conn, _error_detail = open_with_direct_fallback(resolved, open_direct_sqlite)
     if conn is None:
         uri = Path(resolved).resolve().as_uri() + "?mode=ro"

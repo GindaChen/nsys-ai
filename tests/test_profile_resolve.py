@@ -211,6 +211,42 @@ def test_resolve_nsys_rep_defaults_to_parquetdir(monkeypatch, tmp_path: Path):
     assert resolution.resolved_path.endswith(".parquetdir")
 
 
+def test_find_ingested_profile_prefers_parquetdir_without_export(tmp_path: Path):
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"report")
+    parquetdir = tmp_path / "capture.parquetdir"
+    parquetdir.mkdir()
+    (parquetdir / "kernels.parquet").write_bytes(b"parquet")
+    sqlite_path = tmp_path / "capture.sqlite"
+    sqlite_path.write_bytes(b"sqlite")
+
+    resolution = profile_mod.find_ingested_profile(str(rep))
+
+    assert resolution is not None
+    assert resolution.backend == "parquetdir"
+    assert resolution.resolved_path == str(parquetdir.resolve())
+
+
+def test_find_ingested_profile_uses_sqlite_only_without_export(tmp_path: Path):
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"report")
+    sqlite_path = tmp_path / "capture.sqlite"
+    sqlite_path.write_bytes(b"sqlite")
+
+    resolution = profile_mod.find_ingested_profile(str(rep))
+
+    assert resolution is not None
+    assert resolution.backend == "sqlite"
+    assert resolution.resolved_path == str(sqlite_path)
+
+
+def test_find_ingested_profile_returns_none_when_no_store_exists(tmp_path: Path):
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"report")
+
+    assert profile_mod.find_ingested_profile(str(rep)) is None
+
+
 def test_sqlite_ingest_policy_skips_cache_and_exports_sqlite(
     monkeypatch, tmp_path: Path
 ):

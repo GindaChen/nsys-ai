@@ -1056,6 +1056,91 @@ def resolve_profile(
     return ProfileResolution(path, path, "sqlite", "sqlite", cache_mode)
 
 
+def _existing_parquetdir_path(path: str) -> str | None:
+    """Return a current, valid parquetdir beside a capture, if one exists."""
+    output = path[:-9] + ".parquetdir"
+    try:
+        if (
+            not os.path.isdir(output)
+            or os.path.getmtime(output) < os.path.getmtime(path)
+        ):
+            return None
+        canonical = os.path.abspath(output)
+        inspect_local_parquetdir(canonical, allow_missing=False)
+    except (OSError, ValueError):
+        return None
+    return canonical
+
+
+def _existing_sqlite_sidecar(path: str) -> str | None:
+    """Return a current, non-empty SQLite sidecar beside a capture, if any."""
+    output = path[:-9] + ".sqlite"
+    try:
+        if (
+            not os.path.isfile(output)
+            or os.path.getsize(output) <= 0
+            or os.path.getmtime(output) < os.path.getmtime(path)
+        ):
+            return None
+    except OSError:
+        return None
+    return output
+
+
+def find_ingested_profile(
+    path: str,
+    *,
+    backend: str = "auto",
+    ingest_policy: str | None = None,
+) -> ProfileResolution | None:
+    """Find an already-ingested profile without exporting or writing files.
+
+    This is the non-exporting counterpart to :func:`resolve_profile`.  It uses
+    the same backend/policy precedence, but returns ``None`` when a ``.nsys-rep``
+    has no usable existing store instead of invoking ``nsys export``.  The
+    fallback from parquetdir to a current SQLite sidecar is intentional: it
+    lets read-only callers use whichever representation has already been
+    ingested while keeping parquetdir first when both are present.
+    """
+    path = os.fspath(path)
+    if not isinstance(path, str):
+        raise TypeError("profile path must be a string or path-like object")
+    if not os.path.exists(path):
+        raise ProfileNotFoundError(f"profile not found: {path}")
+
+    policy = resolve_ingest_policy(ingest_policy)
+    if backend not in {"auto", "sqlite", "parquetdir"}:
+        raise ValueError(
+            f"Unknown backend: {backend!r}. Expected 'auto', 'sqlite', or 'parquetdir'."
+        )
+    selected = policy if backend == "auto" else backend
+
+    if os.path.isdir(path) or Path(path).suffix.lower() in {".parquetdir", ".nsys-cache"}:
+        if selected == "sqlite":
+            return None
+        try:
+            inspect_local_parquetdir(os.path.abspath(path), allow_missing=False)
+        except ValueError:
+            return None
+        return ProfileResolution(path, path, "parquetdir", "parquetdir", "auto")
+
+    if path.lower().endswith(".nsys-rep"):
+        if selected in {"auto", "parquetdir"}:
+            parquetdir = _existing_parquetdir_path(path)
+            if parquetdir is not None:
+                return ProfileResolution(path, parquetdir, "nsys-rep", "parquetdir", "auto")
+        if selected in {"auto", "sqlite"}:
+            sqlite_path = _existing_sqlite_sidecar(path)
+            if sqlite_path is not None:
+                return ProfileResolution(path, sqlite_path, "nsys-rep", "sqlite", "direct")
+        return None
+
+    if selected == "parquetdir":
+        return None
+    cache_mode: Literal["auto", "direct"] = "direct" if selected == "sqlite" else "auto"
+    return ProfileResolution(path, path, "sqlite", "sqlite", cache_mode)
+
+
 def resolve_profile_path(
     path: str, *, backend: str = "auto", nsys_executable: str = "nsys"
 ) -> str:
