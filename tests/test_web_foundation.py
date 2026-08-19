@@ -45,6 +45,20 @@ def _get(handler, path: str, *, html: bytes = b"<html>"):
     return result
 
 
+def _post(handler, path: str):
+    server = web._ThreadedHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    conn.request("POST", path, body=b"{}", headers={"Content-Type": "application/json"})
+    response = conn.getresponse()
+    result = response.status, response.read(), response.getheader("Content-Type")
+    conn.close()
+    thread.join(timeout=5)
+    server.server_close()
+    return result
+
+
 @pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
 def test_web_surfaces_return_404_for_unknown_paths(handler):
     status, body, content_type = _get(handler, "/api/definitely-not-real")
@@ -59,3 +73,11 @@ def test_web_surfaces_keep_root_page(handler):
     status, _body, _content_type = _get(handler, "/")
 
     assert status == 200
+
+
+def test_viewer_returns_json_404_for_unknown_post_api():
+    status, body, content_type = _post(web._ViewerHandler, "/api/definitely-not-real")
+
+    assert status == 404
+    assert content_type.startswith("application/json")
+    assert b"not found" in body

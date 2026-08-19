@@ -790,6 +790,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 400)
             return
         if path != "/api/chat":
+            if path.startswith("/api/"):
+                self._json_response({"error": "not found", "path": path}, 404)
+                return
             self.send_error(404)
             return
         content_length = int(self.headers.get("Content-Length", 0))
