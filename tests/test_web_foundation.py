@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from nsys_ai import web
-from nsys_ai.diff_web import _DiffHandler
+from nsys_ai.diff_web import _DIFF_HTML, _DiffHandler
 from nsys_ai.gpu_label import format_gpu_label, format_gpu_narrative_label
 from nsys_ai.summary import auto_commentary
 
@@ -47,6 +47,15 @@ def test_summary_commentary_omits_empty_gpu_name():
 
     assert commentary.startswith("GPU 0 ran 3 kernels")
     assert "()" not in commentary
+
+
+def test_diff_web_declares_metric_polarity_for_overlap_summary():
+    assert "const improvementDirection =" in _DIFF_HTML
+    assert "overlap_ms: 1" in _DIFF_HTML
+    assert "overlap_pct: 1" in _DIFF_HTML
+    assert "const signedDelta = delta * improvementDirection[k];" in _DIFF_HTML
+    assert "signedDelta > 0 ? 'delta-good'" in _DIFF_HTML
+    assert "signedDelta < 0 ? 'delta-bad'" in _DIFF_HTML
 
 
 def _get(handler, path: str, *, html: bytes = b"<html>"):
