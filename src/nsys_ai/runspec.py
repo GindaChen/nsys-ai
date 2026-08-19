@@ -333,7 +333,7 @@ class RunSpec:
         if version not in RUNSPEC_SCHEMA_VERSIONS:
             raise UnsupportedRunSpecVersionError(
                 f"unsupported RunSpec schema_version {version!r}; "
-                f"expected {RUNSPEC_SCHEMA_VERSION!r}"
+                f"expected one of {', '.join(sorted(RUNSPEC_SCHEMA_VERSIONS))!r}"
             )
         allowed = {
             "schema_version",

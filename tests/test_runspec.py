@@ -120,7 +120,10 @@ def test_unknown_schema_version_has_stated_reason():
     payload = _full_spec().to_dict()
     payload["schema_version"] = "9.0"
 
-    with pytest.raises(UnsupportedRunSpecVersionError, match="9.0.*expected '0.2'"):
+    with pytest.raises(
+        UnsupportedRunSpecVersionError,
+        match=r"9\.0.*expected one of.*0\.1.*0\.2",
+    ):
         RunSpec.from_dict(payload)
 
 

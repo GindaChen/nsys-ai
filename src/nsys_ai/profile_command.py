@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess  # nosec B404
 import sys
 from collections.abc import Callable, Sequence
@@ -213,6 +215,21 @@ def discover_git_provenance(
         value = completed.stdout.strip()
         return value or None
 
+    def git_bytes(*args: str, working_directory: Path) -> bytes | None:
+        try:
+            completed = subprocess.run(  # nosec B603
+                [git_executable, *args],
+                cwd=working_directory,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout
+
     root_text = git("rev-parse", "--show-toplevel", working_directory=absolute_cwd)
     if root_text is None:
         return None, None, str(absolute_cwd), False, None
@@ -230,8 +247,50 @@ def discover_git_provenance(
     if not dirty:
         return str(root), commit.lower(), relative, False, None
 
-    diff = git("diff", "HEAD", "--binary", working_directory=root) or ""
-    diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    diff = git_bytes("diff", "HEAD", "--binary", working_directory=root)
+    untracked = git_bytes(
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        working_directory=root,
+    )
+    if diff is None or untracked is None:
+        return str(root), commit.lower(), relative, True, hashlib.sha256(
+            b"worktree identity unavailable"
+        ).hexdigest()
+
+    digest = hashlib.sha256()
+
+    def add_record(label: bytes, payload: bytes) -> None:
+        digest.update(label)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+
+    add_record(b"git-diff-head\0", diff)
+    for encoded_path in untracked.split(b"\0"):
+        if not encoded_path:
+            continue
+        path = root / os.fsdecode(encoded_path)
+        try:
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                payload = (
+                    b"regular\0"
+                    + stat.S_IMODE(metadata.st_mode).to_bytes(4, "big")
+                    + path.read_bytes()
+                )
+            elif stat.S_ISLNK(metadata.st_mode):
+                payload = b"symlink\0" + os.fsencode(os.readlink(path))
+            else:
+                payload = b"special\0" + stat.S_IMODE(metadata.st_mode).to_bytes(
+                    4, "big"
+                )
+        except OSError as exc:
+            payload = b"unreadable\0" + type(exc).__name__.encode("ascii")
+        add_record(b"untracked\0" + encoded_path + b"\0", payload)
+
+    diff_sha256 = digest.hexdigest()
     return str(root), commit.lower(), relative, True, diff_sha256
 
 

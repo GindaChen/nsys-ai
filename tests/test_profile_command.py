@@ -242,6 +242,27 @@ def test_git_provenance_records_absolute_root_full_commit_and_relative_cwd(tmp_p
     assert changed_dirty is True
     assert changed_hash != dirty_hash
 
+    (repo / "tracked.txt").write_text("changed")
+    (repo / "untracked-one.txt").write_text("one")
+    _, _, _, untracked_dirty, untracked_hash = discover_git_provenance(nested)
+    assert untracked_dirty is True
+    assert untracked_hash != dirty_hash
+
+    (repo / "untracked-one.txt").write_text("two")
+    _, _, _, changed_untracked, changed_untracked_hash = discover_git_provenance(
+        nested
+    )
+    assert changed_untracked is True
+    assert changed_untracked_hash != untracked_hash
+
+    (repo / "untracked-one.txt").unlink()
+    (repo / "untracked-two.txt").write_text("one")
+    _, _, _, renamed_untracked, renamed_untracked_hash = discover_git_provenance(
+        nested
+    )
+    assert renamed_untracked is True
+    assert renamed_untracked_hash != untracked_hash
+
 
 def test_non_git_provenance_degrades_to_absolute_cwd(tmp_path):
     repository, commit, cwd, dirty, worktree_diff_sha256 = discover_git_provenance(tmp_path)
