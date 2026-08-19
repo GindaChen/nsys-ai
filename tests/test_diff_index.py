@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from nsys_ai.diff import ProfileDiffSummary, ProfileSummary
-from nsys_ai.diff_index import DiffIndex
+from nsys_ai.diff_index import DiffIndex, _path_signature, _selection
 
 
 class _FakeProfile:
@@ -140,3 +140,24 @@ def test_diff_parameters_are_part_of_side_and_pair_keys(tmp_path, monkeypatch):
     index.reconcile(before, after, gpu=1, trim=(100, 200), nvtx_limit=20)
 
     assert builds == [(0, (0, 100), 10), (0, (0, 100), 10), (1, (100, 200), 20), (1, (100, 200), 20)]
+
+
+def test_parquetdir_signature_changes_when_a_file_is_replaced(tmp_path):
+    parquetdir = tmp_path / "profile.parquetdir"
+    parquetdir.mkdir()
+    parquet = parquetdir / "kernels.parquet"
+    parquet.write_bytes(b"before")
+    before = _path_signature(str(parquetdir))
+
+    parquet.write_bytes(b"after-content")
+    parquet.touch()
+    after = _path_signature(str(parquetdir))
+
+    assert before != after
+
+
+def test_malformed_nested_selection_is_a_recoverable_memo_error():
+    import pytest
+
+    with pytest.raises(ValueError, match="selection memo"):
+        _selection([])  # type: ignore[arg-type]

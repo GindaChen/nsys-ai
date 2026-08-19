@@ -171,6 +171,7 @@ def test_cli_session_artifacts_survive_a_second_process(tmp_path: Path):
         "findings.json",
         "proposal.json",
         "diff.json",
+        "indices",
         "logs",
     }
 
@@ -339,6 +340,7 @@ def test_derived_session_id_round_trip_without_explicit_id(tmp_path: Path):
         "findings.json",
         "proposal.json",
         "diff.json",
+        "indices",
         "logs",
     }
 

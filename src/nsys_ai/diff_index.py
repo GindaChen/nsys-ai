@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -47,12 +48,44 @@ def _json_read(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _path_signature(path: str) -> list[int | str]:
-    """Add a cheap source guard for identities that are not capture-derived."""
+def _path_signature(path: str) -> list[Any]:
+    """Add a cheap source guard for identities that are not capture-derived.
+
+    A parquetdir's directory mtime is not a reliable identity: replacing one
+    parquet file can leave the directory metadata unchanged.  Record the
+    deterministic parquet manifest (metadata only, never file contents) so a
+    reused cache notices file replacement while remaining much cheaper than a
+    full content hash.
+    """
     try:
         stat = os.stat(path, follow_symlinks=False)
     except OSError:
         return [os.path.abspath(path), "missing"]
+    if os.path.isdir(path):
+        manifest: list[list[int | str]] = []
+        try:
+            children = sorted(
+                child for child in Path(path).rglob("*.parquet") if child.is_file()
+            )
+            for child in children:
+                child_stat = child.stat(follow_symlinks=False)
+                manifest.append(
+                    [
+                        child.relative_to(path).as_posix(),
+                        int(child_stat.st_size),
+                        int(child_stat.st_mtime_ns),
+                        int(child_stat.st_ctime_ns),
+                    ]
+                )
+        except OSError:
+            return [os.path.abspath(path), "unreadable", int(stat.st_mtime_ns)]
+        return [
+            os.path.abspath(path),
+            "directory",
+            int(stat.st_dev),
+            int(stat.st_ino),
+            manifest,
+        ]
     return [
         os.path.abspath(path),
         int(stat.st_dev),
@@ -120,8 +153,12 @@ def _profile_summary_from_dict(payload: dict[str, Any]) -> ProfileSummary:
     )
 
 
-def _selection(payload: dict[str, Any] | None) -> TraceSelection | None:
-    return TraceSelection.from_dict(payload) if payload is not None else None
+def _selection(payload: Mapping[str, Any] | None) -> TraceSelection | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("selection memo must be an object")
+    return TraceSelection.from_dict(dict(payload))
 
 
 def _kernel_diff(payload: dict[str, Any]) -> KernelDiff:
@@ -133,8 +170,12 @@ def _kernel_diff(payload: dict[str, Any]) -> KernelDiff:
 def _axis_summary(payload: dict[str, Any] | None) -> DiffAxisSummary | None:
     if payload is None:
         return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("axis summary memo must be an object")
     entries = []
     for raw in payload.get("entries") or []:
+        if not isinstance(raw, Mapping):
+            raise ValueError("axis entry memo must be an object")
         value = dict(raw)
         value["selection"] = _selection(value.get("selection"))
         entries.append(DiffAxisEntry(**value))
@@ -206,7 +247,7 @@ class DiffIndex:
             try:
                 summary = _profile_summary_from_dict(cached["summary"])
                 return replace(summary, path=profile.path), key
-            except (KeyError, TypeError, ValueError):
+            except (AttributeError, KeyError, TypeError, ValueError):
                 pass
 
         summary = build_profile_summary(
@@ -284,7 +325,7 @@ class DiffIndex:
                     before=replace(summary.before, path=before.path),
                     after=replace(summary.after, path=after.path),
                 )
-            except (KeyError, TypeError, ValueError):
+            except (AttributeError, KeyError, TypeError, ValueError):
                 pass
 
         summary = diff_profiles(

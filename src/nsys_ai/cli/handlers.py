@@ -968,9 +968,32 @@ def _cmd_diff(args, _profile):
     location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
     session = location.session_id if location is not None else raw_session
     session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
-    diff_index = None
-    if location is not None:
-        diff_index = DiffIndex(location.directory)
+
+    def _session_directory_for_diff(raw_session, *, root=DEFAULT_SESSION_ROOT):
+        if raw_session in (None, ""):
+            return None
+        location = resolve_session_location(raw_session, root=root)
+        return location.directory if location is not None else None
+
+    def _diff_index_for_session(raw_session, *, root=DEFAULT_SESSION_ROOT):
+        """Validate the handoff before allowing DiffIndex to create artifacts."""
+        session_directory = _session_directory_for_diff(raw_session, root=root)
+        if session_directory is None:
+            return None
+        from nsys_ai.session_store import SessionError, SessionStore
+
+        session_directory = session_directory.resolve(strict=False)
+        try:
+            SessionStore(session_directory.parent).load(session_directory.name)
+        except (OSError, SessionError, TypeError, ValueError) as exc:
+            print(
+                f"Error: --session must reference an existing valid session: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return DiffIndex(session_directory)
+
+    diff_index = _diff_index_for_session(session, root=session_root)
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
@@ -1070,6 +1093,15 @@ def _cmd_diff(args, _profile):
             # Opened Profile.path is the resolved .sqlite (including .nsys-rep sidecars).
             session_before_path = before.path
             session_after_path = after.path
+            if session == "":
+                from nsys_ai.profile_runner import build_local_profile_reference
+                from nsys_ai.session_cli import resolve_session_id
+
+                before_ref = build_local_profile_reference(
+                    os.path.abspath(os.path.expanduser(before.path))
+                )
+                session = resolve_session_id(None, before=before_ref)
+                diff_index = _diff_index_for_session(session)
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
                 before,

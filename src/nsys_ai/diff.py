@@ -1257,8 +1257,8 @@ def diff_profiles(
     improvements.sort(key=sort_key)  # most negative first
     diff_id_params = {
         "gpu": gpu,
-        "trim_before": trim_before,
-        "trim_after": trim_after,
+        "trim_before": t_before,
+        "trim_after": t_after,
         "limit": limit,
         "sort": sort,
         "nvtx_limit": nvtx_limit,
