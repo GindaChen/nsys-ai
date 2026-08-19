@@ -446,6 +446,17 @@ def test_legacy_session_profile_reference_defaults_to_sqlite_path(tmp_path):
     assert restored.before_profile.resolved_path == restored.before_profile.path
 
 
+def test_trimmed_profile_reference_round_trips_its_capture_window(tmp_path):
+    profile = replace(_profile_reference(tmp_path / "trimmed.sqlite", "trimmed"), trim_ns=(10, 20))
+    payload = SessionState(session_id="trimmed", before_profile=profile).to_dict()
+
+    assert payload["profiles"]["before"]["trim_ns"] == [10, 20]
+    restored = SessionState.from_dict(payload)
+
+    assert restored.before_profile is not None
+    assert restored.before_profile.trim_ns == (10, 20)
+
+
 def test_active_writer_conflict_is_observed_from_a_second_process(tmp_path):
     store = SessionStore(tmp_path / "sessions")
     store.create("conflict")

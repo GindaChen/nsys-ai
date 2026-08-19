@@ -39,6 +39,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -295,7 +296,7 @@ def run_optimize(
         from .profile import resolve_profile_path
 
         before_sqlite = resolve_profile_path(raw_before)
-        before_ref = build_local_profile_reference(before_sqlite)
+        before_ref = build_local_profile_reference(before_sqlite, trim_ns=trim)
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise OptimizeCommandError(f"could not resolve before profile: {exc}") from exc
 
@@ -493,6 +494,8 @@ def run_optimize(
                 print(f"Resume: {resume}", file=stderr)
                 return outcome
             return stopped("the verification capture did not produce a profile", code=outcome)
+        if trim is not None:
+            outcome = replace(outcome, trim_ns=trim)
         try:
             with store.writer(resolved_id) as writer:
                 writer.publish_after_profile(outcome)

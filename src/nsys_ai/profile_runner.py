@@ -15,7 +15,7 @@ import stat
 import subprocess  # nosec B404
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -288,6 +288,7 @@ def build_local_profile_reference(
     *,
     resolved_secrets: Mapping[str, str] | None = None,
     ingest_policy: str | None = None,
+    trim_ns: tuple[int, int] | None = None,
 ) -> LocalProfileReference:
     """Build a reference through the shared ingest policy."""
     path_conversion_failed = False
@@ -336,6 +337,7 @@ def build_local_profile_reference(
                     kernel_count=profile.meta.kernel_count,
                     storage_kind=profile.storage_kind,
                     resolved_path=profile.resolved_path,
+                    trim_ns=trim_ns,
                 )
         except (NsysAiError, OSError, *DB_ERRORS) as exc:
             raise ProfileError(str(exc)) from None
@@ -346,7 +348,13 @@ def build_local_profile_reference(
     reference, _ = read_local_profile_under_guard(
         path, resolved_secrets=resolved_secrets
     )
-    return reference
+    if trim_ns is None:
+        return reference
+    reference = replace(reference, trim_ns=trim_ns)
+    try:
+        return validate_local_profile_reference(reference, require_file=True)
+    except (TypeError, ValueError) as exc:
+        raise ProfileError(str(exc)) from None
 
 
 def check_expected_gpu_count(spec: RunSpec, observed: int) -> str | None:

@@ -1261,7 +1261,7 @@ def _profile_reference_to_dict(
     if reference is None:
         return None
     validate_local_profile_reference(reference, require_file=False)
-    return {
+    payload = {
         "kind": "local",
         "path": reference.path,
         "storage_kind": reference.storage_kind,
@@ -1271,6 +1271,9 @@ def _profile_reference_to_dict(
         "product_version": reference.product_version,
         "kernel_count": reference.kernel_count,
     }
+    if reference.trim_ns is not None:
+        payload["trim_ns"] = list(reference.trim_ns)
+    return payload
 
 
 def _profile_reference_from_dict(value: Any) -> LocalProfileReference | None:
@@ -1286,11 +1289,13 @@ def _profile_reference_from_dict(value: Any) -> LocalProfileReference | None:
         "kernel_count",
     }
     current_keys = legacy_keys | {"storage_kind", "resolved_path"}
+    legacy_keys_with_trim = legacy_keys | {"trim_ns"}
+    current_keys_with_trim = current_keys | {"trim_ns"}
     actual_keys = set(payload)
-    if actual_keys == legacy_keys:
+    if actual_keys in (legacy_keys, legacy_keys_with_trim):
         storage_kind = "sqlite"
         resolved_path = payload.get("path")
-    elif actual_keys == current_keys:
+    elif actual_keys in (current_keys, current_keys_with_trim):
         storage_kind = payload.get("storage_kind")
         resolved_path = payload.get("resolved_path")
     else:
@@ -1306,6 +1311,11 @@ def _profile_reference_from_dict(value: Any) -> LocalProfileReference | None:
             schema_version=payload["export_schema_version"],
             product_version=payload["product_version"],
             kernel_count=payload["kernel_count"],
+            trim_ns=(
+                tuple(payload["trim_ns"])
+                if payload.get("trim_ns") is not None
+                else None
+            ),
         )
         validate_local_profile_reference(reference, require_file=False)
     except (KeyError, TypeError, ValueError) as exc:

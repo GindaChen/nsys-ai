@@ -41,13 +41,17 @@ def _cmd_diagnose(args, _profile):
     from nsys_ai.diagnose_command import DiagnoseCommandError, run_diagnose
     from nsys_ai.session_cli import DEFAULT_SESSION_ROOT
 
+    trim = _parse_trim(args)
+    profile_path = getattr(args, "profile", None)
+    if trim is not None and profile_path:
+        _check_trim_window_for_path(trim, profile_path, _profile)
     try:
         exit_code = run_diagnose(
-            profile_path=getattr(args, "profile", None),
+            profile_path=profile_path,
             session_id=getattr(args, "session", None),
             session_root=DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", 0) or 0,
-            trim=_parse_trim(args),
+            trim=trim,
             web=bool(getattr(args, "web", False)),
             port=getattr(args, "port", 8144),
             open_browser=not bool(getattr(args, "no_browser", False)),
@@ -64,14 +68,20 @@ def _cmd_review(args, _profile):
     from nsys_ai.review_command import ReviewCommandError, run_review
     from nsys_ai.session_cli import DEFAULT_SESSION_ROOT
 
+    trim = _parse_trim(args)
+    before_path = getattr(args, "before", None)
+    after_path = getattr(args, "after", None)
+    if trim is not None and before_path is not None and after_path is not None:
+        _check_trim_window_for_path(trim, before_path, _profile, label="before")
+        _check_trim_window_for_path(trim, after_path, _profile, label="after")
     try:
         exit_code = run_review(
-            before_path=getattr(args, "before", None),
-            after_path=getattr(args, "after", None),
+            before_path=before_path,
+            after_path=after_path,
             session_id=getattr(args, "session", None),
             session_root=DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", None),
-            trim=_parse_trim(args),
+            trim=trim,
             web=bool(getattr(args, "web", False)),
             port=getattr(args, "port", 8144),
             open_browser=not bool(getattr(args, "no_browser", False)),
@@ -108,6 +118,8 @@ def _cmd_optimize(args, _profile):
         )
         raise SystemExit(2)
 
+    trim = _parse_trim(args)
+    _check_trim_window_for_path(trim, args.profile, _profile)
     try:
         exit_code = run_optimize(
             before_path=args.profile,
@@ -117,7 +129,7 @@ def _cmd_optimize(args, _profile):
             session_root=DEFAULT_SESSION_ROOT,
             nsys=getattr(args, "nsys", "nsys"),
             gpu=getattr(args, "gpu", 0) or 0,
-            trim=_parse_trim(args),
+            trim=trim,
         )
     except KeyboardInterrupt:
         print("Verification capture cancelled.", file=sys.stderr)
@@ -501,12 +513,19 @@ def _resolve_trim_window(trim, prof) -> tuple[int, int]:
     return (int(lo_ns), int(hi_ns))
 
 
-def _check_trim_window_for_path(trim, path, _profile):
+def _check_trim_window_for_path(trim, path, _profile, *, label=None):
     """``_check_trim_window`` for handlers that have not opened the profile yet."""
     if trim is None:
         return
-    with _profile.open(path) as prof:
-        _check_trim_window(trim, prof)
+    from nsys_ai.exceptions import TrimOutOfRangeError
+
+    try:
+        with _profile.open(path) as prof:
+            _check_trim_window(trim, prof)
+    except TrimOutOfRangeError as exc:
+        if label is None:
+            raise
+        raise TrimOutOfRangeError(f"{label} profile: {exc}") from exc
 
 
 def _required_param_names(skill):
@@ -952,6 +971,11 @@ def _cmd_diff(args, _profile):
 
     _resolve_diff_before(args)
 
+    trim = _parse_trim(args)
+    if trim is not None:
+        _check_trim_window_for_path(trim, args.before, _profile, label="before")
+        _check_trim_window_for_path(trim, args.after, _profile, label="after")
+
     no_ai = getattr(args, "no_ai", False)
     gate_summary = None
     gate_pct = getattr(args, "gate", None)
@@ -1060,7 +1084,6 @@ def _cmd_diff(args, _profile):
         _run_diff_chat(args, _profile)
         return
 
-    trim = _parse_trim(args)
     trim_before = None
     trim_after = None
     if getattr(args, "iteration", None) is not None:
@@ -1311,8 +1334,12 @@ def _cmd_diff(args, _profile):
             os.path.expanduser(session_after_path or args.after)
         )
         try:
-            before_ref = build_local_profile_reference(before_path)
-            after_ref = build_local_profile_reference(after_path)
+            before_ref = build_local_profile_reference(
+                before_path, trim_ns=trim_before or trim
+            )
+            after_ref = build_local_profile_reference(
+                after_path, trim_ns=trim_after or trim
+            )
             session_id = resolve_session_id(session or None, before=before_ref)
             # to_diff_dict carries each profile's ``path`` straight from
             # Profile.path, which is the caller's spelling -- "before.sqlite"
@@ -1979,7 +2006,7 @@ def _cmd_evidence(args, _profile):
 
             # Use the opened Profile's resolved .sqlite path so .nsys-rep inputs work.
             try:
-                before = build_local_profile_reference(prof.path)
+                before = build_local_profile_reference(prof.path, trim_ns=trim)
                 session_id = resolve_session_id(session or None, before=before)
                 publish_session_findings(
                     session_id=session_id,
