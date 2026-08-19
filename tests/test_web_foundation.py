@@ -84,6 +84,56 @@ def _post(handler, path: str):
     return result
 
 
+def _head(handler, path: str, *, html: bytes = b"<html>"):
+    if handler is web._ViewerHandler:
+        old_html = handler.html_bytes
+        handler.html_bytes = html
+    else:
+        old_html = None
+    server = web._ThreadedHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    conn.request("HEAD", path)
+    response = conn.getresponse()
+    result = (
+        response.status,
+        response.read(),
+        response.getheader("Content-Type"),
+        response.getheader("Content-Length"),
+    )
+    conn.close()
+    thread.join(timeout=5)
+    server.server_close()
+    if handler is web._ViewerHandler:
+        handler.html_bytes = old_html
+    return result
+
+
+@pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
+def test_web_surfaces_head_matches_get_headers_without_body(handler):
+    get_status, get_body, get_content_type = _get(handler, "/")
+    head_status, head_body, head_content_type, head_length = _head(handler, "/")
+
+    assert head_status == get_status == 200
+    assert head_content_type == get_content_type
+    assert head_length == str(len(get_body))
+    assert head_body == b""
+
+
+@pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
+def test_web_surfaces_head_preserves_json_404_contract(handler):
+    get_status, get_body, get_content_type = _get(handler, "/api/does-not-exist")
+    head_status, head_body, head_content_type, head_length = _head(
+        handler, "/api/does-not-exist"
+    )
+
+    assert head_status == get_status == 404
+    assert head_content_type == get_content_type
+    assert head_length == str(len(get_body))
+    assert head_body == b""
+
+
 @pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
 def test_web_surfaces_return_404_for_unknown_paths(handler):
     status, body, content_type = _get(handler, "/api/definitely-not-real")
