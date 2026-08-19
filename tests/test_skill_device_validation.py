@@ -7,7 +7,8 @@ def test_explicit_absent_device_has_shared_diagnostic_shape(minimal_nsys_conn):
     device_skills = [
         skill
         for skill in all_skills()
-        if any(param.name in {"device", "device_id"} for param in skill.params)
+        if skill.name != "profile_health_manifest"
+        and any(param.name in {"device", "device_id"} for param in skill.params)
     ]
 
     assert len(device_skills) >= 17

@@ -338,8 +338,7 @@ def test_arithmetic_intensity_unknown_gpu_still_uses_a_supplied_peak(minimal_nsy
 
 
 def test_arithmetic_intensity_abstains_when_device_has_no_kernels(minimal_nsys_conn):
-    """No kernel time is "cannot run" too — and it is the divisor."""
-    from nsys_ai.skills.base import is_abstention
+    """An absent device has the shared diagnostic shape."""
     from nsys_ai.skills.registry import get_skill
 
     skill = get_skill("arithmetic_intensity")
@@ -350,9 +349,10 @@ def test_arithmetic_intensity_abstains_when_device_has_no_kernels(minimal_nsys_c
         device=7,
     )
 
-    assert is_abstention(rows), rows
-    assert "error" not in rows[0]
-    assert "device 7" in rows[0]["reason"]
+    assert rows[0]["error"] == "no kernels found"
+    assert rows[0]["requested_device"] == 7
+    assert rows[0]["available_devices"] == {0: 5}
+    assert "Try:" in rows[0]["hint"]
 
 
 def test_arithmetic_intensity_legitimate_verdicts_are_unchanged(minimal_nsys_conn):

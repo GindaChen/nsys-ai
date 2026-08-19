@@ -125,6 +125,18 @@ def _profile_device_inventory(conn, adapter) -> dict[int, int]:
 
 def _requested_device_error(conn, adapter, skill: "Skill", kwargs: dict) -> list[dict] | None:
     """Return the shared diagnostic row for an explicitly absent device."""
+    # Orchestrators own their empty-device shape and continue to collect a
+    # profile-wide manifest even when one requested device has no activity.
+    # Leaf skills are the contract this guard protects.
+    if skill.name == "profile_health_manifest":
+        return None
+
+    # Without kernel inventory there is no meaningful device-existence claim.
+    # Let the skill's required-table/legacy-schema guard produce its established
+    # abstention or schema error instead of converting it into a device error.
+    if not adapter.resolve_activity_tables().get("kernel"):
+        return None
+
     parameter_name = next(
         (
             name
@@ -573,9 +585,11 @@ class Skill:
 
         adapter = wrap_connection(conn)
 
-        device_error = _requested_device_error(conn, adapter, self, kwargs)
-        if device_error is not None:
-            return device_error
+        skip_device_validation = bool(kwargs.pop("_skip_device_validation", False))
+        if not skip_device_validation:
+            device_error = _requested_device_error(conn, adapter, self, kwargs)
+            if device_error is not None:
+                return device_error
 
         # SQL skills can infer required activity tables from their template,
         # but execute_fn skills build SQL in Python and need to declare the
