@@ -17,6 +17,7 @@ from typing import Any
 from .annotation import TraceSelection
 from .artifact_io import atomic_write_json
 from .diff import (
+    STEP_TIME_REGRESSION_PCT,
     CategoryDelta,
     DiffAxisEntry,
     DiffAxisSummary,
@@ -231,28 +232,43 @@ class DiffIndex:
         *,
         gpu: int | None,
         trim: tuple[int, int] | None = None,
+        trim_before: tuple[int, int] | None = None,
+        trim_after: tuple[int, int] | None = None,
         limit: int = 15,
         sort: str = "delta",
         nvtx_limit: int | None = 200,
-        regression_pct: float = 5.0,
+        regression_pct: float = STEP_TIME_REGRESSION_PCT,
     ) -> ProfileDiffSummary:
         """Load/rebuild side indexes and reconcile a pair summary.
 
         The pair memo is optional derived state. Any read/validation failure
         falls through to the canonical ``diff_profiles`` computation.
         """
+        effective_trim_before = trim_before if trim_before is not None else trim
+        effective_trim_after = trim_after if trim_after is not None else trim
         before_summary, before_key = self._side_summary(
-            "before", before, gpu=gpu, trim=trim, nvtx_limit=nvtx_limit
+            "before", before, gpu=gpu, trim=effective_trim_before, nvtx_limit=nvtx_limit
         )
         after_summary, after_key = self._side_summary(
-            "after", after, gpu=gpu, trim=trim, nvtx_limit=nvtx_limit
+            "after", after, gpu=gpu, trim=effective_trim_after, nvtx_limit=nvtx_limit
         )
         pair_payload = {
             "schema_version": PAIR_SCHEMA_VERSION,
             "before_key": before_key,
             "after_key": after_key,
             "parameters": {
-                **_parameters(gpu=gpu, trim=trim, nvtx_limit=nvtx_limit),
+                "gpu": gpu,
+                "trim_before": (
+                    list(effective_trim_before)
+                    if effective_trim_before is not None
+                    else None
+                ),
+                "trim_after": (
+                    list(effective_trim_after)
+                    if effective_trim_after is not None
+                    else None
+                ),
+                "nvtx_limit": nvtx_limit,
                 "limit": limit,
                 "sort": sort,
                 "regression_pct": regression_pct,
@@ -276,6 +292,8 @@ class DiffIndex:
             after,
             gpu=gpu,
             trim=trim,
+            trim_before=effective_trim_before,
+            trim_after=effective_trim_after,
             limit=limit,
             sort=sort,
             nvtx_limit=nvtx_limit,

@@ -1138,14 +1138,19 @@ def _cmd_diff(args, _profile):
                 # The persisted pair memo owns the node-wide summary. Keep the
                 # per-GPU view on the existing canonical path; those rows are
                 # presentation detail, while diff.json is built from global_summary.
-                _, per_gpu = diff_profiles_all_gpus(
-                    before,
-                    after,
-                    trim=trim,
-                    limit=args.limit,
-                    sort=args.sort,
-                    regression_pct=regression_pct,
-                )
+                devices = sorted(set(before.meta.devices) | set(after.meta.devices))
+                per_gpu = {
+                    device: diff_profiles(
+                        before,
+                        after,
+                        gpu=device,
+                        trim=trim,
+                        limit=min(args.limit, 3),
+                        sort=args.sort,
+                        regression_pct=regression_pct,
+                    )
+                    for device in devices
+                }
             else:
                 global_summary, per_gpu = diff_profiles_all_gpus(
                     before,
