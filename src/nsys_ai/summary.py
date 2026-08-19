@@ -6,6 +6,7 @@ NVTX breakdown, stream utilization, and NCCL timing. Designed for both
 agent consumption and human reading.
 """
 
+from .gpu_label import format_gpu_label, format_gpu_narrative_label
 from .profile import Profile
 
 
@@ -105,7 +106,7 @@ def format_text(summary: dict) -> str:
     hw = summary["hardware"]
     t = summary["timing"]
     lines = [
-        f"GPU {summary['device']}: {hw['name']} ({hw['pci_bus']}) — {hw['sm_count']} SMs, {hw['memory_gb']}GB",
+        f"{format_gpu_label(summary['device'], hw)}:",
         f"  Span: {t['span_ms']:.1f}ms | Compute: {t['compute_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%",
         f"  Kernels: {summary['kernel_count']}",
         "",
@@ -142,7 +143,7 @@ def auto_commentary(summary: dict) -> str:
 
     sentences = []
     sentences.append(
-        f"GPU {summary['device']} ({hw['name']}) ran {summary['kernel_count']} kernels "
+        f"{format_gpu_narrative_label(summary['device'], hw)} ran {summary['kernel_count']} kernels "
         f"over {t['span_ms']:.0f}ms with {t['utilization_pct']}% utilization."
     )
 

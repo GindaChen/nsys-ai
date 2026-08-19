@@ -21,6 +21,8 @@ import time as _time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from .gpu_label import format_gpu_label
+
 _log = logging.getLogger(__name__)
 
 _FINDINGS_LOCK = threading.Lock()
@@ -286,6 +288,12 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         if path == "/api/loop/state":
             self._handle_loop_get()
             return
+        if path.startswith("/api/"):
+            self._json_response({"error": "not found", "path": path}, 404)
+            return
+        if path not in {"/", "/index.html"}:
+            self.send_error(404)
+            return
         _send_body(
             self,
             self.html_bytes,
@@ -329,10 +337,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         gpu_infos = []
         for dev in devices:
             info = prof.meta.gpu_info.get(dev)
-            label = f"GPU {dev}"
-            if info:
-                label += f" - {info.name} ({info.pci_bus}), {info.sm_count} SMs, {info.memory_bytes / 1e9:.0f}GB"
-            gpu_infos.append({"id": dev, "label": label})
+            gpu_infos.append({"id": dev, "label": format_gpu_label(dev, info)})
         # Get profile time range from kernel metadata (min_start_ns, max_end_ns)
         t_start, t_end = prof.meta.time_range
         self._json_response(
@@ -785,6 +790,9 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 400)
             return
         if path != "/api/chat":
+            if path.startswith("/api/"):
+                self._json_response({"error": "not found", "path": path}, 404)
+                return
             self.send_error(404)
             return
         content_length = int(self.headers.get("Content-Length", 0))
@@ -1279,6 +1287,12 @@ class _EvidenceHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/data":
             self._handle_data()
+            return
+        if path.startswith("/api/"):
+            self._json_response({"error": "not found", "path": path}, 404)
+            return
+        if path not in {"/", "/index.html"}:
+            self.send_error(404)
             return
         # Default: serve evidence HTML
         _send_body(self, self.html_bytes, "text/html; charset=utf-8")
