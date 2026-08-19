@@ -129,6 +129,64 @@ def test_nsys_rep_without_current_sidecar_returns_export_error_without_writing(t
     assert not (tmp_path / "capture.parquetdir").exists()
 
 
+def test_nsys_rep_uses_existing_parquetdir_without_writing(monkeypatch, tmp_path):
+    from nsys_ai import parquet_cache
+    from nsys_ai.mcp_server import _open_readonly
+
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"capture placeholder")
+    parquetdir = tmp_path / "capture.parquetdir"
+    parquetdir.mkdir()
+    (parquetdir / "kernels.parquet").write_bytes(b"parquet placeholder")
+    opened: list[str] = []
+
+    def fake_open(path):
+        opened.append(path)
+        return sqlite3.connect(":memory:")
+
+    monkeypatch.setattr(parquet_cache, "open_parquetdir_db", fake_open)
+
+    with _open_readonly(str(rep)) as (_conn, resolved):
+        assert resolved == str(parquetdir.resolve())
+
+    assert opened == [str(parquetdir.resolve())]
+
+
+def test_run_skill_reads_parquetdir_only_capture(tmp_path):
+    from test_parquetdir_backend import _create_parquetdir_profile
+
+    from nsys_ai.mcp_server import _run_skill
+
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"capture placeholder")
+    parquetdir = Path(_create_parquetdir_profile(tmp_path / "capture.parquetdir"))
+
+    result = _run_skill(str(rep), "top_kernels", {"limit": 1}, max_rows=1)
+
+    assert "error" not in result
+    assert result["profile"]["path"] == str(parquetdir.resolve())
+    assert result["rows"]
+
+
+def test_diff_reads_parquetdir_on_both_sides(tmp_path):
+    from test_parquetdir_backend import _create_parquetdir_profile
+
+    from nsys_ai.mcp_server import _diff_payload
+
+    before = tmp_path / "before.nsys-rep"
+    after = tmp_path / "after.nsys-rep"
+    before.write_bytes(b"before")
+    after.write_bytes(b"after")
+    before_dir = Path(_create_parquetdir_profile(tmp_path / "before.parquetdir"))
+    after_dir = Path(_create_parquetdir_profile(tmp_path / "after.parquetdir"))
+
+    result = _diff_payload(str(before), str(after), gpu=0, limit=1)
+
+    assert "error" not in result
+    assert result["before"]["path"] == str(before_dir.resolve())
+    assert result["after"]["path"] == str(after_dir.resolve())
+
+
 def test_profile_open_errors_are_standard_mcp_payloads(tmp_path):
     from nsys_ai.mcp_server import _diff_payload, _run_skill
 
