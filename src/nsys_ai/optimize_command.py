@@ -273,7 +273,7 @@ def run_optimize(
     workload: Sequence[str],
     session_id: str | os.PathLike[str] | None = None,
     nsys: str = "nsys",
-    gpu: int = 0,
+    gpu: int | None = None,
     trim: tuple[int, int] | None = None,
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     cwd: str | os.PathLike[str] | None = None,

@@ -12,7 +12,7 @@ import sys
 from typing import TextIO
 
 from .exceptions import NsysAiError, ProfileError
-from .profile import Profile, resolve_profile_path
+from .profile import Profile, resolve_profile_path, select_gpu_device
 from .profile_runner import build_local_profile_reference
 from .session_cli import (
     publish_session_findings,
@@ -34,7 +34,7 @@ def run_diagnose(
     *,
     profile_path: str | os.PathLike[str] | None = None,
     session_id: str | os.PathLike[str] | None = None,
-    gpu: int = 0,
+    gpu: int | None = None,
     trim: tuple[int, int] | None = None,
     web: bool = False,
     port: int = 8144,
@@ -49,7 +49,7 @@ def run_diagnose(
     callers can reuse this path without fabricating an argparse Namespace.
 
     Defaults match ``evidence build`` for the parameters this verb forwards
-    (``gpu`` defaults to 0). It does not forward ``--analyzers``, ``--format``,
+    (``gpu`` defaults to the first device in the profile). It does not forward ``--analyzers``, ``--format``,
     or ``--output``: the default pack always runs, evidence prints to stdout,
     and findings land in the session.
 
@@ -82,7 +82,8 @@ def run_diagnose(
 
     try:
         with Profile(sqlite_path) as prof:
-            builder = EvidenceBuilder(prof, device=gpu, trim=trim)
+            selected_gpu = select_gpu_device(prof, gpu)
+            builder = EvidenceBuilder(prof, device=selected_gpu, trim=trim)
             # Analysis completes before any session writer lease is taken.
             report = builder.build()
             before = build_local_profile_reference(prof.path, trim_ns=trim)
@@ -158,7 +159,7 @@ def run_diagnose(
         return _open_session_web(
             before_path=before.path,
             session_id=resolved_id,
-            gpu=gpu,
+            gpu=selected_gpu,
             trim=trim,
             port=port,
             open_browser=open_browser,

@@ -206,8 +206,8 @@ def _register_optimize_parser(sub):
     p.add_argument(
         "--gpu",
         type=int,
-        default=0,
-        help="GPU device id for diagnose (default: 0, as evidence build); the diff stays all-GPU",
+        default=None,
+        help="GPU device id for diagnose (default: first GPU in profile); the diff stays all-GPU",
     )
     p.add_argument(
         "--trim",
@@ -408,7 +408,9 @@ def _register_evidence_parser(sub):
         default=None,
         help="Time window in seconds",
     )
-    sp_build.add_argument("--gpu", type=int, default=0, help="GPU device ID (default: 0)")
+    sp_build.add_argument(
+        "--gpu", type=int, default=None, help="GPU device ID (default: first GPU in profile)"
+    )
     sp_build.add_argument("-o", "--output", default=None, help="Write findings JSON to file")
     sp_build.add_argument(
         "--session",
@@ -618,8 +620,8 @@ def _build_parser():
     p.add_argument(
         "--gpu",
         type=int,
-        default=0,
-        help="GPU device ID (default: 0; same as evidence build)",
+        default=None,
+        help="GPU device ID (default: first GPU in profile; same as evidence build)",
     )
     p.add_argument(
         "--trim",
@@ -1310,7 +1312,7 @@ def _register_legacy_commands(sub):
     # --trim is optional at the parser level so `--format json` can run on
     # the full profile span; the text path enforces a clear error when
     # --trim is missing (see _cmd_analyze).
-    _add_gpu_trim(p, trim_required=False)
+    _add_gpu_trim(p, gpu_required=False, trim_required=False)
     p.add_argument(
         "-o",
         "--output",
