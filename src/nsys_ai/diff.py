@@ -1150,12 +1150,18 @@ def diff_profiles(
     sort: str = "delta",
     nvtx_limit: int | None = 200,
     regression_pct: float = STEP_TIME_REGRESSION_PCT,
+    before_summary: ProfileSummary | None = None,
+    after_summary: ProfileSummary | None = None,
 ) -> ProfileDiffSummary:
     """Compare two profiles. Use trim for same window, or trim_before/trim_after for iteration diff."""
     t_before = trim_before if trim_before is not None else trim
     t_after = trim_after if trim_after is not None else trim
-    before = build_profile_summary(before_prof, gpu, t_before, nvtx_limit=nvtx_limit)
-    after = build_profile_summary(after_prof, gpu, t_after, nvtx_limit=nvtx_limit)
+    before = before_summary or build_profile_summary(
+        before_prof, gpu, t_before, nvtx_limit=nvtx_limit
+    )
+    after = after_summary or build_profile_summary(
+        after_prof, gpu, t_after, nvtx_limit=nvtx_limit
+    )
     warnings, comparability_confidence = collect_sanity_warnings(before, after)
     # Same capture on both sides, read through the same window. The trim check
     # is what keeps an iteration diff — window A of a capture against window B

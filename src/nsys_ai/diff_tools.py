@@ -23,12 +23,16 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .ai.backend.chat_tools import TOOL_COMPUTE_MFU, TOOL_GET_GPU_PEAK_TFLOPS
 from .diff import ProfileDiffSummary, diff_profiles
 from .nvtx_tree import build_nvtx_tree
 from .overlap import detect_iterations, overlap_analysis
 from .profile import Profile
+
+if TYPE_CHECKING:
+    from .diff_index import DiffIndex
 
 
 def _top_k_payload(summary: ProfileDiffSummary, top_n: int = 5) -> tuple[list, list, float]:
@@ -86,19 +90,33 @@ class DiffContext:
     after: Profile
     trim: tuple[int, int] | None
     marker: str
+    index: DiffIndex | None = None
     _cached_summary: ProfileDiffSummary | None = field(default=None, repr=False)
+    _cached_gpu: int | None = field(default=None, repr=False)
 
     def ensure_summary(self, gpu: int | None) -> ProfileDiffSummary:
-        if self._cached_summary is None:
-            self._cached_summary = diff_profiles(
-                self.before,
-                self.after,
-                gpu=gpu,
-                trim=self.trim,
-                limit=500,
-                sort="delta",
-                nvtx_limit=500,
-            )
+        if self._cached_summary is None or self._cached_gpu != gpu:
+            if self.index is not None:
+                self._cached_summary = self.index.reconcile(
+                    self.before,
+                    self.after,
+                    gpu=gpu,
+                    trim=self.trim,
+                    limit=500,
+                    sort="delta",
+                    nvtx_limit=500,
+                )
+            else:
+                self._cached_summary = diff_profiles(
+                    self.before,
+                    self.after,
+                    gpu=gpu,
+                    trim=self.trim,
+                    limit=500,
+                    sort="delta",
+                    nvtx_limit=500,
+                )
+            self._cached_gpu = gpu
         return self._cached_summary
 
     @property

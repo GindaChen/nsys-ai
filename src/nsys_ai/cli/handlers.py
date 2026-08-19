@@ -932,6 +932,7 @@ def _cmd_diff(args, _profile):
         diff_profiles_all_gpus,
     )
     from nsys_ai.diff_decision import write_diff_decision_json
+    from nsys_ai.diff_index import DiffIndex
     from nsys_ai.diff_render import (
         _fmt_confidence,
         format_diff_markdown,
@@ -967,6 +968,7 @@ def _cmd_diff(args, _profile):
     location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
     session = location.session_id if location is not None else raw_session
     session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
+    diff_index = None
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
@@ -1088,15 +1090,26 @@ def _cmd_diff(args, _profile):
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
         elif args.gpu is not None:
-            summary = diff_profiles(
-                before,
-                after,
-                gpu=args.gpu,
-                trim=trim,
-                limit=args.limit,
-                sort=args.sort,
-                regression_pct=regression_pct,
-            )
+            if diff_index is not None:
+                summary = diff_index.reconcile(
+                    before,
+                    after,
+                    gpu=args.gpu,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
+            else:
+                summary = diff_profiles(
+                    before,
+                    after,
+                    gpu=args.gpu,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
             gate_summary = summary
             narrative = _narrative_for(summary)
             if args.format == "terminal":
@@ -1110,14 +1123,36 @@ def _cmd_diff(args, _profile):
         else:
             # Global (all GPUs) + per-GPU breakdown. Shared with `review` so the
             # two front doors cannot drift on devices or per-GPU top-k.
-            global_summary, per_gpu = diff_profiles_all_gpus(
-                before,
-                after,
-                trim=trim,
-                limit=args.limit,
-                sort=args.sort,
-                regression_pct=regression_pct,
-            )
+            if diff_index is not None:
+                global_summary = diff_index.reconcile(
+                    before,
+                    after,
+                    gpu=None,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
+                # The persisted pair memo owns the node-wide summary. Keep the
+                # per-GPU view on the existing canonical path; those rows are
+                # presentation detail, while diff.json is built from global_summary.
+                _, per_gpu = diff_profiles_all_gpus(
+                    before,
+                    after,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
+            else:
+                global_summary, per_gpu = diff_profiles_all_gpus(
+                    before,
+                    after,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
             gate_summary = global_summary
 
             narrative = _narrative_for(global_summary)
