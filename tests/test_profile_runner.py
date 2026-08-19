@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from nsys_ai.exceptions import ProfileError
 from nsys_ai.profile_runner import (
     LocalProfileRunner,
     RunProgress,
     RunStage,
     RunStatus,
+    _assert_capture_does_not_persist_environment,
 )
 from nsys_ai.runspec import EnvironmentSpec, NsysTraceOptions, RunSpec, RunSpecError
 
@@ -170,6 +172,42 @@ def sqlite_compat_ingest_policy(monkeypatch):
 def _run(tmp_path, fake_nsys, mode="valid", **spec_overrides):
     runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
     return runner.run(_spec(mode, **spec_overrides))
+
+
+def test_capture_environment_guard_checks_serialized_text_not_metadata_row_count(tmp_path):
+    profile = tmp_path / "capture.sqlite"
+    with sqlite3.connect(profile) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE TARGET_INFO_SYSTEM_ENV (name TEXT, value TEXT);
+            INSERT INTO TARGET_INFO_SYSTEM_ENV VALUES ('CpuCores', '12');
+            CREATE TABLE StringIds (id INTEGER, value TEXT);
+            INSERT INTO StringIds VALUES (1, 'NSYS_AI_TEST_SECRET=private-value');
+            """
+        )
+
+    with pytest.raises(ProfileError, match="environment data"):
+        _assert_capture_does_not_persist_environment(
+            profile, {"NSYS_AI_TEST_SECRET": "private-value"}
+        )
+
+
+def test_capture_environment_guard_allows_machine_metadata(tmp_path):
+    profile = tmp_path / "capture.sqlite"
+    with sqlite3.connect(profile) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE TARGET_INFO_SYSTEM_ENV (name TEXT, value TEXT);
+            INSERT INTO TARGET_INFO_SYSTEM_ENV VALUES
+                ('CpuCores', '12'), ('GpuInfo', '{"Gpus": []}');
+            CREATE TABLE StringIds (id INTEGER, value TEXT);
+            INSERT INTO StringIds VALUES (1, 'fake_kernel');
+            """
+        )
+
+    _assert_capture_does_not_persist_environment(
+        profile, {"NSYS_AI_TEST_SECRET": "private-value"}
+    )
 
 
 def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
