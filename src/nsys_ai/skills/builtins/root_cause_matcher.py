@@ -463,6 +463,14 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             }
         )
 
+    # The matcher may intentionally pivot from a present-but-idle requested
+    # device to the busiest active device. Make that choice visible in every
+    # row so a downstream synthesizer cannot attribute the finding to the
+    # caller's requested device by accident.
+    analysed_device = kwargs.get("device", 0)
+    for finding in findings:
+        finding["analysed_device"] = analysed_device
+
     return findings
 
 

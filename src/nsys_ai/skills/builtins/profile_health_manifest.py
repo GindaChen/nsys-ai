@@ -32,7 +32,10 @@ def _safe_skill_run(skill_name: str, conn, **kwargs):
     if skill is None:
         return []
     try:
-        return skill.execute(conn, **kwargs)
+        # The manifest deliberately reports a valid profile-wide shape for an
+        # idle/nonexistent requested device; its child skills must retain their
+        # pre-guard empty-device behavior rather than short-circuiting the rollup.
+        return skill.execute(conn, _skip_device_validation=True, **kwargs)
     except (sqlite3.Error, duckdb.Error, SkillExecutionError) as exc:
         _log.debug("manifest: %s failed: %s", skill_name, exc, exc_info=True)
         return []
