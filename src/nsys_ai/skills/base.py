@@ -81,6 +81,8 @@ ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
     "sync_type_table": ("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
 }
 
+_DEVICE_INVENTORY_CACHE_KEY = "skill:device_inventory"
+
 
 def _profile_device_inventory(conn, adapter) -> dict[int, int]:
     """Return captured CUDA devices and their active kernel counts.
@@ -90,6 +92,12 @@ def _profile_device_inventory(conn, adapter) -> dict[int, int]:
     capture but idle. Keeping both lets callers reject a truly absent device
     without breaking root-cause matcher's intentional idle-device pivot.
     """
+    from ..connection import _PROBE_MISS, _probe_cache_get, _probe_cache_set
+
+    cached = _probe_cache_get(conn, _DEVICE_INVENTORY_CACHE_KEY)
+    if cached is not _PROBE_MISS:
+        return dict(cached)
+
     devices: dict[int, int] = {}
     kernel_table = adapter.resolve_activity_tables().get("kernel")
     if kernel_table:
@@ -120,6 +128,7 @@ def _profile_device_inventory(conn, adapter) -> dict[int, int]:
                     devices.setdefault(int(row[0]), 0)
     except (*DB_ERRORS, ValueError, TypeError):
         pass
+    _probe_cache_set(conn, _DEVICE_INVENTORY_CACHE_KEY, dict(devices))
     return devices
 
 
