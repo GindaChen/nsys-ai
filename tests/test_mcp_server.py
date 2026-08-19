@@ -152,6 +152,30 @@ def test_nsys_rep_uses_existing_parquetdir_without_writing(monkeypatch, tmp_path
     assert opened == [str(parquetdir.resolve())]
 
 
+def test_nsys_rep_falls_back_to_current_sqlite_when_parquetdir_open_fails(
+    monkeypatch, profile_copy, tmp_path
+):
+    from nsys_ai import parquet_cache
+    from nsys_ai.mcp_server import _open_readonly
+
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"capture placeholder")
+    parquetdir = tmp_path / "capture.parquetdir"
+    parquetdir.mkdir()
+    (parquetdir / "kernels.parquet").write_bytes(b"parquet placeholder")
+    sidecar = tmp_path / "capture.sqlite"
+    shutil.copyfile(profile_copy("h100_2gpu_1s.sqlite"), sidecar)
+    sidecar.touch()
+
+    def fail_open(_path):
+        raise RuntimeError("corrupt parquet")
+
+    monkeypatch.setattr(parquet_cache, "open_parquetdir_db", fail_open)
+
+    with _open_readonly(str(rep)) as (_conn, resolved):
+        assert resolved == str(sidecar)
+
+
 def test_run_skill_reads_parquetdir_only_capture(tmp_path):
     from test_parquetdir_backend import _create_parquetdir_profile
 

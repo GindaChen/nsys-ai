@@ -208,12 +208,23 @@ def _open_readonly(path: str) -> Iterator[tuple[Any, str]]:
         )
     resolved = resolution.resolved_path
     if resolution.backend == "parquetdir":
-        conn = open_parquetdir_db(resolved)
         try:
-            yield conn, resolved
-        finally:
-            conn.close()
-        return
+            conn = open_parquetdir_db(resolved)
+        except Exception:
+            # A directory can pass the cheap file-presence inspection while a
+            # parquet file is unreadable. A read-only MCP call must still use
+            # a current SQLite sidecar when one is available.
+            fallback = find_ingested_profile(path, backend="sqlite")
+            if fallback is None:
+                raise
+            resolution = fallback
+            resolved = resolution.resolved_path
+        else:
+            try:
+                yield conn, resolved
+            finally:
+                conn.close()
+            return
 
     conn, _error_detail = open_with_direct_fallback(resolved, open_direct_sqlite)
     if conn is None:
