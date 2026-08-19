@@ -11,6 +11,7 @@ import logging
 import os
 from string import Template
 
+from .gpu_label import format_gpu_label
 from .tree import build_nvtx_tree, to_json
 
 _log = logging.getLogger(__name__)
@@ -70,12 +71,7 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
     tree_json = to_json(roots)
 
     gpu_info = prof.meta.gpu_info.get(device)
-    gpu_label = f"GPU {device}"
-    if gpu_info:
-        gpu_label += (
-            f" - {gpu_info.name} ({gpu_info.pci_bus}), "
-            f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes / 1e9:.0f}GB"
-        )
+    gpu_label = format_gpu_label(device, gpu_info)
 
     # Stable id for this profile view (device + time window) for profile-bound chat history
     trim_sec = (trim[0] / 1e9, trim[1] / 1e9)

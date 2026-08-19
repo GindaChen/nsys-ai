@@ -9,6 +9,7 @@ profiling (trim window) and post-processing SQLite results into a report.
 
 import statistics
 
+from .gpu_label import format_gpu_label
 from .overlap import (
     detect_iterations,
     format_iterations,
@@ -149,7 +150,7 @@ def format_report_markdown(data: dict, profile_path: str, trim: tuple[int, int])
         hw = s["hardware"]
         t = s["timing"]
         lines.append(
-            f"**GPU {s['device']}:** {hw['name']} ({hw['pci_bus']}) — {hw['sm_count']} SMs, {hw['memory_gb']}GB"
+            f"**{format_gpu_label(s['device'], hw)}:**"
         )
         lines.append("")
         lines.append(

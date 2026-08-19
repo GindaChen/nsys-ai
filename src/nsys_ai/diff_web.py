@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .diff import ProfileDiffSummary, diff_profiles
 from .diff_render import to_diff_json
+from .gpu_label import format_gpu_label
 from .profile import Profile
 from .viewer import build_timeline_gpu_data, generate_timeline_html
 from .web import _TEMPLATE_DIR, _bind_local_server, _run_server
@@ -39,7 +40,7 @@ class _DiffHandler(BaseHTTPRequestHandler):
             return
 
         # Iframe timelines
-        if path.startswith("/timeline"):
+        if path == "/timeline":
             qs = parse_qs(urlparse(self.path).query)
             side = str(qs.get("side", ["before"])[0]).lower()
             self._serve_timeline_iframe(side)
@@ -81,7 +82,14 @@ class _DiffHandler(BaseHTTPRequestHandler):
             self._serve_asset("timeline.js", "application/javascript; charset=utf-8")
             return
 
-        # Fallback: serve HTML shell.
+        if path.startswith("/api/"):
+            self._json_response({"error": "not found", "path": path}, 404)
+            return
+        if path != "/":
+            self.send_error(404)
+            return
+
+        # Root: serve HTML shell.
         self._serve_html()
 
     def _serve_asset(self, filename: str, content_type: str):
@@ -155,10 +163,7 @@ class _DiffHandler(BaseHTTPRequestHandler):
         gpu_infos = []
         for dev in devices:
             info = prof.meta.gpu_info.get(dev)
-            label = f"GPU {dev}"
-            if info:
-                label += f" - {info.name} ({info.pci_bus}), {info.sm_count} SMs, {info.memory_bytes / 1e9:.0f}GB"
-            gpu_infos.append({"id": dev, "label": label})
+            gpu_infos.append({"id": dev, "label": format_gpu_label(dev, info)})
 
         trim = self.__class__.trim
         t_start, t_end = prof.meta.time_range
