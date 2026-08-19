@@ -28,6 +28,7 @@ class LocalProfileReference:
     kernel_count: int
     storage_kind: StorageKind = "sqlite"
     resolved_path: str | None = None
+    trim_ns: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.resolved_path is None:
@@ -233,6 +234,15 @@ def validate_local_profile_reference(
         raise ValueError("local profile kernel count is invalid")
     if reference.kernel_count <= 0:
         raise ValueError("local profile contains no GPU kernel activity")
+    trim_ns = reference.trim_ns
+    if trim_ns is not None:
+        if (
+            not isinstance(trim_ns, tuple)
+            or len(trim_ns) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in trim_ns)
+            or trim_ns[1] <= trim_ns[0]
+        ):
+            raise ValueError("local profile reference trim_ns must be an increasing integer pair")
     return reference
 
 

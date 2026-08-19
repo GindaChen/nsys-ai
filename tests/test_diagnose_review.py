@@ -85,7 +85,7 @@ def test_diagnose_then_review_pair_both_succeed(tmp_path: Path):
 def test_diagnose_web_reopens_explicit_handoff_directory(tmp_path: Path, monkeypatch):
     """The resume form must resolve the same explicit directory as creation."""
     handoff = tmp_path / "portable-session"
-    reference = build_local_profile_reference(BEFORE.resolve())
+    reference = build_local_profile_reference(BEFORE.resolve(), trim_ns=(10, 20))
     SessionStore(tmp_path).create(handoff.name, before_profile=reference)
     captured: dict[str, object] = {}
 
@@ -106,6 +106,7 @@ def test_diagnose_web_reopens_explicit_handoff_directory(tmp_path: Path, monkeyp
     assert result == 0
     assert captured["session_id"] == "portable-session"
     assert captured["session_root"] == tmp_path
+    assert captured["trim"] == (10, 20)
 
 
 def test_review_pair_without_session_does_not_create_nsys_ai(tmp_path: Path):

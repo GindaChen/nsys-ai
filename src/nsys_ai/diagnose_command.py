@@ -85,7 +85,7 @@ def run_diagnose(
             builder = EvidenceBuilder(prof, device=gpu, trim=trim)
             # Analysis completes before any session writer lease is taken.
             report = builder.build()
-            before = build_local_profile_reference(prof.path)
+            before = build_local_profile_reference(prof.path, trim_ns=trim)
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise DiagnoseCommandError(f"diagnose failed: {exc}") from exc
 
@@ -201,7 +201,7 @@ def _open_existing_session_web(
         before_path=before.path,
         session_id=session_id,
         gpu=0,
-        trim=None,
+        trim=before.trim_ns,
         port=port,
         open_browser=open_browser,
         session_root=session_root,

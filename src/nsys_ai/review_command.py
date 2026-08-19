@@ -226,7 +226,7 @@ def _resume_review(
             before_path=before.path,
             session_id=session_id,
             gpu=None,
-            trim=None,
+            trim=before.trim_ns,
             port=port,
             open_browser=open_browser,
             session_root=session_root,

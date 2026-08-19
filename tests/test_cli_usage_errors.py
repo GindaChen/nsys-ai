@@ -211,6 +211,61 @@ def test_trim_overlapping_only_partly_is_accepted():
         _check_trim_window(trim, prof)  # must not raise
 
 
+@pytest.mark.parametrize(
+    ("command", "extra"),
+    [
+        ("diagnose", ["--no-browser"]),
+        ("diff", ["--gpu", "0", "--no-ai"]),
+        ("review", ["--gpu", "0"]),
+    ],
+)
+def test_session_verbs_reject_trim_outside_the_profile_window(command, extra):
+    """The session-era front doors must share the established trim guard."""
+    args = [str(PROFILE), "--trim", "0", "1"]
+    if command in {"diff", "review"}:
+        args = [str(PROFILE), str(PROFILE), *args[1:]]
+    result = _run_cli(command, *args, *extra)
+
+    assert result.returncode == 2, (command, result.returncode, result.stderr)
+    assert "Error [TRIM_OUT_OF_RANGE]:" in result.stderr, result.stderr
+    if command == "diff":
+        assert "before profile:" in result.stderr, result.stderr
+
+
+def test_optimize_checks_trim_before_starting_the_loop(monkeypatch):
+    """An invalid optimize window must stop before the runner can capture."""
+    from argparse import Namespace
+
+    from nsys_ai.cli import handlers
+    from nsys_ai.exceptions import TrimOutOfRangeError
+
+    checked = []
+
+    def record_check(trim, path, profile, **kwargs):
+        checked.append((trim, path, profile, kwargs))
+        raise TrimOutOfRangeError("invalid trim")
+
+    monkeypatch.setattr(handlers, "_check_trim_window_for_path", record_check)
+    monkeypatch.setattr(
+        "nsys_ai.optimize_command.run_optimize",
+        lambda **_kwargs: pytest.fail("optimize loop started before trim validation"),
+    )
+    args = Namespace(
+        profile=str(PROFILE),
+        repo=".",
+        workload=["true"],
+        trim=[0.0, 1.0],
+        nsys="nsys",
+        gpu=0,
+        session=None,
+    )
+
+    with pytest.raises(TrimOutOfRangeError, match="invalid trim"):
+        handlers._cmd_optimize(args, _profile)
+
+    assert checked and checked[0][0] == (0, 1_000_000_000)
+
+
 # ── chat without a terminal ────────────────────────────────────────────
 
 
