@@ -969,6 +969,8 @@ def _cmd_diff(args, _profile):
     session = location.session_id if location is not None else raw_session
     session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
     diff_index = None
+    if location is not None:
+        diff_index = DiffIndex(location.directory)
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
