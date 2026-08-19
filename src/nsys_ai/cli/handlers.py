@@ -50,7 +50,7 @@ def _cmd_diagnose(args, _profile):
             profile_path=profile_path,
             session_id=getattr(args, "session", None),
             session_root=DEFAULT_SESSION_ROOT,
-            gpu=getattr(args, "gpu", 0) or 0,
+            gpu=getattr(args, "gpu", None),
             trim=trim,
             web=bool(getattr(args, "web", False)),
             port=getattr(args, "port", 8144),
@@ -128,7 +128,7 @@ def _cmd_optimize(args, _profile):
             session_id=getattr(args, "session", None),
             session_root=DEFAULT_SESSION_ROOT,
             nsys=getattr(args, "nsys", "nsys"),
-            gpu=getattr(args, "gpu", 0) or 0,
+            gpu=getattr(args, "gpu", None),
             trim=trim,
         )
     except KeyboardInterrupt:
@@ -754,12 +754,14 @@ def _cmd_analyze(args, _profile):
         )
         sys.exit(1)
 
+    from nsys_ai.profile import select_gpu_device
     from nsys_ai.report import format_report_markdown, format_report_terminal, run_analyze
 
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
         _check_trim_window(trim, prof)
-        data = run_analyze(prof, args.gpu, trim)
+        device = select_gpu_device(prof, getattr(args, "gpu", None))
+        data = run_analyze(prof, device, trim)
         print(format_report_terminal(data))
         if getattr(args, "output", None):
             md = format_report_markdown(data, args.profile, trim)
@@ -842,7 +844,9 @@ def _cmd_analyze_json(args, _profile):
     with _profile.open(args.profile) as prof:
         trim = _parse_trim(args)
         _check_trim_window(trim, prof)
-        device = getattr(args, "gpu", 0) or 0
+        from nsys_ai.profile import select_gpu_device
+
+        device = select_gpu_device(prof, getattr(args, "gpu", None))
         builder = EvidenceBuilder(prof, device=device, trim=trim)
         report = builder.build()
 
@@ -1962,7 +1966,9 @@ def _cmd_evidence(args, _profile):
     with _profile.open(profile_path) as prof:
         trim = _parse_trim(args)
         _check_trim_window(trim, prof)
-        device = getattr(args, "gpu", 0) or 0
+        from nsys_ai.profile import select_gpu_device
+
+        device = select_gpu_device(prof, getattr(args, "gpu", None))
         builder = EvidenceBuilder(prof, device=device, trim=trim)
 
         analyzers_raw = getattr(args, "analyzers", None)

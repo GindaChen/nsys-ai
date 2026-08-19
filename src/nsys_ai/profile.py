@@ -31,6 +31,7 @@ from nsys_ai.exceptions import (
     ExportToolMissingError,
     ProfileNotFoundError,
     SchemaError,
+    UsageError,
 )
 from nsys_ai.profile_reference import inspect_local_parquetdir
 
@@ -50,6 +51,20 @@ class ProfileResolution:
     storage_kind: StorageKind
     backend: Literal["sqlite", "parquetdir"]
     cache_mode: Literal["auto", "direct"]
+
+
+def select_gpu_device(profile: "Profile", requested: int | None) -> int:
+    """Choose a real profile device, preserving an explicit GPU 0."""
+    devices = list(profile.meta.devices)
+    if requested is None:
+        return devices[0] if devices else 0
+    if requested not in devices:
+        rendered = ", ".join(str(device) for device in devices)
+        raise UsageError(
+            f"GPU device {requested} is not present in the profile; available devices: "
+            f"{rendered or '(none)'}"
+        )
+    return requested
 
 
 def resolve_ingest_policy(policy: str | None = None) -> IngestPolicy:
