@@ -701,6 +701,35 @@ def test_diff_with_trim_before_trim_after(tmp_path):
     assert kB.delta_ns == -20  # 10 - 30
 
 
+def test_diff_id_keys_effective_asymmetric_trim_windows(tmp_path):
+    """The id must distinguish the actual before/after windows used."""
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(100, 110, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(200, 220, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        first = diff_profiles(
+            b,
+            a,
+            gpu=0,
+            trim_before=(0, 150),
+            trim_after=(150, 250),
+        )
+        second = diff_profiles(
+            b,
+            a,
+            gpu=0,
+            trim_before=(0, 150),
+            trim_after=(250, 350),
+        )
+
+    assert first.diff_id != second.diff_id
+
+
 def test_diff_tools_search_nvtx_regions(tmp_path):
     """Phase C: search_nvtx_regions returns merged before/after NVTX names."""
     from nsys_ai import profile as profile_mod
@@ -1036,6 +1065,31 @@ def test_diff_cli_gate_help_and_validation(tmp_path):
         bad = _run_diff_cli(before, after, f"--gate={invalid}")
         assert bad.returncode == 2, f"--gate {invalid} should be rejected"
         assert "positive percentage" in bad.stderr
+
+
+def test_diff_cli_derived_session_does_not_pollute_session_root(tmp_path):
+    """Bare ``--session`` derives its index directory after opening the profile."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--format",
+        "json",
+        "--no-ai",
+        "--session",
+        cwd=tmp_path,
+        env=_decision_cli_env(tmp_path),
+    )
+
+    # No session exists yet, so the command must fail before profile analysis or
+    # memo publication. In particular, it must not leave an orphan handoff that
+    # blocks a later evidence build using the same derived session id.
+    assert result.returncode != 0
+    assert not (tmp_path / ".nsys-ai").exists()
 
 
 def test_diff_cli_gate_tightens_threshold_and_implies_exit(tmp_path):

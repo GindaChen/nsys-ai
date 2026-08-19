@@ -932,6 +932,7 @@ def _cmd_diff(args, _profile):
         diff_profiles_all_gpus,
     )
     from nsys_ai.diff_decision import write_diff_decision_json
+    from nsys_ai.diff_index import DiffIndex
     from nsys_ai.diff_render import (
         _fmt_confidence,
         format_diff_markdown,
@@ -967,6 +968,32 @@ def _cmd_diff(args, _profile):
     location = resolve_session_location(raw_session, root=DEFAULT_SESSION_ROOT)
     session = location.session_id if location is not None else raw_session
     session_root = location.root if location is not None else DEFAULT_SESSION_ROOT
+
+    def _session_directory_for_diff(raw_session, *, root=DEFAULT_SESSION_ROOT):
+        if raw_session in (None, ""):
+            return None
+        location = resolve_session_location(raw_session, root=root)
+        return location.directory if location is not None else None
+
+    def _diff_index_for_session(raw_session, *, root=DEFAULT_SESSION_ROOT):
+        """Validate the handoff before allowing DiffIndex to create artifacts."""
+        session_directory = _session_directory_for_diff(raw_session, root=root)
+        if session_directory is None:
+            return None
+        from nsys_ai.session_store import SessionError, SessionStore
+
+        session_directory = session_directory.resolve(strict=False)
+        try:
+            SessionStore(session_directory.parent).load(session_directory.name)
+        except (OSError, SessionError, TypeError, ValueError) as exc:
+            print(
+                f"Error: --session must reference an existing valid session: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return DiffIndex(session_directory)
+
+    diff_index = _diff_index_for_session(session, root=session_root)
     if session is not None and getattr(args, "chat", False):
         print("Error: --session cannot be combined with --chat", file=sys.stderr)
         sys.exit(2)
@@ -1066,6 +1093,15 @@ def _cmd_diff(args, _profile):
             # Opened Profile.path is the resolved .sqlite (including .nsys-rep sidecars).
             session_before_path = before.path
             session_after_path = after.path
+            if session == "":
+                from nsys_ai.profile_runner import build_local_profile_reference
+                from nsys_ai.session_cli import resolve_session_id
+
+                before_ref = build_local_profile_reference(
+                    os.path.abspath(os.path.expanduser(before.path))
+                )
+                session = resolve_session_id(None, before=before_ref)
+                diff_index = _diff_index_for_session(session)
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
                 before,
@@ -1088,15 +1124,26 @@ def _cmd_diff(args, _profile):
             else:
                 raise RuntimeError(f"Unknown format: {args.format}")
         elif args.gpu is not None:
-            summary = diff_profiles(
-                before,
-                after,
-                gpu=args.gpu,
-                trim=trim,
-                limit=args.limit,
-                sort=args.sort,
-                regression_pct=regression_pct,
-            )
+            if diff_index is not None:
+                summary = diff_index.reconcile(
+                    before,
+                    after,
+                    gpu=args.gpu,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
+            else:
+                summary = diff_profiles(
+                    before,
+                    after,
+                    gpu=args.gpu,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
             gate_summary = summary
             narrative = _narrative_for(summary)
             if args.format == "terminal":
@@ -1110,14 +1157,41 @@ def _cmd_diff(args, _profile):
         else:
             # Global (all GPUs) + per-GPU breakdown. Shared with `review` so the
             # two front doors cannot drift on devices or per-GPU top-k.
-            global_summary, per_gpu = diff_profiles_all_gpus(
-                before,
-                after,
-                trim=trim,
-                limit=args.limit,
-                sort=args.sort,
-                regression_pct=regression_pct,
-            )
+            if diff_index is not None:
+                global_summary = diff_index.reconcile(
+                    before,
+                    after,
+                    gpu=None,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
+                # The persisted pair memo owns the node-wide summary. Keep the
+                # per-GPU view on the existing canonical path; those rows are
+                # presentation detail, while diff.json is built from global_summary.
+                devices = sorted(set(before.meta.devices) | set(after.meta.devices))
+                per_gpu = {
+                    device: diff_profiles(
+                        before,
+                        after,
+                        gpu=device,
+                        trim=trim,
+                        limit=min(args.limit, 3),
+                        sort=args.sort,
+                        regression_pct=regression_pct,
+                    )
+                    for device in devices
+                }
+            else:
+                global_summary, per_gpu = diff_profiles_all_gpus(
+                    before,
+                    after,
+                    trim=trim,
+                    limit=args.limit,
+                    sort=args.sort,
+                    regression_pct=regression_pct,
+                )
             gate_summary = global_summary
 
             narrative = _narrative_for(global_summary)
