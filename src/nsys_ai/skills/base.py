@@ -82,6 +82,85 @@ ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
 }
 
 
+def _profile_device_inventory(conn, adapter) -> dict[int, int]:
+    """Return captured CUDA devices and their active kernel counts.
+
+    Kernel activity is the useful count for diagnostics, while
+    ``TARGET_INFO_CUDA_DEVICE`` also records devices that were present in the
+    capture but idle. Keeping both lets callers reject a truly absent device
+    without breaking root-cause matcher's intentional idle-device pivot.
+    """
+    devices: dict[int, int] = {}
+    kernel_table = adapter.resolve_activity_tables().get("kernel")
+    if kernel_table:
+        try:
+            rows = adapter.execute(
+                f"SELECT deviceId, COUNT(*) AS cnt FROM {kernel_table} "
+                "GROUP BY deviceId ORDER BY deviceId"
+            ).fetchall()
+            devices.update({int(row[0]): int(row[1]) for row in rows})
+        except DB_ERRORS:
+            pass
+
+    try:
+        tables = adapter.get_table_names()
+        target_table = next(
+            (name for name in tables if name.lower().startswith("target_info_cuda_device")),
+            None,
+        )
+        if target_table:
+            columns = {column.lower(): column for column in adapter.get_table_columns(target_table)}
+            device_column = columns.get("cudaid") or columns.get("gpuid")
+            if device_column:
+                rows = adapter.execute(
+                    f"SELECT DISTINCT {device_column} FROM {target_table} "
+                    f"WHERE {device_column} IS NOT NULL ORDER BY {device_column}"
+                ).fetchall()
+                for row in rows:
+                    devices.setdefault(int(row[0]), 0)
+    except (*DB_ERRORS, ValueError, TypeError):
+        pass
+    return devices
+
+
+def _requested_device_error(conn, adapter, skill: "Skill", kwargs: dict) -> list[dict] | None:
+    """Return the shared diagnostic row for an explicitly absent device."""
+    parameter_name = next(
+        (
+            name
+            for name in ("device", "device_id")
+            if name in kwargs and any(param.name == name for param in skill.params)
+        ),
+        None,
+    )
+    if parameter_name is None:
+        return None
+    requested = kwargs.get(parameter_name)
+    if requested is None or str(requested).lower() == "all":
+        return None
+    try:
+        requested = int(requested)
+    except (TypeError, ValueError):
+        return None
+
+    available = _profile_device_inventory(conn, adapter)
+    if requested in available:
+        return None
+    available_text = ", ".join(str(device) for device in sorted(available)) or "(none)"
+    return [
+        {
+            "error": "no kernels found",
+            "requested_device": requested,
+            "available_devices": available,
+            "hint": (
+                f"Device {requested} is not present in this profile. "
+                f"Available devices: {available_text}. "
+                f"Try: {', '.join(f'-p {parameter_name}={device}' for device in sorted(available))}"
+            ),
+        }
+    ]
+
+
 def abstain(reason: str, **detail) -> list[dict]:
     """Return the row a skill emits when it *cannot run*, with the reason why.
 
@@ -493,6 +572,10 @@ class Skill:
         from ..connection import wrap_connection
 
         adapter = wrap_connection(conn)
+
+        device_error = _requested_device_error(conn, adapter, self, kwargs)
+        if device_error is not None:
+            return device_error
 
         # SQL skills can infer required activity tables from their template,
         # but execute_fn skills build SQL in Python and need to declare the
