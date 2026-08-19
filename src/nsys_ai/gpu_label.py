@@ -35,5 +35,16 @@ def format_gpu_label(device: int, info: Any = None) -> str:
     if sm_count:
         label += f", {sm_count} SMs"
     if memory_gb:
-        label += f", {memory_gb:.0f}GB"
+        memory_text = f"{memory_gb:.1f}".rstrip("0").rstrip(".")
+        label += f", {memory_text}GB"
     return label
+
+
+def format_gpu_narrative_label(device: int, info: Any = None) -> str:
+    """Format the short GPU identity used at the start of prose sentences."""
+    label = f"GPU {device}"
+    if isinstance(info, Mapping):
+        name = str(info.get("name", "") or "").strip()
+    else:
+        name = str(getattr(info, "name", "") or "").strip() if info is not None else ""
+    return f"{label} ({name})" if name else label

@@ -8,13 +8,16 @@ import pytest
 
 from nsys_ai import web
 from nsys_ai.diff_web import _DiffHandler
-from nsys_ai.gpu_label import format_gpu_label
+from nsys_ai.gpu_label import format_gpu_label, format_gpu_narrative_label
+from nsys_ai.summary import auto_commentary
 
 
 def test_gpu_label_omits_missing_metadata():
     assert format_gpu_label(0) == "GPU 0"
     assert format_gpu_label(0, SimpleNamespace(name="", pci_bus="", sm_count=0, memory_bytes=0)) == "GPU 0"
     assert format_gpu_label(1, SimpleNamespace(name="H100", pci_bus="", sm_count=132, memory_bytes=0)) == "GPU 1 - H100, 132 SMs"
+    assert format_gpu_narrative_label(0, {"name": ""}) == "GPU 0"
+    assert format_gpu_narrative_label(1, {"name": "H100"}) == "GPU 1 (H100)"
 
 
 def test_gpu_label_supports_summary_data():
@@ -22,6 +25,28 @@ def test_gpu_label_supports_summary_data():
         2,
         {"name": "H100", "pci_bus": "0000:01:00.0", "sm_count": 132, "memory_gb": 80},
     ) == "GPU 2 - H100 (0000:01:00.0), 132 SMs, 80GB"
+
+
+def test_gpu_label_preserves_fractional_memory_precision():
+    assert format_gpu_label(
+        0,
+        SimpleNamespace(name="H200", pci_bus="", sm_count=0, memory_bytes=150_100_000_000),
+    ) == "GPU 0 - H200, 150.1GB"
+
+
+def test_summary_commentary_omits_empty_gpu_name():
+    summary = {
+        "device": 0,
+        "hardware": {"name": ""},
+        "timing": {"span_ms": 10.0, "utilization_pct": 25.0, "idle_ms": 0.0},
+        "kernel_count": 3,
+        "top_kernels": [],
+    }
+
+    commentary = auto_commentary(summary)
+
+    assert commentary.startswith("GPU 0 ran 3 kernels")
+    assert "()" not in commentary
 
 
 def _get(handler, path: str, *, html: bytes = b"<html>"):
