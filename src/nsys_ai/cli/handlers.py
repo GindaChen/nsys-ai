@@ -1039,6 +1039,8 @@ def _cmd_diff(args, _profile):
     # (no symlink dereference), matching SessionStore / build_local_profile_reference.
     session_before_path = None
     session_after_path = None
+    before_ref = None
+    after_ref = None
     # Defaulted here rather than in the parser so the default stays visible next
     # to the only code that writes it. A CI job runs in a checkout, so a record
     # it cannot redirect is a record it cannot keep out of the repo under test.
@@ -1120,15 +1122,36 @@ def _cmd_diff(args, _profile):
             # Opened Profile.path is the resolved .sqlite (including .nsys-rep sidecars).
             session_before_path = before.path
             session_after_path = after.path
-            if session == "":
-                from nsys_ai.profile_runner import build_local_profile_reference
-                from nsys_ai.session_cli import resolve_session_id
+            from nsys_ai.exceptions import ProfileError
+            from nsys_ai.profile_runner import build_local_profile_reference
+            from nsys_ai.session_cli import (
+                resolve_session_id,
+                validate_session_diff_after_profile,
+            )
 
+            try:
                 before_ref = build_local_profile_reference(
-                    os.path.abspath(os.path.expanduser(before.path))
+                    os.path.abspath(os.path.expanduser(before.path)),
+                    trim_ns=trim_before or trim,
                 )
-                session = resolve_session_id(None, before=before_ref)
-                diff_index = _diff_index_for_session(session)
+                after_ref = build_local_profile_reference(
+                    os.path.abspath(os.path.expanduser(after.path)),
+                    trim_ns=trim_after or trim,
+                )
+                if session == "":
+                    session = resolve_session_id(None, before=before_ref)
+                    diff_index = _diff_index_for_session(session, root=session_root)
+                # Do this before DiffIndex.reconcile. The writer repeats the
+                # guard later, but waiting until then can rebuild and persist a
+                # memo for an after profile the session will reject.
+                validate_session_diff_after_profile(
+                    session_id=session,
+                    after_profile=after_ref,
+                    root=session_root,
+                )
+            except (TypeError, ValueError, ProfileError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(2)
         if trim_before is not None and trim_after is not None:
             summary = diff_profiles(
                 before,
@@ -1319,7 +1342,6 @@ def _cmd_diff(args, _profile):
             print("Error: --session requires a computed profile diff", file=sys.stderr)
             sys.exit(2)
         from nsys_ai.exceptions import ProfileError
-        from nsys_ai.profile_runner import build_local_profile_reference
         from nsys_ai.session_cli import publish_session_diff, resolve_session_id
 
         # Absolute either way. ``session_before_path`` is the opened profile's
@@ -1338,12 +1360,13 @@ def _cmd_diff(args, _profile):
             os.path.expanduser(session_after_path or args.after)
         )
         try:
-            before_ref = build_local_profile_reference(
-                before_path, trim_ns=trim_before or trim
-            )
-            after_ref = build_local_profile_reference(
-                after_path, trim_ns=trim_after or trim
-            )
+            if before_ref is None or after_ref is None:
+                before_ref = build_local_profile_reference(
+                    before_path, trim_ns=trim_before or trim
+                )
+                after_ref = build_local_profile_reference(
+                    after_path, trim_ns=trim_after or trim
+                )
             session_id = resolve_session_id(session or None, before=before_ref)
             # to_diff_dict carries each profile's ``path`` straight from
             # Profile.path, which is the caller's spelling -- "before.sqlite"

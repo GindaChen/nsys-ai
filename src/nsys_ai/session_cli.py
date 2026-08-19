@@ -235,6 +235,32 @@ def publish_session_diff(
         return writer.publish_diff(diff)
 
 
+def validate_session_diff_after_profile(
+    *,
+    session_id: str,
+    after_profile: LocalProfileReference,
+    root: str | os.PathLike[str] = DEFAULT_SESSION_ROOT,
+) -> SessionSnapshot:
+    """Validate a diff candidate before any expensive or persistent work.
+
+    ``publish_session_diff`` remains the authoritative writer-side guard. CLI
+    callers also need the same check before running ``DiffIndex.reconcile``:
+    a rejected after profile must not spend analysis time or overwrite a warm
+    pair memo. Proposal/reprofile and diagnose phases intentionally retain the
+    existing publish semantics; only an already-established after profile is
+    immutable here.
+    """
+    session_id, root = _normalize_target(session_id, root)
+    if not isinstance(after_profile, LocalProfileReference):
+        raise TypeError("after_profile must be a LocalProfileReference")
+    snapshot = SessionStore(root).load(session_id)
+    if snapshot.state.phase not in {"propose", "reprofile", "diagnose"} and (
+        snapshot.state.after_profile != after_profile
+    ):
+        raise ValueError("session after profile does not match the after profile being diffed")
+    return snapshot
+
+
 def publish_session_decision(
     *,
     session_id: str,

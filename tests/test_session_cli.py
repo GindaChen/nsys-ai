@@ -175,6 +175,27 @@ def test_cli_session_artifacts_survive_a_second_process(tmp_path: Path):
         "logs",
     }
 
+    # A rejected after profile must fail before DiffIndex.reconcile can
+    # replace the warm pair memo with the wrong pair.
+    pair_path = directory / "indices" / "pair_summary.json"
+    pair_before = pair_path.read_bytes()
+    mismatched_diff = _run_cli(
+        tmp_path,
+        "diff",
+        str(before),
+        str(before),
+        "--gpu",
+        "0",
+        "--format",
+        "json",
+        "--no-ai",
+        "--session",
+        session_id,
+    )
+    assert mismatched_diff.returncode == 2
+    assert "session after profile does not match" in mismatched_diff.stderr
+    assert pair_path.read_bytes() == pair_before
+
     script = """
 import json, sys
 from nsys_ai.session_store import SessionStore
