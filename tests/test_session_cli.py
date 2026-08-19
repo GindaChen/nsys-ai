@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,14 @@ def test_session_location_supports_directory_handoff_and_legacy_ids(tmp_path: Pa
     assert resolve_session_location("tests").session_id == "tests"
     assert session_argument("tests") == "tests"
     assert session_argument(handoff) == str(handoff)
+
+    # An explicit directory must remain explicit even when it happens to sit
+    # below the default root; otherwise a copied handoff loses its location.
+    default_handoff = tmp_path / ".nsys-ai" / "sessions" / "run-001"
+    assert session_argument(default_handoff) == str(default_handoff.resolve())
+
+    spaced_handoff = tmp_path / "handoff dir" / "run-002"
+    assert session_argument(spaced_handoff) == shlex.quote(str(spaced_handoff.resolve()))
 
 
 def test_session_directory_can_be_used_by_publish_facade(tmp_path: Path):

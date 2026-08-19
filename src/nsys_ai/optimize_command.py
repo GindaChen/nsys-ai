@@ -105,11 +105,12 @@ def _resume_command(
     session_id: str,
     session_root: str | os.PathLike[str],
     workload: Sequence[str],
+    session_argument_value: str | os.PathLike[str] | None = None,
 ) -> str:
     """The single command that picks the loop up where it stopped."""
     return (
         f"nsys-ai optimize {before_path} --repo {repo} "
-        f"--session {session_argument(session_id, root=session_root)} -- "
+        f"--session {session_argument(session_argument_value or session_id, root=session_root)} -- "
         f"{' '.join(workload)}"
     )
 
@@ -269,7 +270,7 @@ def run_optimize(
     before_path: str | os.PathLike[str],
     repo: str | os.PathLike[str],
     workload: Sequence[str],
-    session_id: str | None = None,
+    session_id: str | os.PathLike[str] | None = None,
     nsys: str = "nsys",
     gpu: int = 0,
     trim: tuple[int, int] | None = None,
@@ -303,6 +304,7 @@ def run_optimize(
     except ProfileCommandError as exc:
         raise OptimizeCommandError(str(exc)) from exc
 
+    requested_session = session_id
     location = resolve_session_location(session_id or None, root=session_root)
     if location is not None:
         session_id = location.session_id
@@ -314,6 +316,7 @@ def run_optimize(
         session_id=resolved_id,
         session_root=session_root,
         workload=normalized,
+        session_argument_value=requested_session,
     )
     store = SessionStore(session_root)
 

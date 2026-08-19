@@ -30,14 +30,6 @@ def _cmd_profile(args, _profile):
 def _cmd_propose(args, _profile):
     """Generate a deterministic proposal artifact from one finding."""
     from nsys_ai.propose_command import run_propose_command
-    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
-
-    location = resolve_session_location(
-        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
-    )
-    if location is not None:
-        args.session = location.session_id
-        args.session_root = location.root
 
     exit_code = run_propose_command(args)
     if exit_code:
@@ -47,17 +39,13 @@ def _cmd_propose(args, _profile):
 def _cmd_diagnose(args, _profile):
     """Thin front door: default evidence pack → session findings."""
     from nsys_ai.diagnose_command import DiagnoseCommandError, run_diagnose
-    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
-
-    location = resolve_session_location(
-        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
-    )
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT
 
     try:
         exit_code = run_diagnose(
             profile_path=getattr(args, "profile", None),
-            session_id=location.session_id if location is not None else None,
-            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
+            session_id=getattr(args, "session", None),
+            session_root=DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", 0) or 0,
             trim=_parse_trim(args),
             web=bool(getattr(args, "web", False)),
@@ -74,18 +62,14 @@ def _cmd_diagnose(args, _profile):
 def _cmd_review(args, _profile):
     """Thin front door: canonical before/after diff, or resume a session."""
     from nsys_ai.review_command import ReviewCommandError, run_review
-    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
-
-    location = resolve_session_location(
-        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
-    )
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT
 
     try:
         exit_code = run_review(
             before_path=getattr(args, "before", None),
             after_path=getattr(args, "after", None),
-            session_id=location.session_id if location is not None else None,
-            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
+            session_id=getattr(args, "session", None),
+            session_root=DEFAULT_SESSION_ROOT,
             gpu=getattr(args, "gpu", None),
             trim=_parse_trim(args),
             web=bool(getattr(args, "web", False)),
@@ -102,11 +86,7 @@ def _cmd_review(args, _profile):
 def _cmd_optimize(args, _profile):
     """Front door over the loop: diagnose -> propose -> capture -> diff -> decision."""
     from nsys_ai.optimize_command import OptimizeCommandError, run_optimize
-    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
-
-    location = resolve_session_location(
-        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
-    )
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT
 
     workload = list(getattr(args, "workload", None) or [])
     if not workload:
@@ -133,8 +113,8 @@ def _cmd_optimize(args, _profile):
             before_path=args.profile,
             repo=args.repo,
             workload=workload,
-            session_id=location.session_id if location is not None else None,
-            session_root=location.root if location is not None else DEFAULT_SESSION_ROOT,
+            session_id=getattr(args, "session", None),
+            session_root=DEFAULT_SESSION_ROOT,
             nsys=getattr(args, "nsys", "nsys"),
             gpu=getattr(args, "gpu", 0) or 0,
             trim=_parse_trim(args),

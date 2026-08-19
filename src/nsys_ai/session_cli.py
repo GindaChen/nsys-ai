@@ -7,6 +7,7 @@ finish diagnose / propose / diff analysis before acquiring a writer lease.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,7 @@ class SessionLocation:
 
     session_id: str
     root: Path
+    explicit: bool = False
 
     @property
     def directory(self) -> Path:
@@ -76,9 +78,9 @@ def resolve_session_location(
         directory = candidate.resolve(strict=False)
         if directory.name in {"", ".", ".."}:
             raise ValueError("session directory must have a session id basename")
-        return SessionLocation(directory.name, directory.parent)
+        return SessionLocation(directory.name, directory.parent, explicit=True)
 
-    return SessionLocation(raw, Path(root).expanduser().resolve(strict=False))
+    return SessionLocation(raw, Path(root).expanduser().resolve(strict=False), explicit=False)
 
 
 def session_location(
@@ -101,9 +103,9 @@ def session_argument(
     """Return a re-runnable session argument for a user-facing hint."""
     location = session_location(session_id, root=root)
     default_root = Path(DEFAULT_SESSION_ROOT).expanduser().resolve(strict=False)
-    if location.root == default_root:
+    if location.root == default_root and not location.explicit:
         return location.session_id
-    return str(location.directory)
+    return shlex.quote(str(location.directory))
 
 
 def _normalize_target(

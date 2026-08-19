@@ -40,7 +40,7 @@ def run_review(
     *,
     before_path: str | os.PathLike[str] | None = None,
     after_path: str | os.PathLike[str] | None = None,
-    session_id: str | None = None,
+    session_id: str | os.PathLike[str] | None = None,
     gpu: int | None = None,
     trim: tuple[int, int] | None = None,
     web: bool = False,
@@ -73,6 +73,7 @@ def run_review(
     when ``gpu`` is ``None``. Next-step hints are written to ``stderr`` so a
     redirected stdout is exactly that report.
     """
+    requested_session = session_id
     if session_id is not None:
         location = resolve_session_location(session_id, root=session_root)
         if location is not None:
@@ -86,6 +87,7 @@ def run_review(
             port=port,
             open_browser=open_browser,
             session_root=session_root,
+            session_argument_value=requested_session,
             stdout=stdout,
             stderr=stderr,
         )
@@ -191,6 +193,7 @@ def _resume_review(
     port: int,
     open_browser: bool,
     session_root: str | os.PathLike[str],
+    session_argument_value: str | os.PathLike[str] | None = None,
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
@@ -205,7 +208,13 @@ def _resume_review(
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise ReviewCommandError(str(exc)) from exc
 
-    _print_decision_path(session_id, snapshot, session_root, stdout=stdout)
+    _print_decision_path(
+        session_id,
+        snapshot,
+        session_root,
+        session_argument_value=session_argument_value,
+        stdout=stdout,
+    )
 
     if web:
         before = snapshot.state.before_profile
@@ -231,10 +240,14 @@ def _print_decision_path(
     snapshot: SessionSnapshot,
     session_root: str | os.PathLike[str],
     *,
+    session_argument_value: str | os.PathLike[str] | None = None,
     stdout: TextIO,
 ) -> None:
     directory = session_dir(session_id, root=session_root)
-    session_ref = session_argument(session_id, root=session_root)
+    session_ref = session_argument(
+        session_argument_value if session_argument_value is not None else session_id,
+        root=session_root,
+    )
     projected = project_loop_state(snapshot, session_dir_path=directory)
     print(f"Session: {session_id}", file=stdout)
     print(f"Phase: {projected.get('phase')}", file=stdout)

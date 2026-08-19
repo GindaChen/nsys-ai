@@ -33,7 +33,7 @@ class DiagnoseCommandError(NsysAiError):
 def run_diagnose(
     *,
     profile_path: str | os.PathLike[str] | None = None,
-    session_id: str | None = None,
+    session_id: str | os.PathLike[str] | None = None,
     gpu: int = 0,
     trim: tuple[int, int] | None = None,
     web: bool = False,
@@ -89,6 +89,7 @@ def run_diagnose(
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise DiagnoseCommandError(f"diagnose failed: {exc}") from exc
 
+    requested_session = session_id
     location = resolve_session_location(
         None if session_id == "" else session_id,
         root=session_root,
@@ -109,7 +110,10 @@ def run_diagnose(
         raise DiagnoseCommandError(str(exc)) from exc
 
     directory = session_dir(resolved_id, root=session_root)
-    session_ref = session_argument(resolved_id, root=session_root)
+    session_ref = session_argument(
+        requested_session if requested_session else resolved_id,
+        root=session_root,
+    )
     print(f"Session: {resolved_id}", file=stdout)
     print(f"Findings artifact: {directory / 'findings.json'}", file=stdout)
     print(f"── Evidence Findings ({len(report.findings)}) ──", file=stdout)
