@@ -21,7 +21,8 @@ from typing import Any
 
 from .exceptions import NsysAiError
 
-RUNSPEC_SCHEMA_VERSION = "0.1"
+RUNSPEC_SCHEMA_VERSION = "0.2"
+RUNSPEC_SCHEMA_VERSIONS = frozenset({"0.1", RUNSPEC_SCHEMA_VERSION})
 RUNSPEC_COMPATIBILITY_VERSION = "1"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TRACE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -230,6 +231,8 @@ class RunSpec:
     cwd: str = "."
     repository: str | None = None
     commit: str | None = None
+    dirty: bool = False
+    worktree_diff_sha256: str | None = None
     environment: EnvironmentSpec = field(default_factory=EnvironmentSpec)
     warmup_steps: int = 0
     profile_steps: int = 1
@@ -261,6 +264,21 @@ class RunSpec:
             object.__setattr__(self, "cwd", str(posix_cwd))
         if self.commit is not None:
             _validate_string(self.commit, "commit")
+        if not isinstance(self.dirty, bool):
+            raise RunSpecError("dirty must be a boolean")
+        if self.dirty and (self.repository is None or self.commit is None):
+            raise RunSpecError("dirty requires repository and commit provenance")
+        if self.worktree_diff_sha256 is not None:
+            if not isinstance(self.worktree_diff_sha256, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", self.worktree_diff_sha256
+            ):
+                raise RunSpecError(
+                    "worktree_diff_sha256 must be a SHA-256 hex string or null"
+                )
+        if self.dirty != (self.worktree_diff_sha256 is not None):
+            raise RunSpecError(
+                "dirty and worktree_diff_sha256 must either describe a dirty worktree or a clean one"
+            )
         if not isinstance(self.environment, EnvironmentSpec):
             raise RunSpecError("environment must be an EnvironmentSpec")
         if isinstance(self.warmup_steps, bool) or not isinstance(self.warmup_steps, int):
@@ -295,6 +313,8 @@ class RunSpec:
             "cwd": self.cwd,
             "repository": self.repository,
             "commit": self.commit,
+            "dirty": self.dirty,
+            "worktree_diff_sha256": self.worktree_diff_sha256,
             "environment": self.environment.to_dict(),
             "warmup_steps": self.warmup_steps,
             "profile_steps": self.profile_steps,
@@ -310,7 +330,7 @@ class RunSpec:
     def from_dict(cls, payload: Mapping[str, Any]) -> RunSpec:
         data = _require_mapping(payload, "RunSpec")
         version = data.get("schema_version")
-        if version != RUNSPEC_SCHEMA_VERSION:
+        if version not in RUNSPEC_SCHEMA_VERSIONS:
             raise UnsupportedRunSpecVersionError(
                 f"unsupported RunSpec schema_version {version!r}; "
                 f"expected {RUNSPEC_SCHEMA_VERSION!r}"
@@ -321,6 +341,8 @@ class RunSpec:
             "cwd",
             "repository",
             "commit",
+            "dirty",
+            "worktree_diff_sha256",
             "environment",
             "warmup_steps",
             "profile_steps",
@@ -332,6 +354,12 @@ class RunSpec:
             "runner",
         }
         _reject_unknown_keys(data, allowed, "RunSpec")
+        if version == "0.1" and (
+            "dirty" in data or "worktree_diff_sha256" in data
+        ):
+            raise UnsupportedRunSpecVersionError(
+                "RunSpec dirty worktree identity requires schema_version '0.2'"
+            )
         if "argv" not in data:
             raise RunSpecError("RunSpec.argv is required")
         return cls(
@@ -339,6 +367,8 @@ class RunSpec:
             cwd=data.get("cwd", "."),
             repository=data.get("repository"),
             commit=data.get("commit"),
+            dirty=data.get("dirty", False),
+            worktree_diff_sha256=data.get("worktree_diff_sha256"),
             environment=EnvironmentSpec.from_dict(data.get("environment", {})),
             warmup_steps=data.get("warmup_steps", 0),
             profile_steps=data.get("profile_steps", 1),
@@ -386,6 +416,8 @@ class RunSpec:
     def compatibility_limitations(self) -> tuple[str, ...]:
         """Name inputs whose equality the persisted artifact cannot prove."""
         limitations: list[str] = []
+        if self.dirty:
+            limitations.append("uncommitted_worktree")
         if self.environment.policy == "inherit":
             limitations.append("inherited_environment_unresolved")
         if self.environment.secrets:

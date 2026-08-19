@@ -7,6 +7,7 @@ does not own runner internals or durable session layout.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -180,12 +181,19 @@ def parse_environment(
     return EnvironmentSpec(public=public, secrets=tuple(secret_names))
 
 
-def discover_git_provenance(cwd: Path) -> tuple[str | None, str | None, str]:
-    """Return repository, commit, and RunSpec cwd with clean non-Git fallback."""
+def discover_git_provenance(
+    cwd: Path,
+) -> tuple[str | None, str | None, str, bool, str | None]:
+    """Return repository identity, worktree identity, and RunSpec cwd.
+
+    The diff itself is never persisted. Only its SHA-256 digest is recorded,
+    so a dirty checkout is distinguishable without creating a secret-bearing
+    patch artifact.
+    """
     absolute_cwd = cwd.resolve()
     git_executable = shutil.which("git")
     if git_executable is None:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     git_executable = str(Path(git_executable).resolve())
 
     def git(*args: str, working_directory: Path) -> str | None:
@@ -207,16 +215,24 @@ def discover_git_provenance(cwd: Path) -> tuple[str | None, str | None, str]:
 
     root_text = git("rev-parse", "--show-toplevel", working_directory=absolute_cwd)
     if root_text is None:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     root = Path(root_text).resolve()
     try:
         relative = absolute_cwd.relative_to(root).as_posix() or "."
     except ValueError:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     commit = git("rev-parse", "--verify", "HEAD", working_directory=root)
     if commit is None or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
-        return None, None, str(absolute_cwd)
-    return str(root), commit.lower(), relative
+        return None, None, str(absolute_cwd), False, None
+
+    status = git("status", "--porcelain", working_directory=root)
+    dirty = bool(status)
+    if not dirty:
+        return str(root), commit.lower(), relative, False, None
+
+    diff = git("diff", "HEAD", "--binary", working_directory=root) or ""
+    diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    return str(root), commit.lower(), relative, True, diff_sha256
 
 
 def default_output_leaf(cwd: Path) -> Path:
@@ -299,12 +315,16 @@ def run_profile_command(
         )
         return 0
 
-    repository, commit, runspec_cwd = discover_git_provenance(working_directory)
+    repository, commit, runspec_cwd, dirty, worktree_diff_sha256 = (
+        discover_git_provenance(working_directory)
+    )
     spec = RunSpec(
         argv=workload,
         cwd=runspec_cwd,
         repository=repository,
         commit=commit,
+        dirty=dirty,
+        worktree_diff_sha256=worktree_diff_sha256,
         environment=environment,
         warmup_steps=args.warmup_steps,
         profile_steps=args.profile_steps,

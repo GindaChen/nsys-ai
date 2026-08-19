@@ -59,6 +59,7 @@ from .proposal import (
 )
 from .runspec import (
     RUNSPEC_SCHEMA_VERSION,
+    RUNSPEC_SCHEMA_VERSIONS,
     RunSpec,
     RunSpecError,
     validate_secret_boundaries,
@@ -406,7 +407,9 @@ class SessionStore:
         diff = None
         decisions: tuple[Mapping[str, Any], ...] = ()
         if "runspec" in state.artifacts:
-            self._check_artifact_version(state, "runspec", RUNSPEC_SCHEMA_VERSION)
+            self._check_artifact_version(
+                state, "runspec", RUNSPEC_SCHEMA_VERSIONS
+            )
             self._verify_artifact(state, "runspec")
             try:
                 runspec = RunSpec.from_dict(
@@ -640,12 +643,14 @@ class SessionStore:
 
     @staticmethod
     def _check_artifact_version(
-        state: SessionState, name: str, expected: str
+        state: SessionState, name: str, expected: str | frozenset[str]
     ) -> None:
         actual = state.artifacts[name].schema_version
-        if actual != expected:
+        expected_versions = {expected} if isinstance(expected, str) else expected
+        if actual not in expected_versions:
             raise UnsupportedSessionVersionError(
-                f"unsupported {name} artifact schema_version {actual!r}; expected {expected!r}"
+                f"unsupported {name} artifact schema_version {actual!r}; "
+                f"expected {sorted(expected_versions)!r}"
             )
 
     def _require_session(self, session_id: str) -> None:

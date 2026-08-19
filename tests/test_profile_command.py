@@ -223,18 +223,33 @@ def test_git_provenance_records_absolute_root_full_commit_and_relative_cwd(tmp_p
     subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
 
-    repository, commit, cwd = discover_git_provenance(nested)
+    repository, commit, cwd, dirty, worktree_diff_sha256 = discover_git_provenance(nested)
 
     assert repository == str(repo.resolve())
     assert commit is not None and len(commit) == 40
     assert cwd == "training/jobs"
+    assert dirty is False
+    assert worktree_diff_sha256 is None
+
+    (repo / "tracked.txt").write_text("changed")
+    _, dirty_commit, _, dirty, dirty_hash = discover_git_provenance(nested)
+    assert dirty_commit == commit
+    assert dirty is True
+    assert dirty_hash is not None and len(dirty_hash) == 64
+
+    (repo / "tracked.txt").write_text("changed again")
+    _, _, _, changed_dirty, changed_hash = discover_git_provenance(nested)
+    assert changed_dirty is True
+    assert changed_hash != dirty_hash
 
 
 def test_non_git_provenance_degrades_to_absolute_cwd(tmp_path):
-    repository, commit, cwd = discover_git_provenance(tmp_path)
+    repository, commit, cwd, dirty, worktree_diff_sha256 = discover_git_provenance(tmp_path)
     assert repository is None
     assert commit is None
     assert cwd == str(tmp_path.resolve())
+    assert dirty is False
+    assert worktree_diff_sha256 is None
 
 
 def test_dry_run_is_structurally_redacted_and_does_not_create_output(

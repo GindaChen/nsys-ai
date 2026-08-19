@@ -224,7 +224,9 @@ def _build_runspec(
     *, repo: Path, workload: Sequence[str], nsys_executable: str, stderr: TextIO
 ) -> RunSpec:
     """Build the verification RunSpec from ``--repo`` and the workload argv."""
-    repository, commit, runspec_cwd = discover_git_provenance(repo)
+    repository, commit, runspec_cwd, dirty, worktree_diff_sha256 = (
+        discover_git_provenance(repo)
+    )
     if repository is None:
         # Not a Git checkout: still bind the run to the directory the user
         # named, so the recorded RunSpec is reproducible without a commit.
@@ -238,6 +240,8 @@ def _build_runspec(
         cwd=runspec_cwd,
         repository=repository,
         commit=commit,
+        dirty=dirty,
+        worktree_diff_sha256=worktree_diff_sha256,
         environment=EnvironmentSpec(policy="inherit"),
         trace_options=NsysTraceOptions(trace=trace),
     )
