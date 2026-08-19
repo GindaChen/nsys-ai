@@ -176,6 +176,11 @@ def _open_existing_session_web(
     session_root: str | os.PathLike[str],
     stderr: TextIO,
 ) -> int:
+    location = resolve_session_location(session_id, root=session_root)
+    if location is None:
+        raise DiagnoseCommandError("session is required")
+    session_id = location.session_id
+    session_root = location.root
     store = SessionStore(session_root)
     try:
         snapshot = store.load(session_id)
