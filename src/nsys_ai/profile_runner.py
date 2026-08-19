@@ -76,6 +76,67 @@ class RunProgress:
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _quote_sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _assert_capture_does_not_persist_environment(
+    sqlite_path: Path, environment: Mapping[str, str]
+) -> None:
+    """Reject a produced capture containing a serialized runner environment.
+
+    Nsight stores process environments as newline-delimited ``NAME=value``
+    strings in text columns (commonly ``StringIds``).  ``TARGET_INFO_SYSTEM_ENV``
+    also contains legitimate machine metadata, so its row count is not a valid
+    security assertion.  Compare complete name/value entries instead and fail
+    closed before publishing the profile as a successful run.
+    """
+    if not environment:
+        return
+    expected = {f"{name}={value}" for name, value in environment.items() if value}
+    if not expected:
+        return
+
+    uri = f"file:{sqlite_path}?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise ProfileError("produced profile cannot be checked for environment data") from exc
+    try:
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        for (table,) in tables:
+            columns = connection.execute(
+                f"PRAGMA table_info({_quote_sql_identifier(table)})"
+            ).fetchall()
+            text_columns = [
+                column[1]
+                for column in columns
+                if any(
+                    token in str(column[2]).upper()
+                    for token in ("CHAR", "CLOB", "TEXT", "VARCHAR")
+                )
+            ]
+            for column in text_columns:
+                predicates = " OR ".join(
+                    f"instr({_quote_sql_identifier(column)}, ?) > 0"
+                    for _ in expected
+                )
+                query = (
+                    "SELECT 1 "
+                    f"FROM {_quote_sql_identifier(table)} "
+                    f"WHERE ({predicates}) LIMIT 1"
+                )
+                if connection.execute(query, tuple(sorted(expected))).fetchone():
+                    raise ProfileError("produced profile contains runner environment data")
+    except sqlite3.Error as exc:
+        raise ProfileError("produced profile cannot be checked for environment data") from exc
+    finally:
+        connection.close()
+
+
 def _open_profile_descriptor(profile_path: Path) -> tuple[int, os.stat_result]:
     try:
         resolved_path, path_metadata = inspect_local_profile_file(profile_path)
@@ -671,8 +732,18 @@ class LocalProfileRunner:
         progress(RunStage.VALIDATING)
         validation_started = time.monotonic()
         try:
+            _assert_capture_does_not_persist_environment(sqlite_path, environment)
             reference, observed_gpus = read_local_profile_under_guard(
                 sqlite_path, resolved_secrets=resolved_secrets
+            )
+        except ProfileError as exc:
+            validation_seconds = time.monotonic() - validation_started
+            return result(
+                RunStatus.INVALID_PROFILE,
+                return_code=return_code,
+                report=report_path,
+                sqlite=sqlite_path,
+                detail=f"profile validation failed: {exc}",
             )
         except (NsysAiError, OSError, *DB_ERRORS) as exc:
             validation_seconds = time.monotonic() - validation_started
