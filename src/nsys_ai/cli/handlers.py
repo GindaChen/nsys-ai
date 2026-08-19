@@ -1945,10 +1945,52 @@ def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
     return rows
 
 
+def _open_skill_connection(profile_path: str, *, no_cache: bool):
+    """Open a skill profile through the canonical ingest policy.
+
+    ``skill run`` does not construct a :class:`Profile`, so it must still
+    resolve the input itself. Keep the resolution and backend dispatch here:
+    a ``.nsys-rep`` normally resolves to parquetdir, while explicit
+    ``--no-cache`` or ``NSYS_AI_CACHE_MODE=direct`` resolves to SQLite and
+    uses the same fallback as the other non-Profile callers.
+    """
+    import sqlite3
+
+    from nsys_ai.parquet_cache import (
+        open_auto_db,
+        open_direct_sqlite,
+        open_parquetdir_db,
+        open_with_direct_fallback,
+    )
+    from nsys_ai.profile import resolve_profile
+
+    cache_mode = os.environ.get("NSYS_AI_CACHE_MODE", "").strip().lower()
+    direct = no_cache or cache_mode == "direct"
+    resolution = resolve_profile(profile_path, backend="sqlite" if direct else "auto")
+    if resolution.backend == "parquetdir":
+        return open_parquetdir_db(resolution.resolved_path)
+
+    sqlite_path = resolution.resolved_path
+    primary = (
+        open_direct_sqlite
+        if direct or resolution.cache_mode == "direct"
+        else open_auto_db
+    )
+    conn, _err = open_with_direct_fallback(sqlite_path, primary)
+    if conn is not None:
+        return conn
+    return sqlite3.connect(sqlite_path)
+
+
 def _cmd_skill(args, _profile):
     import json as _json
 
-    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError, SkillParameterError
+    from nsys_ai.exceptions import (
+        NsysAiError,
+        SkillExecutionError,
+        SkillNotFoundError,
+        SkillParameterError,
+    )
     from nsys_ai.skills.registry import all_skills, get_skill, load_custom_skills_dir
     from nsys_ai.skills.registry import run_skill as _run_skill
 
@@ -2026,24 +2068,20 @@ def _cmd_skill(args, _profile):
 
         import duckdb
 
-        from nsys_ai.parquet_cache import (
-            open_auto_db,
-            open_direct_sqlite,
-            open_with_direct_fallback,
-        )
-
         fmt = getattr(args, "format", "text")
         no_cache = getattr(args, "no_cache", False)
-        # Same three-tier chain as Profile and open_profile_readonly: cache
-        # (or --no-cache direct), then open_direct_sqlite, then raw sqlite3.
-        # open_auto_db, not open_cached_db: this handler builds no Profile, and
-        # calling the builder directly made it the one subcommand where
-        # NSYS_AI_CACHE_MODE=direct did nothing — while the build banner
-        # printed that very instruction at the user.
-        primary = open_direct_sqlite if no_cache else open_auto_db
-        conn, _err = open_with_direct_fallback(args.profile, primary)
-        if conn is None:
-            conn = sqlite3.connect(args.profile)
+        # Same ingest policy and three-tier SQLite fallback as Profile and
+        # open_profile_readonly. This also makes .nsys-rep inputs use their
+        # existing parquetdir instead of treating the capture as SQLite.
+        try:
+            conn = _open_skill_connection(args.profile, no_cache=no_cache)
+        except (NsysAiError, OSError, RuntimeError, sqlite3.Error, duckdb.Error) as exc:
+            payload = {"error": {"code": "SKILL_EXECUTION_ERROR", "message": str(exc)}}
+            if fmt == "json":
+                print(_json.dumps(payload))
+            else:
+                print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         # Build trim kwargs if --trim was provided
         trim_kwargs = {}

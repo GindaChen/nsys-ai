@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -8,8 +9,9 @@ from unittest import mock
 import pytest
 
 from nsys_ai import parquet_cache
+from nsys_ai.cli import handlers
 from nsys_ai.parquet_cache import _cache_dir_for
-from nsys_ai.profile import Profile
+from nsys_ai.profile import Profile, ProfileResolution
 
 
 def test_invalid_cache_mode(minimal_nsys_db_path):
@@ -339,6 +341,150 @@ def test_skill_run_honours_the_cache_mode_override(minimal_nsys_db_path, tmp_pat
     )
 
 
+def test_skill_run_resolves_nsys_rep_to_existing_parquetdir(tmp_path):
+    """The skill entry point must dispatch resolved captures to parquetdir."""
+    rep = tmp_path / "capture.nsys-rep"
+    parquetdir = tmp_path / "capture.parquetdir"
+    rep.write_bytes(b"capture")
+    parquetdir.mkdir()
+    connection = mock.Mock()
+    resolution = ProfileResolution(
+        str(rep), str(parquetdir), "nsys-rep", "parquetdir", "auto"
+    )
+
+    with mock.patch("nsys_ai.profile.resolve_profile", return_value=resolution) as resolve:
+        with mock.patch(
+            "nsys_ai.parquet_cache.open_parquetdir_db", return_value=connection
+        ) as open_parquet:
+            result = handlers._open_skill_connection(str(rep), no_cache=False)
+
+    assert result is connection
+    resolve.assert_called_once_with(str(rep), backend="auto")
+    open_parquet.assert_called_once_with(str(parquetdir))
+
+
+def test_skill_run_no_cache_resolves_nsys_rep_to_direct_sqlite(tmp_path):
+    """``--no-cache`` keeps its direct SQLite meaning for captures."""
+    rep = tmp_path / "capture.nsys-rep"
+    sqlite_path = tmp_path / "capture.sqlite"
+    rep.write_bytes(b"capture")
+    sqlite_path.write_bytes(b"sqlite")
+    connection = mock.Mock()
+    resolution = ProfileResolution(
+        str(rep), str(sqlite_path), "nsys-rep", "sqlite", "direct"
+    )
+
+    with mock.patch("nsys_ai.profile.resolve_profile", return_value=resolution) as resolve:
+        with mock.patch(
+            "nsys_ai.parquet_cache.open_direct_sqlite", return_value=connection
+        ) as open_direct:
+            result = handlers._open_skill_connection(str(rep), no_cache=True)
+
+    assert result is connection
+    resolve.assert_called_once_with(str(rep), backend="sqlite")
+    open_direct.assert_called_once_with(str(sqlite_path))
+
+
+def test_skill_run_cache_mode_direct_resolves_nsys_rep_to_direct_sqlite(
+    tmp_path, monkeypatch
+):
+    """The direct cache escape hatch also applies to capture inputs."""
+    rep = tmp_path / "capture.nsys-rep"
+    sqlite_path = tmp_path / "capture.sqlite"
+    rep.write_bytes(b"capture")
+    sqlite_path.write_bytes(b"sqlite")
+    connection = mock.Mock()
+    resolution = ProfileResolution(
+        str(rep), str(sqlite_path), "nsys-rep", "sqlite", "direct"
+    )
+    monkeypatch.setenv("NSYS_AI_CACHE_MODE", "direct")
+
+    with mock.patch("nsys_ai.profile.resolve_profile", return_value=resolution) as resolve:
+        with mock.patch(
+            "nsys_ai.parquet_cache.open_direct_sqlite", return_value=connection
+        ) as open_direct:
+            result = handlers._open_skill_connection(str(rep), no_cache=False)
+
+    assert result is connection
+    resolve.assert_called_once_with(str(rep), backend="sqlite")
+    open_direct.assert_called_once_with(str(sqlite_path))
+
+
+def test_skill_run_uses_real_existing_parquetdir_resolution(tmp_path):
+    """The capture-to-parquetdir path is covered without mocking the resolver."""
+    import duckdb
+
+    rep = tmp_path / "capture.nsys-rep"
+    parquetdir = tmp_path / "capture.parquetdir"
+    rep.write_bytes(b"capture")
+    parquetdir.mkdir()
+    db = duckdb.connect()
+    try:
+        db.execute(
+            "COPY (SELECT 1 AS value) TO ? (FORMAT PARQUET)",
+            [str(parquetdir / "sample.parquet")],
+        )
+    finally:
+        db.close()
+
+    connection = handlers._open_skill_connection(str(rep), no_cache=False)
+    try:
+        assert connection is not None
+    finally:
+        connection.close()
+
+
+def test_skill_run_parquetdir_open_failure_is_structured_json(monkeypatch, capsys):
+    """A backend-open failure must not escape as a traceback."""
+    from argparse import Namespace
+
+    monkeypatch.setattr(
+        handlers,
+        "_open_skill_connection",
+        mock.Mock(side_effect=RuntimeError("parquet backend unavailable")),
+    )
+    args = Namespace(
+        skill_action="run",
+        skill_name="top_kernels",
+        profile="capture.nsys-rep",
+        format="json",
+        no_cache=False,
+        trim=None,
+        iteration=None,
+        marker="sample_0",
+        param=[],
+        max_rows=None,
+        skills_dir=None,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        handlers._cmd_skill(args, None)
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "error": {
+            "code": "SKILL_EXECUTION_ERROR",
+            "message": "parquet backend unavailable",
+        }
+    }
+
+
+def test_skill_run_failed_rep_resolution_leaves_no_cache(tmp_path, monkeypatch):
+    """A failed capture resolution must not create an empty cache directory."""
+    from nsys_ai import profile as profile_module
+    from nsys_ai.exceptions import ExportToolMissingError
+
+    rep = tmp_path / "capture.nsys-rep"
+    rep.write_bytes(b"capture")
+    monkeypatch.setattr(profile_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(ExportToolMissingError):
+        handlers._open_skill_connection(str(rep), no_cache=False)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [rep.name]
+
+
 def test_open_profile_readonly_honours_the_cache_mode_override(
     minimal_nsys_db_path, tmp_path, monkeypatch
 ):
@@ -441,11 +587,13 @@ def test_the_batch_audit_script_opens_the_same_way_skill_run_does():
 
     # What `skill run` actually calls, read from the handler rather than
     # assumed, so this test tracks the CLI instead of restating it.
-    assert "open_with_direct_fallback(args.profile, primary)" in handlers, (
-        "`skill run` no longer uses open_with_direct_fallback — update this "
-        "test and the batch audit script together, they are supposed to agree"
+    assert "_open_skill_connection(args.profile, no_cache=no_cache)" in handlers, (
+        "`skill run` no longer uses the canonical profile opener — update this "
+        "test and the batch audit script together"
     )
-    assert "open_auto_db" in handlers and "open_direct_sqlite if no_cache else open_auto_db" in handlers
+    assert "open_auto_db" in handlers
+    assert "open_direct_sqlite" in handlers
+    assert 'backend="sqlite" if direct else "auto"' in handlers
 
     assert "open_with_direct_fallback(profile_path, open_auto_db)" in script, (
         "batch_audit_skills.py does not open the way `skill run` does; its "
