@@ -285,6 +285,231 @@ def build_timeline_gpu_data(
     return gpu_entries
 
 
+def _timeline_record_union(prof, device: int, trim: tuple[int, int]) -> tuple[str, list]:
+    """Return the DuckDB record relation used by on-demand timeline LOD."""
+    start_ns, end_ns = trim
+    branches = []
+    params: list = []
+    if prof.schema.kernel_table:
+        branches.append(
+            f"""
+            SELECT k.start AS start_ns, k.[end] AS end_ns, k.streamId AS stream,
+                   s.value AS name, 'kernel' AS type
+            FROM {prof.schema.kernel_table} k
+            JOIN StringIds s ON k.shortName = s.id
+            WHERE k.deviceId = ? AND k.[end] >= ? AND k.start <= ?
+            """
+        )
+        params.extend((device, start_ns, end_ns))
+    tables = prof.adapter.resolve_activity_tables()
+    memcpy_table = tables.get("memcpy")
+    if memcpy_table:
+        branches.append(
+            f"""
+            SELECT m.start AS start_ns, m.[end] AS end_ns, m.streamId AS stream,
+                   '[CUDA memcpy ' || CASE m.copyKind
+                     WHEN 1 THEN 'H2D' WHEN 2 THEN 'D2H' WHEN 8 THEN 'D2D'
+                     WHEN 10 THEN 'P2P' ELSE 'kind=' || CAST(m.copyKind AS VARCHAR)
+                   END || ']' AS name, 'memcpy' AS type
+            FROM {memcpy_table} m
+            WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
+            """
+        )
+        params.extend((device, start_ns, end_ns))
+    memset_table = tables.get("memset")
+    if memset_table:
+        branches.append(
+            f"""
+            SELECT m.start AS start_ns, m.[end] AS end_ns, m.streamId AS stream,
+                   '[CUDA memset]' AS name, 'memset' AS type
+            FROM {memset_table} m
+            WHERE m.deviceId = ? AND m.[end] >= ? AND m.start <= ?
+            """
+        )
+        params.extend((device, start_ns, end_ns))
+    if not branches:
+        return "SELECT CAST(NULL AS BIGINT) AS start_ns, CAST(NULL AS BIGINT) AS end_ns, NULL AS stream, NULL AS name, NULL AS type WHERE FALSE", []
+    return " UNION ALL ".join(branches), params
+
+
+def build_timeline_gpu_data_lod(
+    prof,
+    devices,
+    trim: tuple[int, int],
+    max_buckets: int,
+) -> list[dict]:
+    """Build exact or bucketed timeline rows directly from DuckDB.
+
+    The progressive endpoint uses this path when a resolution is supplied, so
+    a zoomed-out request does not materialise the full profile payload just to
+    throw most of it away in Python.  Exact requests still use the canonical
+    timeline builder, preserving selection fields and NVTX path enrichment.
+    """
+    from collections.abc import Sequence
+
+    devices_list = list(devices) if isinstance(devices, Sequence) else [devices]
+    result = []
+    for device in devices_list:
+        relation, relation_params = _timeline_record_union(prof, device, trim)
+        count_row = prof._duckdb_query(
+            f"SELECT COUNT(*) AS record_count FROM ({relation}) records",
+            relation_params,
+        )
+        record_count = int(count_row[0]["record_count"] or 0) if count_row else 0
+        if record_count <= max_buckets:
+            result.extend(
+                build_timeline_gpu_data(
+                    prof,
+                    device,
+                    trim,
+                    include_kernels=True,
+                    include_nvtx=False,
+                )
+            )
+            continue
+
+        start_ns, end_ns = trim
+        bucket_count = min(max_buckets, record_count)
+        bucket_width = (end_ns - start_ns) / bucket_count
+        aggregate_sql = f"""
+            WITH records AS ({relation}),
+            clipped AS (
+                SELECT GREATEST(start_ns, ?) AS start_ns,
+                       LEAST(end_ns, ?) AS end_ns,
+                       end_ns - start_ns AS duration_ns, type, name
+                FROM records
+                WHERE end_ns >= ? AND start_ns <= ?
+            ),
+            bucketed AS (
+                SELECT *,
+                       CAST(FLOOR((start_ns - ?) / ?) AS BIGINT) AS first_bucket,
+                       CAST(FLOOR((GREATEST(start_ns, end_ns - 1) - ?) / ?) AS BIGINT) AS last_bucket
+                FROM clipped
+            ),
+            expanded AS (
+                SELECT b.*, r.bucket
+                FROM bucketed b,
+                     LATERAL range(b.first_bucket, b.last_bucket + 1) r(bucket)
+                WHERE b.first_bucket <= ? AND b.last_bucket >= 0
+            ),
+            segments AS (
+                SELECT bucket,
+                       GREATEST(start_ns, CAST(? + bucket * ? AS BIGINT)) AS seg_start,
+                       LEAST(end_ns, CAST(? + (bucket + 1) * ? AS BIGINT)) AS seg_end
+                FROM expanded
+                WHERE end_ns > start_ns
+            ),
+            ordered AS (
+                SELECT *, MAX(seg_end) OVER (
+                    PARTITION BY bucket ORDER BY seg_start, seg_end
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS previous_end
+                FROM segments
+            ),
+            marked AS (
+                SELECT *, CASE WHEN previous_end IS NULL OR seg_start > previous_end THEN 1 ELSE 0 END AS is_new
+                FROM ordered
+            ),
+            islands AS (
+                SELECT *, SUM(is_new) OVER (
+                    PARTITION BY bucket ORDER BY seg_start, seg_end
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS island
+                FROM marked
+            ),
+            busy AS (
+                SELECT bucket, SUM(island_end - island_start) AS busy_ns
+                FROM (
+                    SELECT bucket, island, MIN(seg_start) AS island_start, MAX(seg_end) AS island_end
+                    FROM islands GROUP BY bucket, island
+                ) merged
+                GROUP BY bucket
+            ),
+            stats AS (
+                SELECT bucket, COUNT(*) AS record_count, MAX(duration_ns) AS max_duration_ns
+                FROM expanded GROUP BY bucket
+            ),
+            type_counts AS (
+                SELECT bucket, type, COUNT(*) AS count
+                FROM expanded GROUP BY bucket, type
+            ),
+            top_types AS (
+                SELECT bucket, type FROM type_counts
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY count DESC, type) = 1
+            ),
+            name_counts AS (
+                SELECT bucket, name, COUNT(*) AS count
+                FROM expanded GROUP BY bucket, name
+            ),
+            top_names AS (
+                SELECT bucket, name FROM name_counts
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY count DESC, name) = 1
+            )
+            SELECT stats.bucket, stats.record_count, stats.max_duration_ns,
+                   busy.busy_ns, top_types.type AS dominant_type, top_names.name AS dominant_name
+            FROM stats JOIN busy USING (bucket)
+            JOIN top_types USING (bucket) JOIN top_names USING (bucket)
+            ORDER BY stats.bucket
+        """
+        params = list(relation_params)
+        params.extend(
+            [
+                start_ns,
+                end_ns,
+                start_ns,
+                end_ns,
+                start_ns,
+                bucket_width,
+                start_ns,
+                bucket_width,
+                bucket_count - 1,
+                start_ns,
+                bucket_width,
+                start_ns,
+                bucket_width,
+            ]
+        )
+        rows = prof._duckdb_query(aggregate_sql, params)
+        kernels = []
+        for row in rows:
+            bucket = int(row["bucket"])
+            bucket_start = int(start_ns + bucket * bucket_width)
+            bucket_end = int(start_ns + (bucket + 1) * bucket_width)
+            busy_ns = int(row["busy_ns"] or 0)
+            kernels.append(
+                {
+                    "type": "aggregate",
+                    "aggregate": True,
+                    "name": f"[Aggregate] {int(row['record_count']):,} records",
+                    "start_ns": bucket_start,
+                    "end_ns": bucket_end,
+                    "duration_ms": round(busy_ns / 1e6, 3),
+                    "stream": "__aggregate__",
+                    "path": "",
+                    "record_count": int(row["record_count"]),
+                    "busy_ns": busy_ns,
+                    "occupancy": busy_ns / max(bucket_end - bucket_start, 1),
+                    "max_duration_ms": round(int(row["max_duration_ns"] or 0) / 1e6, 3),
+                    "dominant_type": row["dominant_type"],
+                    "dominant_name": row["dominant_name"],
+                }
+            )
+        result.append(
+            {
+                "id": device,
+                "kernels": kernels,
+                "nvtx_spans": [],
+                "lod": {
+                    "mode": "aggregate",
+                    "record_count": record_count,
+                    "bucket_count": len(kernels),
+                    "max_buckets": max_buckets,
+                },
+            }
+        )
+    return result
+
+
 def generate_timeline_data_json(prof, devices, trim: tuple[int, int]) -> str:
     """Return JSON string of per-GPU kernel/NVTX data for a time window.
 

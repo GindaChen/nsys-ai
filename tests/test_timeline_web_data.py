@@ -1,14 +1,84 @@
 import json
 import sqlite3
+from pathlib import Path
 
 from nsys_ai.profile import Profile
 from nsys_ai.viewer import (
     build_timeline_gpu_data,
+    build_timeline_gpu_data_lod,
     generate_timeline_data_json,
     generate_timeline_html,
     write_timeline_html,
 )
-from nsys_ai.web import _build_timeline_overview, _slice_nvtx_spans
+from nsys_ai.web import (
+    _aggregate_timeline_gpu_entry,
+    _build_timeline_overview,
+    _slice_nvtx_spans,
+)
+
+
+def test_timeline_web_lod_uses_interval_union_and_marks_aggregates():
+    entry = {
+        "id": 0,
+        "kernels": [
+            {"type": "kernel", "name": "long", "start_ns": 0, "end_ns": 60, "stream": 1},
+            {"type": "kernel", "name": "overlap", "start_ns": 40, "end_ns": 100, "stream": 2},
+            {"type": "kernel", "name": "short", "start_ns": 20, "end_ns": 30, "stream": 1},
+        ],
+        "nvtx_spans": [{"name": "phase", "start": 0, "end": 100}],
+    }
+
+    result = _aggregate_timeline_gpu_entry(entry, 0, 100, 2)
+
+    assert result["lod"] == {
+        "mode": "aggregate",
+        "record_count": 3,
+        "bucket_count": 2,
+        "max_buckets": 2,
+    }
+    assert len(result["kernels"]) == 2
+    assert all(row["aggregate"] is True for row in result["kernels"])
+    assert [row["record_count"] for row in result["kernels"]] == [3, 2]
+    # Both buckets are fully busy after merging overlapping stream intervals.
+    assert [row["busy_ns"] for row in result["kernels"]] == [50, 50]
+    assert all(row["occupancy"] == 1.0 for row in result["kernels"])
+    assert result["nvtx_spans"] == entry["nvtx_spans"]
+
+
+def test_timeline_web_lod_keeps_small_windows_exact():
+    entry = {
+        "id": 0,
+        "kernels": [
+            {"type": "kernel", "name": "one", "start_ns": 10, "end_ns": 20},
+            {"type": "kernel", "name": "two", "start_ns": 30, "end_ns": 40},
+        ],
+        "nvtx_spans": [],
+    }
+
+    result = _aggregate_timeline_gpu_entry(entry, 0, 100, 2)
+
+    assert result["lod"]["mode"] == "exact"
+    assert result["kernels"] == entry["kernels"]
+
+
+def test_timeline_web_duckdb_lod_returns_bounded_rows(minimal_nsys_db_path):
+    with Profile(minimal_nsys_db_path) as prof:
+        trim = (0, 5_000_000)
+        result = build_timeline_gpu_data_lod(prof, [0], trim, max_buckets=2)
+
+    assert result[0]["lod"]["mode"] == "aggregate"
+    assert result[0]["lod"]["record_count"] > 2
+    assert len(result[0]["kernels"]) <= 2
+    assert all(row["aggregate"] is True for row in result[0]["kernels"])
+
+
+def test_timeline_web_frontend_requests_max_buckets_and_marks_aggregates():
+    javascript = Path("src/nsys_ai/templates/timeline.js").read_text(encoding="utf-8")
+
+    assert "max_buckets=${maxBuckets}" in javascript
+    assert "resolution=" not in javascript
+    assert "k.aggregate === true" in javascript
+    assert "Aggregate bucket" in javascript
 
 
 def test_timeline_web_kernel_first_keeps_kernels_outside_nvtx(minimal_nsys_db_path):
