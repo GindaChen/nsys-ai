@@ -19,6 +19,39 @@ from pathlib import Path
 
 from .profile_db_tool import TOOL_QUERY_PROFILE_DB
 
+TOOL_RUN_SKILL = {
+    "type": "function",
+    "function": {
+        "name": "run_skill",
+        "description": (
+            "Run one registered profile-analysis skill and return its structured evidence. "
+            "Use this for formal grounding of profile facts and diagnoses; the skill owns "
+            "schema compatibility, parameters, and typed abstention. Do not write SQL. "
+            "Examples: profile_health_manifest, root_cause_matcher, top_kernels, "
+            "iteration_timing, overlap_breakdown, nccl_breakdown."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Exact name of a registered analysis skill.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Skill parameters, for example {\"device\": 0} or "
+                        "{\"device\": 0, \"trim_start_ns\": 0, \"trim_end_ns\": 1000000}."
+                    ),
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["skill_name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 logger = logging.getLogger(__name__)
 
 TOOL_REQUEST_CLARIFICATION = {
@@ -469,6 +502,7 @@ def _tools_openai() -> list[dict]:
         },
         TOOL_REQUEST_CLARIFICATION,
         TOOL_ANSWER_FROM_UI_CONTEXT,
+        TOOL_RUN_SKILL,
         TOOL_QUERY_PROFILE_DB,
         TOOL_GET_GPU_PEAK_TFLOPS,
         TOOL_COMPUTE_MFU,
@@ -527,7 +561,7 @@ def _build_system_prompt(
                          selected stream, time range, etc.
         profile_schema:  Optional schema string from ``get_profile_schema_cached``.
                          When provided the LLM is instructed to use
-                         ``query_profile_db`` for whole-profile questions.
+                         ``run_skill`` for whole-profile questions.
         skill_docs:      Optional pre-loaded skill content to append at the end.
                          Use ``prompt_loader.load_skill_context(["skills/mfu.md"])``
                          to inject a specific skill for the current session.
@@ -536,10 +570,12 @@ def _build_system_prompt(
     schema_block = ""
     if profile_schema:
         schema_block = (
-            "\n=== PROFILE DATABASE SCHEMA (for query_profile_db) ===\n"
+            "\n=== PROFILE DATABASE SCHEMA (exploratory only) ===\n"
             f"{profile_schema}\n"
             "NOTE: Write strict SQLite3 SQL only (use strftime() not DATE_TRUNC/EXTRACT; "
             "use || for concatenation not CONCAT()).\n"
+            "Formal profile analysis must use the run_skill tool; raw SQL is exploratory "
+            "and cannot ground a diagnosis.\n"
             "=====================================================\n\n"
         )
     chat_system, mfu_ref = _load_prompt_files()

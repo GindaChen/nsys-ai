@@ -82,6 +82,40 @@ def test_query_profile_db_remains_exploratory_tool(minimal_nsys_conn):
     assert result.content == "exploratory:SELECT 1"
 
 
+def test_run_skill_is_the_formal_profile_evidence_path(minimal_nsys_conn, monkeypatch):
+    from nsys_ai.skills import registry
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    calls = []
+
+    def fake_run_skill(skill_name, conn, *, raw=False, **kwargs):
+        calls.append((skill_name, conn, raw, kwargs))
+        return [{"pattern": "GPU bubble", "severity": "warning"}]
+
+    monkeypatch.setattr(registry, "run_skill", fake_run_skill)
+    dispatcher = ToolDispatcher(conn=minimal_nsys_conn)
+    result = dispatcher.dispatch(
+        "run_skill",
+        json.dumps({"skill_name": "root_cause_matcher", "params": {"device": 0}}),
+    )
+
+    payload = json.loads(result.content)
+    assert payload == {
+        "skill": "root_cause_matcher",
+        "rows": [{"pattern": "GPU bubble", "severity": "warning"}],
+    }
+    assert calls == [("root_cause_matcher", minimal_nsys_conn, True, {"device": 0})]
+
+
+def test_run_skill_rejects_unknown_skill(minimal_nsys_conn):
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    result = ToolDispatcher(conn=minimal_nsys_conn).dispatch(
+        "run_skill", '{"skill_name":"does_not_exist"}'
+    )
+    assert json.loads(result.content)["error"]["code"] == "UNKNOWN_SKILL"
+
+
 def test_submit_finding_uses_session_sink_and_preserves_confidence():
     from nsys_ai.tool_dispatch import ToolDispatcher
 

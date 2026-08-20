@@ -116,7 +116,7 @@ GEMINI_THINKING_BUDGET = 8_000
 # a calculation from caller-supplied numbers.
 _PROFILE_GROUNDING_TOOLS = frozenset(
     {
-        "query_profile_db",
+        "run_skill",
         "get_gpu_peak_tflops",
         "compute_region_mfu",
         "get_gpu_overlap_stats",
@@ -1119,6 +1119,7 @@ def stream_agent_loop(
     # Fix 2: Filter out DB-dependent tools when no profile is connected.
     # This prevents LLM from calling tools that always fail, avoiding retry spirals.
     _DB_TOOLS = {
+        "run_skill",
         "query_profile_db",
         "get_gpu_peak_tflops",
         "compute_region_mfu",

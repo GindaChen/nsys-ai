@@ -110,6 +110,7 @@ class ToolDispatcher:
         self._handlers["compute_theoretical_flops"] = self._handle_theoretical_flops
         self._handlers["compute_region_mfu"] = self._handle_region_mfu
         self._handlers["submit_finding"] = self._handle_submit_finding
+        self._handlers["run_skill"] = self._handle_run_skill
         self._handlers["get_gpu_overlap_stats"] = self._handle_gpu_overlap_stats
         self._handlers["get_nccl_breakdown"] = self._handle_nccl_breakdown
         self._handlers["query_profile_db"] = self._handle_query_profile_db
@@ -335,6 +336,58 @@ class ToolDispatcher:
             ),
         }
         return ToolResult(content=json.dumps(result), events=events)
+
+    def _handle_run_skill(self, args: dict) -> ToolResult:
+        """Run a named registry skill as the formal chat evidence path."""
+        events = [{"type": "system", "content": "Running registered analysis skill..."}]
+        skill_name = str(args.get("skill_name") or "").strip()
+        if not skill_name:
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "code": "MISSING_PARAMETER",
+                            "message": "skill_name is required.",
+                        }
+                    }
+                ),
+                events=events,
+            )
+        params = args.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "code": "INVALID_PARAMETER",
+                            "message": "params must be an object.",
+                        }
+                    }
+                ),
+                events=events,
+            )
+
+        from .skills.registry import get_skill
+
+        if get_skill(skill_name) is None:
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "code": "UNKNOWN_SKILL",
+                            "message": f"Unknown skill '{skill_name}'.",
+                        }
+                    }
+                ),
+                events=events,
+            )
+        rows = self._run_registered_skill(skill_name, dict(params))
+        return ToolResult(
+            content=json.dumps({"skill": skill_name, "rows": rows}),
+            events=events,
+        )
 
     def _handle_gpu_overlap_stats(self, args: dict) -> ToolResult:
         events = [{"type": "system", "content": "Computing GPU overlap stats..."}]
