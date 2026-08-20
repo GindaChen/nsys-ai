@@ -211,6 +211,7 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
 
 from .viewer import (  # noqa: E402
     build_timeline_gpu_data,
+    build_timeline_gpu_data_lod,
     generate_evidence_html,
     generate_html,
     generate_timeline_html,
@@ -289,7 +290,8 @@ def _handle_chat_stream(body_bytes: bytes):
 
 class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     """Serve the pre-rendered HTML on GET; GET /api/models for model list;
-    GET /api/data for on-demand tile data; GET /api/meta for profile metadata;
+    GET /api/data for on-demand tile data (with optional resolution LOD);
+    GET /api/meta for profile metadata;
     POST /api/chat for AI chat."""
 
     html_bytes: bytes = b""
@@ -559,6 +561,13 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
             f"gpu={gpu_filter if gpu_filter is not None else 'all'})...",
             flush=True,
         )
+        resolution = None
+        if qs.get("resolution", [None])[0] not in (None, ""):
+            try:
+                resolution = max(1, min(100_000, int(qs["resolution"][0])))
+            except (TypeError, ValueError):
+                self._json_response({"error": "resolution must be a positive integer"}, 400)
+                return
         try:
             nvtx_spans_by_gpu = None
             if self.__class__._prebuilt_nvtx_mode == "background" and nvtx_requested:
@@ -581,19 +590,40 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                     for dev in annotate_devices
                 }
 
+            lod_by_gpu = {}
+            if resolution is not None and kernels_requested and self.__class__.prof is not None:
+                try:
+                    lod_by_gpu = {
+                        entry["id"]: entry
+                        for entry in build_timeline_gpu_data_lod(
+                            self.__class__.prof,
+                            self.__class__.devices,
+                            (start_ns, end_ns),
+                            resolution,
+                        )
+                    }
+                except Exception:
+                    _log.exception("DuckDB timeline LOD query failed; using cached payload")
+
             # Filter pre-built data by time window
             gpu_entries = []
             for gpu_data in prebuilt:
                 if "kernels" in gpu_data:
-                    filtered = _filter_timeline_gpu_entry(
-                        gpu_data,
-                        start_ns,
-                        end_ns,
-                        filter_kernels=kernels_requested,
-                        filter_nvtx=self.__class__._prebuilt_nvtx_mode == "full",
-                    )
+                    filtered = lod_by_gpu.get(gpu_data.get("id"))
+                    if filtered is None:
+                        filtered = _filter_timeline_gpu_entry(
+                            gpu_data,
+                            start_ns,
+                            end_ns,
+                            filter_kernels=kernels_requested,
+                            filter_nvtx=self.__class__._prebuilt_nvtx_mode == "full",
+                        )
                     if nvtx_spans_by_gpu is not None:
                         filtered["nvtx_spans"] = nvtx_spans_by_gpu.get(filtered["id"], [])
+                    if resolution is not None and kernels_requested and filtered.get("lod") is None:
+                        filtered = _aggregate_timeline_gpu_entry(
+                            filtered, start_ns, end_ns, resolution
+                        )
                     gpu_entries.append(filtered)
                 else:
                     # Backward-compatible fallback for older in-memory format.
@@ -1074,6 +1104,125 @@ def _filter_timeline_gpu_entry(
     else:
         nvtx_spans = []
     return {"id": gpu_entry.get("id"), "kernels": kernels, "nvtx_spans": nvtx_spans}
+
+
+def _aggregate_timeline_gpu_entry(
+    gpu_entry: dict,
+    start_ns: int,
+    end_ns: int,
+    max_buckets: int,
+) -> dict:
+    """Summarise a dense kernel payload into at most ``max_buckets`` bins.
+
+    This is deliberately a request-time representation.  An aggregate is not
+    a kernel: it carries the number of records, busy-time union, longest
+    record, and dominant categories so the UI can label it as derived data.
+    Busy time is an interval union rather than a sum of durations; concurrent
+    streams must not make a bucket look more than 100% occupied.
+    """
+    kernels = [
+        kernel
+        for kernel in gpu_entry.get("kernels", [])
+        if kernel.get("end_ns", 0) >= start_ns and kernel.get("start_ns", 0) <= end_ns
+    ]
+    if not kernels or max_buckets <= 0 or end_ns <= start_ns:
+        return {
+            "id": gpu_entry.get("id"),
+            "kernels": kernels,
+            "nvtx_spans": gpu_entry.get("nvtx_spans", []),
+        }
+    if len(kernels) <= max_buckets:
+        return {
+            "id": gpu_entry.get("id"),
+            "kernels": kernels,
+            "nvtx_spans": gpu_entry.get("nvtx_spans", []),
+            "lod": {"mode": "exact", "record_count": len(kernels)},
+        }
+
+    bucket_count = min(max_buckets, len(kernels))
+    span_ns = end_ns - start_ns
+    bucket_width = span_ns / bucket_count
+    buckets: list[dict] = [
+        {"intervals": [], "count": 0, "max_duration_ns": 0, "types": {}, "names": {}}
+        for _ in range(bucket_count)
+    ]
+
+    for kernel in kernels:
+        raw_start = int(kernel.get("start_ns", start_ns))
+        raw_end = int(kernel.get("end_ns", raw_start))
+        clipped_start = max(start_ns, raw_start)
+        clipped_end = min(end_ns, raw_end)
+        if clipped_end <= clipped_start:
+            continue
+        first = max(0, min(bucket_count - 1, int((clipped_start - start_ns) / bucket_width)))
+        last = max(
+            first,
+            min(bucket_count - 1, int((max(clipped_start, clipped_end - 1) - start_ns) / bucket_width)),
+        )
+        duration_ns = max(0, raw_end - raw_start)
+        kind = str(kernel.get("type") or "kernel")
+        name = str(kernel.get("name") or "(unnamed)")
+        for bucket_index in range(first, last + 1):
+            bucket_start = int(start_ns + bucket_index * bucket_width)
+            bucket_end = int(start_ns + (bucket_index + 1) * bucket_width)
+            interval_start = max(clipped_start, bucket_start)
+            interval_end = min(clipped_end, bucket_end)
+            if interval_end <= interval_start:
+                continue
+            bucket = buckets[bucket_index]
+            bucket["intervals"].append((interval_start, interval_end))
+            bucket["count"] += 1
+            bucket["max_duration_ns"] = max(bucket["max_duration_ns"], duration_ns)
+            bucket["types"][kind] = bucket["types"].get(kind, 0) + 1
+            bucket["names"][name] = bucket["names"].get(name, 0) + 1
+
+    aggregate_rows = []
+    for bucket_index, bucket in enumerate(buckets):
+        if not bucket["count"]:
+            continue
+        intervals = sorted(bucket["intervals"])
+        union_ns = 0
+        union_start, union_end = intervals[0]
+        for interval_start, interval_end in intervals[1:]:
+            if interval_start > union_end:
+                union_ns += union_end - union_start
+                union_start, union_end = interval_start, interval_end
+            else:
+                union_end = max(union_end, interval_end)
+        union_ns += union_end - union_start
+        dominant_type = max(bucket["types"].items(), key=lambda item: (item[1], item[0]))[0]
+        dominant_name = max(bucket["names"].items(), key=lambda item: (item[1], item[0]))[0]
+        bucket_start = int(start_ns + bucket_index * bucket_width)
+        bucket_end = int(start_ns + (bucket_index + 1) * bucket_width)
+        aggregate_rows.append(
+            {
+                "type": "aggregate",
+                "aggregate": True,
+                "name": f"[Aggregate] {bucket['count']:,} records",
+                "start_ns": bucket_start,
+                "end_ns": bucket_end,
+                "duration_ms": round(union_ns / 1e6, 3),
+                "stream": "__aggregate__",
+                "path": "",
+                "record_count": bucket["count"],
+                "busy_ns": union_ns,
+                "occupancy": union_ns / max(bucket_end - bucket_start, 1),
+                "max_duration_ms": round(bucket["max_duration_ns"] / 1e6, 3),
+                "dominant_type": dominant_type,
+                "dominant_name": dominant_name,
+            }
+        )
+    return {
+        "id": gpu_entry.get("id"),
+        "kernels": aggregate_rows,
+        "nvtx_spans": gpu_entry.get("nvtx_spans", []),
+        "lod": {
+            "mode": "aggregate",
+            "record_count": len(kernels),
+            "bucket_count": len(aggregate_rows),
+            "max_buckets": max_buckets,
+        },
+    }
 
 
 def serve_timeline(

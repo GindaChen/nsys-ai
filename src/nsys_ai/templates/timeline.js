@@ -51,26 +51,42 @@ const overviewCtx = overviewCanvas ? overviewCanvas.getContext('2d') : null;
 // ── Tile Cache ──
 class TileCache {
     constructor(maxBytes = 100 * 1024 * 1024) {
-        this.tiles = new Map();  // key "start_s-end_s" → {data, ts, sizeEst}
+        this.tiles = new Map();  // key "start_s-end_s|resolution" → {data, ts, sizeEst}
         this.maxBytes = maxBytes;
         this.currentBytes = 0;
         this.nvtxReady = new Set();
         this._dirty = true;
         this._cachedMerge = null;
     }
-    key(startS, endS) { return `${startS.toFixed(1)}-${endS.toFixed(1)}`; }
-    has(startS, endS) { return this.tiles.has(this.key(startS, endS)); }
-    nvtxKey(startS, endS, gpuId) { return `${this.key(startS, endS)}|gpu:${gpuId}`; }
-    hasNvtx(startS, endS, gpuId) { return this.nvtxReady.has(this.nvtxKey(startS, endS, gpuId)); }
-    markNvtx(startS, endS, gpuId) { this.nvtxReady.add(this.nvtxKey(startS, endS, gpuId)); }
-    get(startS, endS) {
-        const k = this.key(startS, endS);
+    key(startS, endS, resolution = 0) {
+        return `${startS.toFixed(1)}-${endS.toFixed(1)}|r:${Math.max(0, Math.round(resolution))}`;
+    }
+    baseKey(startS, endS) { return `${startS.toFixed(1)}-${endS.toFixed(1)}|r:`; }
+    has(startS, endS, resolution = 0) { return this.tiles.has(this.key(startS, endS, resolution)); }
+    nvtxKey(startS, endS, gpuId, resolution = 0) { return `${this.key(startS, endS, resolution)}|gpu:${gpuId}`; }
+    hasNvtx(startS, endS, gpuId, resolution = 0) { return this.nvtxReady.has(this.nvtxKey(startS, endS, gpuId, resolution)); }
+    markNvtx(startS, endS, gpuId, resolution = 0) { this.nvtxReady.add(this.nvtxKey(startS, endS, gpuId, resolution)); }
+    get(startS, endS, resolution = 0) {
+        const k = this.key(startS, endS, resolution);
         const entry = this.tiles.get(k);
         if (entry) entry.ts = Date.now();
         return entry ? entry.data : null;
     }
-    put(startS, endS, data) {
-        const k = this.key(startS, endS);
+    put(startS, endS, data, resolution = 0) {
+        const k = this.key(startS, endS, resolution);
+        // A tile can be exact when zoomed in and aggregate when zoomed out.
+        // Keep only the current resolution so stale variants cannot be merged.
+        const prefix = this.baseKey(startS, endS);
+        for (const oldKey of this.tiles.keys()) {
+            if (oldKey !== k && oldKey.startsWith(prefix)) {
+                const old = this.tiles.get(oldKey);
+                this.currentBytes -= old ? old.sizeEst : 0;
+                this.tiles.delete(oldKey);
+                for (const readyKey of this.nvtxReady) {
+                    if (readyKey.startsWith(oldKey + '|')) this.nvtxReady.delete(readyKey);
+                }
+            }
+        }
         const sizeEst = JSON.stringify(data).length * 2;  // rough byte estimate
         const previous = this.tiles.get(k);
         if (previous) this.currentBytes -= previous.sizeEst;
@@ -99,8 +115,8 @@ class TileCache {
         }
         this._dirty = true;
     }
-    mergeNvtx(startS, endS, nvtxData, gpuId) {
-        const k = this.key(startS, endS);
+    mergeNvtx(startS, endS, nvtxData, gpuId, resolution = 0) {
+        const k = this.key(startS, endS, resolution);
         const entry = this.tiles.get(k);
         if (!entry || !entry.data || !entry.data.gpus || !nvtxData || !nvtxData.gpus) return;
         let mergedTargetGpu = false;
@@ -112,7 +128,7 @@ class TileCache {
             mergedTargetGpu = true;
         }
         if (mergedTargetGpu) {
-            this.markNvtx(startS, endS, gpuId);
+            this.markNvtx(startS, endS, gpuId, resolution);
             this._dirty = true;
         }
     }
@@ -202,18 +218,28 @@ function hideLoading() {
 }
 
 // ── Fetch data for a time window ──
+function resolutionForTile(startS, endS) {
+    const width = Math.max(256, Math.floor((canvas.clientWidth || canvas.width / (window.devicePixelRatio || 1)) - LABEL_W));
+    const tileSpan = Math.max(endS - startS, 0.001);
+    const viewSpan = Math.max((viewEnd - viewStart) / 1e9, 0.001);
+    // A tile gets the fraction of the viewport's pixel budget that it occupies.
+    // Zooming into a sub-range therefore restores exact records for that tile.
+    return Math.max(64, Math.min(100000, Math.round(width * tileSpan / viewSpan)));
+}
+
 async function fetchTile(startS, endS, { requestNvtx = false } = {}) {
-    if (tileCache.has(startS, endS)) return tileCache.get(startS, endS);
-    const tileKey = tileCache.key(startS, endS);
+    const resolution = resolutionForTile(startS, endS);
+    if (tileCache.has(startS, endS, resolution)) return tileCache.get(startS, endS, resolution);
+    const tileKey = tileCache.key(startS, endS, resolution);
     if (tileInflight.has(tileKey)) return tileInflight.get(tileKey);
     const pfx = BOOT.API_PREFIX || '';
-    const request = fetch(`${pfx}/api/data?start_s=${startS}&end_s=${endS}&kernels=1&nvtx=0`)
+    const request = fetch(`${pfx}/api/data?start_s=${startS}&end_s=${endS}&resolution=${resolution}&kernels=1&nvtx=0`)
         .then(async resp => {
             if (!resp.ok) throw new Error(`tile request failed (${resp.status})`);
             const data = await resp.json();
             if (data.error) throw new Error(data.error);
-            tileCache.put(startS, endS, data);
-            if (requestNvtx && showNVTX) void fetchTileNvtx(startS, endS, currentActiveGpuId());
+            tileCache.put(startS, endS, data, resolution);
+            if (requestNvtx && showNVTX) void fetchTileNvtx(startS, endS, currentActiveGpuId(), resolution);
             return data;
         })
         .catch(err => {
@@ -240,9 +266,9 @@ function currentActiveGpuId() {
     return null;
 }
 
-async function fetchTileNvtx(startS, endS, gpuId) {
-    const key = `${tileCache.key(startS, endS)}|gpu:${gpuId}`;
-    if (tileCache.hasNvtx(startS, endS, gpuId) || nvtxInflight.has(key)) return;
+async function fetchTileNvtx(startS, endS, gpuId, resolution = resolutionForTile(startS, endS)) {
+    const key = `${tileCache.key(startS, endS, resolution)}|gpu:${gpuId}`;
+    if (tileCache.hasNvtx(startS, endS, gpuId, resolution) || nvtxInflight.has(key)) return;
     nvtxInflight.add(key);
     updateNvtxLoadingIndicator();
     try {
@@ -251,7 +277,7 @@ async function fetchTileNvtx(startS, endS, gpuId) {
         if (!resp.ok) throw new Error(`NVTX request failed (${resp.status})`);
         const data = await resp.json();
         if (data.error) throw new Error(data.error);
-        tileCache.mergeNvtx(startS, endS, data, gpuId);
+        tileCache.mergeNvtx(startS, endS, data, gpuId, resolution);
         rebuildDataFromCache();
         draw();
     } catch (err) {
@@ -296,7 +322,7 @@ async function ensureTilesForView(vStart, vEnd) {
     const promises = [];
     for (let s = startS; s < endS; s += TILE_WINDOW_S) {
         if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
-        if (!tileCache.has(s, s + TILE_WINDOW_S)) {
+        if (!tileCache.has(s, s + TILE_WINDOW_S, resolutionForTile(s, s + TILE_WINDOW_S))) {
             promises.push(fetchTile(s, s + TILE_WINDOW_S));
         }
     }
@@ -320,8 +346,9 @@ function maybeFetchNvtxForCurrentView() {
     if (activeGpu === null || activeGpu === undefined) return;
     for (let s = startS; s < endS; s += TILE_WINDOW_S) {
         if (!renderLockIntersects(s, s + TILE_WINDOW_S)) continue;
-        if (tileCache.has(s, s + TILE_WINDOW_S)) {
-            void fetchTileNvtx(s, s + TILE_WINDOW_S, activeGpu);
+        const resolution = resolutionForTile(s, s + TILE_WINDOW_S);
+        if (tileCache.has(s, s + TILE_WINDOW_S, resolution)) {
+            void fetchTileNvtx(s, s + TILE_WINDOW_S, activeGpu, resolution);
         }
     }
 }
@@ -337,10 +364,10 @@ function prefetchAdjacent() {
         if (profileMeta) {
             const pStartS = profileMeta.time_range_ns[0] / 1e9;
             const pEndS = profileMeta.time_range_ns[1] / 1e9;
-            if (before[0] >= pStartS && renderLockIntersects(before[0], before[1]) && !tileCache.has(before[0], before[1])) {
+            if (before[0] >= pStartS && renderLockIntersects(before[0], before[1]) && !tileCache.has(before[0], before[1], resolutionForTile(before[0], before[1]))) {
                 fetchTile(before[0], before[1], { requestNvtx: false }).then(() => { rebuildDataFromCache(); draw(); });
             }
-            if (after[1] <= pEndS && renderLockIntersects(after[0], after[1]) && !tileCache.has(after[0], after[1])) {
+            if (after[1] <= pEndS && renderLockIntersects(after[0], after[1]) && !tileCache.has(after[0], after[1], resolutionForTile(after[0], after[1]))) {
                 fetchTile(after[0], after[1], { requestNvtx: false }).then(() => { rebuildDataFromCache(); draw(); });
             }
         }
@@ -1540,6 +1567,28 @@ function drawKernelBlock(k, y, W, options = {}) {
     const w = Math.max(MIN_BLOCK_W, x2 - x1);
     const bY = y + 2;
     const bH = STREAM_H - 4;
+    if (k.aggregate === true) {
+        const aggregateColor = '#8b949e';
+        ctx.fillStyle = aggregateColor;
+        ctx.globalAlpha = 0.86;
+        ctx.fillRect(x1, bY, w, bH);
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.setLineDash([3, 2]);
+        ctx.strokeStyle = '#c9d1d9';
+        ctx.strokeRect(x1 + 0.5, bY + 0.5, w - 1, bH - 1);
+        ctx.restore();
+        if (options.label && w > 24) {
+            ctx.fillStyle = '#11161d';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.save();
+            ctx.beginPath(); ctx.rect(x1 + 1, bY, w - 2, bH); ctx.clip();
+            ctx.fillText(`▦ ${Number(k.record_count || 0).toLocaleString()} events`, x1 + 3, bY + bH / 2);
+            ctx.restore();
+        }
+        return;
+    }
     const isMatch = !searchQuery || searchKernelMatches.has(k);
     const isSel = k === selectedKernel;
     const isNcclK = String(k.name || '').toLowerCase().includes('nccl');
@@ -1826,6 +1875,18 @@ function showDetail(item) {
     }
 
     const k = item;
+    if (k.aggregate === true) {
+        const gpuLabel = isMultiGPU ? ` &nbsp;|&nbsp; GPU ${k._gpu}` : '';
+        const occupancy = Number(k.occupancy || 0) * 100;
+        document.getElementById('detail').className = '';
+        document.getElementById('detail').innerHTML =
+            `<div class="detail-name">▦ Aggregate bucket</div>` +
+            `<div class="detail-dur">${Number(k.record_count || 0).toLocaleString()} records${gpuLabel} &nbsp;|&nbsp; ` +
+            `${occupancy.toFixed(1)}% busy &nbsp;|&nbsp; ${fmtNs(k.start_ns)} → ${fmtNs(k.end_ns)}</div>` +
+            `<div class="detail-path horizontal">Dominant: ${escH(k.dominant_type || 'kernel')} · ${escH(k.dominant_name || '(unnamed)')} · ` +
+            `longest ${fmtDur(k.max_duration_ms || 0)}</div>`;
+        return;
+    }
     const displayPath = kernelPathForDisplay(k);
     const pathInfo = renderPathHtml(displayPath);
     const gpuLabel = isMultiGPU ? ` &nbsp;|&nbsp; GPU ${k._gpu}` : '';
@@ -2503,7 +2564,10 @@ function onSearch() {
         matcher = { test: (s) => s.toLowerCase().includes(q) };
     }
     if (matcher) {
-        kernels.forEach(k => { if (matcher.test(k.name)) searchKernelMatches.add(k); });
+        kernels.forEach(k => {
+            if (k.aggregate === true) return;
+            if (matcher.test(k.name)) searchKernelMatches.add(k);
+        });
         nvtxSpans.forEach(s => {
             if (matcher.test(s.name || '')) searchNvtxMatches.add(nvtxKey(s));
         });
