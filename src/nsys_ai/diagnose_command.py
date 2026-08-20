@@ -7,6 +7,7 @@ publication and user-facing output.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import TextIO
@@ -39,6 +40,8 @@ def run_diagnose(
     web: bool = False,
     port: int = 8144,
     open_browser: bool = True,
+    output: str | os.PathLike[str] | None = None,
+    format: str = "text",
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
@@ -49,9 +52,9 @@ def run_diagnose(
     callers can reuse this path without fabricating an argparse Namespace.
 
     Defaults match ``evidence build`` for the parameters this verb forwards
-    (``gpu`` defaults to the first device in the profile). It does not forward ``--analyzers``, ``--format``,
-    or ``--output``: the default pack always runs, evidence prints to stdout,
-    and findings land in the session.
+    (``gpu`` defaults to the first device in the profile). ``format=json``
+    emits the same EvidenceReport envelope used by ``analyze --format json``;
+    the session artifact remains the handoff source of truth.
 
     ``--web`` with only ``session_id`` opens the persisted session without
     re-running analysis.
@@ -71,6 +74,8 @@ def run_diagnose(
 
     if not os.fspath(profile_path):
         raise DiagnoseCommandError("profile path is required")
+    if format not in {"text", "json"}:
+        raise DiagnoseCommandError(f"unsupported diagnose format: {format}")
 
     raw = os.path.abspath(os.path.expanduser(os.fspath(profile_path)))
     try:
@@ -115,45 +120,61 @@ def run_diagnose(
         requested_session if requested_session else resolved_id,
         root=session_root,
     )
-    print(f"Session: {resolved_id}", file=stdout)
-    print(f"Findings artifact: {directory / 'findings.json'}", file=stdout)
-    print(f"── Evidence Findings ({len(report.findings)}) ──", file=stdout)
-    sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
-    for finding in report.findings:
-        icon = sev_icons.get(finding.severity, "⚪")
-        dur_ms = (finding.end_ns - finding.start_ns) / 1e6 if finding.end_ns else 0
-        print(f"  {icon} [{finding.type}] {finding.label}  ({dur_ms:.1f}ms)", file=stdout)
-        if finding.note:
-            print(f"      {finding.note}", file=stdout)
+    if format == "json":
+        print(json.dumps(report.to_dict(), indent=2), file=stdout)
+    else:
+        print(f"Session: {resolved_id}", file=stdout)
+        print(f"Findings artifact: {directory / 'findings.json'}", file=stdout)
+        print(f"── Evidence Findings ({len(report.findings)}) ──", file=stdout)
+        sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
+        for finding in report.findings:
+            icon = sev_icons.get(finding.severity, "⚪")
+            dur_ms = (finding.end_ns - finding.start_ns) / 1e6 if finding.end_ns else 0
+            print(f"  {icon} [{finding.type}] {finding.label}  ({dur_ms:.1f}ms)", file=stdout)
+            if finding.note:
+                print(f"      {finding.note}", file=stdout)
 
-    if report.skipped:
-        print(f"── Limitations / skipped analyses ({len(report.skipped)}) ──", file=stdout)
-        for entry in report.skipped:
+        if report.skipped:
+            print(f"── Limitations / skipped analyses ({len(report.skipped)}) ──", file=stdout)
+            for entry in report.skipped:
+                print(
+                    f"  {entry.analyzer} ({entry.skill}) — skipped: {entry.reason}",
+                    file=stdout,
+                )
+        else:
+            print("── Limitations / skipped analyses ──", file=stdout)
+            print("  (none)", file=stdout)
+
+        top_id = next((f.id for f in report.findings if f.id), None)
+        if top_id:
             print(
-                f"  {entry.analyzer} ({entry.skill}) — skipped: {entry.reason}",
+                "Next: nsys-ai propose --session "
+                f"{session_ref} --finding-id {top_id} --runspec <runspec.json>",
                 file=stdout,
             )
-    else:
-        print("── Limitations / skipped analyses ──", file=stdout)
-        print("  (none)", file=stdout)
+        else:
+            print(
+                "Next: no actionable finding id to propose from; "
+                f"re-open with nsys-ai diagnose --session {session_ref} --web",
+                file=stdout,
+            )
+        print(
+            f"Or open the same session: nsys-ai diagnose --session {session_ref} --web",
+            file=stdout,
+        )
 
-    top_id = next((f.id for f in report.findings if f.id), None)
-    if top_id:
-        print(
-            "Next: nsys-ai propose --session "
-            f"{session_ref} --finding-id {top_id} --runspec <runspec.json>",
-            file=stdout,
-        )
-    else:
-        print(
-            "Next: no actionable finding id to propose from; "
-            f"re-open with nsys-ai diagnose --session {session_ref} --web",
-            file=stdout,
-        )
-    print(
-        f"Or open the same session: nsys-ai diagnose --session {session_ref} --web",
-        file=stdout,
-    )
+    if output:
+        from .annotation import save_findings
+
+        try:
+            output_path = os.fspath(output)
+            output_parent = os.path.dirname(os.path.abspath(output_path))
+            os.makedirs(output_parent, exist_ok=True)
+            save_findings(report, output_path)
+        except OSError as exc:
+            raise DiagnoseCommandError(f"could not write findings: {exc}") from exc
+        if format == "json":
+            print(f"Saved findings: {output}", file=stderr)
 
     if web:
         return _open_session_web(

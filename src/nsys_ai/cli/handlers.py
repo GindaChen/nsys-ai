@@ -55,6 +55,8 @@ def _cmd_diagnose(args, _profile):
             web=bool(getattr(args, "web", False)),
             port=getattr(args, "port", 8144),
             open_browser=not bool(getattr(args, "no_browser", False)),
+            output=getattr(args, "output", None),
+            format=getattr(args, "format", "text"),
         )
     except DiagnoseCommandError as exc:
         print(f"Error: {exc}", file=sys.stderr)
