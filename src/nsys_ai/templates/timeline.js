@@ -3160,6 +3160,7 @@ function setInspectorMode(mode) {
         const button = document.getElementById(buttonId);
         if (button) button.classList.toggle('active', buttonMode === mode);
     }
+    updateWorkflowEdgeTab();
 
     if (mode === 'chat') {
         const input = document.getElementById('chatInput');
@@ -3176,6 +3177,30 @@ function closeInspector() {
 
 function toggleInspector(mode) {
     setInspectorMode(activeInspectorMode === mode ? null : mode);
+}
+
+function updateWorkflowEdgeTab() {
+    const tab = document.getElementById('workflowEdgeTab');
+    if (!tab) return;
+
+    const railOpen = Boolean(activeInspectorMode);
+    tab.hidden = railOpen;
+    tab.setAttribute('aria-expanded', activeInspectorMode === 'loop' ? 'true' : 'false');
+
+    const label = document.getElementById('workflowEdgeLabel');
+    const progress = document.getElementById('workflowEdgeProgress');
+    const phase = LOOP_STATE?.phase || '';
+    const phaseIdx = LOOP_PHASE_ORDER.indexOf(phase);
+    const step = phaseIdx >= 0 ? phaseIdx + 1 : null;
+    const phaseLabel = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : '';
+    if (label) label.textContent = phaseLabel || 'Workflow';
+    if (progress) progress.textContent = step ? `${step}/${LOOP_PHASE_ORDER.length}` : '';
+    tab.title = step
+        ? `Open Workflow: ${phaseLabel} (${step}/${LOOP_PHASE_ORDER.length})`
+        : 'Open Workflow inspector (W)';
+    tab.setAttribute('aria-label', step
+        ? `Open Workflow inspector, ${phaseLabel}, step ${step} of ${LOOP_PHASE_ORDER.length}`
+        : 'Open Workflow inspector');
 }
 
 function toggleChat() {
@@ -4383,6 +4408,7 @@ function loopRenderState() {
     const phase = LOOP_STATE.phase || 'diagnose';
     const phaseIdx = LOOP_PHASE_ORDER.indexOf(phase);
     const suggested = loopSuggestedPhase(LOOP_STATE);
+    updateWorkflowEdgeTab();
 
     const badge = document.getElementById('loopPhaseBadge');
     if (badge) badge.textContent = phase.charAt(0).toUpperCase() + phase.slice(1);

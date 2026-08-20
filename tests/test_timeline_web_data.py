@@ -235,6 +235,11 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert 'id="inspectorTabChat"' in html
     assert 'id="inspectorTabFindings"' in html
     assert 'id="inspectorTabLoop"' in html
+    assert 'id="workflowEdgeTab"' in html
+    assert 'id="workflowEdgeLabel"' in html
+    assert 'id="workflowEdgeProgress"' in html
+    assert 'aria-controls="inspectorRail"' in html
+    assert 'onclick="toggleLoop()"' in html
     assert 'data-inspector-panel="chat"' in html
     assert 'data-inspector-panel="findings"' in html
     assert 'data-inspector-panel="loop"' in html
@@ -267,6 +272,17 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="chatCapabilities"' in html
     assert "fit_nvtx_range" in html
     assert "Go to NVTX" in html
+
+
+def test_workflow_edge_tab_contract_is_wired():
+    css = Path("src/nsys_ai/templates/timeline.css").read_text(encoding="utf-8")
+    js = Path("src/nsys_ai/templates/timeline.js").read_text(encoding="utf-8")
+
+    assert "#workflowEdgeTab[hidden]" in css
+    assert "@media (max-width: 960px)" in css
+    assert "function updateWorkflowEdgeTab()" in js
+    assert "tab.hidden = railOpen" in js
+    assert "loopRenderState()" in js
 
 
 def test_timeline_template_declutters_inspector_and_annotations(minimal_nsys_db_path):

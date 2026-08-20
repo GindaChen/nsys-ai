@@ -771,6 +771,58 @@
             display: flex;
         }
 
+        #workflowEdgeTab {
+            position: absolute;
+            top: 50%;
+            right: 0;
+            z-index: 25;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+            min-width: 34px;
+            max-width: 42px;
+            padding: 10px 7px;
+            border: 1px solid var(--border);
+            border-right: none;
+            border-radius: 7px 0 0 7px;
+            background: var(--surface-raised);
+            color: var(--accent);
+            box-shadow: -3px 4px 12px rgba(0, 0, 0, 0.28);
+            cursor: pointer;
+            font: 600 10px var(--font-ui);
+            transform: translateY(-50%);
+            writing-mode: vertical-rl;
+        }
+
+        #workflowEdgeTab:hover,
+        #workflowEdgeTab:focus-visible {
+            background: var(--accent-subtle);
+            border-color: var(--accent-dim);
+            color: var(--text);
+            outline: none;
+        }
+
+        #workflowEdgeTab[hidden] {
+            display: none;
+        }
+
+        #workflowEdgeProgress {
+            color: var(--text-dim);
+            font-size: 9px;
+        }
+
+        @media (max-width: 960px) {
+            #workflowEdgeTab {
+                top: auto;
+                bottom: 24px;
+                max-width: none;
+                border-right: 1px solid var(--border);
+                writing-mode: horizontal-tb;
+                transform: none;
+            }
+        }
+
         #inspectorTabs {
             min-height: 42px;
             flex-shrink: 0;
