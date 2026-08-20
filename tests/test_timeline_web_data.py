@@ -226,10 +226,13 @@ def test_timeline_html_export_writes_sidecar_assets(minimal_nsys_db_path, tmp_pa
 
     out_css = tmp_path / "timeline.css"
     out_js = tmp_path / "timeline.js"
+    out_tokens = tmp_path / "tokens.css"
     assert out_html.exists()
     assert out_css.exists()
     assert out_js.exists()
+    assert out_tokens.exists()
 
     html_text = out_html.read_text(encoding="utf-8")
     assert 'href="timeline.css"' in html_text
     assert 'src="timeline.js"' in html_text
+    assert '@import url("tokens.css")' in out_css.read_text(encoding="utf-8")

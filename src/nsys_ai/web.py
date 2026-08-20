@@ -42,7 +42,7 @@ _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 def _template_asset_version() -> str:
     """Cache-bust token from template mtimes (changes when timeline UI is edited)."""
     latest = 0.0
-    for name in ("timeline.html", "timeline.css", "timeline.js"):
+    for name in ("timeline.html", "timeline.css", "timeline.js", "tokens.css"):
         path = os.path.join(_TEMPLATE_DIR, name)
         try:
             latest = max(latest, os.path.getmtime(path))
@@ -283,6 +283,9 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/assets/timeline.css":
             self._serve_asset("timeline.css", "text/css; charset=utf-8")
+            return
+        if path == "/assets/tokens.css":
+            self._serve_asset("tokens.css", "text/css; charset=utf-8")
             return
         if path == "/assets/timeline.js":
             self._serve_asset("timeline.js", "application/javascript; charset=utf-8")
@@ -1307,6 +1310,9 @@ class _EvidenceHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
         if path == "/assets/evidence.css":
             # Reuse the existing timeline.css asset for evidence CSS.
             self._serve_asset("timeline.css", "text/css; charset=utf-8")
+            return
+        if path == "/assets/tokens.css":
+            self._serve_asset("tokens.css", "text/css; charset=utf-8")
             return
         if path == "/assets/evidence.js":
             # Reuse the existing timeline.js asset for evidence JS.
