@@ -77,8 +77,8 @@ Four things land in `run-before/`:
 
 | File | What it is |
 |------|------------|
-| `profile.sqlite` | The exported profile. Every other command reads this. |
-| `profile.nsys-rep` | The native Nsight report, for the Nsight GUI. |
+| `profile.nsys-rep` | The capture itself. Hand this to any command. |
+| `profile.sqlite` | A SQLite export of the same capture, for tools that want one. |
 | `runspec.json` | Exactly how this run was launched. Section 5 explains why this matters. |
 | `stdout.log`, `stderr.log` | Your workload's own output. |
 
@@ -89,8 +89,9 @@ capture, so you never have to name sessions yourself.
 activity is an error, not a silent empty file. Add `--dry-run` to print the plan without running
 anything.
 
-If you already have a `.sqlite` or `.nsys-rep` from `nsys` directly, skip this step — every command
-below accepts either.
+If you already have a `.nsys-rep`, a `.sqlite` or a `parquetdir` from `nsys` directly, skip this step.
+Every command below accepts any of them; see [what to hand nsys-ai](./user/profile-inputs.md) for how
+each is read.
 
 ## 3. Look at it
 

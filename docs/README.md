@@ -1,6 +1,8 @@
-# Nsight Systems — Agent Knowledge Base
+# nsys-ai documentation
 
-> **Purpose:** Machine-readable documentation for the nsys-agent. Each file covers one topic from the official NVIDIA documentation, saved as plain markdown for easy querying, embedding, and retrieval.
+> **How this is organised.** `user/` is for operating the tool and `dev/` is for maintaining it. The
+> numbered files are excerpts of NVIDIA's own Nsight Systems documentation, kept as plain markdown so
+> the agent can query them; the rest are this project's guides.
 
 ## ⚠️ Version Awareness
 
@@ -18,6 +20,8 @@ Always check `nsys --version` on the target system and cross-reference with the 
 
 | File | Topic | Source |
 |------|-------|--------|
+| [user/profile-inputs.md](./user/profile-inputs.md) | What to hand nsys-ai, and how each input is read | Project Guide |
+| [dev/ingest-policy.md](./dev/ingest-policy.md) | How profile inputs are resolved, and why call sites must not bypass it | Project Guide |
 | [user-guide.md](./user-guide.md) | nsys-ai end to end: capture, diagnose, propose, diff, decide | Project Guide |
 | [guided-loop-setup.md](./guided-loop-setup.md) | The same loop driven from the timeline web UI | Project Guide |
 | [doctor.md](./doctor.md) | Environment and profile health checks | Project Guide |
