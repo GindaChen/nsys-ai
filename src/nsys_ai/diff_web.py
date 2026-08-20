@@ -78,6 +78,10 @@ class _DiffHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
             self._serve_asset("timeline.css", "text/css; charset=utf-8")
             return
 
+        if path == "/assets/tokens.css":
+            self._serve_asset("tokens.css", "text/css; charset=utf-8")
+            return
+
         if path == "/assets/timeline.js":
             self._serve_asset("timeline.js", "application/javascript; charset=utf-8")
             return
@@ -258,33 +262,33 @@ _DIFF_HTML = """<!doctype html>
     <link rel="stylesheet" href="/assets/timeline.css" />
     <style>
       body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-             margin: 0; padding: 1.5rem; background: #050816; color: #f5f5f5;
+             margin: 0; padding: 1.5rem; background: var(--diff-bg); color: var(--diff-text);
              min-height: 100vh; overflow-y: auto; overflow-x: hidden; }
       h1 { margin-top: 0; font-size: 1.4rem; }
       .paths { font-size: 0.9rem; margin-bottom: 1rem; }
       .paths code { word-break: break-all; }
       .layout { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.5rem; align-items: flex-start; }
       .layout-timeline { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1.5rem; }
-      .timeline-container { height: 400px; position: relative; border-radius: 0.5rem; overflow: hidden; border: 1px solid rgba(148,163,184,0.25); background: #000; }
-      .card { background: rgba(15,23,42,0.9); border-radius: 0.75rem; padding: 1rem 1.25rem; box-shadow: 0 18px 45px rgba(15,23,42,0.9); border: 1px solid rgba(148,163,184,0.25);}
+      .timeline-container { height: 400px; position: relative; border-radius: 0.5rem; overflow: hidden; border: 1px solid var(--diff-border); background: #000; }
+      .card { background: var(--diff-surface); border-radius: 0.75rem; padding: 1rem 1.25rem; box-shadow: 0 18px 45px rgba(15,23,42,0.9); border: 1px solid var(--diff-border);}
       .card h2 { margin: 0 0 0.5rem 0; font-size: 1.0rem; }
 
-      .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: rgba(148,163,184,0.25); font-size: 0.75rem; margin-right: 0.25rem; }
+      .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--diff-border); font-size: 0.75rem; margin-right: 0.25rem; }
       table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
       th, td { padding: 0.35rem 0.4rem; text-align: right; border-bottom: 1px solid rgba(30,41,59,0.9); }
       th:nth-child(2), td:nth-child(2) { text-align: left; }
-      th { font-weight: 600; color: #e5e7eb; background: rgba(15,23,42,0.9); position: sticky; top: 0; }
+      th { font-weight: 600; color: var(--text); background: var(--diff-surface); position: sticky; top: 0; }
       tbody tr:nth-child(even) { background: rgba(15,23,42,0.6); }
-      .delta-bad { color: #f87171; }
-      .delta-good { color: #4ade80; }
-      .warnings { color: #facc15; font-size: 0.85rem; }
+      .delta-bad { color: var(--verdict-worse); }
+      .delta-good { color: var(--verdict-better); }
+      .warnings { color: var(--heat-50); font-size: 0.85rem; }
       .warnings li { margin-bottom: 0.15rem; }
-      .section-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 0.35rem; }
+      .section-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--diff-label); margin-bottom: 0.35rem; }
       .overlap-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem 0.75rem; font-size: 0.8rem; }
       .overlap-grid div span { display: block; }
-      .overlap-label { color: #9ca3af; }
+      .overlap-label { color: var(--diff-label); }
       .overlap-value { font-weight: 600; }
-      .badge { font-size: 0.75rem; padding: 0.05rem 0.4rem; border-radius: 999px; border: 1px solid rgba(148,163,184,0.4); }
+      .badge { font-size: 0.75rem; padding: 0.05rem 0.4rem; border-radius: 999px; border: 1px solid var(--diff-border); }
     </style>
   </head>
   <body>

@@ -65,7 +65,13 @@ def _escape_json_for_html_attr(value) -> str:
     )
 
 
-def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
+def generate_html(
+    prof,
+    device: int,
+    trim: tuple[int, int],
+    *,
+    tokens_href: str = "/assets/tokens.css",
+) -> str:
     """Generate a standalone HTML page showing the NVTX stack trace."""
     roots = build_nvtx_tree(prof, device, trim)
     tree_json = to_json(roots)
@@ -90,13 +96,18 @@ def generate_html(prof, device: int, trim: tuple[int, int]) -> str:
         PROFILE_ID=profile_id,
         PROFILE_PATH=safe_profile_path,
         DB_AGENT_ENABLED="1" if db_agent_enabled else "",
+        TOKENS_HREF=tokens_href,
     )
 
 
 def write_html(prof, device: int, trim: tuple[int, int], path: str):
     """Generate and write the HTML viewer to a file."""
+    tokens_name = "tokens.css"
+    out_dir = os.path.dirname(os.path.abspath(path))
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(generate_html(prof, device, trim))
+        f.write(generate_html(prof, device, trim, tokens_href=tokens_name))
+    with open(os.path.join(out_dir, tokens_name), "w", encoding="utf-8", newline="\n") as f:
+        f.write(_read_template_text(tokens_name))
 
 
 def _collect_nvtx_annotations(
@@ -400,6 +411,8 @@ def write_timeline_html(prof, device: int, trim: tuple[int, int], path: str):
     # Export sidecar static assets so generated HTML remains self-contained on disk.
     with open(os.path.join(out_dir, css_name), "w", encoding="utf-8", newline="\n") as f:
         f.write(_read_template_text("timeline.css"))
+    with open(os.path.join(out_dir, "tokens.css"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(_read_template_text("tokens.css"))
     with open(os.path.join(out_dir, js_name), "w", encoding="utf-8", newline="\n") as f:
         f.write(_read_template_text("timeline.js"))
 

@@ -1,26 +1,4 @@
-        :root {
-            --bg: #0d1117;
-            --surface: #161b22;
-            --surface-raised: #1c2128;
-            --border: #30363d;
-            --border-subtle: #21262d;
-            --text: #e6edf3;
-            --text-dim: #8b949e;
-            --text-muted: #6e7681;
-            --accent: #79b8ff;
-            --accent-dim: #58a6ff;
-            --accent-subtle: rgba(56, 139, 253, 0.12);
-            --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-            --font-mono: "SF Mono", "Cascadia Code", "Fira Code", ui-monospace, monospace;
-            --nvtx: #4a6fa5;
-            --kernel: #238636;
-            --nccl: #d2a8ff;
-            --heat-0: #238636;
-            --heat-50: #d4a72c;
-            --heat-100: #da3633;
-            --sel: #264f78;
-            --chrome-h: 88px;
-        }
+        @import url("tokens.css");
 
         * {
             box-sizing: border-box;

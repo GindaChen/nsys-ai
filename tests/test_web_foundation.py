@@ -34,6 +34,16 @@ def test_gpu_label_preserves_fractional_memory_precision():
     ) == "GPU 0 - H200, 150.1GB"
 
 
+@pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
+def test_web_surfaces_serve_shared_tokens_asset(handler):
+    status, body, content_type = _get(handler, "/assets/tokens.css")
+
+    assert status == 200
+    assert content_type.startswith("text/css")
+    assert b"--accent:" in body
+    assert b"--heat-75:" in body
+
+
 def test_summary_commentary_omits_empty_gpu_name():
     summary = {
         "device": 0,
