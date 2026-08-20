@@ -90,24 +90,38 @@ cause is elsewhere.
 
 ### The results describe a GPU you did not ask for
 
-`root-cause` substitutes a different device when the one you selected has no kernels on it. Multi-GPU
-captures often leave device 0 idle while devices 1-7 do the work, and returning nothing there would
-be less useful than answering about a device that ran something.
+The `root_cause_matcher` skill substitutes a different device when the one selected has no kernels on
+it. Multi-GPU captures often leave device 0 idle while devices 1-7 do the work, and returning nothing
+there would be less useful than answering about a device that actually ran something.
 
-The substitution is silent — nothing in the output says it happened. If a per-device number looks
-wrong, check the per-GPU kernel counts in `nsys-ai info` and pass `--gpu` explicitly.
+You will meet this through `nsys-ai root-cause`, through `nsys-ai skill run root_cause_matcher`, or
+by asking a question that routes to it — one containing "why", "root cause" or "diagnosis".
+
+The substitution is silent: nothing in the output says which device the answer is about. If a
+per-device number looks wrong, check the per-GPU kernel counts that `nsys-ai info` prints and pass
+`--gpu` explicitly.
 
 ## The command is slow
 
 ### The first command on a capture takes seconds before printing anything
 
 ```
-[nsys-ai] Building analysis cache for a 634MB profile (~6s, once per profile) ...
+[nsys-ai] Building analysis cache for a 634MB profile (~6s, once per profile;
+queries afterwards are 4-5x faster).
+[nsys-ai] The first NVTX-attributing query then builds the kernel map (~8s more,
+also once per profile).
+[nsys-ai] Set NSYS_AI_CACHE_MODE=direct to skip the build and query the SQLite
+export in place.
 ```
 
-Expected. The capture is being converted once into a form queries can run against, and the result is
-written beside it. Every later command on the same capture starts immediately. See
+Expected, and it says so. The capture is being converted once into a form queries can run against,
+and the result is written beside it. Every later command on the same capture starts immediately. See
 [What to hand nsys-ai](./profile-inputs.md).
+
+Note the second line: the NVTX-to-kernel map is built lazily, so there is a *second* one-off pause
+later, the first time you run something that attributes kernels to NVTX ranges. That is not a second
+cache build. [`NSYS_AI_DEFER_NVTX_KERNEL_MAP`](./environment-variables.md) moves it into the first
+build if you would rather pay once.
 
 If it happens *every* time, the conversion output is not being kept: check that the directory holding
 the capture is writable, and that the capture's modification time is not being updated by whatever
