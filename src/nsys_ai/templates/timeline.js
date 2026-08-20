@@ -3203,6 +3203,12 @@ function updateWorkflowEdgeTab() {
         : 'Open Workflow inspector');
 }
 
+function applyLoopState(state) {
+    LOOP_STATE = state || {};
+    updateWorkflowEdgeTab();
+    loopRenderState();
+}
+
 function toggleChat() {
     toggleInspector('chat');
 }
@@ -4377,8 +4383,7 @@ async function loopFetchState() {
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
     if (!resp.ok) throw new Error(data.error || text || resp.statusText);
-    LOOP_STATE = data;
-    loopRenderState();
+    applyLoopState(data);
     return LOOP_STATE;
 }
 
@@ -4393,13 +4398,11 @@ async function loopPost(path, payload) {
     try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
     if (!resp.ok) {
         if (data.state) {
-            LOOP_STATE = data.state;
-            loopRenderState();
+            applyLoopState(data.state);
         }
         throw new Error(data.error || text || resp.statusText);
     }
-    LOOP_STATE = data.state || data;
-    loopRenderState();
+    applyLoopState(data.state || data);
     return data;
 }
 
@@ -4408,7 +4411,6 @@ function loopRenderState() {
     const phase = LOOP_STATE.phase || 'diagnose';
     const phaseIdx = LOOP_PHASE_ORDER.indexOf(phase);
     const suggested = loopSuggestedPhase(LOOP_STATE);
-    updateWorkflowEdgeTab();
 
     const badge = document.getElementById('loopPhaseBadge');
     if (badge) badge.textContent = phase.charAt(0).toUpperCase() + phase.slice(1);
