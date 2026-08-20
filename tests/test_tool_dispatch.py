@@ -107,6 +107,60 @@ def test_run_skill_is_the_formal_profile_evidence_path(minimal_nsys_conn, monkey
     assert calls == [("root_cause_matcher", minimal_nsys_conn, True, {"device": 0})]
 
 
+def test_run_skill_caps_large_results(minimal_nsys_conn, monkeypatch):
+    from nsys_ai.skills import registry
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    monkeypatch.setattr(
+        registry,
+        "run_skill",
+        lambda *args, **kwargs: [{"column": "x" * 500} for _ in range(40)],
+    )
+    result = ToolDispatcher(conn=minimal_nsys_conn).dispatch(
+        "run_skill", '{"skill_name":"schema_inspect"}'
+    )
+
+    from nsys_ai.ai.backend.profile_db_tool import DEFAULT_MAX_JSON_CHARS
+
+    assert len(result.content) <= DEFAULT_MAX_JSON_CHARS
+    payload = json.loads(result.content)
+    assert payload["_truncated"] is True
+    assert payload["_total_rows"] == 40
+    assert payload["_shown_rows"] == len(payload["rows"])
+
+
+def test_run_skill_preserves_typed_abstention(minimal_nsys_conn, monkeypatch):
+    from nsys_ai.skills import registry
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    abstention = {"_abstained": True, "reason": "required activity is unavailable"}
+    monkeypatch.setattr(registry, "run_skill", lambda *args, **kwargs: [abstention])
+    result = ToolDispatcher(conn=minimal_nsys_conn).dispatch(
+        "run_skill", '{"skill_name":"iteration_timing"}'
+    )
+
+    assert json.loads(result.content)["rows"] == [abstention]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "code"),
+    [
+        ('{"skill_name":"top_kernels","params":[]}', "INVALID_PARAMETER"),
+        ('{"skill_name":"top_kernels"}', None),
+        ('{}', "MISSING_PARAMETER"),
+    ],
+)
+def test_run_skill_validates_arguments_before_dispatch(minimal_nsys_conn, arguments, code):
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    result = ToolDispatcher(conn=minimal_nsys_conn).dispatch("run_skill", arguments)
+    payload = json.loads(result.content)
+    if code is None:
+        assert payload["rows"]
+    else:
+        assert payload["error"]["code"] == code
+
+
 def test_run_skill_rejects_unknown_skill(minimal_nsys_conn):
     from nsys_ai.tool_dispatch import ToolDispatcher
 

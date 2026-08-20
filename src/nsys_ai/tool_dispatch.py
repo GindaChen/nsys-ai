@@ -22,6 +22,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .ai.backend.profile_db_tool import DEFAULT_MAX_JSON_CHARS
+
 _log = logging.getLogger(__name__)
 
 
@@ -55,6 +57,39 @@ def _parse_json_args(args_str: str) -> dict:
     if not args_str or not args_str.strip():
         return {}
     return json.loads(args_str)
+
+
+def _serialize_skill_result(skill_name: str, rows: list) -> str:
+    """Serialize registry rows without allowing one skill to flood the prompt."""
+    payload = {"skill": skill_name, "rows": rows}
+    encoded = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(encoded) <= DEFAULT_MAX_JSON_CHARS:
+        return encoded
+
+    capped_rows = []
+    for row in rows:
+        candidate = {
+            "skill": skill_name,
+            "rows": capped_rows + [row],
+            "_truncated": True,
+            "_total_rows": len(rows),
+            "_shown_rows": len(capped_rows) + 1,
+        }
+        if len(json.dumps(candidate, ensure_ascii=False, default=str)) > DEFAULT_MAX_JSON_CHARS:
+            break
+        capped_rows.append(row)
+
+    return json.dumps(
+        {
+            "skill": skill_name,
+            "rows": capped_rows,
+            "_truncated": True,
+            "_total_rows": len(rows),
+            "_shown_rows": len(capped_rows),
+        },
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 class ToolDispatcher:
@@ -385,7 +420,7 @@ class ToolDispatcher:
             )
         rows = self._run_registered_skill(skill_name, dict(params))
         return ToolResult(
-            content=json.dumps({"skill": skill_name, "rows": rows}),
+            content=_serialize_skill_result(skill_name, rows),
             events=events,
         )
 

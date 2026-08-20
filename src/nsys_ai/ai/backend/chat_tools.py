@@ -567,6 +567,20 @@ def _build_system_prompt(
                          to inject a specific skill for the current session.
     """
     ctx_json = json.dumps(ui_context, separators=(",", ":"))
+    if profile_schema:
+        profile_grounding_instruction = (
+            "When a profile database is connected, for whole-profile questions and "
+            "diagnoses you MUST use the `run_skill` tool with a registered skill "
+            "(for example `profile_health_manifest`, `root_cause_matcher`, `top_kernels`, "
+            "`iteration_timing`, `overlap_breakdown`, or `nccl_breakdown`). The registry "
+            "owns schema compatibility and typed abstention. Do not write analysis SQL "
+            "in chat. `query_profile_db` is exploratory only and cannot ground a diagnosis."
+        )
+    else:
+        profile_grounding_instruction = (
+            "No profile database is connected. Do not attempt whole-profile analysis or "
+            "claim profile measurements; explain that a profile is required."
+        )
     schema_block = ""
     if profile_schema:
         schema_block = (
@@ -584,6 +598,9 @@ def _build_system_prompt(
         # Use the template from the prompt file when available.
         chat_system = chat_system.replace("{schema_block}", schema_block)
         chat_system = chat_system.replace("{ctx_json}", ctx_json)
+        chat_system = chat_system.replace(
+            "{profile_grounding_instruction}", profile_grounding_instruction
+        )
         base_prompt = chat_system
     else:
         # Fallback minimal prompt if the prompt files could not be loaded.

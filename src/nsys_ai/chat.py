@@ -670,7 +670,7 @@ def run_agent_loop(
                         turn_tool_failed = True
                     if name in _PROFILE_GROUNDING_TOOLS:
                         grounding_attempted = True
-                        if not tool_failed and name != "query_profile_db":
+                        if not tool_failed:
                             turn_grounding_succeeded = True
                     if name == "compute_mfu" and not tool_failed:
                         compute_mfu_succeeded = True
@@ -1375,12 +1375,8 @@ def stream_agent_loop(
                         turn_tool_failed = True
                     if name in grounding_tools:
                         grounding_attempted = True
-                        # Exploratory SQL can support a registered analysis,
-                        # but it cannot ground a diagnosis by itself.
-                        if not tool_failed and name != "query_profile_db":
+                        if not tool_failed:
                             turn_grounding_succeeded = True
-                        if name == "query_profile_db" and not tool_failed:
-                            exploratory_query_succeeded = True
                     elif name == "query_profile_db":
                         grounding_attempted = True
                         if not tool_failed:

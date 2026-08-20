@@ -101,6 +101,16 @@ def test_build_system_prompt():
     assert "num_gpus" in out
 
 
+def test_build_system_prompt_only_requires_run_skill_with_profile_schema():
+    ctx = {"view_state": {"scope": "all"}}
+    no_profile = chat_mod._build_system_prompt(ctx)
+    with_profile = chat_mod._build_system_prompt(ctx, profile_schema="CREATE TABLE kernels(id INTEGER)")
+
+    assert "When a profile database is connected" not in no_profile
+    assert "No profile database is connected" in no_profile
+    assert "When a profile database is connected" in with_profile
+
+
 def test_tools_openai():
     """Tools include navigation plus registry-backed profile analysis."""
     tools = chat_mod._tools_openai()
