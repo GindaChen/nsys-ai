@@ -603,8 +603,14 @@ async function initData() {
             // Default view starts at the profile's actual first event. Profiles
             // exported from Nsight commonly have a non-zero epoch-relative start.
             const [profileStart, profileEnd] = profileRangeNs();
-            viewStart = profileStart;
-            viewEnd = Math.min(profileEnd, profileStart + TILE_WINDOW_S * 1e9);
+            const requestedTrim = loopTrimPayload().trim;
+            if (requestedTrim) {
+                viewStart = Math.max(profileStart, requestedTrim[0]);
+                viewEnd = Math.min(profileEnd, requestedTrim[1]);
+            } else {
+                viewStart = profileStart;
+                viewEnd = Math.min(profileEnd, profileStart + TILE_WINDOW_S * 1e9);
+            }
             await ensureTilesForView(viewStart, viewEnd);
             rebuildDataFromCache();
             resetViewHistory();

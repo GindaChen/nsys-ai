@@ -370,6 +370,38 @@ def test_timeline_web_survives_a_busy_port(tmp_path: Path, monkeypatch):
     assert bound.get("port") not in (None, busy), bound
 
 
+def test_timeline_web_trim_uses_progressive_shell_and_bounded_prebuild(
+    tmp_path: Path, monkeypatch
+):
+    profile_copy = tmp_path / "profile.sqlite"
+    shutil.copyfile(PROFILE, profile_copy)
+    calls: list[tuple[int, int]] = []
+    captured: dict[str, bytes] = {}
+
+    def _fake_timeline_data(_prof, devices, window, **_kwargs):
+        calls.append(window)
+        return [{"id": dev, "kernels": [], "nvtx_spans": []} for dev in devices]
+
+    def _capture_instead_of_serving(server, _open_url, _prof):
+        captured["html"] = web._ViewerHandler.html_bytes
+        server.server_close()
+
+    monkeypatch.setattr(web, "build_timeline_gpu_data", _fake_timeline_data)
+    monkeypatch.setattr(web, "_run_server", _capture_instead_of_serving)
+    monkeypatch.chdir(tmp_path)
+
+    with _profile.open(str(profile_copy)) as prof:
+        start_ns, end_ns = prof.meta.time_range
+        trim = (start_ns, min(end_ns, start_ns + 2_000_000_000))
+        web.serve_timeline(prof, [0], trim, port=0, open_browser=False)
+
+    html = captured["html"].decode("utf-8")
+    assert "INITIAL_DATA: null" in html
+    assert "PROGRESSIVE: '1' === '1'" in html
+    assert f"LOOP_TRIM_NS: [{trim[0]}, {trim[1]}]" in html
+    assert calls and all(window == trim for window in calls)
+
+
 def test_timeline_web_bind_failure_waits_for_the_background_worker(tmp_path: Path, monkeypatch):
     """A bind that still fails must not leave the NVTX worker running.
 

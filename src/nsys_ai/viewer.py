@@ -289,12 +289,15 @@ def generate_timeline_html(
     profile_path: str = "",
     profile_id: str | None = None,
     loop_mode: bool = False,
+    progressive_mode: bool = False,
 ) -> str:
     """Generate a standalone HTML page with the horizontal timeline viewer.
 
     *device* may be a single int or a list of ints.
     When *trim* is None, HTML is generated in progressive mode: ``$DATA``
     is ``null`` and the template fetches data via ``/api/data`` on demand.
+    Set *progressive_mode* when a server wants to keep a trim window as the
+    initial viewport without embedding its data in the HTML.
     """
     from collections.abc import Sequence
 
@@ -330,12 +333,14 @@ def generate_timeline_html(
     loop_trim_ns_json = "null"
     trim_meta = ""
     if trim is not None:
-        # Full data baked into HTML (kernel-first payload).
-        gpu_entries = build_timeline_gpu_data(prof, devices, trim)
-        data_json = json.dumps({"gpus": gpu_entries})
         trim_window = f"{trim[0] / 1e9:.1f}s – {trim[1] / 1e9:.1f}s"
         trim_meta = f" · {html.escape(trim_window)}"
         loop_trim_ns_json = json.dumps([int(trim[0]), int(trim[1])])
+
+    if trim is not None and not progressive_mode:
+        # Full data baked into HTML (kernel-first payload).
+        gpu_entries = build_timeline_gpu_data(prof, devices, trim)
+        data_json = json.dumps({"gpus": gpu_entries})
         progressive = ""
     else:
         # Progressive mode: no data baked in

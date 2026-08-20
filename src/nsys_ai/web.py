@@ -244,6 +244,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
     _findings: list[dict] = []  # mutable findings state for evidence overlay
     _session_id: str | None = None  # SessionStore id (always set by serve_timeline)
     _session_root: str = ".nsys-ai/sessions"
+    _trim: tuple[int, int] | None = None
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -339,7 +340,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             info = prof.meta.gpu_info.get(dev)
             gpu_infos.append({"id": dev, "label": format_gpu_label(dev, info)})
         # Get profile time range from kernel metadata (min_start_ns, max_end_ns)
-        t_start, t_end = prof.meta.time_range
+        t_start, t_end = self.__class__._trim or prof.meta.time_range
         self._json_response(
             {
                 "time_range_ns": [t_start, t_end],
@@ -1017,6 +1018,7 @@ def serve_timeline(
     _ViewerHandler._findings = findings_data or []
     _ViewerHandler._session_id = None
     _ViewerHandler._session_root = os.fspath(session_root)
+    _ViewerHandler._trim = trim
     from .loop_state import detect_h100_replay_preset
 
     raw_path = prof.path if hasattr(prof, "path") else ""
@@ -1088,34 +1090,21 @@ def serve_timeline(
     _asset_v = _template_asset_version()
     _css_href = _versioned_asset_url("/assets/timeline.css")
     _js_src = _versioned_asset_url("/assets/timeline.js")
-    if trim is not None:
-        # Legacy: render full HTML with all data baked in
-        html = generate_timeline_html(
-            prof,
-            devices,
-            trim,
-            findings_data=findings_data,
-            profile_path=_profile_path,
-            profile_id=_ViewerHandler._profile_id,
-            loop_mode=_in_loop_mode,
-            timeline_css_href=_css_href,
-            timeline_js_src=_js_src,
-        )
-        _ViewerHandler._prebuilt_nvtx_mode = "full"
-    else:
-        # Progressive: generate shell HTML, data fetched via /api/data
-        html = generate_timeline_html(
-            prof,
-            devices,
-            None,
-            findings_data=findings_data,
-            profile_path=_profile_path,
-            profile_id=_ViewerHandler._profile_id,
-            loop_mode=_in_loop_mode,
-            timeline_css_href=_css_href,
-            timeline_js_src=_js_src,
-        )
-        _ViewerHandler._prebuilt_nvtx_mode = "background"
+    # Always serve the progressive shell. A trim window is metadata for the
+    # initial viewport and API range, not a reason to embed the selected data.
+    html = generate_timeline_html(
+        prof,
+        devices,
+        trim,
+        findings_data=findings_data,
+        profile_path=_profile_path,
+        profile_id=_ViewerHandler._profile_id,
+        loop_mode=_in_loop_mode,
+        timeline_css_href=_css_href,
+        timeline_js_src=_js_src,
+        progressive_mode=True,
+    )
+    _ViewerHandler._prebuilt_nvtx_mode = "background"
 
     _ViewerHandler.html_bytes = html.encode("utf-8")
     if _in_loop_mode:
@@ -1123,10 +1112,15 @@ def serve_timeline(
 
     nvtx_done: threading.Event | None = None
 
-    # Pre-build full kernel-first timeline payload for all GPUs (progressive mode)
-    if trim is None:
+    # Pre-build the requested range only. A trim window must not switch back
+    # to the legacy full-document path or force a full-profile scan.
+    if _ViewerHandler._prebuilt_nvtx_mode == "background":
         db_path = _profile_path
-        cache_path = db_path + ".timeline-cache-v3-kernels.json" if db_path else ""
+        cache_path = (
+            db_path + ".timeline-cache-v3-kernels.json"
+            if db_path and trim is None
+            else ""
+        )
         cache_valid = False
 
         # Try loading from disk cache
@@ -1162,7 +1156,7 @@ def serve_timeline(
 
         if not cache_valid:
             t0 = _time.monotonic()
-            full_range = prof.meta.time_range
+            full_range = trim or prof.meta.time_range
             print(
                 f"Pre-building kernels only for {len(devices)} GPU(s) "
                 f"({full_range[0] / 1e9:.1f}s–{full_range[1] / 1e9:.1f}s)...",
@@ -1200,7 +1194,7 @@ def serve_timeline(
                     print(f"Cache save failed: {e}", flush=True)
 
         _ViewerHandler._overview_bins, _ViewerHandler._overview_kernel_count = (
-            _build_timeline_overview(prebuilt, prof.meta.time_range)
+            _build_timeline_overview(prebuilt, trim or prof.meta.time_range)
         )
 
         # NVTX is much more expensive than kernel filtering.  Warm the full
@@ -1214,7 +1208,7 @@ def serve_timeline(
 
         def _warm_nvtx() -> None:
             t_nv = _time.monotonic()
-            full_range = prof.meta.time_range
+            full_range = trim or prof.meta.time_range
             try:
                 print(
                     f"Pre-building NVTX in background for {len(devices)} GPU(s) "
