@@ -1719,9 +1719,9 @@ def _cmd_web(args, _profile):
     from nsys_ai.web import serve
 
     with _profile.open(args.profile) as prof:
-        trim = _parse_trim(args)
-        _check_trim_window(trim, prof)
-        serve(prof, args.gpu, trim, port=args.port, open_browser=not args.no_browser)
+        gpu = args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        trim = _resolve_trim_window(_parse_trim(args), prof)
+        serve(prof, gpu, trim, port=args.port, open_browser=not args.no_browser)
 
 
 def _cmd_open(args, _profile):

@@ -71,10 +71,15 @@ def generate_html(
     trim: tuple[int, int],
     *,
     tokens_href: str = "/assets/tokens.css",
+    embed_data: bool = True,
 ) -> str:
-    """Generate a standalone HTML page showing the NVTX stack trace."""
-    roots = build_nvtx_tree(prof, device, trim)
-    tree_json = to_json(roots)
+    """Generate the NVTX stack trace page.
+
+    ``embed_data=False`` produces the small web shell; the server supplies the
+    tree through ``/api/tree``.  Standalone exports keep the historical inline
+    data behaviour unless the caller explicitly opts into the shell.
+    """
+    tree_json = to_json(build_nvtx_tree(prof, device, trim)) if embed_data else []
 
     gpu_info = prof.meta.gpu_info.get(device)
     gpu_label = format_gpu_label(device, gpu_info)
@@ -97,6 +102,7 @@ def generate_html(
         PROFILE_PATH=safe_profile_path,
         DB_AGENT_ENABLED="1" if db_agent_enabled else "",
         TOKENS_HREF=tokens_href,
+        API_PREFIX="",
     )
 
 
