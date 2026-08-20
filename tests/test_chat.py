@@ -656,6 +656,64 @@ def test_run_agent_loop_uses_registry_for_profile_tools(minimal_nsys_conn):
     assert mock_lt.completion.call_count == 2
 
 
+def test_run_agent_loop_uses_run_skill_for_profile_grounding(
+    minimal_nsys_conn, monkeypatch
+):
+    from nsys_ai.skills import registry
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    def tool_call(call_id, name, arguments):
+        fn = MagicMock()
+        fn.name = name
+        fn.arguments = json.dumps(arguments)
+        return MagicMock(id=call_id, function=fn)
+
+    calls = []
+
+    def fake_run_skill(skill_name, conn, *, raw=False, **kwargs):
+        calls.append((skill_name, conn, raw, kwargs))
+        return [{"kernel_name": "flash", "total_ms": 12.0}]
+
+    first = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "skill1",
+                            "run_skill",
+                            {"skill_name": "top_kernels", "params": {"device": 0}},
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    final = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(content="Grounded registry result.", tool_calls=[])
+            )
+        ]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [first, final]
+    monkeypatch.setattr(registry, "run_skill", fake_run_skill)
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        content, _ = chat_mod.run_agent_loop(
+            model="gpt-4o",
+            api_messages=[{"role": "system", "content": "s"}],
+            tools=chat_mod._tools_openai(),
+            dispatcher=ToolDispatcher(conn=minimal_nsys_conn),
+        )
+
+    assert content == "Grounded registry result."
+    assert calls == [("top_kernels", minimal_nsys_conn, True, {"device": 0})]
+    assert mock_lt.completion.call_count == 2
+
+
 def test_run_agent_loop_exits_after_navigate(monkeypatch):
     """run_agent_loop exits immediately after navigate_to_kernel (no extra LLM turn)."""
     fn1 = MagicMock()
