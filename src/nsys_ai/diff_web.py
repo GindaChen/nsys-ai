@@ -18,10 +18,10 @@ from .diff_render import to_diff_json
 from .gpu_label import format_gpu_label
 from .profile import Profile
 from .viewer import build_timeline_gpu_data, generate_timeline_html
-from .web import _TEMPLATE_DIR, _bind_local_server, _run_server
+from .web import _TEMPLATE_DIR, _bind_local_server, _HeadRequestMixin, _run_server
 
 
-class _DiffHandler(BaseHTTPRequestHandler):
+class _DiffHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     """Serve a minimal web diff viewer and JSON APIs."""
 
     before: Profile | None = None

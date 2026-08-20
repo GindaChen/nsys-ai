@@ -102,6 +102,39 @@ def _send_body(
     handler.wfile.write(body)
 
 
+class _HeadBodySuppressor:
+    """Preserve response headers while discarding a HEAD response body."""
+
+    def __init__(self, wfile):
+        self._wfile = wfile
+
+    def write(self, body):
+        return len(body)
+
+    def __getattr__(self, name):
+        return getattr(self._wfile, name)
+
+
+class _HeadRequestMixin:
+    """Route HEAD through GET while keeping its response body empty."""
+
+    _head_only = False
+
+    def do_HEAD(self):
+        original_wfile = self.wfile
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = original_wfile
+            self._head_only = False
+
+    def end_headers(self):
+        super().end_headers()
+        if self._head_only:
+            self.wfile = _HeadBodySuppressor(self.wfile)
+
+
 class _ThreadPoolMixIn(socketserver.ThreadingMixIn):
     """Use a fixed-size thread pool instead of one thread per request. Prevents thread exhaustion."""
 
@@ -224,7 +257,7 @@ def _handle_chat_stream(body_bytes: bytes):
     return None
 
 
-class _ViewerHandler(BaseHTTPRequestHandler):
+class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     """Serve the pre-rendered HTML on GET; GET /api/models for model list;
     GET /api/data for on-demand tile data; GET /api/meta for profile metadata;
     POST /api/chat for AI chat."""
@@ -1258,7 +1291,7 @@ def serve_timeline(
 # ── Mode 3: Evidence View ────────────────────────────────────────
 
 
-class _EvidenceHandler(BaseHTTPRequestHandler):
+class _EvidenceHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     """Serve the Evidence View HTML; GET /api/data for progressive kernel tiles."""
 
     html_bytes: bytes = b""
