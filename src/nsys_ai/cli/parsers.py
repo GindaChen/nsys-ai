@@ -654,6 +654,19 @@ def _build_parser():
         action="store_true",
         help="Don't auto-open a browser with --web",
     )
+    p.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format; json uses the canonical EvidenceReport envelope",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Also save the canonical findings JSON to PATH",
+    )
     p.set_defaults(handler=_cmd_diagnose)
 
     p = sub.add_parser(
@@ -860,7 +873,18 @@ def _build_parser():
 
     p = sub.add_parser("report", help="Generate performance report")
     _add_gpu_trim(p)
-    p.add_argument("-o", "--output", default=None, help="Write markdown report to file")
+    p.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format; json uses the canonical EvidenceReport envelope",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Write markdown, or canonical findings JSON with --format json",
+    )
     p.set_defaults(handler=_cmd_report)
 
     p = sub.add_parser("diff", help="Compare two profiles (before/after)")

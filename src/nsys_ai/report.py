@@ -11,7 +11,6 @@ import statistics
 
 from .gpu_label import format_gpu_label
 from .overlap import (
-    detect_iterations,
     format_iterations,
     format_nccl,
     format_overlap,
@@ -64,6 +63,32 @@ def _iteration_regression_flags(iters: list[dict]) -> list[str]:
     return flags
 
 
+def _run_iteration_skill(prof: Profile, device: int, trim: tuple[int, int]) -> list[dict]:
+    """Run iteration analysis through the canonical skill registry.
+
+    ``report`` is a presentation surface, so it must not maintain a second
+    implementation of iteration detection beside ``diagnose`` and Web chat.
+    The registry skill owns the SQL/schema compatibility and abstention policy;
+    this adapter only keeps rows that are valid iteration records for the
+    legacy report formatter.
+    """
+    from .skills.registry import run_skill
+
+    rows = run_skill(
+        "iteration_timing",
+        prof.query_conn(),
+        raw=True,
+        device=device,
+        trim_start_ns=trim[0],
+        trim_end_ns=trim[1],
+    )
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and "iteration" in row and "duration_ms" in row
+    ]
+
+
 def run_analyze(prof: Profile, device: int, trim: tuple[int, int]) -> dict:
     """
     Run all analyses and return a structured dict for formatting.
@@ -73,7 +98,7 @@ def run_analyze(prof: Profile, device: int, trim: tuple[int, int]) -> dict:
     summary = gpu_summary(prof, device, trim)
     overlap = overlap_analysis(prof, device, trim)
     nccl = nccl_breakdown(prof, device, trim)
-    iters = detect_iterations(prof, device, trim)
+    iters = _run_iteration_skill(prof, device, trim)
     iters_regression = _iteration_regression_flags(iters) if iters else []
     nvtx_summary = _nvtx_hierarchy_summary(prof, device, trim)
 
