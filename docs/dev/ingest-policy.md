@@ -43,7 +43,7 @@ input ends .nsys-rep
     policy=sqlite             -> convert to <stem>.sqlite, sqlite backend, cache_mode=direct
 
 anything else (treated as SQLite)
-    policy=parquetdir -> ExportError: parquetdir ingest requires a parquetdir or .nsys-rep
+    policy=parquetdir -> ExportError: Parquetdir ingest requires a parquetdir directory or a .nsys-rep input.
     policy=sqlite     -> sqlite backend, cache_mode=direct
     policy=auto       -> sqlite backend, cache_mode=auto
 ```
@@ -68,18 +68,19 @@ sometimes does.
 If `nsys` is not on `PATH`, `ExportToolMissingError` names the manual command rather than failing
 generically.
 
-## `NSYS_AI_INGEST` and `NSYS_AI_CACHE_MODE` are different knobs
+## Where the two environment variables are consumed
 
-They are easy to confuse and control different layers:
+`NSYS_AI_INGEST` and `NSYS_AI_CACHE_MODE` are easy to confuse. Their values are documented in
+[Environment variables](../user/environment-variables.md); what matters here is where each is read:
 
-- **`NSYS_AI_INGEST`** (`auto` | `parquetdir` | `sqlite`) chooses the **storage** a profile is read
-  from. It is consumed inside `resolve_profile()`, so it only reaches call sites that go through it.
-- **`NSYS_AI_CACHE_MODE`** (`auto` | `direct` | `parquet`) chooses whether the **SQLite path** builds
-  its Parquet query cache. It is read by `open_auto_db()` and is irrelevant once the parquetdir
-  backend is selected.
+- **`NSYS_AI_INGEST`** is consumed by `resolve_ingest_policy()`, which is called from inside
+  `resolve_profile()`. It therefore reaches exactly those call sites that go through one of the three
+  entry points, and no others.
+- **`NSYS_AI_CACHE_MODE`** is consumed by `open_auto_db()` in `parquet_cache.py`, one layer down, and
+  is irrelevant once the parquetdir backend has been selected.
 
-A caller that hardcodes a path past `resolve_profile()` silently ignores the first of these. That is
-not hypothetical — see below.
+The consequence is the reason this page exists: a caller that derives a path itself does not fail
+loudly, it just silently ignores `NSYS_AI_INGEST`. That is not hypothetical — see below.
 
 ## Call it. Do not reimplement it.
 
@@ -131,5 +132,7 @@ If you are adding a code path that opens a profile:
 ## Related
 
 - [What to hand nsys-ai](../user/profile-inputs.md) — the same rules from the user's side
+- [Environment variables](../user/environment-variables.md) — `NSYS_AI_INGEST` and `NSYS_AI_CACHE_MODE` values
+- [Troubleshooting](../user/troubleshooting.md) — the symptoms a policy bypass produces
 - [Support matrix](../support-matrix.md) — export schema versions covered by tests
 - [doctor](../doctor.md) — what to run when a capture will not open

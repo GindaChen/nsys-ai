@@ -71,3 +71,32 @@ def test_repository_index_links_point_at_files_that_exist():
     assert linked, "no documentation links found in docs/README.md"
     broken = sorted(path for path in linked if not (DOCS / path).is_file())
     assert not broken, "docs/README.md links to files that do not exist: " + ", ".join(broken)
+
+
+def _heading_anchors(path: Path) -> set[str]:
+    """GitHub's slug rule, reduced to what these documents actually use."""
+    anchors = set()
+    for heading in re.findall(r"^#+\s+(.+)$", path.read_text(encoding="utf-8"), re.M):
+        slug = re.sub(r"[^a-z0-9\s-]", "", heading.lower()).strip().replace(" ", "-")
+        anchors.add(slug)
+    return anchors
+
+
+def test_cross_page_links_resolve():
+    """The pages link to each other heavily, so a rename breaks navigation silently.
+
+    Anchors are checked too. A link to a section that has been retitled still renders as a
+    working link and lands the reader at the top of the page, which is the failure that is
+    hardest to notice by reading the diff.
+    """
+    broken = []
+    for page in _indexed_pages():
+        path = DOCS / page
+        for _text, target in re.findall(r"\[([^\]]+)\]\((\.[^)]+)\)", path.read_text(encoding="utf-8")):
+            file_part, _, anchor = target.partition("#")
+            destination = (path.parent / file_part).resolve()
+            if not destination.is_file():
+                broken.append(f"{page} -> {target} (no such file)")
+            elif anchor and anchor not in _heading_anchors(destination):
+                broken.append(f"{page} -> {target} (no such heading)")
+    assert not broken, "broken links between documentation pages:\n  " + "\n  ".join(broken)
