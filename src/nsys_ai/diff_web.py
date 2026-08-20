@@ -399,14 +399,24 @@ _DIFF_HTML = """<!doctype html>
           total_ms: 'Wall-clock span',
           overlap_pct: 'Overlap %',
         };
+        // Positive means an improvement for the metric; negative means a regression.
+        const improvementDirection = {
+          compute_only_ms: -1,
+          nccl_only_ms: -1,
+          overlap_ms: 1,
+          idle_ms: -1,
+          total_ms: -1,
+          overlap_pct: 1,
+        };
         html += '<div class=\"overlap-grid\" style=\"margin-top:0.75rem;\">';
         for (const k of keys) {
           if (!d.overlap || !(k in d.overlap.before) || !(k in d.overlap.after)) continue;
           const b = d.overlap.before[k];
           const a = d.overlap.after[k];
           const delta = d.overlap.delta[k] ?? (a - b);
-          const kindClass = delta > 0 ? (k === 'idle_ms' ? 'delta-bad' : 'delta-bad') :
-                            delta < 0 ? (k === 'idle_ms' ? 'delta-good' : 'delta-good') : '';
+          const signedDelta = delta * improvementDirection[k];
+          const kindClass = signedDelta > 0 ? 'delta-good' :
+                            signedDelta < 0 ? 'delta-bad' : '';
           html += '<div><span class=\"overlap-label\">' + labels[k] +
                   '</span><span class=\"overlap-value\">' + b + ' → ' + a +
                   '</span><span class=\"' + kindClass + '\">(' + (delta >= 0 ? '+' : '') +
