@@ -273,6 +273,29 @@ def test_non_git_provenance_degrades_to_absolute_cwd(tmp_path):
     assert worktree_diff_sha256 is None
 
 
+def test_git_provenance_hashes_untracked_files_in_chunks(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "tracked.txt").write_text("tracked")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    (repo / "capture.nsys-rep").write_bytes(b"capture" * 1024)
+
+    def forbidden_read_bytes(_path):
+        raise AssertionError("untracked provenance must hash files incrementally")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    repository, commit, _cwd, dirty, digest = discover_git_provenance(repo)
+
+    assert repository == str(repo.resolve())
+    assert commit is not None
+    assert dirty is True
+    assert digest is not None and len(digest) == 64
+
+
 def test_dry_run_is_structurally_redacted_and_does_not_create_output(
     tmp_path, fake_nsys, monkeypatch
 ):

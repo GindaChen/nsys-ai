@@ -275,10 +275,14 @@ def discover_git_provenance(
         try:
             metadata = path.lstat()
             if stat.S_ISREG(metadata.st_mode):
+                content_digest = hashlib.sha256()
+                with path.open("rb") as file_handle:
+                    while chunk := file_handle.read(1 << 20):
+                        content_digest.update(chunk)
                 payload = (
                     b"regular\0"
                     + stat.S_IMODE(metadata.st_mode).to_bytes(4, "big")
-                    + path.read_bytes()
+                    + content_digest.digest()
                 )
             elif stat.S_ISLNK(metadata.st_mode):
                 payload = b"symlink\0" + os.fsencode(os.readlink(path))
