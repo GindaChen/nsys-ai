@@ -189,7 +189,7 @@ function showLoading(msg) {
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'loadingOverlay';
-        overlay.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:${P.bg};color:${P.accent};font-size:14px;z-index:100;pointer-events:none;`;
+        overlay.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:${withAlpha(P.bg, 0.8)};color:${P.accent};font-size:14px;z-index:100;pointer-events:none;`;
         wrap.style.position = 'relative';
         wrap.appendChild(overlay);
     }
@@ -951,9 +951,9 @@ function applyRenderLockSettings() {
 }
 
 // ── Colors (vivid so bars stand out on dark background; background unchanged) ──
-const STREAM_COLORS = [P.laneCompute, P.accent, P.laneComm, P.memcpy, P.magnitude[4], P.accentDim, P.cat[4]];
+const STREAM_COLORS = [P.laneCompute, P.accent, P.laneComm, P.laneMemory, P.magnitude[4], P.accentDim, P.cat[4]];
 const NVTX_COLORS = P.cat;
-const GPU_SEP_COLORS = [P.accent, P.laneComm, P.laneCompute, P.memcpy];
+const GPU_SEP_COLORS = [P.accent, P.laneComm, P.laneCompute, P.laneMemory];
 
 function streamColor(idx) { return STREAM_COLORS[idx % STREAM_COLORS.length]; }
 const _nvtxIdentityColors = new Map();
@@ -1691,7 +1691,7 @@ function drawStreams(W, H, renderState) {
 
         // Background
         if (isSelected) {
-            ctx.fillStyle = withAlpha(P.surfaceRaised || P.surface, 0.5);
+            ctx.fillStyle = withAlpha(P.selected, 0.5);
             ctx.fillRect(0, y, W, STREAM_H);
         }
 
