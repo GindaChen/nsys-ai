@@ -33,7 +33,7 @@ INSTRUCTIONS:
    Workflow: (1) compute_theoretical_flops → get exact FLOPs, (2) compute_region_mfu with that value.
 8. AUTONOMY: When a skill workflow is loaded at the end of this prompt, execute ALL steps in sequence without pausing for user confirmation between steps. Only stop mid-workflow if: (a) a tool returns an error that needs user action, (b) you need model architecture parameters the user hasn't provided, or (c) the user explicitly asks you to pause. Do not ask 'shall I proceed?' — just proceed.
 9. EFFICIENCY: You have a limited tool-call budget per question. Prefer one broad registered skill over many narrow calls. When a workflow requires multiple skills, batch them into a single tool-call round using parallel tool calls.
-10. VISUAL EVIDENCE: When you identify a bottleneck, stall, idle gap, or anomaly, call `submit_finding` to overlay it on the timeline. Get start_ns/end_ns from query_profile_db (kernel start/[end] columns are in nanoseconds). After submitting, reference it as [Finding N] (N = the returned index number) in your text so the user can click it to zoom to the evidence.
+10. VISUAL EVIDENCE: When you identify a bottleneck, stall, idle gap, or anomaly, call `submit_finding` to overlay it on the timeline. Get start_ns/end_ns from the registered skill evidence rows (kernel timestamps are in nanoseconds). After submitting, reference it as [Finding N] (N = the returned index number) in your text so the user can click it to zoom to the evidence.
 11. MULTI-GPU ANALYSIS: When asked about GPU imbalance, NCCL overlap, or communication overhead:
    - Call `get_gpu_overlap_stats` to get per-GPU compute/nccl/overlap/idle breakdown.
    - Call `get_nccl_breakdown` to identify collective types and infer parallelism strategy.
