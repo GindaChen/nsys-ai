@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import threading
 from types import SimpleNamespace
 
@@ -9,7 +10,10 @@ import pytest
 from nsys_ai import web
 from nsys_ai.diff_web import _DIFF_HTML, _DiffHandler
 from nsys_ai.gpu_label import format_gpu_label, format_gpu_narrative_label
+from nsys_ai.profile import Profile
 from nsys_ai.summary import auto_commentary
+from nsys_ai.viewer import generate_html
+from nsys_ai.web import _slice_tree_nodes
 
 
 def test_gpu_label_omits_missing_metadata():
@@ -32,6 +36,49 @@ def test_gpu_label_preserves_fractional_memory_precision():
         0,
         SimpleNamespace(name="H200", pci_bus="", sm_count=0, memory_bytes=150_100_000_000),
     ) == "GPU 0 - H200, 150.1GB"
+
+
+def test_tree_web_shell_does_not_embed_profile_data(minimal_nsys_db_path):
+    with Profile(minimal_nsys_db_path) as prof:
+        html = generate_html(prof, 0, prof.meta.time_range, embed_data=False)
+
+    assert len(html) < 200_000
+    assert "let DATA = [];" in html
+    assert "/api/tree" in html
+
+
+def test_tree_web_endpoint_returns_bounded_slices():
+    old_data = web._ViewerHandler._tree_data
+    old_configured = web._ViewerHandler._tree_configured
+    web._ViewerHandler._tree_data = [
+        {
+            "type": "nvtx",
+            "name": "root",
+            "path": "root",
+            "children": [{"type": "kernel", "name": "child", "path": "root > child"}],
+        }
+    ]
+    web._ViewerHandler._tree_configured = True
+    try:
+        status, body, content_type = _get(web._ViewerHandler, "/api/tree?depth=0")
+    finally:
+        web._ViewerHandler._tree_data = old_data
+        web._ViewerHandler._tree_configured = old_configured
+
+    payload = json.loads(body)
+    assert status == 200
+    assert content_type.startswith("application/json")
+    assert payload["nodes"][0]["has_children"] is True
+    assert "children" not in payload["nodes"][0] or payload["nodes"][0]["children"] == []
+
+
+def test_tree_slice_preserves_children_marker_without_mutating_source():
+    source = [{"path": "root", "children": [{"path": "child"}]}]
+
+    result = _slice_tree_nodes(source, 0)
+
+    assert result[0]["has_children"] is True
+    assert source[0]["children"] == [{"path": "child"}]
 
 
 @pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])

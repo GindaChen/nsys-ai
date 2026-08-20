@@ -1022,7 +1022,10 @@
     <div class="tooltip" id="tooltip" style="display:none"></div>
 
     <script>
-        const DATA = $DATA;
+        const API_PREFIX = "$API_PREFIX";
+        let DATA = [];
+        let fullDataPromise = null;
+        let fullDataLoaded = false;
         const PROFILE_PATH = $PROFILE_PATH;
         const DB_AGENT_ENABLED = "$DB_AGENT_ENABLED" === "1";
         let heatEnabled = false, demangledMode = false, searchMode = 'path', currentTab = 'tree', scopeActive = false, scopedData = null, scopePath = null;
@@ -1053,6 +1056,48 @@
         function getTopNVTX(nodes, depth) { const r = []; nodes.forEach(n => { if (n.type === 'nvtx') { r.push({ name: n.name, path: n.path, start_ns: n.start_ns, end_ns: n.end_ns, duration_ms: n.duration_ms }); if (depth > 0 && n.children) r.push(...getTopNVTX(n.children, depth - 1)) } }); return r }
 
         function activeData() { return scopedData || DATA }
+
+        function treeUrl(path, depth) {
+            let url = (API_PREFIX || '') + '/api/tree?depth=' + encodeURIComponent(depth);
+            if (path) url += '&path=' + encodeURIComponent(path);
+            return url;
+        }
+        async function fetchTree(path, depth) {
+            const response = await fetch(treeUrl(path, depth));
+            if (!response.ok) throw new Error('tree request failed (' + response.status + ')');
+            const payload = await response.json();
+            if (payload.error) throw new Error(payload.error);
+            return Array.isArray(payload.nodes) ? payload.nodes : [];
+        }
+        function setTreeData(nodes) {
+            DATA = Array.isArray(nodes) ? nodes : [];
+            const stats = countNodes(DATA);
+            document.getElementById('stats').innerHTML =
+                '<span>NVTX: <strong>' + stats.nvtx + '</strong></span>' +
+                '<span>Kernels: <strong>' + stats.kern + '</strong></span>' +
+                '<span>Total GPU: <strong>' + stats.totalMs.toFixed(1) + 'ms</strong></span>';
+            let html = ''; DATA.forEach(n => html += renderNode(n, 0));
+            document.getElementById('tree').innerHTML = html;
+            updateTreeExpandButtons();
+        }
+        async function ensureFullData() {
+            if (fullDataLoaded) return DATA;
+            if (!fullDataPromise) {
+                fullDataPromise = fetchTree('', 'full').then(nodes => {
+                    fullDataLoaded = true;
+                    setTreeData(nodes);
+                    return DATA;
+                });
+            }
+            return fullDataPromise;
+        }
+        async function loadInitialTree() {
+            try {
+                setTreeData(await fetchTree('', 2));
+            } catch (error) {
+                document.getElementById('tree').textContent = 'Failed to load tree: ' + error.message;
+            }
+        }
 
         // = Profile context (Issue #6) =
         function getTimeRangeFromData(nodes) {
@@ -1198,17 +1243,23 @@
             document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
             document.getElementById('treeControls').style.display = tab === 'tree' ? 'flex' : 'none';
             document.getElementById('searchBar').style.display = (tab === 'tree' || tab === 'kernels') ? 'block' : 'none';
-            if (tab === 'kernels') renderKernelView();
-            if (tab === 'scan') renderScanView();
-            if (tab === 'scanv2') renderScanV2();
-            if (tab === 'streams') renderStreamView();
-            if (tab === 'aggregate') renderAggView();
-            if (tab === 'patterns') renderPatternView();
+            if (tab !== 'tree') {
+                ensureFullData().then(() => {
+                    if (tab === 'kernels') renderKernelView();
+                    if (tab === 'scan') renderScanView();
+                    if (tab === 'scanv2') renderScanV2();
+                    if (tab === 'streams') renderStreamView();
+                    if (tab === 'aggregate') renderAggView();
+                    if (tab === 'patterns') renderPatternView();
+                }).catch(error => {
+                    document.getElementById('tree').textContent = 'Failed to load profile data: ' + error.message;
+                });
+            }
         }
 
         // = Tree view =
         function renderNode(node, depth) {
-            const hasC = node.children && node.children.length > 0, isK = node.type === 'kernel', cls = isK ? 'kernel' : 'nvtx';
+            const hasC = (node.children && node.children.length > 0) || node.has_children === true, isK = node.type === 'kernel', cls = isK ? 'kernel' : 'nvtx';
             const icon = isK ? '⚡' : '📦', toggle = hasC ? '▶' : ' ';
             const displayName = (demangledMode && isK && node.demangled) ? node.demangled : node.name;
             const stream = node.stream !== undefined ? '<span class="stream">[stream ' + node.stream + ']</span>' : '';
@@ -1224,10 +1275,45 @@
             h += '<div class="node-header" onclick="toggleNode(this)">';
             h += '<span class="toggle">' + toggle + '</span><span class="icon">' + icon + '</span>';
             h += '<span class="name">' + escHtml(displayName) + '</span>' + stream + dur + ' ' + heatBar + pctLabel + '</div>';
-            if (hasC) { h += '<div class="children' + (depth > 1 ? ' collapsed' : '') + '">'; node.children.forEach(c => h += renderNode(c, depth + 1)); h += '</div>' }
+            if (hasC) {
+                const lazy = node.has_children === true && !(node.children && node.children.length);
+                h += '<div class="children' + (depth > 1 || lazy ? ' collapsed' : '') + '" data-lazy="' + (lazy ? '1' : '0') + '">';
+                if (node.children) node.children.forEach(c => h += renderNode(c, depth + 1));
+                h += '</div>';
+            }
             h += '</div>'; return h;
         }
-        function toggleNode(hdr) { const c = hdr.nextElementSibling; if (!c || !c.classList.contains('children')) return; c.classList.toggle('collapsed'); hdr.querySelector('.toggle').textContent = c.classList.contains('collapsed') ? '▶' : '▼' }
+        async function toggleNode(hdr) {
+            const c = hdr.nextElementSibling;
+            if (!c || !c.classList.contains('children')) return;
+            if (c.dataset.lazy === '1' && c.dataset.loaded !== '1') {
+                const nodeEl = hdr.parentElement;
+                c.classList.remove('collapsed');
+                c.textContent = 'Loading…';
+                try {
+                    const children = await fetchTree(nodeEl.dataset.path || '', 2);
+                    c.textContent = '';
+                    children.forEach(child => c.insertAdjacentHTML('beforeend', renderNode(child, Number(nodeEl.dataset.depth || 0) + 1)));
+                    c.dataset.loaded = '1';
+                    c.dataset.lazy = '0';
+                    const target = findTreeNode(DATA, nodeEl.dataset.path || '');
+                    if (target) { target.children = children; delete target.has_children; }
+                } catch (error) {
+                    c.textContent = 'Failed to load children: ' + error.message;
+                    return;
+                }
+            }
+            c.classList.toggle('collapsed');
+            hdr.querySelector('.toggle').textContent = c.classList.contains('collapsed') ? '▶' : '▼';
+        }
+        function findTreeNode(nodes, path) {
+            for (const node of nodes) {
+                if (node.path === path) return node;
+                const found = findTreeNode(node.children || [], path);
+                if (found) return found;
+            }
+            return null;
+        }
         function updateTreeExpandButtons() {
             document.getElementById('expandAllBtn').classList.toggle('active', treeExpandState === 'all');
             document.getElementById('collapseAllBtn').classList.toggle('active', treeExpandState === 'none');
@@ -2087,9 +2173,8 @@
         }
 
         // = Initial render =
-        const stats = countNodes(DATA);
-        document.getElementById('stats').innerHTML = '<span>NVTX: <strong>' + stats.nvtx + '</strong></span><span>Kernels: <strong>' + stats.kern + '</strong></span><span>Total GPU: <strong>' + stats.totalMs.toFixed(1) + 'ms</strong></span>';
-        let html = ''; DATA.forEach(n => html += renderNode(n, 0)); document.getElementById('tree').innerHTML = html;
+        document.getElementById('tree').textContent = 'Loading tree…';
+        loadInitialTree();
         renderChatHistory();
     </script>
 </body>

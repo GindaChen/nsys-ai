@@ -55,6 +55,36 @@ def _versioned_asset_url(path: str) -> str:
     return f"{path}?v={_template_asset_version()}"
 
 
+def _find_tree_path(nodes: list[dict], path: str) -> dict | None:
+    """Find a serialized NVTX node by its stable display path."""
+    for node in nodes:
+        if node.get("path") == path:
+            return node
+        children = node.get("children") or []
+        found = _find_tree_path(children, path)
+        if found is not None:
+            return found
+    return None
+
+
+def _slice_tree_nodes(nodes: list[dict], depth: int | None) -> list[dict]:
+    """Copy a tree to *depth*, preserving a marker for unloaded children."""
+    result = []
+    for node in nodes:
+        copied = {key: value for key, value in node.items() if key != "children"}
+        children = node.get("children") or []
+        if children:
+            if depth is None or depth > 0:
+                copied["children"] = _slice_tree_nodes(
+                    children, None if depth is None else depth - 1
+                )
+            else:
+                copied["children"] = []
+                copied["has_children"] = True
+        result.append(copied)
+    return result
+
+
 #: Below this, the gzip header costs more than the compression saves.
 _MIN_COMPRESS_BYTES = 1024
 
@@ -278,6 +308,10 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     _session_id: str | None = None  # SessionStore id (always set by serve_timeline)
     _session_root: str = ".nsys-ai/sessions"
     _trim: tuple[int, int] | None = None
+    _tree_data: list[dict] = []
+    _tree_configured: bool = False
+    _tree_device: int | None = None
+    _tree_trim: tuple[int, int] | None = None
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -301,6 +335,9 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 options = []
                 default = None
             self._json_response({"default": default, "options": options})
+            return
+        if path == "/api/tree":
+            self._handle_tree()
             return
         if path == "/api/meta":
             self._handle_meta()
@@ -387,6 +424,35 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 "profile_id": self.__class__._profile_id,
             }
         )
+
+    def _handle_tree(self):
+        """Return a bounded tree slice for the lazy NVTX tree viewer."""
+        from urllib.parse import parse_qs, urlparse
+
+        if not self.__class__._tree_configured:
+            self._json_response({"error": "tree data is not configured"}, 500)
+            return
+        qs = parse_qs(urlparse(self.path).query)
+        path = str(qs.get("path", [""])[0])
+        depth_raw = str(qs.get("depth", ["2"])[0]).lower()
+        if depth_raw == "full":
+            depth = None
+        else:
+            try:
+                depth = max(0, min(8, int(depth_raw)))
+            except ValueError:
+                self._json_response({"error": "depth must be an integer or full"}, 400)
+                return
+
+        source = self.__class__._tree_data
+        if path:
+            source = _find_tree_path(source, path)
+            if source is None:
+                self._json_response({"error": "tree path not found", "path": path}, 404)
+                return
+            source = source.get("children") or []
+        nodes = _slice_tree_nodes(source, depth)
+        self._json_response({"nodes": nodes, "path": path, "depth": depth_raw})
 
     def _handle_search(self):
         """Search the complete pre-built profile, including unloaded tiles."""
@@ -912,7 +978,15 @@ def serve(prof, device: int, trim: tuple[int, int], *, port: int = 8142, open_br
     """Start a local HTTP server serving the interactive HTML viewer.
     If the requested port is in use, tries port 0 (system assigns a free port) and opens that URL.
     """
-    html = generate_html(prof, device, trim)
+    from .nvtx_tree import build_nvtx_tree
+    from .tree import to_json
+
+    _ViewerHandler.prof = prof
+    _ViewerHandler._tree_device = device
+    _ViewerHandler._tree_trim = trim
+    _ViewerHandler._tree_data = to_json(build_nvtx_tree(prof, device, trim))
+    _ViewerHandler._tree_configured = True
+    html = generate_html(prof, device, trim, embed_data=False)
     _ViewerHandler.html_bytes = html.encode("utf-8")
 
     server = _bind_local_server(port, _ViewerHandler)
