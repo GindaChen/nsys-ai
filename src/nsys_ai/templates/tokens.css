@@ -36,4 +36,23 @@
     --diff-label: #9ca3af;
     --verdict-better: #58a6ff;
     --verdict-worse: #f0883e;
+
+    /* Primer-derived categorical and magnitude scales for canvas charts. */
+    --cat-1: #b643ef;
+    --cat-2: #2f6f37;
+    --cat-3: #0576ff;
+    --cat-4: #eb3342;
+    --cat-5: #18915e;
+    --cat-6: #984b10;
+    --cat-7: #975bf1;
+    --cat-8: #e1430e;
+    --cat-other: #576270;
+    --lane-compute: #18915e;
+    --lane-comm: #975bf1;
+    --lane-memory: #895906;
+    --mag-1: #7a3a0d;
+    --mag-2: #984b10;
+    --mag-3: #b85a15;
+    --mag-4: #d47c33;
+    --mag-5: #e8a163;
 }

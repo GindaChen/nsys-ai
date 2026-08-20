@@ -1,9 +1,46 @@
 const BOOT = window.__TIMELINE_BOOTSTRAP__ || {};
+const CSS_TOKENS = getComputedStyle(document.documentElement);
+const P = Object.freeze({
+    bg: CSS_TOKENS.getPropertyValue('--bg').trim(),
+    surface: CSS_TOKENS.getPropertyValue('--surface').trim(),
+    surfaceRaised: CSS_TOKENS.getPropertyValue('--surface-raised').trim(),
+    border: CSS_TOKENS.getPropertyValue('--border').trim(),
+    borderSubtle: CSS_TOKENS.getPropertyValue('--border-subtle').trim(),
+    text: CSS_TOKENS.getPropertyValue('--text').trim(),
+    textDim: CSS_TOKENS.getPropertyValue('--text-dim').trim(),
+    textMuted: CSS_TOKENS.getPropertyValue('--text-muted').trim(),
+    accent: CSS_TOKENS.getPropertyValue('--accent').trim(),
+    accentDim: CSS_TOKENS.getPropertyValue('--accent-dim').trim(),
+    nvtx: CSS_TOKENS.getPropertyValue('--nvtx').trim(),
+    kernel: CSS_TOKENS.getPropertyValue('--kernel').trim(),
+    nccl: CSS_TOKENS.getPropertyValue('--nccl').trim(),
+    memcpy: CSS_TOKENS.getPropertyValue('--memcpy').trim(),
+    bubble: CSS_TOKENS.getPropertyValue('--bubble').trim(),
+    success: CSS_TOKENS.getPropertyValue('--kernel').trim(),
+    selected: CSS_TOKENS.getPropertyValue('--sel').trim(),
+    verdictBetter: CSS_TOKENS.getPropertyValue('--verdict-better').trim(),
+    verdictWorse: CSS_TOKENS.getPropertyValue('--verdict-worse').trim(),
+    cat: Array.from({ length: 8 }, (_, i) => CSS_TOKENS.getPropertyValue(`--cat-${i + 1}`).trim()),
+    catOther: CSS_TOKENS.getPropertyValue('--cat-other').trim(),
+    laneCompute: CSS_TOKENS.getPropertyValue('--lane-compute').trim(),
+    laneComm: CSS_TOKENS.getPropertyValue('--lane-comm').trim(),
+    laneMemory: CSS_TOKENS.getPropertyValue('--lane-memory').trim(),
+    magnitude: Array.from({ length: 5 }, (_, i) => CSS_TOKENS.getPropertyValue(`--mag-${i + 1}`).trim()),
+});
 const INITIAL_DATA = BOOT.INITIAL_DATA ?? null;
 const PROGRESSIVE = BOOT.PROGRESSIVE === true;
 const TILE_WINDOW_S = Number.isFinite(BOOT.TILE_WINDOW_S) ? BOOT.TILE_WINDOW_S : 5;  // seconds per tile
 const GPU_INFO = Array.isArray(BOOT.GPU_INFO) ? BOOT.GPU_INFO : [];
 const FINDINGS = Array.isArray(BOOT.FINDINGS) ? BOOT.FINDINGS : [];
+
+function withAlpha(hex, alpha) {
+    const value = String(hex || '').replace('#', '');
+    if (value.length !== 6) return hex;
+    const red = parseInt(value.slice(0, 2), 16);
+    const green = parseInt(value.slice(2, 4), 16);
+    const blue = parseInt(value.slice(4, 6), 16);
+    return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -152,7 +189,7 @@ function showLoading(msg) {
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'loadingOverlay';
-        overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(13,17,23,0.8);color:#79b8ff;font-size:14px;z-index:100;pointer-events:none;';
+        overlay.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:${P.bg};color:${P.accent};font-size:14px;z-index:100;pointer-events:none;`;
         wrap.style.position = 'relative';
         wrap.appendChild(overlay);
     }
@@ -539,30 +576,30 @@ function drawOverview() {
     const [lo, hi] = overviewRangeNs();
     const fullSpan = Math.max(hi - lo, 1);
     overviewCtx.clearRect(0, 0, width, height);
-    overviewCtx.fillStyle = '#0d1117';
+    overviewCtx.fillStyle = P.bg;
     overviewCtx.fillRect(0, 0, width, height);
     const barWidth = Math.max(1, width / Math.max(overviewBins.length, 1));
     for (let i = 0; i < overviewBins.length; i++) {
         const h = Math.max(1, overviewBins[i] * 21);
-        overviewCtx.fillStyle = `rgba(88, 166, 255, ${0.16 + overviewBins[i] * 0.58})`;
+        overviewCtx.fillStyle = withAlpha(P.accentDim, 0.16 + overviewBins[i] * 0.58);
         overviewCtx.fillRect(i * barWidth, height - h - 4, Math.ceil(barWidth), h);
     }
     const x1 = Math.max(0, (viewStart - lo) / fullSpan * width);
     const x2 = Math.min(width, (viewEnd - lo) / fullSpan * width);
-    overviewCtx.fillStyle = 'rgba(88, 166, 255, 0.12)';
+    overviewCtx.fillStyle = withAlpha(P.accentDim, 0.12);
     overviewCtx.fillRect(x1, 0, Math.max(2, x2 - x1), height);
-    overviewCtx.strokeStyle = '#79b8ff';
+    overviewCtx.strokeStyle = P.accent;
     overviewCtx.lineWidth = 1;
     overviewCtx.strokeRect(x1 + 0.5, 1.5, Math.max(1, x2 - x1 - 1), height - 3);
-    overviewCtx.fillStyle = '#79b8ff';
+    overviewCtx.fillStyle = P.accent;
     overviewCtx.fillRect(Math.max(0, x1 - 1), 0, 3, height);
     overviewCtx.fillRect(Math.min(width - 2, x2 - 1), 0, 3, height);
     if (overviewSelecting) {
         const sx = Math.max(0, Math.min(width, (overviewSelectStartNs - lo) / fullSpan * width));
         const ex = Math.max(0, Math.min(width, (overviewSelectEndNs - lo) / fullSpan * width));
-        overviewCtx.fillStyle = 'rgba(210, 168, 255, 0.24)';
+        overviewCtx.fillStyle = withAlpha(P.nccl, 0.24);
         overviewCtx.fillRect(Math.min(sx, ex), 0, Math.max(2, Math.abs(ex - sx)), height);
-        overviewCtx.strokeStyle = '#d2a8ff';
+        overviewCtx.strokeStyle = P.nccl;
         overviewCtx.strokeRect(Math.min(sx, ex) + 0.5, 1.5, Math.max(1, Math.abs(ex - sx) - 1), height - 3);
     }
 }
@@ -914,12 +951,20 @@ function applyRenderLockSettings() {
 }
 
 // ── Colors (vivid so bars stand out on dark background; background unchanged) ──
-const STREAM_COLORS = ['#3fb950', '#58a6ff', '#bc8cff', '#ff7b7b', '#d4a72c', '#79b8ff', '#56d364'];
-const NVTX_COLORS = ['#5b8dc9', '#8b7ab8', '#3d9b6e', '#c76b7a', '#b89b4d', '#6b9bc4'];
-const GPU_SEP_COLORS = ['#58a6ff', '#bc8cff', '#3fb950', '#ff7b7b'];
+const STREAM_COLORS = [P.laneCompute, P.accent, P.laneComm, P.memcpy, P.magnitude[4], P.accentDim, P.cat[4]];
+const NVTX_COLORS = P.cat;
+const GPU_SEP_COLORS = [P.accent, P.laneComm, P.laneCompute, P.memcpy];
 
 function streamColor(idx) { return STREAM_COLORS[idx % STREAM_COLORS.length]; }
-function nvtxColor(depth) { return NVTX_COLORS[depth % NVTX_COLORS.length]; }
+const _nvtxIdentityColors = new Map();
+function nvtxColor(depth, identity) {
+    const key = String(identity || `depth:${depth}`);
+    if (!_nvtxIdentityColors.has(key)) {
+        const index = _nvtxIdentityColors.size;
+        _nvtxIdentityColors.set(key, index < NVTX_COLORS.length ? NVTX_COLORS[index] : P.catOther);
+    }
+    return _nvtxIdentityColors.get(key);
+}
 
 // Per-kernel coloring: Perfetto-inspired hash → perceptually-uniform HSL
 // Normalizes name (strip templates, pointers, numeric suffixes) so similar
@@ -1302,20 +1347,20 @@ function drawRuler(W) {
     const anchorNs = Math.floor(viewStart / 1e9) * 1e9;
     const rulerUnit = chooseRulerUnit(nice);
 
-    ctx.fillStyle = '#161b22';
+    ctx.fillStyle = P.surface;
     ctx.fillRect(0, 0, W, RULER_H);
-    ctx.strokeStyle = '#30363d';
+    ctx.strokeStyle = P.border;
     ctx.beginPath(); ctx.moveTo(0, RULER_H - 0.5); ctx.lineTo(W, RULER_H - 0.5); ctx.stroke();
 
     const start = Math.ceil(viewStart / nice) * nice;
-    ctx.fillStyle = '#8b949e';
+    ctx.fillStyle = P.textDim;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     let prevLabel = null;
     for (let t = start; t <= viewEnd; t += nice) {
         const x = nsToX(t);
         if (x < LABEL_W || x > W) continue;
-        ctx.strokeStyle = '#30363d';
+        ctx.strokeStyle = P.border;
         ctx.beginPath(); ctx.moveTo(x, RULER_H - 6); ctx.lineTo(x, RULER_H); ctx.stroke();
         const valueNs = mode === 'anchored' ? (t - anchorNs) : t;
         let decimals = rulerUnit.decimals;
@@ -1330,7 +1375,7 @@ function drawRuler(W) {
 
     // Label
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#8b949e';
+    ctx.fillStyle = P.textDim;
     if (mode === 'anchored') {
         const anchorLabel = formatTickValue(anchorNs, 1e9, 0);
         ctx.fillText(`Time ${anchorLabel}s + (${rulerUnit.unit})`, LABEL_W - 6, RULER_H - 7);
@@ -1381,7 +1426,7 @@ function drawNVTX(W) {
     const renderState = timelineRenderState(W);
     renderState.condensedNvtxLabels = 0;
     const baseY = RULER_H + findingsLaneH();
-    ctx.fillStyle = 'rgba(22, 27, 34, 0.85)';
+    ctx.fillStyle = withAlpha(P.surface, 0.85);
     ctx.fillRect(0, baseY, W, nvtxAreaH());
 
     const { activeGpu, thread, spans: allVisibleSpans, clipped } = activeNvtxLayout();
@@ -1401,7 +1446,8 @@ function drawNVTX(W) {
         const isSel = selectedNvtx && selectedNvtx.key === span._key;
         const isSearchMatch = !searchQuery || searchNvtxMatches.has(span._key);
 
-        ctx.fillStyle = nvtxColor(span.depth);
+        const spanColor = nvtxColor(span.depth, span.path || span.name);
+        ctx.fillStyle = spanColor;
         let alpha = 0.82;
         if (selectedKernel) alpha = renderSettings.nvtxWhenKernelSelectedAlpha;
         if (selectedNvtx) alpha = isSel ? renderSettings.nvtxSelectedAlpha : renderSettings.nvtxNonSelectedAlpha;
@@ -1409,7 +1455,7 @@ function drawNVTX(W) {
         ctx.globalAlpha = alpha;
         ctx.fillRect(x1, y, w, h);
         ctx.globalAlpha = 1;
-        ctx.strokeStyle = nvtxColor(span.depth);
+        ctx.strokeStyle = spanColor;
         ctx.globalAlpha = isSel ? 1 : 0.75;
         ctx.strokeRect(x1 + 0.5, y + 0.5, w - 1, h - 1);
         ctx.globalAlpha = 1;
@@ -1426,7 +1472,7 @@ function drawNVTX(W) {
         if (canLabel || isSel || (searchQuery && isSearchMatch)) {
             seenLabels.add(labelKey);
             labelEnds.set(span._lane, x1 + Math.max(40, w));
-            ctx.fillStyle = isSel ? '#ffffff' : (searchQuery && !isSearchMatch ? '#6b7280' : '#e6edf3');
+            ctx.fillStyle = isSel ? P.text : (searchQuery && !isSearchMatch ? P.textMuted : P.text);
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
             ctx.save();
@@ -1442,7 +1488,7 @@ function drawNVTX(W) {
 
     // NVTX depth labels
     for (let d = 0; d < depthMax; d++) {
-        ctx.fillStyle = '#8b949e';
+        ctx.fillStyle = P.textDim;
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         ctx.font = '9px SF Mono, monospace';
@@ -1450,13 +1496,13 @@ function drawNVTX(W) {
     }
 
     if (!visibleSpans.length && nvtxLoadingForGpu(activeGpu) && depthMax > 0) {
-        ctx.fillStyle = '#d4a72c';
+        ctx.fillStyle = P.magnitude[4];
         ctx.font = '10px SF Mono, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText('Loading NVTX…', LABEL_W + 8, baseY + NVTX_ROW_H / 2);
     } else if (!visibleSpans.length && depthMax > 0) {
-        ctx.fillStyle = '#8b949e';
+        ctx.fillStyle = P.textDim;
         ctx.font = '10px SF Mono, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
@@ -1472,7 +1518,7 @@ function drawNVTX(W) {
         const threadLabel = thread ? ` • ${thread}` : '';
         ctx.fillText(`NVTX: GPU ${activeGpu}${threadLabel}`, LABEL_W + 4, baseY + 2);
         if (clippedCount > 0) {
-            ctx.fillStyle = '#8b949e';
+            ctx.fillStyle = P.textDim;
             ctx.textAlign = 'right';
             ctx.fillText(`+${clippedCount} condensed`, W - 8, baseY + 2);
         }
@@ -1481,7 +1527,7 @@ function drawNVTX(W) {
 
     // Separator
     const sepY = baseY + nvtxAreaH() - 1;
-    ctx.strokeStyle = '#30363d';
+    ctx.strokeStyle = P.border;
     ctx.beginPath(); ctx.moveTo(0, sepY); ctx.lineTo(W, sepY); ctx.stroke();
 }
 
@@ -1501,7 +1547,7 @@ function drawKernelBlock(k, y, W, options = {}) {
     // Per-kernel color from name hash (NCCL keeps special purple).
     if (!k._nsysColor) {
         k._nsysColor = isNcclK
-            ? { color: '#d2a8ff', lightness: 72 }
+            ? { color: P.nccl, lightness: 72 }
             : kernelColorFromName(k.name);
     }
     const kColor = k._nsysColor;
@@ -1515,7 +1561,7 @@ function drawKernelBlock(k, y, W, options = {}) {
     } else if (w < 6) {
         alpha *= Math.max(0.25, w / 6);
     }
-    if (isSel) fillColor = '#79b8ff', alpha = 1;
+    if (isSel) fillColor = P.accent, alpha = 1;
 
     ctx.globalAlpha = alpha;
     ctx.fillStyle = fillColor;
@@ -1528,7 +1574,7 @@ function drawKernelBlock(k, y, W, options = {}) {
         ctx.globalAlpha = 1;
     }
     if (isSel) {
-        ctx.strokeStyle = '#79b8ff';
+        ctx.strokeStyle = P.accent;
         ctx.lineWidth = 2;
         ctx.strokeRect(x1, bY, w, bH);
         ctx.lineWidth = 1;
@@ -1536,8 +1582,8 @@ function drawKernelBlock(k, y, W, options = {}) {
 
     if (options.label && w > 20) {
         ctx.fillStyle = isSel
-            ? '#fff'
-            : (searchQuery && !isMatch ? '#555' : (kLightness > 55 ? '#1c1c1c' : '#e6edf3'));
+            ? P.text
+            : (searchQuery && !isMatch ? P.textMuted : P.text);
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.save();
@@ -1571,7 +1617,7 @@ function drawDenseStream(ks, y, W) {
         if (!counts[b]) continue;
         const x = LABEL_W + b * bucketW;
         const alpha = Math.min(0.82, 0.18 + Math.log2(counts[b] + 1) * 0.12 + heat[b] * 0.18);
-        ctx.fillStyle = '#58a6ff';
+        ctx.fillStyle = P.accentDim;
         ctx.globalAlpha = alpha;
         ctx.fillRect(x, y + 3, Math.max(1, bucketW + 0.5), STREAM_H - 6);
         ctx.globalAlpha = 1;
@@ -1596,7 +1642,7 @@ function drawStreams(W, H, renderState) {
             const sepColor = GPU_SEP_COLORS[gi % GPU_SEP_COLORS.length];
 
             // Background bar
-            ctx.fillStyle = '#0d1117';
+            ctx.fillStyle = P.bg;
             ctx.fillRect(0, sepY, W, GPU_SEP_H);
 
             // Colored accent line
@@ -1619,7 +1665,7 @@ function drawStreams(W, H, renderState) {
             const topY = streamY(0) - GPU_SEP_H;
             if (topY >= RULER_H + findingsLaneH() + nvtxAreaH() - GPU_SEP_H) {
                 const sepColor = GPU_SEP_COLORS[0];
-                ctx.fillStyle = '#0d1117';
+                ctx.fillStyle = P.bg;
                 ctx.fillRect(0, RULER_H + findingsLaneH() + nvtxAreaH(), W, GPU_SEP_H);
                 ctx.fillStyle = sepColor;
                 ctx.globalAlpha = 0.6;
@@ -1645,12 +1691,12 @@ function drawStreams(W, H, renderState) {
 
         // Background
         if (isSelected) {
-            ctx.fillStyle = 'rgba(55, 65, 85, 0.5)';
+            ctx.fillStyle = withAlpha(P.surfaceRaised || P.surface, 0.5);
             ctx.fillRect(0, y, W, STREAM_H);
         }
 
         // Stream label
-        ctx.fillStyle = isSelected ? '#79b8ff' : '#8b949e';
+        ctx.fillStyle = isSelected ? P.accent : P.textDim;
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         const isNccl = ks.some(k => k.name.toLowerCase().includes('nccl'));
@@ -1685,7 +1731,7 @@ function drawStreams(W, H, renderState) {
 
         // Gridline
         if (si < streamIds.length - 1) {
-            ctx.strokeStyle = '#1c2230';
+            ctx.strokeStyle = P.borderSubtle;
             ctx.beginPath(); ctx.moveTo(LABEL_W, y + STREAM_H + 1); ctx.lineTo(W, y + STREAM_H + 1); ctx.stroke();
         }
     }
@@ -2227,9 +2273,9 @@ function toggleGpuInfo() {
     const panel = document.getElementById('gpuInfoPanel');
     if (panel.style.display !== 'block') {
         let html = '<table style="border-collapse:collapse;width:100%">';
-        html += '<tr style="color:#58a6ff"><th style="text-align:left;padding:2px 6px">GPU</th><th style="text-align:left;padding:2px 6px">Name</th><th style="text-align:right;padding:2px 6px">SMs</th><th style="text-align:right;padding:2px 6px">Mem</th><th style="text-align:left;padding:2px 6px">PCI</th></tr>';
+        html += `<tr style="color:${P.accentDim}"><th style="text-align:left;padding:2px 6px">GPU</th><th style="text-align:left;padding:2px 6px">Name</th><th style="text-align:right;padding:2px 6px">SMs</th><th style="text-align:right;padding:2px 6px">Mem</th><th style="text-align:left;padding:2px 6px">PCI</th></tr>`;
         GPU_INFO.forEach(g => {
-            html += `<tr><td style="padding:2px 6px;color:#7ee787">${g.id}</td><td style="padding:2px 6px">${g.name}</td><td style="padding:2px 6px;text-align:right">${g.sms}</td><td style="padding:2px 6px;text-align:right">${g.mem_gb}GB</td><td style="padding:2px 6px;color:#8b949e">${g.pci}</td></tr>`;
+            html += `<tr><td style="padding:2px 6px;color:${P.success}">${g.id}</td><td style="padding:2px 6px">${g.name}</td><td style="padding:2px 6px;text-align:right">${g.sms}</td><td style="padding:2px 6px;text-align:right">${g.mem_gb}GB</td><td style="padding:2px 6px;color:${P.textDim}">${g.pci}</td></tr>`;
         });
         html += '</table>';
         document.getElementById('gpuInfoContent').innerHTML = html;
@@ -2277,11 +2323,11 @@ function jumpToBookmark(idx) {
 function toggleBookmarkList() {
     const panel = document.getElementById('gpuInfoPanel');
     if (bookmarks.length === 0) { showToast('No bookmarks. Press B to save one.'); return; }
-    let html = '<div style="color:#58a6ff;margin-bottom:4px;font-weight:600">📌 Bookmarks</div>';
+    let html = `<div style="color:${P.accentDim};margin-bottom:4px;font-weight:600">📌 Bookmarks</div>`;
     html += '<table style="border-collapse:collapse;width:100%">';
     bookmarks.forEach((bm, i) => {
         const ts = (bm.time_ns / 1e9).toFixed(3) + 's';
-        html += `<tr style="cursor:pointer" onclick="jumpToBookmark(${i});document.getElementById('gpuInfoPanel').style.display='none'"><td style="padding:2px 4px;color:#7ee787">${i + 1}</td><td style="padding:2px 4px">${bm.label}</td><td style="padding:2px 4px;color:#8b949e">${ts}</td><td style="padding:2px 4px;color:#8b949e">${bm.nvtx_path ? bm.nvtx_path.split(' > ').pop() : ''}</td></tr>`;
+        html += `<tr style="cursor:pointer" onclick="jumpToBookmark(${i});document.getElementById('gpuInfoPanel').style.display='none'"><td style="padding:2px 4px;color:${P.success}">${i + 1}</td><td style="padding:2px 4px">${bm.label}</td><td style="padding:2px 4px;color:${P.textDim}">${ts}</td><td style="padding:2px 4px;color:${P.textDim}">${bm.nvtx_path ? bm.nvtx_path.split(' > ').pop() : ''}</td></tr>`;
     });
     html += '</table>';
     document.getElementById('gpuInfoContent').innerHTML = html;
@@ -2293,7 +2339,7 @@ function showToast(msg) {
     if (!toast) {
         toast = document.createElement('div');
         toast.id = 'toast';
-        toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#21262d;color:#e6edf3;padding:6px 16px;border-radius:6px;border:1px solid #30363d;font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s';
+    toast.style.cssText = `position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:${P.borderSubtle};color:${P.text};padding:6px 16px;border-radius:6px;border:1px solid ${P.border};font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s`;
         document.body.appendChild(toast);
     }
     toast.textContent = msg;
@@ -2352,13 +2398,13 @@ function streamNumberGroups() {
 
 function renderStreamFilterPanel() {
     const panel = document.getElementById('gpuInfoPanel');
-    let html = '<div style="color:#58a6ff;margin-bottom:6px;font-weight:600">📺 Stream Number Visibility</div>';
+    let html = `<div style="color:${P.accentDim};margin-bottom:6px;font-weight:600">📺 Stream Number Visibility</div>`;
     const visibleCount = streamIds.length - hiddenStreams.size;
-    html += `<div style="margin-bottom:6px;font-size:11px;color:#8b949e">Visible ${visibleCount}/${streamIds.length} · ` +
-        `<a href="#" onclick="setAllStreams(true);return false" style="color:#58a6ff;text-decoration:none">All</a> ` +
-        `<a href="#" onclick="setAllStreams(false);return false" style="color:#58a6ff;text-decoration:none">None</a> ` +
-        `<a href="#" onclick="toggleSelectedStreamNumber();return false" style="color:#58a6ff;text-decoration:none">Toggle selected number</a> ` +
-        `<a href="#" onclick="invertStreams();return false" style="color:#58a6ff;text-decoration:none">Invert</a></div>`;
+    html += `<div style="margin-bottom:6px;font-size:11px;color:${P.textDim}">Visible ${visibleCount}/${streamIds.length} · ` +
+        `<a href="#" onclick="setAllStreams(true);return false" style="color:${P.accentDim};text-decoration:none">All</a> ` +
+        `<a href="#" onclick="setAllStreams(false);return false" style="color:${P.accentDim};text-decoration:none">None</a> ` +
+        `<a href="#" onclick="toggleSelectedStreamNumber();return false" style="color:${P.accentDim};text-decoration:none">Toggle selected number</a> ` +
+        `<a href="#" onclick="invertStreams();return false" style="color:${P.accentDim};text-decoration:none">Invert</a></div>`;
 
     const groups = streamNumberGroups();
     for (const [streamNum, sids] of groups) {
@@ -2366,7 +2412,7 @@ function renderStreamFilterPanel() {
         const total = sids.length;
         const checked = visible === total ? 'checked' : '';
         const totalKernels = sids.reduce((acc, sid) => acc + ((streamMap[sid] || []).length), 0);
-        html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStreamNumber('${streamNum}')" style="margin-right:4px">S${streamNum} <span style="color:#484f58">(${visible}/${total} GPUs, ${totalKernels} kernels)</span></label>`;
+        html += `<label style="display:block;padding:1px 0;cursor:pointer"><input type="checkbox" ${checked} onchange="toggleStreamNumber('${streamNum}')" style="margin-right:4px">S${streamNum} <span style="color:${P.textMuted}">(${visible}/${total} GPUs, ${totalKernels} kernels)</span></label>`;
     }
     document.getElementById('gpuInfoContent').innerHTML = html;
     return panel;
@@ -2618,7 +2664,7 @@ canvas.addEventListener('mousemove', e => {
         const x2 = Math.min(canvas.width / DPR, nsToX(Math.max(selectStartNs, selectEndNs)));
         ctx.fillStyle = 'rgba(88, 166, 255, 0.15)';
         ctx.fillRect(x1, 0, x2 - x1, canvas.height / DPR);
-        ctx.strokeStyle = '#58a6ff';
+        ctx.strokeStyle = P.accentDim;
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
         ctx.beginPath(); ctx.moveTo(x1, 0); ctx.lineTo(x1, canvas.height / DPR); ctx.stroke();
@@ -2633,8 +2679,8 @@ canvas.addEventListener('mousemove', e => {
     if (hit && hit.kernel) {
         const k = hit.kernel;
         const isNccl = k.name.toLowerCase().includes('nccl');
-        tt.innerHTML = `<div style="color:${isNccl ? '#d2a8ff' : '#7ee787'};font-weight:600">${escH(k.name)}</div>` +
-            `<div style="color:#8b949e">${fmtDur(k.duration_ms)} &nbsp;|&nbsp; Stream ${k.stream ?? '?'}</div>`;
+        tt.innerHTML = `<div style="color:${isNccl ? P.nccl : P.kernel};font-weight:600">${escH(k.name)}</div>` +
+            `<div style="color:${P.textDim}">${fmtDur(k.duration_ms)} &nbsp;|&nbsp; Stream ${k.stream ?? '?'}</div>`;
         tt.style.display = 'block';
         tt.style.left = (e.clientX + 12) + 'px';
         tt.style.top = (e.clientY - 10) + 'px';
@@ -2644,8 +2690,8 @@ canvas.addEventListener('mousemove', e => {
         if (tr.bottom > window.innerHeight) tt.style.top = (e.clientY - tr.height - 8) + 'px';
     } else if (hit && hit.nvtx) {
         const n = hit.nvtx;
-        tt.innerHTML = `<div style="color:#79b8ff;font-weight:600">${escH(n.name)}</div>` +
-            `<div style="color:#8b949e">${fmtDur((n.end - n.start) / 1e6)} &nbsp;|&nbsp; ${(n.thread || '(unnamed)')}</div>`;
+        tt.innerHTML = `<div style="color:${P.accent};font-weight:600">${escH(n.name)}</div>` +
+            `<div style="color:${P.textDim}">${fmtDur((n.end - n.start) / 1e6)} &nbsp;|&nbsp; ${(n.thread || '(unnamed)')}</div>`;
         tt.style.display = 'block';
         tt.style.left = (e.clientX + 12) + 'px';
         tt.style.top = (e.clientY - 10) + 'px';
@@ -2661,10 +2707,10 @@ canvas.addEventListener('mousemove', e => {
                     : '@ ' + _fmtFindingNs(f.start_ns);
                 tt.innerHTML =
                     `<div style="color:${sevCol};font-weight:600">📋 #${fi + 1} ${escH(f.label)}</div>` +
-                    `<div style="color:#8b949e">${(f.severity || 'info').toUpperCase()} · ${f.type}` +
+                    `<div style="color:${P.textDim}">${(f.severity || 'info').toUpperCase()} · ${f.type}` +
                     (f.gpu_id != null ? ` · GPU ${f.gpu_id}` : '') +
                     ` · ${rangeStr}</div>` +
-                    (f.note ? `<div style="color:#c9d1d9;margin-top:3px;max-width:280px;white-space:normal;line-height:1.3">${escH(f.note.slice(0, 120))}</div>` : '');
+                    (f.note ? `<div style="color:${P.text};margin-top:3px;max-width:280px;white-space:normal;line-height:1.3">${escH(f.note.slice(0, 120))}</div>` : '');
                 tt.style.display = 'block';
                 tt.style.left = (e.clientX + 12) + 'px';
                 tt.style.top = (e.clientY - 10) + 'px';
@@ -3392,9 +3438,9 @@ let selectedFindingIdx = -1;
 let findingSeverityFilter = 'all';
 
 function _findingSevColor(sev) {
-    if (sev === 'critical') return '#ff4444';
-    if (sev === 'warning') return '#d4a72c';
-    return '#58a6ff';
+    if (sev === 'critical') return P.verdictWorse;
+    if (sev === 'warning') return P.magnitude[3];
+    return P.verdictBetter;
 }
 
 function _findingStreamRange(f) {
@@ -3527,16 +3573,16 @@ function drawFindings(W, H) {
 
     // ── Pass 0: Draw annotation lane background ──
     if (laneH > 0) {
-        ctx.fillStyle = '#0f141d';
+        ctx.fillStyle = P.bg;
         ctx.fillRect(0, laneY, W, laneH);
-        ctx.strokeStyle = '#21262d';
+        ctx.strokeStyle = P.borderSubtle;
         ctx.beginPath();
         ctx.moveTo(0, laneY + laneH - 0.5);
         ctx.lineTo(W, laneY + laneH - 0.5);
         ctx.stroke();
 
         // Label on the left
-        ctx.fillStyle = '#6e7681';
+        ctx.fillStyle = P.textMuted;
         ctx.font = '9px SF Mono, monospace';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
@@ -3691,7 +3737,7 @@ function drawFindings(W, H) {
             const circX = rect.x + circR + 3;
             const circCY = rect.y + rect.h / 2;
             ctx.globalAlpha = 1;
-            ctx.fillStyle = '#0d1117';
+                    ctx.fillStyle = P.bg;
             ctx.beginPath();
             ctx.arc(circX, circCY, circR, 0, Math.PI * 2);
             ctx.fill();
@@ -3704,7 +3750,7 @@ function drawFindings(W, H) {
             ctx.fillText(badge, circX, circCY);
 
             if (rect.w > 40) {
-                ctx.fillStyle = '#0d1117';
+                ctx.fillStyle = P.bg;
                 ctx.font = (isActive ? 'bold ' : '') + '9px SF Mono, monospace';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
@@ -3901,12 +3947,12 @@ function selectFinding(idx) {
         detail.innerHTML =
             '<div style="color:' + _findingSevColor(sev) + ';font-weight:600;font-size:13px">' +
                 '📋 ' + _esc(f.label) + '</div>' +
-            '<div style="font-size:11px;color:#8b949e;margin-top:2px">' +
+            `<div style="font-size:11px;color:${P.textDim};margin-top:2px">` +
                 sev.toUpperCase() + ' · ' + f.type + ' · ' + rangeText +
                 (f.gpu_id != null ? ' · GPU ' + f.gpu_id : '') +
                 (f.stream != null ? ' · Stream ' + f.stream : '') +
             '</div>' +
-            '<div style="font-size:10px;color:#8b949e;margin-top:6px">Full explanation is in the Evidence panel.</div>';
+            `<div style="font-size:10px;color:${P.textDim};margin-top:6px">Full explanation is in the Evidence panel.</div>`;
     }
 
     // ── Smart zoom: center the finding, range = 50% of viewport ──

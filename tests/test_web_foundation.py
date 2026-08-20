@@ -222,3 +222,19 @@ def test_viewer_returns_json_404_for_unknown_post_api():
     assert status == 404
     assert content_type.startswith("application/json")
     assert b"not found" in body
+
+
+def test_timeline_canvas_reads_the_shared_token_palette():
+    javascript = open("src/nsys_ai/templates/timeline.js", encoding="utf-8").read()
+    tokens = open("src/nsys_ai/templates/tokens.css", encoding="utf-8").read()
+
+    assert "getComputedStyle(document.documentElement)" in javascript
+    assert "const P = Object.freeze" in javascript
+    assert "function nvtxColor(depth, identity)" in javascript
+    assert "depth % NVTX_COLORS.length" not in javascript
+    assert "background:${withAlpha(P.bg, 0.8)}" in javascript
+    assert "withAlpha(P.selected, 0.5)" in javascript
+    assert "P.laneMemory" in javascript
+    assert "--cat-other" in tokens
+    assert "--mag-5" in tokens
+    assert not re.search(r"#[0-9a-fA-F]{6}", javascript)
