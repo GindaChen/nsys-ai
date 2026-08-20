@@ -290,7 +290,7 @@ def _handle_chat_stream(body_bytes: bytes):
 
 class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     """Serve the pre-rendered HTML on GET; GET /api/models for model list;
-    GET /api/data for on-demand tile data (with optional resolution LOD);
+    GET /api/data for on-demand tile data (with optional max_buckets LOD);
     GET /api/meta for profile metadata;
     POST /api/chat for AI chat."""
 
@@ -533,11 +533,14 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
         """Return kernel/NVTX data for a requested time window (from pre-built cache)."""
         from urllib.parse import parse_qs, urlparse
 
+        qs = parse_qs(urlparse(self.path).query)
+        if qs.get("resolution", [None])[0] not in (None, ""):
+            self._json_response({"error": "resolution is obsolete; use max_buckets"}, 400)
+            return
         prebuilt = self.__class__._prebuilt_data
         if not prebuilt:
             self._json_response({"error": "no prebuilt data"}, 500)
             return
-        qs = parse_qs(urlparse(self.path).query)
         try:
             start_s = float(qs.get("start_s", [0])[0])
             end_s = float(qs.get("end_s", [5])[0])
@@ -561,12 +564,12 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
             f"gpu={gpu_filter if gpu_filter is not None else 'all'})...",
             flush=True,
         )
-        resolution = None
-        if qs.get("resolution", [None])[0] not in (None, ""):
+        max_buckets = None
+        if qs.get("max_buckets", [None])[0] not in (None, ""):
             try:
-                resolution = max(1, min(100_000, int(qs["resolution"][0])))
+                max_buckets = max(1, min(100_000, int(qs["max_buckets"][0])))
             except (TypeError, ValueError):
-                self._json_response({"error": "resolution must be a positive integer"}, 400)
+                self._json_response({"error": "max_buckets must be a positive integer"}, 400)
                 return
         try:
             nvtx_spans_by_gpu = None
@@ -591,7 +594,7 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 }
 
             lod_by_gpu = {}
-            if resolution is not None and kernels_requested and self.__class__.prof is not None:
+            if max_buckets is not None and kernels_requested and self.__class__.prof is not None:
                 try:
                     lod_by_gpu = {
                         entry["id"]: entry
@@ -599,7 +602,7 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                             self.__class__.prof,
                             self.__class__.devices,
                             (start_ns, end_ns),
-                            resolution,
+                            max_buckets,
                         )
                     }
                 except Exception:
@@ -620,9 +623,9 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                         )
                     if nvtx_spans_by_gpu is not None:
                         filtered["nvtx_spans"] = nvtx_spans_by_gpu.get(filtered["id"], [])
-                    if resolution is not None and kernels_requested and filtered.get("lod") is None:
+                    if max_buckets is not None and kernels_requested and filtered.get("lod") is None:
                         filtered = _aggregate_timeline_gpu_entry(
-                            filtered, start_ns, end_ns, resolution
+                            filtered, start_ns, end_ns, max_buckets
                         )
                     gpu_entries.append(filtered)
                 else:

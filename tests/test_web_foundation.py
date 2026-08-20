@@ -82,6 +82,14 @@ def test_tree_slice_preserves_children_marker_without_mutating_source():
     assert source[0]["children"] == [{"path": "child"}]
 
 
+def test_timeline_data_rejects_obsolete_resolution_parameter():
+    status, body, content_type = _get(web._ViewerHandler, "/api/data?resolution=2000")
+
+    assert status == 400
+    assert content_type.startswith("application/json")
+    assert b"use max_buckets" in body
+
+
 @pytest.mark.parametrize("handler", [web._ViewerHandler, web._EvidenceHandler, _DiffHandler])
 def test_web_surfaces_serve_shared_tokens_asset(handler):
     status, body, content_type = _get(handler, "/assets/tokens.css")

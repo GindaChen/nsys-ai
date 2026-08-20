@@ -72,10 +72,11 @@ def test_timeline_web_duckdb_lod_returns_bounded_rows(minimal_nsys_db_path):
     assert all(row["aggregate"] is True for row in result[0]["kernels"])
 
 
-def test_timeline_web_frontend_requests_resolution_and_marks_aggregates():
+def test_timeline_web_frontend_requests_max_buckets_and_marks_aggregates():
     javascript = Path("src/nsys_ai/templates/timeline.js").read_text(encoding="utf-8")
 
-    assert "resolution=${resolution}" in javascript
+    assert "max_buckets=${maxBuckets}" in javascript
+    assert "resolution=" not in javascript
     assert "k.aggregate === true" in javascript
     assert "Aggregate bucket" in javascript
 
