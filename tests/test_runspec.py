@@ -120,8 +120,60 @@ def test_unknown_schema_version_has_stated_reason():
     payload = _full_spec().to_dict()
     payload["schema_version"] = "9.0"
 
-    with pytest.raises(UnsupportedRunSpecVersionError, match="9.0.*expected '0.1'"):
+    with pytest.raises(
+        UnsupportedRunSpecVersionError,
+        match=r"9\.0.*expected one of.*0\.1.*0\.2",
+    ):
         RunSpec.from_dict(payload)
+
+
+def test_schema_v01_remains_readable_without_new_identity_fields():
+    payload = _full_spec().to_dict()
+    payload["schema_version"] = "0.1"
+    payload.pop("dirty")
+    payload.pop("worktree_diff_sha256")
+
+    parsed = RunSpec.from_dict(payload)
+
+    assert parsed.dirty is False
+    assert parsed.worktree_diff_sha256 is None
+
+
+def test_schema_v01_rejects_v02_identity_fields():
+    payload = _full_spec(dirty=True, worktree_diff_sha256="a" * 64).to_dict()
+    payload["schema_version"] = "0.1"
+
+    with pytest.raises(UnsupportedRunSpecVersionError, match="requires schema_version '0.2'"):
+        RunSpec.from_dict(payload)
+
+
+def test_dirty_worktree_identity_round_trips_and_is_distinct():
+    first = _full_spec(
+        dirty=True,
+        worktree_diff_sha256="a" * 64,
+    )
+    second = _full_spec(
+        dirty=True,
+        worktree_diff_sha256="b" * 64,
+    )
+
+    assert RunSpec.from_dict(first.to_dict()) == first
+    assert first.canonical_json_bytes() != second.canonical_json_bytes()
+    assert first.compatibility_key() == second.compatibility_key()
+    assert "uncommitted_worktree" in first.compatibility_limitations()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dirty": True},
+        {"worktree_diff_sha256": "not-a-sha"},
+        {"dirty": False, "worktree_diff_sha256": "a" * 64},
+    ],
+)
+def test_dirty_worktree_identity_requires_a_complete_provenance_pair(overrides):
+    with pytest.raises(RunSpecError, match="dirty|worktree_diff_sha256"):
+        _full_spec(**overrides)
 
 
 @pytest.mark.parametrize(

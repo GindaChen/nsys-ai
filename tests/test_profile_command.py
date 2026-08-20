@@ -223,18 +223,77 @@ def test_git_provenance_records_absolute_root_full_commit_and_relative_cwd(tmp_p
     subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
 
-    repository, commit, cwd = discover_git_provenance(nested)
+    repository, commit, cwd, dirty, worktree_diff_sha256 = discover_git_provenance(nested)
 
     assert repository == str(repo.resolve())
     assert commit is not None and len(commit) == 40
     assert cwd == "training/jobs"
+    assert dirty is False
+    assert worktree_diff_sha256 is None
+
+    (repo / "tracked.txt").write_text("changed")
+    _, dirty_commit, _, dirty, dirty_hash = discover_git_provenance(nested)
+    assert dirty_commit == commit
+    assert dirty is True
+    assert dirty_hash is not None and len(dirty_hash) == 64
+
+    (repo / "tracked.txt").write_text("changed again")
+    _, _, _, changed_dirty, changed_hash = discover_git_provenance(nested)
+    assert changed_dirty is True
+    assert changed_hash != dirty_hash
+
+    (repo / "tracked.txt").write_text("changed")
+    (repo / "untracked-one.txt").write_text("one")
+    _, _, _, untracked_dirty, untracked_hash = discover_git_provenance(nested)
+    assert untracked_dirty is True
+    assert untracked_hash != dirty_hash
+
+    (repo / "untracked-one.txt").write_text("two")
+    _, _, _, changed_untracked, changed_untracked_hash = discover_git_provenance(
+        nested
+    )
+    assert changed_untracked is True
+    assert changed_untracked_hash != untracked_hash
+
+    (repo / "untracked-one.txt").unlink()
+    (repo / "untracked-two.txt").write_text("one")
+    _, _, _, renamed_untracked, renamed_untracked_hash = discover_git_provenance(
+        nested
+    )
+    assert renamed_untracked is True
+    assert renamed_untracked_hash != untracked_hash
 
 
 def test_non_git_provenance_degrades_to_absolute_cwd(tmp_path):
-    repository, commit, cwd = discover_git_provenance(tmp_path)
+    repository, commit, cwd, dirty, worktree_diff_sha256 = discover_git_provenance(tmp_path)
     assert repository is None
     assert commit is None
     assert cwd == str(tmp_path.resolve())
+    assert dirty is False
+    assert worktree_diff_sha256 is None
+
+
+def test_git_provenance_hashes_untracked_files_in_chunks(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "tracked.txt").write_text("tracked")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    (repo / "capture.nsys-rep").write_bytes(b"capture" * 1024)
+
+    def forbidden_read_bytes(_path):
+        raise AssertionError("untracked provenance must hash files incrementally")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    repository, commit, _cwd, dirty, digest = discover_git_provenance(repo)
+
+    assert repository == str(repo.resolve())
+    assert commit is not None
+    assert dirty is True
+    assert digest is not None and len(digest) == 64
 
 
 def test_dry_run_is_structurally_redacted_and_does_not_create_output(

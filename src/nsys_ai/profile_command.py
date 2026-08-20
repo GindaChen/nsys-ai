@@ -7,9 +7,12 @@ does not own runner internals or durable session layout.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess  # nosec B404
 import sys
 from collections.abc import Callable, Sequence
@@ -180,12 +183,19 @@ def parse_environment(
     return EnvironmentSpec(public=public, secrets=tuple(secret_names))
 
 
-def discover_git_provenance(cwd: Path) -> tuple[str | None, str | None, str]:
-    """Return repository, commit, and RunSpec cwd with clean non-Git fallback."""
+def discover_git_provenance(
+    cwd: Path,
+) -> tuple[str | None, str | None, str, bool, str | None]:
+    """Return repository identity, worktree identity, and RunSpec cwd.
+
+    The diff itself is never persisted. Only its SHA-256 digest is recorded,
+    so a dirty checkout is distinguishable without creating a secret-bearing
+    patch artifact.
+    """
     absolute_cwd = cwd.resolve()
     git_executable = shutil.which("git")
     if git_executable is None:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     git_executable = str(Path(git_executable).resolve())
 
     def git(*args: str, working_directory: Path) -> str | None:
@@ -205,18 +215,87 @@ def discover_git_provenance(cwd: Path) -> tuple[str | None, str | None, str]:
         value = completed.stdout.strip()
         return value or None
 
+    def git_bytes(*args: str, working_directory: Path) -> bytes | None:
+        try:
+            completed = subprocess.run(  # nosec B603
+                [git_executable, *args],
+                cwd=working_directory,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout
+
     root_text = git("rev-parse", "--show-toplevel", working_directory=absolute_cwd)
     if root_text is None:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     root = Path(root_text).resolve()
     try:
         relative = absolute_cwd.relative_to(root).as_posix() or "."
     except ValueError:
-        return None, None, str(absolute_cwd)
+        return None, None, str(absolute_cwd), False, None
     commit = git("rev-parse", "--verify", "HEAD", working_directory=root)
     if commit is None or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
-        return None, None, str(absolute_cwd)
-    return str(root), commit.lower(), relative
+        return None, None, str(absolute_cwd), False, None
+
+    status = git("status", "--porcelain", working_directory=root)
+    dirty = bool(status)
+    if not dirty:
+        return str(root), commit.lower(), relative, False, None
+
+    diff = git_bytes("diff", "HEAD", "--binary", working_directory=root)
+    untracked = git_bytes(
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        working_directory=root,
+    )
+    if diff is None or untracked is None:
+        return str(root), commit.lower(), relative, True, hashlib.sha256(
+            b"worktree identity unavailable"
+        ).hexdigest()
+
+    digest = hashlib.sha256()
+
+    def add_record(label: bytes, payload: bytes) -> None:
+        digest.update(label)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+
+    add_record(b"git-diff-head\0", diff)
+    for encoded_path in untracked.split(b"\0"):
+        if not encoded_path:
+            continue
+        path = root / os.fsdecode(encoded_path)
+        try:
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                content_digest = hashlib.sha256()
+                with path.open("rb") as file_handle:
+                    while chunk := file_handle.read(1 << 20):
+                        content_digest.update(chunk)
+                payload = (
+                    b"regular\0"
+                    + stat.S_IMODE(metadata.st_mode).to_bytes(4, "big")
+                    + content_digest.digest()
+                )
+            elif stat.S_ISLNK(metadata.st_mode):
+                payload = b"symlink\0" + os.fsencode(os.readlink(path))
+            else:
+                payload = b"special\0" + stat.S_IMODE(metadata.st_mode).to_bytes(
+                    4, "big"
+                )
+        except OSError as exc:
+            payload = b"unreadable\0" + type(exc).__name__.encode("ascii")
+        add_record(b"untracked\0" + encoded_path + b"\0", payload)
+
+    diff_sha256 = digest.hexdigest()
+    return str(root), commit.lower(), relative, True, diff_sha256
 
 
 def default_output_leaf(cwd: Path) -> Path:
@@ -299,12 +378,16 @@ def run_profile_command(
         )
         return 0
 
-    repository, commit, runspec_cwd = discover_git_provenance(working_directory)
+    repository, commit, runspec_cwd, dirty, worktree_diff_sha256 = (
+        discover_git_provenance(working_directory)
+    )
     spec = RunSpec(
         argv=workload,
         cwd=runspec_cwd,
         repository=repository,
         commit=commit,
+        dirty=dirty,
+        worktree_diff_sha256=worktree_diff_sha256,
         environment=environment,
         warmup_steps=args.warmup_steps,
         profile_steps=args.profile_steps,
