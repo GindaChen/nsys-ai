@@ -21,12 +21,12 @@ bottlenecks with an evidence-first agent — from your browser or terminal.
 
 ---
 
-nsys-ai reads `.nsys-rep` or `.sqlite` exports from
+nsys-ai reads `.nsys-rep`, `.parquetdir`, or `.sqlite` exports from
 [NVIDIA Nsight Systems](https://developer.nvidia.com/nsight-systems) and turns
 them into something you can navigate and reason about: a web timeline, terminal
 viewers, a before/after diff that reports whether a change actually helped, and
 a set of deterministic analysis skills an LLM agent can drive. `.nsys-rep` files
-are opened directly — nsys-ai exports them to SQLite for you on first use.
+use a Parquet cache by default; `.sqlite` remains the compatibility path.
 
 ## Installation
 
@@ -440,6 +440,10 @@ cd nsys-ai
 pip install -e '.[dev]'
 pytest tests/ -v
 ```
+
+See [CONTRIBUTING.md](https://github.com/GindaChen/nsys-ai/blob/main/CONTRIBUTING.md)
+for the full contributor workflow, test layers, skill walkthrough, fixture
+policy, and pull-request checklist.
 
 **Guided optimization loop** (diagnose → propose → re-profile → diff → accept): see the
 [User guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md) for the CLI path and
