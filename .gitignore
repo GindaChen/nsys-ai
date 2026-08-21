@@ -1,5 +1,8 @@
 node_modules/
 __pycache__/
+.coverage
+.coverage.*
+htmlcov/
 *.egg-info/
 dist/
 # `python -m build` leaves this beside dist/; only dist/ was ignored, so a

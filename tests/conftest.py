@@ -5,6 +5,7 @@ All fixtures here are available to every test module without explicit imports.
 """
 
 import hashlib
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -13,6 +14,32 @@ from pathlib import Path
 import pytest
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_COVERAGE_CONFIG = _REPO_ROOT / "pyproject.toml"
+_COVERAGE_SOURCE = _REPO_ROOT / "src"
+
+
+def pytest_configure(config):
+    """Pass pytest-cov's configuration to CLI subprocesses.
+
+    pytest-cov owns the parent process, but the suite exercises the public CLI
+    by launching fresh Python interpreters. Those interpreters need both the
+    coverage config path and the source directory on ``PYTHONPATH`` before
+    Python imports ``sitecustomize``. Keep this opt-in: an ordinary pytest run
+    must not enable coverage in every subprocess it launches.
+    """
+    if not config.pluginmanager.hasplugin("_cov"):
+        return
+
+    os.environ.setdefault("COVERAGE_PROCESS_START", str(_COVERAGE_CONFIG))
+    os.environ.setdefault("COVERAGE_FILE", str(_REPO_ROOT / ".coverage"))
+    os.environ.setdefault("COVERAGE_SOURCE", str(_REPO_ROOT / "src" / "nsys_ai"))
+
+    source = str(_COVERAGE_SOURCE)
+    paths = os.environ.get("PYTHONPATH", "").split(os.pathsep) if os.environ.get("PYTHONPATH") else []
+    if source not in paths:
+        paths.insert(0, source)
+        os.environ["PYTHONPATH"] = os.pathsep.join(paths)
 
 
 @pytest.fixture(scope="session")

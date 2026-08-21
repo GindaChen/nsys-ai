@@ -155,6 +155,18 @@ skip conditions:
 python -m pytest tests/test_ci_coverage.py -v --tb=short
 ~~~
 
+To measure the full suite, including CLI subprocesses, use the repository's
+[subprocess-aware coverage guide](docs/dev/testing.md) and wrapper:
+
+~~~bash
+bash scripts/coverage.sh
+~~~
+
+The wrapper combines child-process data before reporting. A plain
+`pytest --cov` run from the repository root also gets the child startup hook;
+do not run it from another working directory because CLI tests intentionally
+use temporary child directories.
+
 ### Layer 4: lint and security
 
 These are required CI checks, not optional polish:
@@ -479,4 +491,3 @@ Before requesting review:
 - [ ] Committed fixtures are unchanged.
 - [ ] The PR body records commands, results, skips, and follow-ups.
 - [ ] No secret, private capture data, or machine-specific credential appears in the patch or PR.
-

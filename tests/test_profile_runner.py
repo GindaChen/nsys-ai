@@ -643,9 +643,17 @@ def test_leader_exit_always_cleans_surviving_process_group(
     ("mode", "poll_seconds"),
     [("exit_094", 2.0), ("exit_070", 5.0)],
 )
+@pytest.mark.no_cover
 def test_completion_before_deadline_wins_over_coarse_polling(
     tmp_path, fake_nsys, monkeypatch, mode, poll_seconds
 ):
+    # Coverage tracing is deliberately excluded here. This test verifies a
+    # sub-second process/deadline race, and tracing both this test and the fake
+    # nsys child changes the scheduling it is meant to measure. Keep the
+    # correctness check and the coverage report honest instead of making a
+    # timing assertion depend on instrumentation overhead.
+    monkeypatch.delenv("COVERAGE_PROCESS_START", raising=False)
+    monkeypatch.delenv("COVERAGE_SOURCE", raising=False)
     monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", poll_seconds)
 
     result = _run(tmp_path, fake_nsys, mode, timeout_seconds=1)
