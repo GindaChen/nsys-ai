@@ -101,10 +101,20 @@ def test_build_system_prompt():
     assert "num_gpus" in out
 
 
+def test_build_system_prompt_only_requires_run_skill_with_profile_schema():
+    ctx = {"view_state": {"scope": "all"}}
+    no_profile = chat_mod._build_system_prompt(ctx)
+    with_profile = chat_mod._build_system_prompt(ctx, profile_schema="CREATE TABLE kernels(id INTEGER)")
+
+    assert "When a profile database is connected" not in no_profile
+    assert "No profile database is connected" in no_profile
+    assert "When a profile database is connected" in with_profile
+
+
 def test_tools_openai():
-    """Tools include navigate, zoom, NVTX fit, query_profile_db, get_gpu_peak_tflops, compute_mfu, compute_region_mfu, submit_finding, get_gpu_overlap_stats, get_nccl_breakdown."""
+    """Tools include navigation plus registry-backed profile analysis."""
     tools = chat_mod._tools_openai()
-    assert len(tools) == 13
+    assert len(tools) == 14
     names = {t["function"]["name"] for t in tools}
     assert names == {
         "navigate_to_kernel",
@@ -112,6 +122,7 @@ def test_tools_openai():
         "fit_nvtx_range",
         "request_clarification",
         "answer_from_ui_context",
+        "run_skill",
         "query_profile_db",
         "get_gpu_peak_tflops",
         "compute_mfu",
@@ -652,6 +663,64 @@ def test_run_agent_loop_uses_registry_for_profile_tools(minimal_nsys_conn):
         )
 
     assert content == "Grounded web result."
+    assert mock_lt.completion.call_count == 2
+
+
+def test_run_agent_loop_uses_run_skill_for_profile_grounding(
+    minimal_nsys_conn, monkeypatch
+):
+    from nsys_ai.skills import registry
+    from nsys_ai.tool_dispatch import ToolDispatcher
+
+    def tool_call(call_id, name, arguments):
+        fn = MagicMock()
+        fn.name = name
+        fn.arguments = json.dumps(arguments)
+        return MagicMock(id=call_id, function=fn)
+
+    calls = []
+
+    def fake_run_skill(skill_name, conn, *, raw=False, **kwargs):
+        calls.append((skill_name, conn, raw, kwargs))
+        return [{"kernel_name": "flash", "total_ms": 12.0}]
+
+    first = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(
+                    content="",
+                    tool_calls=[
+                        tool_call(
+                            "skill1",
+                            "run_skill",
+                            {"skill_name": "top_kernels", "params": {"device": 0}},
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    final = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(content="Grounded registry result.", tool_calls=[])
+            )
+        ]
+    )
+    mock_lt = MagicMock()
+    mock_lt.completion.side_effect = [first, final]
+    monkeypatch.setattr(registry, "run_skill", fake_run_skill)
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        content, _ = chat_mod.run_agent_loop(
+            model="gpt-4o",
+            api_messages=[{"role": "system", "content": "s"}],
+            tools=chat_mod._tools_openai(),
+            dispatcher=ToolDispatcher(conn=minimal_nsys_conn),
+        )
+
+    assert content == "Grounded registry result."
+    assert calls == [("top_kernels", minimal_nsys_conn, True, {"device": 0})]
     assert mock_lt.completion.call_count == 2
 
 

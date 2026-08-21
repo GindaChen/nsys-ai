@@ -116,7 +116,7 @@ GEMINI_THINKING_BUDGET = 8_000
 # a calculation from caller-supplied numbers.
 _PROFILE_GROUNDING_TOOLS = frozenset(
     {
-        "query_profile_db",
+        "run_skill",
         "get_gpu_peak_tflops",
         "compute_region_mfu",
         "get_gpu_overlap_stats",
@@ -670,7 +670,7 @@ def run_agent_loop(
                         turn_tool_failed = True
                     if name in _PROFILE_GROUNDING_TOOLS:
                         grounding_attempted = True
-                        if not tool_failed and name != "query_profile_db":
+                        if not tool_failed:
                             turn_grounding_succeeded = True
                     if name == "compute_mfu" and not tool_failed:
                         compute_mfu_succeeded = True
@@ -1119,6 +1119,7 @@ def stream_agent_loop(
     # Fix 2: Filter out DB-dependent tools when no profile is connected.
     # This prevents LLM from calling tools that always fail, avoiding retry spirals.
     _DB_TOOLS = {
+        "run_skill",
         "query_profile_db",
         "get_gpu_peak_tflops",
         "compute_region_mfu",
@@ -1374,12 +1375,8 @@ def stream_agent_loop(
                         turn_tool_failed = True
                     if name in grounding_tools:
                         grounding_attempted = True
-                        # Exploratory SQL can support a registered analysis,
-                        # but it cannot ground a diagnosis by itself.
-                        if not tool_failed and name != "query_profile_db":
+                        if not tool_failed:
                             turn_grounding_succeeded = True
-                        if name == "query_profile_db" and not tool_failed:
-                            exploratory_query_succeeded = True
                     elif name == "query_profile_db":
                         grounding_attempted = True
                         if not tool_failed:
