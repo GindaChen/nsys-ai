@@ -3160,6 +3160,7 @@ function setInspectorMode(mode) {
         const button = document.getElementById(buttonId);
         if (button) button.classList.toggle('active', buttonMode === mode);
     }
+    updateWorkflowEdgeTab();
 
     if (mode === 'chat') {
         const input = document.getElementById('chatInput');
@@ -3176,6 +3177,36 @@ function closeInspector() {
 
 function toggleInspector(mode) {
     setInspectorMode(activeInspectorMode === mode ? null : mode);
+}
+
+function updateWorkflowEdgeTab() {
+    const tab = document.getElementById('workflowEdgeTab');
+    if (!tab) return;
+
+    const railOpen = Boolean(activeInspectorMode);
+    tab.hidden = railOpen;
+    tab.setAttribute('aria-expanded', activeInspectorMode === 'loop' ? 'true' : 'false');
+
+    const label = document.getElementById('workflowEdgeLabel');
+    const progress = document.getElementById('workflowEdgeProgress');
+    const phase = LOOP_STATE?.phase || '';
+    const phaseIdx = LOOP_PHASE_ORDER.indexOf(phase);
+    const step = phaseIdx >= 0 ? phaseIdx + 1 : null;
+    const phaseLabel = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : '';
+    if (label) label.textContent = phaseLabel || 'Workflow';
+    if (progress) progress.textContent = step ? `${step}/${LOOP_PHASE_ORDER.length}` : '';
+    tab.title = step
+        ? `Open Workflow: ${phaseLabel} (${step}/${LOOP_PHASE_ORDER.length})`
+        : 'Open Workflow inspector (W)';
+    tab.setAttribute('aria-label', step
+        ? `Open Workflow inspector, ${phaseLabel}, step ${step} of ${LOOP_PHASE_ORDER.length}`
+        : 'Open Workflow inspector');
+}
+
+function applyLoopState(state) {
+    LOOP_STATE = state || {};
+    updateWorkflowEdgeTab();
+    loopRenderState();
 }
 
 function toggleChat() {
@@ -4352,8 +4383,7 @@ async function loopFetchState() {
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
     if (!resp.ok) throw new Error(data.error || text || resp.statusText);
-    LOOP_STATE = data;
-    loopRenderState();
+    applyLoopState(data);
     return LOOP_STATE;
 }
 
@@ -4368,13 +4398,11 @@ async function loopPost(path, payload) {
     try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
     if (!resp.ok) {
         if (data.state) {
-            LOOP_STATE = data.state;
-            loopRenderState();
+            applyLoopState(data.state);
         }
         throw new Error(data.error || text || resp.statusText);
     }
-    LOOP_STATE = data.state || data;
-    loopRenderState();
+    applyLoopState(data.state || data);
     return data;
 }
 

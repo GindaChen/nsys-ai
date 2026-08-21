@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 from nsys_ai.profile import Profile
@@ -235,6 +236,11 @@ def test_timeline_web_template_uses_external_assets(minimal_nsys_db_path):
     assert 'id="inspectorTabChat"' in html
     assert 'id="inspectorTabFindings"' in html
     assert 'id="inspectorTabLoop"' in html
+    assert 'id="workflowEdgeTab"' in html
+    assert 'id="workflowEdgeLabel"' in html
+    assert 'id="workflowEdgeProgress"' in html
+    assert 'aria-controls="inspectorRail"' in html
+    assert 'onclick="toggleLoop()"' in html
     assert 'data-inspector-panel="chat"' in html
     assert 'data-inspector-panel="findings"' in html
     assert 'data-inspector-panel="loop"' in html
@@ -267,6 +273,86 @@ def test_timeline_web_template_has_nvtx_command_controls(minimal_nsys_db_path):
     assert 'id="chatCapabilities"' in html
     assert "fit_nvtx_range" in html
     assert "Go to NVTX" in html
+
+
+def test_workflow_edge_tab_contract_is_wired():
+    css = Path("src/nsys_ai/templates/timeline.css").read_text(encoding="utf-8")
+    js = Path("src/nsys_ai/templates/timeline.js").read_text(encoding="utf-8")
+
+    assert "#workflowEdgeTab[hidden]" in css
+    assert "@media (max-width: 960px)" in css
+    assert "function updateWorkflowEdgeTab()" in js
+    assert "function applyLoopState(state)" in js
+
+
+def _extract_js_function(source, name):
+    marker = f"function {name}("
+    start = source.index(marker)
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unterminated JavaScript function: {name}")
+
+
+def test_workflow_edge_tab_wiring_changes_real_dom_state():
+    source = Path("src/nsys_ai/templates/timeline.js").read_text(encoding="utf-8")
+    update_tab = _extract_js_function(source, "updateWorkflowEdgeTab")
+    apply_state = _extract_js_function(source, "applyLoopState")
+    set_mode = _extract_js_function(source, "setInspectorMode")
+
+    harness = f"""
+const elements = new Map();
+function element() {{
+    return {{
+        hidden: false,
+        textContent: '',
+        title: '',
+        attrs: {{}},
+        classList: {{ toggle() {{}} }},
+        setAttribute(name, value) {{ this.attrs[name] = value; }},
+        focus() {{}},
+    }};
+}}
+for (const id of [
+    'workflowEdgeTab', 'workflowEdgeLabel', 'workflowEdgeProgress', 'inspectorRail',
+    'chatSidebar', 'findingsSidebar', 'loopSidebar', 'inspectorTabChat',
+    'inspectorTabFindings', 'inspectorTabLoop', 'chatBtn', 'findingsBtn', 'loopBtn',
+]) elements.set(id, element());
+const document = {{ getElementById(id) {{ return elements.get(id) || null; }} }};
+const FINDINGS = [];
+const INSPECTOR_PANELS = {{ chat: 'chatSidebar', findings: 'findingsSidebar', loop: 'loopSidebar' }};
+const LOOP_PHASE_ORDER = ['diagnose', 'propose', 'reprofile', 'diff', 'accept'];
+let activeInspectorMode = null;
+let LOOP_STATE = null;
+function loopFetchState() {{}}
+function loopRenderState() {{}}
+function resize() {{}}
+{update_tab}
+{apply_state}
+{set_mode}
+
+setInspectorMode('chat');
+if (!elements.get('workflowEdgeTab').hidden) throw new Error('edge tab stayed visible while inspector was open');
+setInspectorMode(null);
+if (elements.get('workflowEdgeTab').hidden) throw new Error('edge tab stayed hidden after inspector close');
+applyLoopState({{ phase: 'diff' }});
+if (elements.get('workflowEdgeLabel').textContent !== 'Diff') throw new Error('edge tab phase was not updated');
+if (elements.get('workflowEdgeProgress').textContent !== '4/5') throw new Error('edge tab progress was not updated');
+"""
+    result = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=harness,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_timeline_template_declutters_inspector_and_annotations(minimal_nsys_db_path):
