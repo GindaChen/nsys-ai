@@ -81,6 +81,51 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
     return kwargs
 
 
+def _empty_trim_window(conn, kwargs: dict) -> list[dict] | None:
+    """Return an abstention when a requested window has no GPU activity.
+
+    The matcher used to treat an empty trim as a clean profile because every
+    check returned no rows and the generic healthy fallback ran.  That is not
+    evidence of health: there was simply nothing to inspect.  Check all
+    devices here, before device selection, so an idle requested device does
+    not mask activity on another GPU.
+    """
+    if kwargs.get("trim_start_ns") is None and kwargs.get("trim_end_ns") is None:
+        return None
+
+    try:
+        adapter = wrap_connection(conn)
+        kernel_table = adapter.resolve_activity_tables().get("kernel")
+        if not kernel_table:
+            return None
+        trim_sql, trim_params = _trim_event_clause(kwargs)
+        row = adapter.execute(
+            f"SELECT 1 FROM {kernel_table} WHERE 1=1{trim_sql} LIMIT 1",
+            trim_params,
+        ).fetchone()
+    except DB_ERRORS as e:
+        _log.debug("root_cause_matcher (trim activity check): %s", e, exc_info=True)
+        return None
+
+    if row:
+        return None
+
+    start = kwargs.get("trim_start_ns")
+    end = kwargs.get("trim_end_ns")
+    bounds = []
+    if start is not None:
+        bounds.append(f"start >= {int(start)} ns")
+    if end is not None:
+        bounds.append(f"end <= {int(end)} ns")
+    window = " and ".join(bounds) or "the requested trim window"
+    return abstain(
+        f"No GPU kernel activity falls within {window}; root-cause checks "
+        "cannot determine whether this window is healthy.",
+        trim_start_ns=start,
+        trim_end_ns=end,
+    )
+
+
 def _small_kernel_launch_summary(rows: list[dict]) -> tuple[int, int]:
     """Return (launch occurrences, kernel types) below the 10us threshold."""
     qualifying = []
@@ -101,7 +146,12 @@ def _small_kernel_launch_summary(rows: list[dict]) -> tuple[int, int]:
 
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Run all pattern matchers against the profile."""
+    empty_window = _empty_trim_window(conn, kwargs)
+    if empty_window is not None:
+        return empty_window
+
     findings = []
+    sync_abstention = None
 
     # Gather evidence from skills (forward trim kwargs)
 
@@ -457,12 +507,33 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     # --- nsys anti-pattern checks (direct SQL) ---
     # These cover the 4 expert-rule recipes from nsys:
     # cuda_api_sync, cuda_memcpy_sync, cuda_memcpy_async, cuda_memset_sync
-    findings += _check_sync_apis(conn, **kwargs)
+    sync_findings = _check_sync_apis(conn, **kwargs)
+    if is_abstention(sync_findings):
+        sync_abstention = sync_findings[0]
+    else:
+        findings += sync_findings
     findings += _check_sync_memcpy(conn, **kwargs)
     findings += _check_pageable_memcpy(conn, **kwargs)
     memset_findings = _check_sync_memset(conn, **kwargs)
     if not is_abstention(memset_findings):
         findings += memset_findings
+
+    if sync_abstention and findings:
+        findings.append(
+            {
+                "pattern": "Excessive Synchronization (abstained)",
+                "severity": "info",
+                "evidence": sync_abstention["reason"],
+                "recommendation": (
+                    "Attribute synchronization time per host thread, or use a "
+                    "thread-aware denominator before ranking this pattern."
+                ),
+                "abstained": True,
+                "reason": sync_abstention["reason"],
+            }
+        )
+    elif sync_abstention:
+        findings = [sync_abstention]
 
     if not findings:
         findings.append(
@@ -826,11 +897,18 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         wall_ns = (wall_end - wall_start) if wall_start is not None and wall_end is not None else 0
         wall_ms = wall_ns / 1e6
         wall_pct = (total_sync_ns / wall_ns * 100) if wall_ns > 0 else 0
-        if (
-            total_sync_ms >= 1.0
-            and threshold_pct >= 2.0
-            and 0 <= wall_pct <= 100
-        ):
+        if total_sync_ms >= 1.0 and threshold_pct >= 2.0:
+            if wall_pct > 100:
+                return abstain(
+                    f"{call_count} sync calls total {total_sync_ms:.1f}ms, which "
+                    f"is {wall_pct:.1f}% of the {wall_ms:.1f}ms runtime wall "
+                    "span. Concurrent host-thread intervals overlap, so a "
+                    "single wall-time denominator would be misleading; "
+                    "per-thread attribution is required.",
+                    pattern="Excessive Synchronization",
+                    wall_pct=round(wall_pct, 1),
+                    total_sync_ms=round(total_sync_ms, 1),
+                )
             return [
                 {
                     "pattern": "Excessive Synchronization",

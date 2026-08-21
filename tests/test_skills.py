@@ -740,9 +740,44 @@ def test_root_cause_sync_and_pageable_checks_honor_trim(minimal_nsys_conn):
 
     skill = get_skill("root_cause_matcher")
     rows = skill.execute(minimal_nsys_conn, trim_start_ns=0, trim_end_ns=1)
-    patterns = {row["pattern"] for row in rows}
+    patterns = {row.get("pattern") for row in rows}
     assert "Excessive Synchronization" not in patterns
     assert "Pageable Memory in Async Memcpy" not in patterns
+    assert rows[0]["_abstained"] is True
+    assert "No GPU kernel activity" in rows[0]["reason"]
+    assert "No Known Anti-Patterns Detected" not in patterns
+
+
+def test_root_cause_sync_abstains_for_overlapping_host_threads(minimal_nsys_conn):
+    """Overlapping host-thread sync intervals must not become a >100% warning."""
+    from nsys_ai.skills.base import is_abstention
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_sync_apis
+    from nsys_ai.skills.registry import get_skill
+
+    # Two different host threads block over the same interval.  Summing their
+    # durations is valid for a cost total, but not as a percentage of one
+    # global runtime wall span.
+    minimal_nsys_conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME "
+        "(globalTid, correlationId, start, end, nameId) VALUES (?, ?, ?, ?, ?)",
+        [
+            (101, 106, 5_000_000, 35_000_000, 20),
+            (102, 107, 5_000_000, 35_000_000, 20),
+        ],
+    )
+
+    direct_rows = _check_sync_apis(minimal_nsys_conn)
+    assert is_abstention(direct_rows)
+    assert direct_rows[0]["wall_pct"] > 100
+    assert "Concurrent host-thread intervals overlap" in direct_rows[0]["reason"]
+
+    rows = get_skill("root_cause_matcher").execute(minimal_nsys_conn)
+    assert not any(row.get("pattern") == "Excessive Synchronization" for row in rows)
+    composite = next(
+        row for row in rows if row.get("pattern") == "Excessive Synchronization (abstained)"
+    )
+    assert composite["severity"] == "info"
+    assert composite["abstained"] is True
 
 
 def test_root_cause_sync_percentage_names_wall_time_denominator(minimal_nsys_conn):
