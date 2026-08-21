@@ -46,8 +46,18 @@ ai = ["anthropic>=0.20.0", "litellm>=1.0.0"]  # backward compat alias
 tui = ["textual>=8.0.0"]                        # backward compat; textual is now core (tree + timeline)
 chat = ["litellm>=1.0.0", "nsys-ai[tui]"]       # AI chat TUI (tui extra kept for compat)
 cutracer = ["cutracer>=0.2.0"]                  # CUTracer CLI + instruction-level analysis
-dev = ["pytest>=8.2,<9", "ruff>=0.4.0", "pytest-textual-snapshot>=1.1.0", "pytest-asyncio>=0.25,<1"]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.25,<1",
+    "pytest-cov>=5.0",
+    "pytest-textual-snapshot>=1.1.0",
+    "coverage>=7.0",
+    "ruff>=0.4.0",
+]
 all = ["nsys-ai[agent,tui,chat,cutracer,mcp]"]
+
+[tool.setuptools]
+py-modules = ["sitecustomize"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -84,6 +94,17 @@ ignore = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "no_cover: exclude timing-sensitive tests from coverage instrumentation",
+]
+
+[tool.coverage.run]
+branch = true
+concurrency = ["multiprocessing", "thread"]
+disable_warnings = ["no-data-collected"]
+parallel = true
+sigterm = true
+source = ["src/nsys_ai"]
 
 [tool.bandit]
 # B110: try_except_pass; B608: SQL
