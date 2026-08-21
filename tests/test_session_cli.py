@@ -77,6 +77,55 @@ def test_session_directory_can_be_used_by_publish_facade(tmp_path: Path):
     assert (handoff / "findings.json").is_file()
 
 
+def test_cli_ask_persists_completed_session_handoff(tmp_path: Path, monkeypatch, capsys):
+    """The CLI ask facade writes the same evidence-first handoff log as Web/TUI."""
+    from nsys_ai.cli import handlers
+    from nsys_ai.profile_runner import build_local_profile_reference
+
+    profile = BEFORE.resolve()
+    reference = build_local_profile_reference(profile)
+    handoff = tmp_path / "cli-ask-session"
+    SessionStore(handoff.parent).create(handoff.name, before_profile=reference)
+
+    class FakeAgent:
+        def __init__(self, profile_path):
+            self.profile_path = profile_path
+            self._trim_kwargs = {}
+
+        def ask_result(self, question):
+            assert question == "why is this slow?"
+            return (
+                "## Summary\nGrounded",
+                {"top_kernels": [{"name": "gemm"}]},
+                ["root_cause_matcher", "top_kernels"],
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nsys_ai.agent.loop.Agent", FakeAgent)
+    handlers._cmd_ask(
+        type(
+            "Args",
+            (),
+            {
+                "profile": None,
+                "session": str(handoff),
+                "question": "why is this slow?",
+            },
+        )(),
+        None,
+    )
+    assert "Grounded" in capsys.readouterr().out
+
+    record = json.loads(
+        (handoff / "logs" / "ask.jsonl").read_text(encoding="utf-8")
+    )
+    assert record["question"] == "why is this slow?"
+    assert record["selected_skills"] == ["root_cause_matcher", "top_kernels"]
+    assert record["evidence"]["top_kernels"][0]["name"] == "gemm"
+
+
 def _subprocess_environment(**extra: str) -> dict[str, str]:
     environment = dict(os.environ)
     source = str(ROOT / "src")

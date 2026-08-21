@@ -10,6 +10,7 @@ import os
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,36 @@ from .session_store import (
 )
 
 DEFAULT_SESSION_ROOT = ".nsys-ai/sessions"
+
+
+def append_ask_log(
+    session_id: str | None,
+    session_root: str | os.PathLike[str] | None,
+    *,
+    question: str,
+    answer: str,
+    selected_skills: list[str],
+    evidence: Mapping[str, list[dict]],
+    profile_path: str,
+    trim_kwargs: Mapping,
+) -> str | None:
+    """Append one completed ask handoff for any transport."""
+    if not session_id:
+        return None
+    record = {
+        "schema_version": "0.1",
+        "kind": "ask",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "question": question,
+        "answer": answer,
+        "selected_skills": list(selected_skills),
+        "evidence": dict(evidence),
+        "profile_path": profile_path,
+        "trim": dict(trim_kwargs),
+    }
+    with SessionStore(session_root or DEFAULT_SESSION_ROOT).writer(session_id) as writer:
+        writer.append_log("ask", record)
+    return "logs/ask.jsonl"
 
 
 @dataclass(frozen=True)

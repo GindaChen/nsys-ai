@@ -2510,12 +2510,7 @@ def _cmd_agent(args, _profile):
         finally:
             agent.close()
     elif args.agent_action == "ask":
-        profile_path = _resolve_ask_profile(args)
-        agent = Agent(profile_path)
-        try:
-            print(agent.ask(args.question))
-        finally:
-            agent.close()
+        print(_run_cli_ask(args))
     else:
         print("Usage: nsys-ai agent {analyze,ask} ...")
         sys.exit(1)
@@ -2523,12 +2518,37 @@ def _cmd_agent(args, _profile):
 
 def _cmd_ask(args, _profile):
     """Simplified alias for `agent ask`."""
+    print(_run_cli_ask(args))
+
+
+def _run_cli_ask(args) -> str:
+    """Run either public CLI ask entry point and publish its session handoff."""
     from nsys_ai.agent.loop import Agent
+    from nsys_ai.session_cli import (
+        DEFAULT_SESSION_ROOT,
+        append_ask_log,
+        resolve_session_location,
+    )
 
     profile_path = _resolve_ask_profile(args)
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
     agent = Agent(profile_path)
     try:
-        print(agent.ask(args.question))
+        answer, evidence, selected = agent.ask_result(args.question)
+        if location is not None:
+            append_ask_log(
+                location.session_id,
+                location.root,
+                question=args.question,
+                answer=answer,
+                selected_skills=selected,
+                evidence=evidence,
+                profile_path=profile_path,
+                trim_kwargs=agent._trim_kwargs,
+            )
+        return answer
     finally:
         agent.close()
 

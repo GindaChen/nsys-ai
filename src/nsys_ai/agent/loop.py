@@ -85,6 +85,10 @@ class Agent:
 
     def ask(self, question: str) -> str:
         """Run deterministic triage/deep-dive evidence, then synthesize it."""
+        return self.ask_result(question)[0]
+
+    def ask_result(self, question: str) -> tuple[str, dict[str, list[dict]], list[str]]:
+        """Return the answer plus runner evidence for session handoff callers."""
         try:
             from ..chat_config import _get_model_and_key
 
@@ -93,7 +97,7 @@ class Agent:
             log.debug("LLM model/key resolution failed", exc_info=True)
             model, api_key = None, None
         has_llm = bool(model and api_key)
-        answer, _evidence, _selected = runner.answer_question(
+        return runner.answer_question(
             self.conn,
             question,
             profile_path=self.profile_path,
@@ -103,7 +107,6 @@ class Agent:
             triage_selector=self._try_llm_triage if has_llm else None,
             summary_provider=self._try_llm_synthesis if has_llm else None,
         )
-        return answer
 
     def run_skill(self, skill_name: str, **kwargs) -> str:
         """Run one registered skill by name."""
