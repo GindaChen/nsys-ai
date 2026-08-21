@@ -511,6 +511,10 @@ SKILL = Skill(
     to_findings_fn=_to_findings,
     required_tables=("kernel",),
     params=[SkillParam("device", "GPU device ID", "int", False, 0)],
+    # Static audit for #350: overlap_analysis and the same-stream/device
+    # enrichment read device and trim. Forwarded overhead_ns and
+    # communicator_data do not affect this skill's rows.
+    memo_key_params=("device", "trim_start_ns", "trim_end_ns"),
     tags=[
         "overlap", "nccl", "compute", "communication", "distributed",
         "multi-gpu", "same-stream", "stream-serialization",

@@ -574,5 +574,15 @@ SKILL = Skill(
     ],
     format_fn=_format,
     to_findings_fn=_to_findings,
+    # Static audit for #350: device, trim, min_gap_ns, and limit all affect
+    # the returned rows or summary. Forwarded overhead_ns and
+    # communicator_data are not read by _execute.
+    memo_key_params=(
+        "device",
+        "trim_start_ns",
+        "trim_end_ns",
+        "min_gap_ns",
+        "limit",
+    ),
     tags=["bubble", "idle", "gap", "pipeline", "stall", "utilization", "attribution"],
 )
