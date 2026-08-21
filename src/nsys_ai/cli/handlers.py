@@ -57,6 +57,7 @@ def _cmd_diagnose(args, _profile):
             open_browser=not bool(getattr(args, "no_browser", False)),
             output=getattr(args, "output", None),
             format=getattr(args, "format", "text"),
+            against=getattr(args, "against", None),
         )
     except DiagnoseCommandError as exc:
         print(f"Error: {exc}", file=sys.stderr)

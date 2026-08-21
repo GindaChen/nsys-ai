@@ -15,6 +15,7 @@ from nsys_ai.session_cli import (
     resolve_session_location,
     session_argument,
     session_dir,
+    session_id_from_diff_id,
     session_id_from_profile_id,
 )
 from nsys_ai.session_store import SessionStore
@@ -49,6 +50,13 @@ def test_session_location_supports_directory_handoff_and_legacy_ids(tmp_path: Pa
 
     spaced_handoff = tmp_path / "handoff dir" / "run-002"
     assert session_argument(spaced_handoff) == shlex.quote(str(spaced_handoff.resolve()))
+
+
+def test_diff_id_derivation_is_distinct_from_profile_id_derivation():
+    diff_id = "diff1:sha256:abc123"
+
+    assert session_id_from_diff_id(diff_id) == "diff_diff1_sha256_abc123"
+    assert session_id_from_diff_id(diff_id) != session_id_from_profile_id(diff_id)
 
 
 def test_session_directory_can_be_used_by_publish_facade(tmp_path: Path):

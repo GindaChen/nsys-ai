@@ -12,6 +12,7 @@ import os
 import sys
 from typing import TextIO
 
+from .annotation import rank_findings
 from .exceptions import NsysAiError, ProfileError
 from .profile import Profile, resolve_profile_path, select_gpu_device
 from .profile_runner import build_local_profile_reference
@@ -42,6 +43,7 @@ def run_diagnose(
     open_browser: bool = True,
     output: str | os.PathLike[str] | None = None,
     format: str = "text",
+    against: str | os.PathLike[str] | None = None,
     session_root: str | os.PathLike[str] = ".nsys-ai/sessions",
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
@@ -60,6 +62,8 @@ def run_diagnose(
     re-running analysis.
     """
     if profile_path is None:
+        if against:
+            raise DiagnoseCommandError("diagnose --against requires a candidate profile")
         if not web or not session_id:
             raise DiagnoseCommandError(
                 "diagnose requires a profile, or --session <id> --web to reopen"
@@ -85,6 +89,7 @@ def run_diagnose(
 
     from .evidence_builder import EvidenceBuilder
 
+    diff_summary = None
     try:
         with Profile(sqlite_path) as prof:
             selected_gpu = select_gpu_device(prof, gpu)
@@ -92,6 +97,30 @@ def run_diagnose(
             # Analysis completes before any session writer lease is taken.
             report = builder.build()
             before = build_local_profile_reference(prof.path, trim_ns=trim)
+            if against:
+                from .baseline import parse_baseline_ref, resolve_baseline_ref
+                from .diff import diff_profiles
+                from .diff_findings import findings_from_diff
+
+                baseline_ref = os.fspath(against)
+                baseline_path = (
+                    resolve_baseline_ref(baseline_ref)
+                    if parse_baseline_ref(baseline_ref) is not None
+                    else baseline_ref
+                )
+                baseline_sqlite = resolve_profile_path(
+                    os.path.abspath(os.path.expanduser(baseline_path))
+                )
+                with Profile(baseline_sqlite) as baseline_prof:
+                    diff_summary = diff_profiles(
+                        baseline_prof,
+                        prof,
+                        gpu=gpu,
+                        trim=trim,
+                    )
+                report.findings = rank_findings(
+                    [*report.findings, *findings_from_diff(diff_summary)]
+                )
     except (OSError, ProfileError, TypeError, ValueError) as exc:
         raise DiagnoseCommandError(f"diagnose failed: {exc}") from exc
 
@@ -101,7 +130,11 @@ def run_diagnose(
         root=session_root,
     )
     if location is None:
-        resolved_id = resolve_session_id(None, before=before)
+        resolved_id = resolve_session_id(
+            None,
+            before=before,
+            diff_id=diff_summary.diff_id if diff_summary is not None else None,
+        )
     else:
         resolved_id = location.session_id
         session_root = location.root
