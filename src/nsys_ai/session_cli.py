@@ -167,14 +167,37 @@ def session_id_from_profile_id(profile_id: str) -> str:
     return derived
 
 
+def session_id_from_diff_id(diff_id: str) -> str:
+    """Derive a SessionStore-safe id from a content ``diff_id``.
+
+    A diagnose seeded by ``--against`` is a new handoff boundary: its
+    findings describe the candidate profile, but the pair comparison is the
+    identity that makes the run reproducible. Prefixing the normalized diff
+    id also keeps it distinct from a normal profile-derived session.
+    """
+    if not isinstance(diff_id, str) or not diff_id:
+        raise ValueError("diff_id must be a non-empty string")
+    derived = f"diff_{diff_id.replace(':', '_')}"
+    SessionState(session_id=derived)
+    return derived
+
+
 def resolve_session_id(
     explicit: str | None,
     *,
     before: LocalProfileReference | None = None,
+    diff_id: str | None = None,
 ) -> str:
-    """Return a caller id, or derive one from the before profile content id."""
+    """Return a caller id, or derive one from a diff/profile content id.
+
+    ``diff_id`` takes precedence over ``before`` because a diagnose seeded by
+    a baseline comparison must not silently replace a normal diagnosis for
+    the candidate profile.
+    """
     if explicit:
         return explicit
+    if diff_id:
+        return session_id_from_diff_id(diff_id)
     if before is None:
         raise ValueError(
             "session id is required when no before profile is available to derive from"

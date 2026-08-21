@@ -264,6 +264,9 @@ definitions, metric bases, and the recovery path for an inconclusive comparison.
 Useful variants:
 
 - `--session` publishes the diff into the same session directory.
+- `diagnose run-after/profile.sqlite --against run-before/profile.sqlite`
+  publishes candidate-anchored regression Findings that can be sent directly
+  to `propose`; see [the diff findings contract](./dev/diff-findings.md).
 - `--gpu N` restricts to one device; the default compares all of them.
 - `--against baseline:<name>` diffs against a stored baseline instead of a path — see
   `nsys-ai baseline --help`.

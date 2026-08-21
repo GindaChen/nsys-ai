@@ -38,6 +38,7 @@ alongside them.
 | [dev/surface-adapters.md](./dev/surface-adapters.md) | How CLI, TUI, Web, MCP, and chat delegate shared policy and analysis |
 | [dev/artifact-layout.md](./dev/artifact-layout.md) | Where invocation artifacts and input-keyed profile caches live |
 | [dev/skill-memo-fingerprint.md](./dev/skill-memo-fingerprint.md) | How answer-affecting parameters define a skill memo identity |
+| [dev/diff-findings.md](./dev/diff-findings.md) | How baseline diffs seed candidate-owned findings and proposals |
 | [dev/testing.md](./dev/testing.md) | Test layers and subprocess-aware coverage |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI |
 

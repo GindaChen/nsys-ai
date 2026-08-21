@@ -632,6 +632,15 @@ def _build_parser():
         help="Time window in seconds",
     )
     p.add_argument(
+        "--against",
+        default=None,
+        metavar="REF",
+        help=(
+            "Baseline to diff against while diagnosing the candidate "
+            "(e.g. 'baseline:<name>' or a profile path)"
+        ),
+    )
+    p.add_argument(
         "--session",
         nargs="?",
         const="",
