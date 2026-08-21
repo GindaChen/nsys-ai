@@ -57,6 +57,13 @@
             color: var(--text)
         }
 
+        .tree-more {
+            color: var(--text-dim);
+            font-size: 11px;
+            padding: 2px 0 2px 24px;
+            font-style: italic
+        }
+
         /* Controls */
         .controls {
             display: flex;
@@ -1067,7 +1074,10 @@
             if (!response.ok) throw new Error('tree request failed (' + response.status + ')');
             const payload = await response.json();
             if (payload.error) throw new Error(payload.error);
-            return Array.isArray(payload.nodes) ? payload.nodes : [];
+            return {
+                nodes: Array.isArray(payload.nodes) ? payload.nodes : [],
+                truncated: payload.truncated === true,
+            };
         }
         function setTreeData(nodes) {
             DATA = Array.isArray(nodes) ? nodes : [];
@@ -1083,9 +1093,9 @@
         async function ensureFullData() {
             if (fullDataLoaded) return DATA;
             if (!fullDataPromise) {
-                fullDataPromise = fetchTree('', 'full').then(nodes => {
-                    fullDataLoaded = true;
-                    setTreeData(nodes);
+                fullDataPromise = fetchTree('', 'full').then(payload => {
+                    fullDataLoaded = !payload.truncated;
+                    setTreeData(payload.nodes);
                     return DATA;
                 });
             }
@@ -1093,7 +1103,7 @@
         }
         async function loadInitialTree() {
             try {
-                setTreeData(await fetchTree('', 2));
+                setTreeData((await fetchTree('', 2)).nodes);
             } catch (error) {
                 document.getElementById('tree').textContent = 'Failed to load tree: ' + error.message;
             }
@@ -1259,7 +1269,7 @@
 
         // = Tree view =
         function renderNode(node, depth) {
-            const hasC = (node.children && node.children.length > 0) || node.has_children === true, isK = node.type === 'kernel', cls = isK ? 'kernel' : 'nvtx';
+            const hasC = (node.children && node.children.length > 0) || node.has_children === true || node.has_more === true, isK = node.type === 'kernel', cls = isK ? 'kernel' : 'nvtx';
             const icon = isK ? '⚡' : '📦', toggle = hasC ? '▶' : ' ';
             const displayName = (demangledMode && isK && node.demangled) ? node.demangled : node.name;
             const stream = node.stream !== undefined ? '<span class="stream">[stream ' + node.stream + ']</span>' : '';
@@ -1279,6 +1289,10 @@
                 const lazy = node.has_children === true && !(node.children && node.children.length);
                 h += '<div class="children' + (depth > 1 || lazy ? ' collapsed' : '') + '" data-lazy="' + (lazy ? '1' : '0') + '">';
                 if (node.children) node.children.forEach(c => h += renderNode(c, depth + 1));
+                if (node.has_more) {
+                    const total = node.children_total ? ' of ' + node.children_total : '';
+                    h += '<div class="tree-more">Showing a bounded slice' + total + ' children</div>';
+                }
                 h += '</div>';
             }
             h += '</div>'; return h;
@@ -1291,13 +1305,19 @@
                 c.classList.remove('collapsed');
                 c.textContent = 'Loading…';
                 try {
-                    const children = await fetchTree(nodeEl.dataset.path || '', 2);
+                    const payload = await fetchTree(nodeEl.dataset.path || '', 2);
+                    const children = payload.nodes;
                     c.textContent = '';
                     children.forEach(child => c.insertAdjacentHTML('beforeend', renderNode(child, Number(nodeEl.dataset.depth || 0) + 1)));
+                    if (payload.truncated) c.insertAdjacentHTML('beforeend', '<div class="tree-more">Showing a bounded child slice</div>');
                     c.dataset.loaded = '1';
                     c.dataset.lazy = '0';
                     const target = findTreeNode(DATA, nodeEl.dataset.path || '');
-                    if (target) { target.children = children; delete target.has_children; }
+                    if (target) {
+                        target.children = children;
+                        delete target.has_children;
+                        if (payload.truncated) target.has_more = true;
+                    }
                 } catch (error) {
                     c.textContent = 'Failed to load children: ' + error.message;
                     return;

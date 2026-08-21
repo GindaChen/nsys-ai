@@ -67,22 +67,75 @@ def _find_tree_path(nodes: list[dict], path: str) -> dict | None:
     return None
 
 
-def _slice_tree_nodes(nodes: list[dict], depth: int | None) -> list[dict]:
-    """Copy a tree to *depth*, preserving a marker for unloaded children."""
-    result = []
-    for node in nodes:
-        copied = {key: value for key, value in node.items() if key != "children"}
-        children = node.get("children") or []
-        if children:
-            if depth is None or depth > 0:
-                copied["children"] = _slice_tree_nodes(
-                    children, None if depth is None else depth - 1
-                )
-            else:
-                copied["children"] = []
-                copied["has_children"] = True
-        result.append(copied)
+_TREE_CHILD_LIMIT = 256
+_TREE_CHILD_LIMIT_MAX = 2_000
+_TREE_NODE_LIMIT = 10_000
+_TREE_NODE_LIMIT_MAX = 20_000
+
+
+def _slice_tree_nodes(
+    nodes: list[dict],
+    depth: int | None,
+    *,
+    limit: int = _TREE_CHILD_LIMIT,
+    max_nodes: int | None = None,
+) -> list[dict]:
+    """Copy a tree to *depth* with bounded fan-out and response size.
+
+    ``has_children`` continues to mean that a lazy child request is possible.
+    ``has_more`` is stronger: the current response contains only the first
+    *limit* children (or reached *max_nodes*), so a consumer must not treat
+    the returned subtree as complete.
+    """
+    remaining = max_nodes
+
+    def walk(items: list[dict], remaining_nodes: int | None, item_depth: int | None):
+        truncated = len(items) > limit
+        if remaining_nodes is not None and len(items) > remaining_nodes:
+            truncated = True
+        result = []
+        for node in items[:limit]:
+            if remaining_nodes is not None and remaining_nodes <= 0:
+                truncated = True
+                break
+            if remaining_nodes is not None:
+                remaining_nodes -= 1
+            copied = {key: value for key, value in node.items() if key != "children"}
+            children = node.get("children") or []
+            if children:
+                if item_depth is None or item_depth > 0:
+                    child_depth = None if item_depth is None else item_depth - 1
+                    child_nodes, child_truncated, remaining_nodes = walk(
+                        children, remaining_nodes, child_depth
+                    )
+                    copied["children"] = child_nodes
+                    if child_truncated:
+                        truncated = True
+                        copied["has_more"] = True
+                        copied["children_total"] = len(children)
+                else:
+                    copied["children"] = []
+                    copied["has_children"] = True
+            result.append(copied)
+        return result, truncated, remaining_nodes
+
+    result, _truncated, _remaining = walk(nodes, remaining, depth)
     return result
+
+
+def _tree_slice_has_more(nodes: list[dict]) -> bool:
+    """Return whether a serialized tree contains an explicitly partial node."""
+    for node in nodes:
+        if node.get("has_more"):
+            return True
+        if _tree_slice_has_more(node.get("children") or []):
+            return True
+    return False
+
+
+def _count_tree_nodes(nodes: list[dict]) -> int:
+    """Count nodes in an already bounded serialized tree."""
+    return sum(1 + _count_tree_nodes(node.get("children") or []) for node in nodes)
 
 
 #: Below this, the gzip header costs more than the compression saves.
@@ -477,6 +530,30 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
             except ValueError:
                 self._json_response({"error": "depth must be an integer or full"}, 400)
                 return
+        try:
+            limit = int(qs.get("limit", [_TREE_CHILD_LIMIT])[0])
+            max_nodes = int(qs.get("max_nodes", [_TREE_NODE_LIMIT])[0])
+        except (TypeError, ValueError):
+            self._json_response(
+                {"error": "limit and max_nodes must be positive integers"}, 400
+            )
+            return
+        if not 1 <= limit <= _TREE_CHILD_LIMIT_MAX:
+            self._json_response(
+                {"error": f"limit must be between 1 and {_TREE_CHILD_LIMIT_MAX}"},
+                400,
+            )
+            return
+        if not 1 <= max_nodes <= _TREE_NODE_LIMIT_MAX:
+            self._json_response(
+                {
+                    "error": (
+                        f"max_nodes must be between 1 and {_TREE_NODE_LIMIT_MAX}"
+                    )
+                },
+                400,
+            )
+            return
 
         source = self.__class__._tree_data
         if path:
@@ -485,8 +562,23 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 self._json_response({"error": "tree path not found", "path": path}, 404)
                 return
             source = source.get("children") or []
-        nodes = _slice_tree_nodes(source, depth)
-        self._json_response({"nodes": nodes, "path": path, "depth": depth_raw})
+        nodes = _slice_tree_nodes(source, depth, limit=limit, max_nodes=max_nodes)
+        truncated = (
+            len(source) > limit
+            or len(source) > max_nodes
+            or _tree_slice_has_more(nodes)
+        )
+        self._json_response(
+            {
+                "nodes": nodes,
+                "path": path,
+                "depth": depth_raw,
+                "limit": limit,
+                "max_nodes": max_nodes,
+                "returned_nodes": _count_tree_nodes(nodes),
+                "truncated": truncated,
+            }
+        )
 
     def _handle_search(self):
         """Search the complete pre-built profile, including unloaded tiles."""
