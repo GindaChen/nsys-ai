@@ -336,6 +336,8 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
     _trim: tuple[int, int] | None = None
     _tree_data: list[dict] = []
     _tree_configured: bool = False
+    _tree_build_done: threading.Event | None = None
+    _tree_build_error: str | None = None
     _tree_device: int | None = None
     _tree_trim: tuple[int, int] | None = None
 
@@ -455,8 +457,14 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
         """Return a bounded tree slice for the lazy NVTX tree viewer."""
         from urllib.parse import parse_qs, urlparse
 
+        if self.__class__._tree_build_error:
+            self._json_response({"error": "tree build failed"}, 500)
+            return
         if not self.__class__._tree_configured:
-            self._json_response({"error": "tree data is not configured"}, 500)
+            self._json_response(
+                {"status": "building", "message": "tree data is still building"},
+                202,
+            )
             return
         qs = parse_qs(urlparse(self.path).query)
         path = str(qs.get("path", [""])[0])
@@ -1090,14 +1098,42 @@ def serve(prof, device: int, trim: tuple[int, int], *, port: int = 8142, open_br
     _ViewerHandler.prof = prof
     _ViewerHandler._tree_device = device
     _ViewerHandler._tree_trim = trim
-    _ViewerHandler._tree_data = to_json(build_nvtx_tree(prof, device, trim))
-    _ViewerHandler._tree_configured = True
+    _ViewerHandler._tree_data = []
+    _ViewerHandler._tree_configured = False
+    _ViewerHandler._tree_build_error = None
     html = generate_html(prof, device, trim, embed_data=False)
     _ViewerHandler.html_bytes = html.encode("utf-8")
 
     server = _bind_local_server(port, _ViewerHandler)
     open_url = f"http://127.0.0.1:{server.server_address[1]}" if open_browser else None
-    _run_server(server, open_url, prof)
+    tree_done = threading.Event()
+    _ViewerHandler._tree_build_done = tree_done
+
+    def _warm_tree() -> None:
+        t0 = _time.monotonic()
+        try:
+            print("Building NVTX tree in background...", flush=True)
+            _ViewerHandler._tree_data = to_json(build_nvtx_tree(prof, device, trim))
+            print(
+                f"NVTX tree ready in {_time.monotonic() - t0:.1f}s "
+                f"({len(_ViewerHandler._tree_data)} roots)",
+                flush=True,
+            )
+        except Exception as exc:
+            _ViewerHandler._tree_build_error = str(exc)
+            _log.exception("Background NVTX tree build failed")
+        finally:
+            _ViewerHandler._tree_configured = True
+            tree_done.set()
+
+    print(f"Web viewer at http://127.0.0.1:{server.server_address[1]}", flush=True)
+    threading.Thread(target=_warm_tree, name="web-nvtx-tree-warmup", daemon=True).start()
+    try:
+        _run_server(server, open_url, prof)
+    finally:
+        # Keep the Profile alive until the worker has stopped using its DuckDB
+        # connection, matching the timeline-web background build contract.
+        tree_done.wait()
 
 
 # ── Mode 2: Horizontal timeline viewer ──────────────────────────
