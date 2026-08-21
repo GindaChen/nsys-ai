@@ -555,14 +555,13 @@ def test_idle_the_pipeline_actually_sees_is_still_not_called_recoverable():
         "no idle findings at all — the gaps were filtered, not judged"
     )
 
-    # Documenting current behaviour rather than blessing it: severity is judged
-    # per gap with no reference to the share of the run, so a healthy profile
-    # still emits warnings. Tracked separately; pinned here so a change is
-    # deliberate rather than accidental.
+    # The gaps are visible, but their aggregate share is immaterial. They are
+    # observations rather than warning-level bottlenecks.
     idle_warnings = [
         f for f in report.findings if f.category == "idle" and f.severity == "warning"
     ]
-    assert len(idle_warnings) <= 5, f"idle warning noise grew to {len(idle_warnings)}"
+    assert not idle_warnings, f"immaterial idle share emitted warnings: {idle_warnings}"
+    assert [f for f in report.findings if f.category == "idle" and f.severity == "info"]
     assert not [f for f in report.findings if f.category == "idle" and f.severity == "critical"]
 
 

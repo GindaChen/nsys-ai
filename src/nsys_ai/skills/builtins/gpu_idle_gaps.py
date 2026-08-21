@@ -344,6 +344,12 @@ _FALSE_POSITIVE_NOTES = [
     "Profiler overhead can inflate apparent idle time on very short profiles",
 ]
 
+# A per-gap duration can be operationally noticeable while still being
+# immaterial to the run as a whole. Keep the threshold shared by the summary
+# and per-gap findings so consumers do not see an informational summary paired
+# with warning-level children for the same small aggregate signal.
+_IDLE_WARNING_SHARE_PCT = 15.0
+
 
 def _gap_confidence(gap_ms: float) -> float:
     """Map a gap duration to a confidence in [0, 1].
@@ -372,6 +378,24 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
 
     profile_id = (context or {}).get("profile_id", "unknown")
     findings = []
+
+    # `_execute` appends one aggregate row after the per-gap rows. Read it
+    # before constructing findings so severity does not depend on row order.
+    # Direct callers may provide only gap rows; in that case retain the legacy
+    # warning because there is no aggregate denominator to justify demotion.
+    idle_share_pct = None
+    for row in rows:
+        if row.get("_summary"):
+            try:
+                idle_share_pct = float(row.get("pct_of_profile"))
+            except (TypeError, ValueError):
+                idle_share_pct = None
+            break
+    per_gap_severity = (
+        "info"
+        if idle_share_pct is not None and idle_share_pct < _IDLE_WARNING_SHARE_PCT
+        else "warning"
+    )
 
     for r in rows:
         if r.get("error"):
@@ -443,7 +467,9 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                         start_ns=profile_start_ns,
                         end_ns=profile_end_ns,
                         gpu_id=target_device,
-                        severity="info" if pct < 15 else "warning",
+                        severity=(
+                            "info" if pct < _IDLE_WARNING_SHARE_PCT else "warning"
+                        ),
                         # The gap sum is per stream, so on a multi-stream profile
                         # it exceeds the wall-clock the device lost and the
                         # headroom below is visibly smaller than the number
@@ -535,7 +561,7 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 end_ns=end_ns,
                 gpu_id=device_id,
                 stream=str(stream_id),
-                severity="warning",
+                severity=per_gap_severity,
                 note=note,
                 # v0.1 fields
                 id=finding_id,
