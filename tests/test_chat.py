@@ -670,6 +670,97 @@ def test_stream_agent_loop_terminates_with_done(monkeypatch):
     assert events[-1].get("type") == "done"
 
 
+def test_stream_agent_loop_done_carries_runner_handoff(monkeypatch):
+    """A profile stream exposes the same deterministic runner handoff metadata."""
+    chunk = MagicMock()
+    chunk.choices = [MagicMock(delta=MagicMock(content="Grounded", tool_calls=[]))]
+    chunk.usage = None
+    mock_lt = MagicMock()
+    mock_lt.completion.return_value = iter([chunk])
+    conn = MagicMock()
+
+    monkeypatch.setattr(chat_mod, "_prepare_session", lambda *args, **kwargs: (
+        conn,
+        "/profile.sqlite",
+        "system",
+        lambda _sql: "[]",
+    ))
+    monkeypatch.setattr(
+        chat_mod,
+        "_runner_prefill",
+        lambda prompt, _conn, _messages: (
+            prompt + "\nrunner",
+            True,
+            {"top_kernels": [{"name": "gemm"}]},
+            ["root_cause_matcher", "top_kernels"],
+        ),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    with patch.dict(sys.modules, {"litellm": mock_lt}):
+        events = list(
+            chat_mod.stream_agent_loop(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "why slow?"}],
+                ui_context={},
+                profile_path="/profile.sqlite",
+                prefill_evidence=True,
+                max_turns=1,
+            )
+        )
+
+    done = next(event for event in events if event.get("type") == "done")
+    assert done["selected_skills"] == ["root_cause_matcher", "top_kernels"]
+    assert done["evidence"]["top_kernels"][0]["name"] == "gemm"
+    conn.close.assert_called_once()
+
+
+def test_chat_completion_stream_persists_runner_handoff(monkeypatch):
+    """Conversational SSE forwards runner evidence and records a session log."""
+    evidence = {"top_kernels": [{"name": "gemm"}]}
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: ("gpt-4o", "key"))
+
+    def fake_stream(**_kwargs):
+        yield {"type": "text", "content": "Grounded answer"}
+        yield {
+            "type": "done",
+            "usage": {"prompt_tokens": 4},
+            "selected_skills": ["root_cause_matcher", "top_kernels"],
+            "evidence": evidence,
+        }
+
+    recorded = {}
+
+    def fake_record(session_id, session_root, **kwargs):
+        recorded.update(
+            {"session_id": session_id, "session_root": session_root, **kwargs}
+        )
+        return "logs/ask.jsonl"
+
+    monkeypatch.setattr(chat_mod, "stream_agent_loop", fake_stream)
+    monkeypatch.setattr(chat_mod, "_record_session_ask", fake_record)
+
+    body = json.dumps(
+        {
+            "profile_path": "/profile.sqlite",
+            "session_id": "chat-001",
+            "session_root": "/tmp/sessions",
+            "messages": [{"role": "user", "content": "why slow?"}],
+        }
+    ).encode()
+    raw = b"".join(chat_mod.chat_completion_stream(body))
+    events = [part for part in raw.split(b"\n\n") if part]
+    done = json.loads(next(part for part in events if b"event: done" in part).split(b"data: ", 1)[1])
+
+    assert done["selected_skills"] == ["root_cause_matcher", "top_kernels"]
+    assert done["evidence"] == evidence
+    assert done["session_id"] == "chat-001"
+    assert done["session_log"] == "logs/ask.jsonl"
+    assert recorded["question"] == "why slow?"
+    assert recorded["answer"] == "Grounded answer"
+    assert recorded["evidence"] == evidence
+
+
 # --- 11.8.4 Stage 2: tool error feedback in run_agent_loop (§11.7.1) ---
 
 
