@@ -355,6 +355,44 @@ def test_chat_accepts_a_terminal_whose_stdout_is_redirected(monkeypatch, tmp_pat
     assert started == [str(PROFILE)]
 
 
+def test_chat_session_opens_handoff_and_passes_it_to_tui(monkeypatch, tmp_path: Path):
+    """The standalone chat entry point can create a portable session handoff."""
+    from argparse import Namespace
+
+    from nsys_ai import tui_textual
+    from nsys_ai.cli import handlers
+    from nsys_ai.session_store import SessionStore
+
+    started: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        tui_textual,
+        "run_chat_tui",
+        lambda path, **kwargs: started.append((path, kwargs)),
+    )
+
+    class _Terminal:
+        @staticmethod
+        def isatty():
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _Terminal())
+    session_dir = tmp_path / "chat-session"
+    handlers._cmd_chat(
+        Namespace(profile=str(PROFILE), session=str(session_dir)),
+        None,
+    )
+
+    assert started == [
+        (
+            str(PROFILE),
+            {"session_id": "chat-session", "session_root": str(tmp_path)},
+        )
+    ]
+    snapshot = SessionStore(tmp_path).load("chat-session")
+    assert snapshot.state.before_profile is not None
+    assert snapshot.state.before_profile.path == str(PROFILE)
+
+
 # ── a busy port ────────────────────────────────────────────────────────
 
 
