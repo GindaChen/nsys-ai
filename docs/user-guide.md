@@ -189,6 +189,11 @@ When the request is opened with a session, the response also returns `session_lo
 each completed ask is appended there as a handoff record without changing the session artifact
 manifest.
 
+The NVTX tree viewer loads bounded slices from `GET /api/tree`. `depth` controls levels,
+`limit` caps children per node, and `max_nodes` caps the complete response. A response with
+`"truncated": true` is intentionally partial; nodes may also carry `has_more` and
+`children_total` so clients do not mistake the visible children for the complete profile.
+
 The optional MCP transport exposes the same read-only handoff as `get_session`; it returns the
 SessionStore projection rather than a second MCP-specific session schema.
 

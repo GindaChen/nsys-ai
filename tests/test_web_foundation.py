@@ -106,6 +106,55 @@ def test_tree_slice_preserves_children_marker_without_mutating_source():
     assert source[0]["children"] == [{"path": "child"}]
 
 
+def test_tree_web_endpoint_reports_and_enforces_fanout_limit():
+    old_data = web._ViewerHandler._tree_data
+    old_configured = web._ViewerHandler._tree_configured
+    web._ViewerHandler._tree_data = [
+        {
+            "type": "nvtx",
+            "name": "root",
+            "path": "root",
+            "children": [
+                {"type": "kernel", "name": f"child-{index}", "path": f"root > {index}"}
+                for index in range(5)
+            ],
+        }
+    ]
+    web._ViewerHandler._tree_configured = True
+    try:
+        status, body, _content_type = _get(
+            web._ViewerHandler, "/api/tree?depth=1&limit=2&max_nodes=3"
+        )
+    finally:
+        web._ViewerHandler._tree_data = old_data
+        web._ViewerHandler._tree_configured = old_configured
+
+    payload = json.loads(body)
+    root = payload["nodes"][0]
+    assert status == 200
+    assert payload["truncated"] is True
+    assert payload["limit"] == 2
+    assert payload["max_nodes"] == 3
+    assert payload["returned_nodes"] == 3
+    assert len(root["children"]) == 2
+    assert root["has_more"] is True
+    assert root["children_total"] == 5
+
+
+def test_tree_web_endpoint_rejects_unbounded_limits():
+    old_configured = web._ViewerHandler._tree_configured
+    web._ViewerHandler._tree_configured = True
+    try:
+        status, body, _content_type = _get(
+            web._ViewerHandler, "/api/tree?limit=2001"
+        )
+    finally:
+        web._ViewerHandler._tree_configured = old_configured
+
+    assert status == 400
+    assert "limit must be between" in json.loads(body)["error"]
+
+
 def test_timeline_data_rejects_obsolete_resolution_parameter():
     status, body, content_type = _get(web._ViewerHandler, "/api/data?resolution=2000")
 
