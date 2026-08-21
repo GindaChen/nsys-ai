@@ -7,6 +7,14 @@ Two general notes before the list. Errors carry a bracketed code — `Error [TRI
 which is stable across releases and worth searching for. And `nsys-ai doctor <profile>` answers most
 "will this capture work" questions in one command; run it before working through anything below.
 
+If the command succeeds but a number looks too confident for the evidence, see [Known limits and
+trust boundaries](./known-limits.md). That page is organised by what can make a valid-looking number
+misleading; this page remains organised by the symptom you already saw.
+
+If the command succeeds but a number looks too confident for the evidence, see [Known limits and
+trust boundaries](known-limits.md). That page is organised by what can make a valid-looking number
+misleading; this page remains organised by the symptom you already saw.
+
 ## The profile will not open
 
 ### `Error [EXPORT_TOOL_MISSING]` — conversion requires 'nsys' on PATH
