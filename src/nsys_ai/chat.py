@@ -1247,7 +1247,8 @@ def stream_agent_loop(
     * ``{"type": "system", "content": str}``   — status / warning message
     * ``{"type": "action", "action": dict}``   — navigation/zoom action
     * ``{"type": "done",   "usage": dict, "selected_skills": list,
-      "evidence": dict}`` — final event with runner handoff metadata
+      "evidence": dict, "completed": bool}`` — final event with runner
+      handoff metadata; ``completed`` is false when the turn ended in an error
 
     When *diff_context* is set, uses Phase C diff tools and no single-profile DB.
     *diff_paths* must be (before_path, after_path) for the system prompt.
@@ -1288,7 +1289,7 @@ def stream_agent_loop(
         import litellm
     except ImportError:
         yield {"type": "text", "content": "LLM not available (install litellm)."}
-        yield {"type": "done", "usage": {}}
+        yield {"type": "done", "usage": {}, "completed": False}
         return
 
     # Per-request finding counter (replaces old module-level global).
@@ -1318,12 +1319,12 @@ def stream_agent_loop(
             )
         except (RuntimeError, NsysAiError) as e:
             yield {"type": "text", "content": f"Profile error: {e}"}
-            yield {"type": "done", "usage": {}}
+            yield {"type": "done", "usage": {}, "completed": False}
             return
         except Exception as e:
             _log.warning("Profile session setup failed: %s", e, exc_info=True)
             yield {"type": "text", "content": f"Error loading profile data: {e}"}
-            yield {"type": "done", "usage": {}}
+            yield {"type": "done", "usage": {}, "completed": False}
             return
 
     # Fix 2: Filter out DB-dependent tools when no profile is connected.
@@ -1356,13 +1357,14 @@ def stream_agent_loop(
 
     usage: dict = {}
 
-    def done_event() -> dict:
-        """Build one stable completion event for every normal exit path."""
+    def done_event(*, completed: bool = True) -> dict:
+        """Build one stable completion event for every exit path."""
         return {
             "type": "done",
             "usage": dict(usage),
             "selected_skills": list(runner_selected),
             "evidence": runner_evidence,
+            "completed": completed,
         }
     turn_count = 0
 
@@ -1420,7 +1422,7 @@ def stream_agent_loop(
                 )
             except Exception as e:
                 yield {"type": "text", "content": f"LLM error: {_friendly_error(model, e)}"}
-                yield done_event()
+                yield done_event(completed=False)
                 return
 
             content_parts: list[str] = []
@@ -1500,7 +1502,7 @@ def stream_agent_loop(
                         "Please start a new chat session to continue."
                     ),
                 }
-                yield done_event()
+                yield done_event(completed=False)
                 return
 
             full_content = "".join(content_parts).strip() if content_parts else ""
@@ -1658,7 +1660,7 @@ def stream_agent_loop(
                         grounding_failure or "a tool call was invalid or failed"
                     ),
                 }
-                yield done_event()
+                yield done_event(completed=False)
                 return
             elif turn_grounding_succeeded:
                 evidence_ready = True

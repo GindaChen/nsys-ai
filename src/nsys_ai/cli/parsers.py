@@ -844,7 +844,23 @@ def _build_parser():
     p.set_defaults(handler=_cmd_loop)
 
     p = sub.add_parser("chat", help="AI chat TUI")
-    p.add_argument("profile", help="Path to profile (.sqlite or .nsys-rep)")
+    p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Path to profile (.sqlite or .nsys-rep); omit when using --session",
+    )
+    p.add_argument(
+        "--session",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Open or resume the SessionStore handoff. A profile is required "
+            "when creating a new session."
+        ),
+    )
     p.set_defaults(handler=_cmd_chat)
 
     p = sub.add_parser("ask", help="Ask AI a backend analysis question")

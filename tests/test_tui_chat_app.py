@@ -69,7 +69,11 @@ class _GatedStream:
             for i in range(1, 6):
                 self.produced.append(f"<{label}{i}>")
                 yield {"type": "text", "content": f"<{label}{i}>"}
-            yield {"type": "done"}
+            yield {
+                "type": "done",
+                "selected_skills": ["top_kernels"],
+                "evidence": {"top_kernels": [{"name": "fake_kernel", "total_ms": 1.0}]},
+            }
         finally:
             # Lets a test wait for the worker to be done with this stream instead
             # of sleeping. The worker's `finally: stream.close()` throws
@@ -176,6 +180,86 @@ async def test_cancelled_turn_stops_writing(profile_copy, fake_stream):
         assert [m["role"] for m in app._chat_messages] == ["user", "user", "assistant"], (
             f"unexpected history shape: {app._chat_messages}"
         )
+
+
+@pytest.mark.asyncio
+async def test_completed_session_turn_persists_canonical_handoff(profile_copy, fake_stream, tmp_path):
+    """A standalone chat turn writes the same handoff shape as other TUIs."""
+    import json
+
+    from nsys_ai.profile_runner import build_local_profile_reference
+    from nsys_ai.session_store import SessionStore
+    from nsys_ai.tui_textual import NsysChatApp
+
+    session_root = tmp_path / "sessions"
+    SessionStore(session_root).create(
+        "chat-session",
+        before_profile=build_local_profile_reference(profile_copy),
+    )
+    app = NsysChatApp(
+        profile_copy,
+        session_id="chat-session",
+        session_root=str(session_root),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        inp = app.query_one("#chat-input")
+        inp.focus()
+        inp.value = "What is the top kernel?"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: "<What is the top kernel?0>" in fake_stream.produced)
+        fake_stream.gate("What is the top kernel?").set()
+        assert await _until(pilot, lambda: app._is_generating is False)
+
+    log_path = session_root / "chat-session" / "logs" / "ask.jsonl"
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["kind"] == "ask"
+    assert records[0]["question"] == "What is the top kernel?"
+    assert records[0]["answer"] == "<What is the top kernel?0><What is the top kernel?1><What is the top kernel?2><What is the top kernel?3><What is the top kernel?4><What is the top kernel?5>"
+    assert records[0]["selected_skills"] == ["top_kernels"]
+    assert records[0]["evidence"]["top_kernels"][0]["name"] == "fake_kernel"
+    assert records[0]["profile_path"] == profile_copy
+
+
+@pytest.mark.asyncio
+async def test_failed_session_turn_is_not_persisted(profile_copy, monkeypatch, tmp_path):
+    """An error completion is visible in the UI but never becomes handoff."""
+    from nsys_ai.profile_runner import build_local_profile_reference
+    from nsys_ai.session_store import SessionStore
+    from nsys_ai.tui_textual import NsysChatApp
+
+    def failed_stream(**_kwargs):
+        yield {"type": "text", "content": "Profile error: unavailable"}
+        yield {"type": "done", "completed": False}
+
+    import nsys_ai.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "stream_agent_loop", failed_stream)
+    monkeypatch.setattr(
+        chat_mod,
+        "_get_model_and_key",
+        lambda *args, **kwargs: ("fake/model", "key"),
+    )
+    session_root = tmp_path / "sessions"
+    SessionStore(session_root).create(
+        "failed-session",
+        before_profile=build_local_profile_reference(profile_copy),
+    )
+    app = NsysChatApp(
+        profile_copy,
+        session_id="failed-session",
+        session_root=str(session_root),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        inp = app.query_one("#chat-input")
+        inp.focus()
+        inp.value = "What failed?"
+        await pilot.press("enter")
+        assert await _until(pilot, lambda: app._is_generating is False)
+
+    assert not (session_root / "failed-session" / "logs" / "ask.jsonl").exists()
 
 
 @pytest.mark.asyncio

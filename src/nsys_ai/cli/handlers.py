@@ -1947,12 +1947,62 @@ def _cmd_chat(args, _profile):
             "\"<question>\"' for a single non-interactive answer."
         )
 
+    from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
+
+    location = resolve_session_location(
+        getattr(args, "session", None), root=DEFAULT_SESSION_ROOT
+    )
+    profile_path = _resolve_chat_profile(args, location)
+
+    if location is not None:
+        from nsys_ai.profile_runner import build_local_profile_reference
+        from nsys_ai.session_store import SessionExistsError, SessionStore
+
+        before_ref = build_local_profile_reference(profile_path)
+        store = SessionStore(location.root)
+        try:
+            store.create(location.session_id, before_profile=before_ref)
+        except SessionExistsError:
+            pass
+
     try:
         from nsys_ai.tui_textual import run_chat_tui
     except ImportError:
         print("Error: 'textual' package is required. Install with: pip install 'textual>=0.80.0'")
         return
-    run_chat_tui(args.profile)
+    if location is None:
+        run_chat_tui(profile_path)
+    else:
+        run_chat_tui(
+            profile_path,
+            session_id=location.session_id,
+            session_root=str(location.root),
+        )
+
+
+def _resolve_chat_profile(args, location) -> str:
+    """Resolve chat's profile from an explicit path or session handoff."""
+    profile_path = getattr(args, "profile", None)
+    if profile_path:
+        return profile_path
+    if location is None:
+        print(
+            "Error: chat requires a profile, or --session <dir> with a recorded before profile",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    from nsys_ai.session_store import SessionStore
+
+    snapshot = SessionStore(location.root).load(location.session_id)
+    before = snapshot.state.before_profile
+    if before is None:
+        print(
+            f"Error: session {location.session_id} has no before profile",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return before.path
 
 
 def _cmd_evidence(args, _profile):

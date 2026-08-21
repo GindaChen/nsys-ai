@@ -2,7 +2,7 @@
 tui_textual.py — Textual AI chat TUI for nsys-ai (§11.3, §11.8).
 
 Usage (registered as CLI command):
-    nsys-ai chat <profile>
+    nsys-ai chat <profile> [--session <dir>]
 
 Layout:
     Left panel:  DataTable of top kernels by GPU time.
@@ -204,10 +204,18 @@ class NsysChatApp(App):
         Binding("escape", "quit", "Quit", show=True),
     ]
 
-    def __init__(self, profile_path: str) -> None:
+    def __init__(
+        self,
+        profile_path: str,
+        *,
+        session_id: str | None = None,
+        session_root: str = ".nsys-ai/sessions",
+    ) -> None:
         super().__init__()
         self.profile_path = profile_path
         self.profile_name = Path(profile_path).name
+        self.session_id = session_id
+        self.session_root = session_root
         # LLM conversation history (user + assistant turns only; system is built internally).
         self._chat_messages: list[dict] = []
         # Top kernels loaded from the profile DB.
@@ -510,6 +518,9 @@ class NsysChatApp(App):
         # Snapshot history so the worker sees a consistent view (read-only copy).
         messages = list(self._chat_messages)
         accumulated: list[str] = []
+        runner_evidence: dict[str, list[dict]] = {}
+        runner_selected: list[str] = []
+        completed = False
 
         stream = stream_agent_loop(
             model=model,
@@ -517,6 +528,8 @@ class NsysChatApp(App):
             ui_context=ui_context,
             profile_path=self.profile_path,
             max_turns=5,
+            session_id=self.session_id,
+            session_root=self.session_root,
             prefill_evidence=True,
         )
         try:
@@ -553,7 +566,11 @@ class NsysChatApp(App):
                             self._on_system_event,
                             f"🔍 Zoom: {start_s:.3f}s – {end_s:.3f}s",
                         )
-                # "done" type is handled by loop termination.
+                elif etype == "done":
+                    runner_evidence = event.get("evidence") or {}
+                    runner_selected = list(event.get("selected_skills") or [])
+                    completed = event.get("completed", True) is not False
+                    break
         except Exception as e:
             if not cancelled():
                 self.call_from_thread(
@@ -580,6 +597,33 @@ class NsysChatApp(App):
             return
 
         final_content = "".join(accumulated)
+        if completed and self.session_id:
+            try:
+                from .session_cli import append_ask_log
+
+                session_log = append_ask_log(
+                    self.session_id,
+                    self.session_root,
+                    question=user_msg,
+                    answer=final_content,
+                    selected_skills=runner_selected,
+                    evidence=runner_evidence,
+                    profile_path=self.profile_path,
+                    trim_kwargs={},
+                )
+                self.call_from_thread(
+                    self._ui_call,
+                    gen,
+                    self._on_system_event,
+                    f"Session handoff saved: {session_log}",
+                )
+            except Exception:
+                self.call_from_thread(
+                    self._ui_call,
+                    gen,
+                    self._on_system_event,
+                    "Session handoff failed; the chat response is still available.",
+                )
         self.call_from_thread(self._ui_call, gen, self._on_stream_done, final_content)
 
         # Distill history to compress tool call/result sequences for lean context (§11.7).
@@ -613,6 +657,15 @@ class NsysChatApp(App):
 # ---------------------------------------------------------------------------
 
 
-def run_chat_tui(profile_path: str) -> None:
-    """Launch the Textual AI chat TUI for the given profile path."""
-    NsysChatApp(profile_path).run()
+def run_chat_tui(
+    profile_path: str,
+    *,
+    session_id: str | None = None,
+    session_root: str = ".nsys-ai/sessions",
+) -> None:
+    """Launch the Textual AI chat TUI with an optional session handoff."""
+    NsysChatApp(
+        profile_path,
+        session_id=session_id,
+        session_root=session_root,
+    ).run()
