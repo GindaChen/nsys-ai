@@ -734,6 +734,30 @@ def test_root_cause_finds_pageable_memcpy(minimal_nsys_conn):
     assert "Pageable Memory in Async Memcpy" in patterns
 
 
+def test_root_cause_sync_and_pageable_checks_honor_trim(minimal_nsys_conn):
+    """Checks that use direct SQL must not leak evidence from outside trim."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("root_cause_matcher")
+    rows = skill.execute(minimal_nsys_conn, trim_start_ns=0, trim_end_ns=1)
+    patterns = {row["pattern"] for row in rows}
+    assert "Excessive Synchronization" not in patterns
+    assert "Pageable Memory in Async Memcpy" not in patterns
+
+
+def test_root_cause_sync_percentage_names_wall_time_denominator(minimal_nsys_conn):
+    """Sync CPU time is reported against elapsed runtime, not summed GPU time."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("root_cause_matcher")
+    finding = next(
+        row for row in skill.execute(minimal_nsys_conn)
+        if row["pattern"] == "Excessive Synchronization"
+    )
+    assert "runtime wall time" in finding["evidence"]
+    assert "GPU time" not in finding["evidence"]
+
+
 def test_root_cause_finds_sync_memset(minimal_nsys_conn):
     """Should detect Synchronous Memset from seed data.
 
