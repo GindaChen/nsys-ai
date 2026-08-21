@@ -997,6 +997,7 @@ def _cmd_diff(args, _profile):
     elif getattr(args, "reject", False):
         decision = "rejected"
     reason = getattr(args, "reason", None)
+    from nsys_ai.artifact_root import default_decision_path
     from nsys_ai.session_cli import DEFAULT_SESSION_ROOT, resolve_session_location
 
     raw_session = getattr(args, "session", None)
@@ -1048,14 +1049,15 @@ def _cmd_diff(args, _profile):
     session_after_path = None
     before_ref = None
     after_ref = None
-    # Defaulted here rather than in the parser so the default stays visible next
-    # to the only code that writes it. A CI job runs in a checkout, so a record
-    # it cannot redirect is a record it cannot keep out of the repo under test.
+    # Resolve here rather than in the parser so the environment is read at
+    # command time. A CI job runs in a checkout, so a record it cannot redirect
+    # is a record it cannot keep out of the repo under test.
     # expanduser because the shell does not: CI invokes this without one, and a
     # literal "~/..." would be created as a directory named "~" in the checkout
     # this option exists to keep clean.
+    selected_decision_path = getattr(args, "decision_out", None)
     decision_out_path = os.path.expanduser(
-        getattr(args, "decision_out", None) or "diff.json"
+        selected_decision_path or str(default_decision_path())
     )
     if decision is not None:
         if getattr(args, "chat", False):

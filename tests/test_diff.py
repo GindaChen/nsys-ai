@@ -1313,6 +1313,33 @@ def test_diff_cli_decision_defaults_to_the_working_directory(tmp_path):
     assert (tmp_path / "diff.json").exists()
 
 
+def test_diff_cli_decision_uses_configured_artifact_root(tmp_path):
+    """The env override keeps a default decision out of the checkout."""
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 9_000_000, 0, 7, 1, 1, 2)])
+    artifact_root = tmp_path / "artifacts"
+    env = _decision_cli_env(tmp_path)
+    env["NSYS_AI_ARTIFACT_ROOT"] = str(artifact_root)
+
+    result = _run_diff_cli(
+        before,
+        after,
+        "--accept",
+        "--reason",
+        "verified",
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    decision = artifact_root / "decisions" / "diff.json"
+    assert decision.is_file()
+    assert not (tmp_path / "diff.json").exists()
+    assert f"Diff decision written to {decision}" in result.stderr
+
+
 def test_diff_cli_unwritable_decision_path_is_a_configuration_error(tmp_path):
     """Exit 2, not 1: a CI job reads 1 as "the performance gate failed".
 

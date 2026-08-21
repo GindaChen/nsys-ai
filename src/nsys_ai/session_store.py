@@ -44,6 +44,7 @@ from .annotation import (
     SCHEMA_VERSION as EVIDENCE_SCHEMA_VERSION,
 )
 from .artifact_io import atomic_write_bytes, atomic_write_json, fsync_directory
+from .artifact_root import session_root as resolve_artifact_session_root
 from .diff_decision import (
     build_diff_decision_record_from_diff_dict,
     write_diff_json_from_diff_dict,
@@ -340,10 +341,10 @@ class SessionSnapshot:
 
 
 class SessionStore:
-    """Read and create sessions rooted at ``.nsys-ai/sessions``."""
+    """Read and create sessions under the configured artifact root."""
 
-    def __init__(self, root: str | os.PathLike[str] = ".nsys-ai/sessions"):
-        self.root = Path(root).expanduser().resolve(strict=False)
+    def __init__(self, root: str | os.PathLike[str] | None = None):
+        self.root = resolve_artifact_session_root(root)
         self.lock_root = self.root.parent / "locks"
 
     def create(

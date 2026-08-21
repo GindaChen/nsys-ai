@@ -44,6 +44,9 @@ def test_env_checks_present():
     report = run_doctor()
     assert _check(report, "Python") is not None
     assert _check(report, "SQLite analysis").status == "ok"
+    cache_policy = _check(report, "Parquet cache location")
+    assert cache_policy is not None
+    assert "beside each input profile" in cache_policy.detail
     # AI provider + CUTracer are always reported (configured or not).
     assert _check(report, "AI provider (litellm)") is not None
     assert _check(report, "CUTracer") is not None
@@ -97,6 +100,22 @@ def test_health_section_on_minimal_profile(minimal_nsys_db_path):
     assert "Duration" in by_name
     assert "GPUs" in by_name
     assert "RunSpec attached" in by_name
+    assert "Parquet cache location" in by_name
+
+
+def test_cache_location_check_reports_the_registered_directory(tmp_path, monkeypatch):
+    from nsys_ai import doctor
+
+    cache = tmp_path / "profile.nsys-cache"
+    monkeypatch.setattr(
+        "nsys_ai.connection.cache_dir_for_connection", lambda _conn: str(cache)
+    )
+
+    check = doctor._cache_location_check(types.SimpleNamespace(db=object()))
+
+    assert check.status == "ok"
+    assert check.detail == str(cache)
+    assert "beside the profile" in (check.hint or "")
 
 
 def test_missing_profile_is_reported_as_failure(tmp_path):

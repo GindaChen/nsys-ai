@@ -216,6 +216,19 @@ def _check_profile_support() -> DoctorSection:
             )
         )
 
+    checks.append(
+        CheckResult(
+            "Parquet cache location",
+            "ok",
+            "beside each input profile (<profile>.nsys-cache)",
+            hint=(
+                "The cache is input-keyed and is not moved by "
+                "NSYS_AI_ARTIFACT_ROOT. Use --no-cache or "
+                "NSYS_AI_CACHE_MODE=direct for read-only inputs."
+            ),
+        )
+    )
+
     return DoctorSection("Profile support", checks)
 
 
@@ -524,6 +537,29 @@ def _overhead_check(pct: float | None) -> CheckResult:
     return CheckResult("Profiler overhead", "ok", f"{pct:.1f}%")
 
 
+def _cache_location_check(prof: Any) -> CheckResult:
+    """Name the persisted cache behind an opened profile, if one exists."""
+    try:
+        from nsys_ai.connection import cache_dir_for_connection
+
+        cache_dir = cache_dir_for_connection(getattr(prof, "db", None))
+    except Exception:  # noqa: BLE001 — doctor must degrade to a useful report
+        cache_dir = None
+    if cache_dir:
+        return CheckResult(
+            "Parquet cache location",
+            "ok",
+            str(cache_dir),
+            hint="Input-keyed cache; it stays beside the profile rather than under the artifact root.",
+        )
+    return CheckResult(
+        "Parquet cache location",
+        "skipped",
+        "no persisted Parquet cache for this profile",
+        hint="The profile is using direct SQLite or an in-memory/parquetdir path.",
+    )
+
+
 def _runspec_check(profile_path: str | None) -> CheckResult:
     """Report whether this capture carries the RunSpec that lets the loop verify a change.
 
@@ -640,6 +676,7 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
         checks.append(CheckResult("NCCL events", "ok", "none"))
 
     checks.append(_overhead_check(_profiler_overhead_pct(prof, span_ns)))
+    checks.append(_cache_location_check(prof))
 
     checks.append(_runspec_check(getattr(prof, "path", None)))
 
