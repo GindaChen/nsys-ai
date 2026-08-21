@@ -258,7 +258,8 @@ Top regressions (GPU 0)
 
 `--no-ai` keeps the comparison purely deterministic. `diff` reports a verdict and a comparability
 score alongside the numbers; a low comparability score means the two captures differ enough that the
-delta should not be read as a result.
+delta should not be read as a result. See [Reading a diff](./user/reading-a-diff.md) for the verdict
+definitions, metric bases, and the recovery path for an inconclusive comparison.
 
 Useful variants:
 
