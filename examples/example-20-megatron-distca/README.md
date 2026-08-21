@@ -119,3 +119,12 @@ Run pytest regression test:
 ```bash
 pytest tests/test_timeline_web_distca_benchmark.py -q
 ```
+
+The profile path is configurable for developers who downloaded the capture to a
+different directory:
+
+```bash
+NSYS_DISTCA_SQLITE=/path/to/megatron_distca.sqlite \
+  pytest tests/test_timeline_web_distca_profile.py \
+         tests/test_timeline_web_distca_benchmark.py -q
+```

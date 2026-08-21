@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,12 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 
-DEFAULT_PROFILE = Path(__file__).resolve().parent / "output" / "megatron_distca.sqlite"
+DEFAULT_PROFILE = Path(
+    os.environ.get(
+        "NSYS_DISTCA_SQLITE",
+        Path(__file__).resolve().parent / "output" / "megatron_distca.sqlite",
+    )
+).expanduser()
 DEFAULT_BUDGET = Path(__file__).resolve().parent / "timeline_web_perf_budget.json"
 
 
