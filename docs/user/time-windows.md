@@ -62,30 +62,25 @@ captures rarely share a clock — the example above is a real pair whose windows
 
 A window that *partly* overlaps is accepted and clipped. That is a legitimate request.
 
-### Commands that do not check
+### Commands that check
 
-Six commands skip this check. Given a window that selects nothing they produce an empty result
-rather than an error:
+The profile-backed commands apply the same check. Given a window that selects nothing they reject it
+with `Error [TRIM_OUT_OF_RANGE]` rather than returning an empty result that could be mistaken for a
+profile with no kernels:
 
 ```
 $ nsys-ai skill run top_kernels perf.sqlite --trim 0 1
-(No kernels found)
+Error [TRIM_OUT_OF_RANGE]: --trim 0.000 1.000 selects no part of this profile…
 ```
 
-| Command | What you get instead of an error |
+| Command | Out-of-range behavior |
 |---|---|
-| `skill run` | `(No kernels found)` |
-| `agent analyze` | A report header, then `(No kernels found)` |
-| `cutracer plan`, `cutracer analyze`, `cutracer run` | `(No kernels found — nothing to instrument)` |
-| `diff-web` | A served page with an empty comparison on it |
+| `skill run`, `agent analyze` | Coded `TRIM_OUT_OF_RANGE` error |
+| `cutracer plan`, `cutracer analyze`, `cutracer run` | Coded `TRIM_OUT_OF_RANGE` error |
+| `diff-web` | Coded `TRIM_OUT_OF_RANGE` error before the server starts |
 
-That output is indistinguishable from a capture that genuinely has no kernels, which is the whole
-reason the check exists elsewhere. `diff-web` is the most confusing of the six, because the empty
-result is a rendered page rather than a line of text.
-
-Until this is unified, treat an unexpected empty result from any of the six as a trim-window question
-first: re-run the same window through `diagnose`, which does check, and it will tell you whether the
-window or the capture is the problem.
+A window that partly overlaps is still accepted and clipped. A genuinely empty capture remains a
+valid empty result; the guard only rejects a requested window that selects no part of the capture.
 
 ## Selecting an iteration instead of seconds
 

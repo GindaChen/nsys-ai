@@ -216,6 +216,7 @@ def _cutracer_analyze(args, _profile):
     fmt = getattr(args, "format", "table")
     # cutracer_analysis skill expects trim in nanoseconds.
     trim = _parse_trim(args)
+    _check_trim_window_for_path(trim, profile_path, _profile)
 
     if not trace_dir.exists():
         print(f"Error: trace_dir not found: {trace_dir}", file=sys.stderr)
@@ -254,6 +255,7 @@ def _cutracer_run(args, _profile):
     device = getattr(args, "device", 0) or 0
     # build_plan expects (start_s, end_s) and performs ns conversion itself.
     trim = tuple(args.trim) if getattr(args, "trim", None) else None
+    trim_ns = _parse_trim(args)
     dry_run = getattr(args, "dry_run", False)
     backend = getattr(args, "backend", "local")
     modal_save = getattr(args, "modal_save", None)
@@ -270,6 +272,7 @@ def _cutracer_run(args, _profile):
         )
 
     with _profile.open(profile_path) as prof:
+        _check_trim_window(trim_ns, prof)
         plan = build_plan(
             prof.conn,
             profile_path=profile_path,
@@ -402,6 +405,7 @@ def _cutracer_plan(args, _profile):
     profile_path = args.profile
     # build_plan expects (start_s, end_s) and performs ns conversion itself.
     trim = tuple(args.trim) if getattr(args, "trim", None) else None
+    trim_ns = _parse_trim(args)
     top_n = getattr(args, "top_n", 5)
     device = getattr(args, "device", 0) or 0
     output_dir = getattr(args, "output_dir", "./cutracer_out") or "./cutracer_out"
@@ -410,6 +414,7 @@ def _cutracer_plan(args, _profile):
     save_path = getattr(args, "save", None)
 
     with _profile.open(profile_path) as prof:
+        _check_trim_window(trim_ns, prof)
         plan = build_plan(
             prof.conn,
             profile_path=profile_path,
@@ -1550,6 +1555,8 @@ def _cmd_diff_web(args, _profile):
     from nsys_ai.diff_web import serve_diff_web
 
     trim = _parse_trim(args)
+    _check_trim_window_for_path(trim, args.before, _profile, label="before")
+    _check_trim_window_for_path(trim, args.after, _profile, label="after")
     with _profile.open(args.before) as before, _profile.open(args.after) as after:
         serve_diff_web(
             before,
@@ -2202,6 +2209,7 @@ def _cmd_skill(args, _profile):
 
         fmt = getattr(args, "format", "text")
         no_cache = getattr(args, "no_cache", False)
+        trim = getattr(args, "trim", None)
         # Same ingest policy and three-tier SQLite fallback as Profile and
         # open_profile_readonly. This also makes .nsys-rep inputs use their
         # existing parquetdir instead of treating the capture as SQLite.
@@ -2217,13 +2225,14 @@ def _cmd_skill(args, _profile):
 
         # Build trim kwargs if --trim was provided
         trim_kwargs = {}
-        trim = getattr(args, "trim", None)
         if trim:
             trim_kwargs["trim_start_ns"] = int(trim[0] * 1e9)
             trim_kwargs["trim_end_ns"] = int(trim[1] * 1e9)
 
         # Resolve --iteration N to trim range (conflicts with --trim)
         iteration_n = getattr(args, "iteration", None)
+        if trim and iteration_n is None:
+            _check_trim_window_for_path(_parse_trim(args), args.profile, _profile)
         if iteration_n is not None:
             if trim:
                 print("Error: --iteration and --trim cannot be used together", file=sys.stderr)
@@ -2482,6 +2491,7 @@ def _cmd_agent(args, _profile):
         trim = getattr(args, "trim", None)
         if trim:
             trim_ns = (int(trim[0] * 1e9), int(trim[1] * 1e9))
+            _check_trim_window_for_path(trim_ns, args.profile, _profile)
         agent = Agent(args.profile, trim_ns=trim_ns)
         try:
             print(agent.analyze())
