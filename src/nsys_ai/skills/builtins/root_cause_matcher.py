@@ -23,6 +23,26 @@ from ..base import Skill, SkillParam, abstain, is_abstention
 _log = logging.getLogger(__name__)
 
 
+def _trim_event_clause(kwargs: dict, *, start_column: str = "start", end_column: str = '"end"'):
+    """Return a SQL suffix and parameters for the requested event window.
+
+    The custom root-cause checks do not use ``Skill.sql``, so they must apply
+    the same containment semantics themselves.  Keeping this in one helper
+    prevents a new check from silently reverting to whole-profile evidence.
+    """
+    clauses: list[str] = []
+    params: list[int] = []
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+    if trim_start is not None:
+        clauses.append(f"{start_column} >= ?")
+        params.append(int(trim_start))
+    if trim_end is not None:
+        clauses.append(f"{end_column} <= ?")
+        params.append(int(trim_end))
+    return (f" AND {' AND '.join(clauses)}" if clauses else ""), params
+
+
 def _resolve_active_device(conn, kwargs: dict) -> dict:
     """Return kwargs with 'device' set to an active GPU if the current one has no kernels.
 
@@ -38,16 +58,7 @@ def _resolve_active_device(conn, kwargs: dict) -> dict:
 
         current_device = kwargs.get("device", 0)
 
-        # Build optional trim filter (use "end" not [end] for DuckDB compat)
-        trim_conds: list[str] = []
-        trim_params: list = []
-        if "trim_start_ns" in kwargs:
-            trim_conds.append("start >= ?")
-            trim_params.append(kwargs["trim_start_ns"])
-        if "trim_end_ns" in kwargs:
-            trim_conds.append('"end" <= ?')
-            trim_params.append(kwargs["trim_end_ns"])
-        trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
+        trim_sql, trim_params = _trim_event_clause(kwargs)
 
         cur_count = adapter.execute(
             f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ?{trim_sql}",
@@ -755,14 +766,16 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: count sync calls by nameId (fast with index)
+        trim_sql, trim_params = _trim_event_clause(kwargs)
         rows = adapter.execute(
             f"""
             SELECT nameId, COUNT(*) AS call_count,
                    SUM([end] - start) AS total_ns
             FROM {runtime_tbl}
-            WHERE nameId IN ({placeholders})
+            WHERE nameId IN ({placeholders}){trim_sql}
             GROUP BY nameId
-        """
+        """,
+            trim_params,
         ).fetchall()
         if not rows:
             return []
@@ -775,23 +788,57 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         # Strip version suffixes for cleaner display (cudaDeviceSynchronize_v3020 → cudaDeviceSynchronize)
         api_names = ", ".join(sorted({id_to_name[r[0]].split("_v")[0] for r in rows}))
 
-        # Total GPU kernel time as baseline for percentage threshold
+        # Total GPU kernel time as the threshold baseline.  It is deliberately
+        # separate from the displayed percentage: sync calls are CPU wall-time
+        # intervals and should not be presented as a ratio of summed GPU work.
         total_gpu_ns = 0
         if kernel_tbl:
-            gpu_row = adapter.execute(f"SELECT SUM([end] - start) FROM {kernel_tbl}").fetchone()
+            gpu_trim_sql, gpu_trim_params = _trim_event_clause(kwargs)
+            gpu_row = adapter.execute(
+                f"SELECT SUM([end] - start) FROM {kernel_tbl} WHERE 1=1{gpu_trim_sql}",
+                gpu_trim_params,
+            ).fetchone()
             total_gpu_ns = gpu_row[0] or 0 if gpu_row else 0
 
         # Percentage-based threshold: sync time > 2% of total GPU time
         # Also require absolute minimum of 1ms to filter trivial cases
-        sync_pct = (total_sync_ns / total_gpu_ns * 100) if total_gpu_ns > 0 else 100
-        if total_sync_ms >= 1.0 and sync_pct >= 2.0:
+        threshold_pct = (total_sync_ns / total_gpu_ns * 100) if total_gpu_ns > 0 else 0
+
+        # Report sync time against elapsed runtime wall time.  This is the
+        # dimensionally valid denominator for CPU synchronization calls and
+        # keeps the published percentage bounded for normal non-overlapping
+        # intervals.  Runtime is preferred because it covers host-side work;
+        # kernel span is a fallback for profiles without runtime rows.
+        wall_row = adapter.execute(
+            f"SELECT MIN(start), MAX([end]) FROM {runtime_tbl} WHERE 1=1{trim_sql}",
+            trim_params,
+        ).fetchone()
+        wall_start, wall_end = wall_row if wall_row else (None, None)
+        if wall_start is None or wall_end is None:
+            if not kernel_tbl:
+                return []
+            gpu_trim_sql, gpu_trim_params = _trim_event_clause(kwargs)
+            wall_row = adapter.execute(
+                f"SELECT MIN(start), MAX([end]) FROM {kernel_tbl} WHERE 1=1{gpu_trim_sql}",
+                gpu_trim_params,
+            ).fetchone()
+            wall_start, wall_end = wall_row if wall_row else (None, None)
+        wall_ns = (wall_end - wall_start) if wall_start is not None and wall_end is not None else 0
+        wall_ms = wall_ns / 1e6
+        wall_pct = (total_sync_ns / wall_ns * 100) if wall_ns > 0 else 0
+        if (
+            total_sync_ms >= 1.0
+            and threshold_pct >= 2.0
+            and 0 <= wall_pct <= 100
+        ):
             return [
                 {
                     "pattern": "Excessive Synchronization",
                     "severity": "warning",
                     "evidence": (
                         f"{call_count} sync calls totalling {total_sync_ms:.1f}ms "
-                        f"({sync_pct:.1f}% of GPU time). APIs: {api_names}"
+                        f"({wall_pct:.1f}% of {wall_ms:.1f}ms runtime wall time). "
+                        f"APIs: {api_names}"
                     ),
                     "recommendation": (
                         "Remove .item()/.cpu() from the training loop, "
@@ -893,14 +940,16 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
         return []
 
     try:
+        trim_sql, trim_params = _trim_event_clause(kwargs)
         row = adapter.execute(
             f"""
             SELECT COUNT(*) AS pageable_count,
                    COALESCE(SUM(bytes), 0) AS total_bytes,
                    COALESCE(SUM([end] - start), 0) AS total_ns
             FROM {memcpy_tbl}
-            WHERE srcKind = 1 OR dstKind = 1
-        """
+            WHERE (srcKind = 1 OR dstKind = 1){trim_sql}
+        """,
+            trim_params,
         ).fetchone()
         if not row or row[0] == 0:
             return []
