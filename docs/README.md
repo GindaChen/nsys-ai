@@ -15,6 +15,7 @@ Operating the tool.
 | [user-guide.md](./user-guide.md) | nsys-ai end to end: capture, diagnose, propose, diff, decide |
 | [user/profile-inputs.md](./user/profile-inputs.md) | The three inputs it accepts, and what conversion happens |
 | [user/time-windows.md](./user/time-windows.md) | Narrowing analysis with `--trim` and `--iteration` |
+| [user/reading-a-diff.md](./user/reading-a-diff.md) | What a diff verdict means, how to recover from low comparability, and which metrics to trust |
 | [user/troubleshooting.md](./user/troubleshooting.md) | Symptoms, what they mean, and what to change |
 | [user/environment-variables.md](./user/environment-variables.md) | Every variable, its default, and when to change it |
 | [guided-loop-setup.md](./guided-loop-setup.md) | The same loop driven from the timeline web UI |
