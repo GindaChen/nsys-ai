@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 nsys-ai is an AI-powered terminal UI for analyzing NVIDIA Nsight Systems GPU profiles (`.sqlite` files). It provides Textual-based TUI viewers, a local web timeline, HTML export, a skill-based analysis system, and an LLM agent for automated GPU performance diagnosis.
 
-**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). Both `nsys-ai` and `nsys-tui` CLI commands work.
+**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). The CLI command is `nsys-ai`; the older `nsys-tui` entry point was dropped in the rename.
 
 ## Build & Development Commands
 
@@ -39,7 +39,7 @@ Core runtime dependencies are `duckdb` + `pyarrow` (Parquet cache acceleration) 
 
 ### Entry Point
 
-`src/nsys_ai/__main__.py` delegates to `nsys_ai.cli.app:main`; the argparse CLI is built in `cli/parsers.py` (~30 subcommands) and dispatched to `cli/handlers.py`. Two entry points registered in pyproject.toml: `nsys-ai` and `nsys-tui`, both point to `nsys_ai.__main__:main`.
+`src/nsys_ai/__main__.py` delegates to `nsys_ai.cli.app:main`; the argparse CLI is built in `cli/parsers.py` (~30 subcommands) and dispatched to `cli/handlers.py`. One entry point is registered in pyproject.toml: `nsys-ai`, pointing at `nsys_ai.__main__:main`.
 
 ### Core Data Model
 

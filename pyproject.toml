@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nsys-ai"
-version = "0.2.3"
+version = "0.3.0"
 description = "AI-powered analysis for NVIDIA Nsight Systems profiles — web viewer, timeline, kernel navigator, NVTX hierarchy"
 readme = "README.md"
 license = {text = "MIT"}
@@ -27,6 +27,13 @@ classifiers = [
     "Topic :: Software Development :: Debuggers",
     "Topic :: System :: Monitoring",
 ]
+
+[project.urls]
+Homepage = "https://github.com/GindaChen/nsys-ai"
+Repository = "https://github.com/GindaChen/nsys-ai"
+Issues = "https://github.com/GindaChen/nsys-ai/issues"
+Changelog = "https://github.com/GindaChen/nsys-ai/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md"
 
 [project.scripts]
 nsys-ai = "nsys_ai.__main__:main"

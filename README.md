@@ -15,7 +15,7 @@ bottlenecks with an evidence-first agent — from your browser or terminal.
 [![CI](https://github.com/GindaChen/nsys-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/GindaChen/nsys-ai/actions)
 [![PyPI](https://img.shields.io/pypi/v/nsys-ai)](https://pypi.org/project/nsys-ai/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/GindaChen/nsys-ai/blob/main/LICENSE)
 
 </div>
 
@@ -69,8 +69,8 @@ nsys profile --capture-range=cudaProfilerApi --trace=cuda,nvtx \
 API). `nvtx` adds the annotation hierarchy that drives the iteration, region,
 and layer views. To use the iteration tools (`iters`, `diff --iteration`),
 annotate each step with a consistent NVTX marker — see
-[Focused Profiling](docs/08-focused-profiling.md) and
-[NVTX Annotations](docs/03-nvtx-annotations.md).
+[Focused Profiling](https://github.com/GindaChen/nsys-ai/blob/main/docs/08-focused-profiling.md) and
+[NVTX Annotations](https://github.com/GindaChen/nsys-ai/blob/main/docs/03-nvtx-annotations.md).
 
 No workload handy? Download an example profile:
 
@@ -241,7 +241,7 @@ via `--against` or as the `before` positional.
 
 | Command | Description |
 |---------|-------------|
-| `open` | Quick-open a profile in the web UI, Perfetto, or TUI |
+| `open` | Quick-open a profile in the web UI or TUI |
 | `timeline-web` | Web multi-GPU timeline (progressive rendering) |
 | `timeline` | Timeline TUI |
 | `tui` | NVTX tree TUI |
@@ -347,7 +347,7 @@ A few common ones:
 | `profile_health_manifest` | One-shot health summary (run this first) |
 
 Skills are extensible — add one by dropping a Python file that exports a `SKILL`
-constant. See [`skill list`](src/nsys_ai/agent_skills/commands/skill.md) for the full
+constant. See [`skill list`](https://github.com/GindaChen/nsys-ai/blob/main/docs/agent_skills/commands/skill.md) for the full
 catalog.
 
 ## AI analysis (optional)
@@ -390,33 +390,33 @@ same answer shape with a deterministic Summary.
 nsys-ai ships as a [Claude Code](https://claude.com/claude-code) plugin: the
 `/nsys-ai` slash command turns a profile into a root cause, a proposed fix, and
 an annotated timeline. See
-[docs/claude-plugin-quickstart.md](docs/claude-plugin-quickstart.md) to install
-and [docs/claude-plugin.md](docs/claude-plugin.md) for the full reference.
+[docs/claude-plugin-quickstart.md](https://github.com/GindaChen/nsys-ai/blob/main/docs/claude-plugin-quickstart.md) to install
+and [docs/claude-plugin.md](https://github.com/GindaChen/nsys-ai/blob/main/docs/claude-plugin.md) for the full reference.
 
 ## Documentation
 
-Start with the **[User guide](docs/user-guide.md)** — one workload from capture to a recorded
+Start with the **[User guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md)** — one workload from capture to a recorded
 decision, on the command line. To drive the same workflow in a browser instead, see
-[Guided loop setup](docs/guided-loop-setup.md).
+[Guided loop setup](https://github.com/GindaChen/nsys-ai/blob/main/docs/guided-loop-setup.md).
 
 The rest of the `docs/` directory mirrors the relevant NVIDIA Nsight Systems reference
 (capture, schema, NVTX, CUDA/NCCL trace) plus nsys-ai project guides:
 
 | Guide | Topic |
 |-------|-------|
-| [User guide](docs/user-guide.md) | Capture, diagnose, propose, diff, decide — end to end |
-| [doctor](docs/doctor.md) | Environment and profile health checks |
-| [NVIDIA nsys CLI](docs/01-cli-reference.md) | The upstream `nsys` profiler CLI (capture-time) |
-| [SQLite schema](docs/02-sqlite-schema.md) | Nsight export tables and queries |
-| [NVTX annotations](docs/03-nvtx-annotations.md) | Annotating your code (and iteration markers) |
-| [CUDA trace](docs/04-cuda-trace.md) | GPU kernel and memory tracing |
-| [NCCL tracing](docs/05-nccl-tracing.md) | Multi-GPU collective analysis |
-| [Python / PyTorch](docs/06-python-pytorch.md) | Profiling PyTorch workloads |
-| [Containers](docs/07-container-profiling.md) | Profiling inside Docker / Slurm |
-| [Focused profiling](docs/08-focused-profiling.md) | Capturing representative iterations |
-| [CUTracer](docs/cutracer-instruction-analysis.md) | Instruction-level drill-down for top kernels |
+| [User guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md) | Capture, diagnose, propose, diff, decide — end to end |
+| [doctor](https://github.com/GindaChen/nsys-ai/blob/main/docs/doctor.md) | Environment and profile health checks |
+| [NVIDIA nsys CLI](https://github.com/GindaChen/nsys-ai/blob/main/docs/01-cli-reference.md) | The upstream `nsys` profiler CLI (capture-time) |
+| [SQLite schema](https://github.com/GindaChen/nsys-ai/blob/main/docs/02-sqlite-schema.md) | Nsight export tables and queries |
+| [NVTX annotations](https://github.com/GindaChen/nsys-ai/blob/main/docs/03-nvtx-annotations.md) | Annotating your code (and iteration markers) |
+| [CUDA trace](https://github.com/GindaChen/nsys-ai/blob/main/docs/04-cuda-trace.md) | GPU kernel and memory tracing |
+| [NCCL tracing](https://github.com/GindaChen/nsys-ai/blob/main/docs/05-nccl-tracing.md) | Multi-GPU collective analysis |
+| [Python / PyTorch](https://github.com/GindaChen/nsys-ai/blob/main/docs/06-python-pytorch.md) | Profiling PyTorch workloads |
+| [Containers](https://github.com/GindaChen/nsys-ai/blob/main/docs/07-container-profiling.md) | Profiling inside Docker / Slurm |
+| [Focused profiling](https://github.com/GindaChen/nsys-ai/blob/main/docs/08-focused-profiling.md) | Capturing representative iterations |
+| [CUTracer](https://github.com/GindaChen/nsys-ai/blob/main/docs/cutracer-instruction-analysis.md) | Instruction-level drill-down for top kernels |
 
-The [`docs/sqlite-explorer/`](docs/sqlite-explorer/) directory holds an
+The [`docs/sqlite-explorer/`](https://github.com/GindaChen/nsys-ai/tree/main/docs/sqlite-explorer/) directory holds an
 interactive HTML explorer for the Nsight SQLite schema — open
 `docs/sqlite-explorer/index.html` in a browser.
 
@@ -442,14 +442,14 @@ pytest tests/ -v
 ```
 
 **Guided optimization loop** (diagnose → propose → re-profile → diff → accept): see the
-[User guide](docs/user-guide.md) for the CLI path and
-[docs/guided-loop-setup.md](docs/guided-loop-setup.md) for the browser path.
+[User guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md) for the CLI path and
+[docs/guided-loop-setup.md](https://github.com/GindaChen/nsys-ai/blob/main/docs/guided-loop-setup.md) for the browser path.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/GindaChen/nsys-ai/blob/main/LICENSE).
 
 <div align="center">
 <sub>Built for GPU performance engineers.</sub>
