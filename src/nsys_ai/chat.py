@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Sub-module re-exports — keep the public API stable for existing callers.
@@ -219,31 +218,19 @@ def _record_session_ask(
     profile_path: str,
     trim_kwargs: dict,
 ) -> str | None:
-    """Persist one transport-neutral ask result for a Web session.
+    """Compatibility wrapper for the shared session ask-log publisher."""
+    from .session_cli import append_ask_log
 
-    The log is deliberately additive and does not mutate the SessionStore
-    phase or findings artifact.  CLI/TUI analysis remains the owner of those
-    phase-bearing artifacts; Web ask contributes the conversational handoff
-    record that the next surface can inspect.
-    """
-    if not session_id:
-        return None
-    from .session_store import SessionStore
-
-    record = {
-        "schema_version": "0.1",
-        "kind": "ask",
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "question": question,
-        "answer": answer,
-        "selected_skills": list(selected_skills),
-        "evidence": evidence,
-        "profile_path": profile_path,
-        "trim": dict(trim_kwargs),
-    }
-    with SessionStore(session_root or ".nsys-ai/sessions").writer(session_id) as writer:
-        writer.append_log("ask", record)
-    return "logs/ask.jsonl"
+    return append_ask_log(
+        session_id,
+        session_root,
+        question=question,
+        answer=answer,
+        selected_skills=selected_skills,
+        evidence=evidence,
+        profile_path=profile_path,
+        trim_kwargs=trim_kwargs,
+    )
 
 
 def _last_user_question(messages: list) -> str:
