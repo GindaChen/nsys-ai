@@ -233,6 +233,37 @@ def test_viewer_returns_json_404_for_unknown_post_api():
     assert b"not found" in body
 
 
+def test_viewer_ask_route_delegates_to_shared_transport(monkeypatch):
+    from nsys_ai import web
+
+    monkeypatch.setattr(web, "_handle_ask_request", lambda body: {"answer": "ok"})
+    old_session = web._ViewerHandler._session_id
+    old_root = web._ViewerHandler._session_root
+    web._ViewerHandler._session_id = None
+    try:
+        server = web._ThreadedHTTPServer(("127.0.0.1", 0), web._ViewerHandler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        conn.request(
+            "POST",
+            "/api/ask",
+            body=json.dumps({"question": "why?"}),
+            headers={"Content-Type": "application/json"},
+        )
+        response = conn.getresponse()
+        status, body = response.status, response.read()
+        conn.close()
+        thread.join(timeout=5)
+        server.server_close()
+    finally:
+        web._ViewerHandler._session_id = old_session
+        web._ViewerHandler._session_root = old_root
+
+    assert status == 200
+    assert json.loads(body) == {"answer": "ok"}
+
+
 def test_timeline_canvas_reads_the_shared_token_palette():
     javascript = open("src/nsys_ai/templates/timeline.js", encoding="utf-8").read()
     tokens = open("src/nsys_ai/templates/tokens.css", encoding="utf-8").read()

@@ -276,6 +276,18 @@ def _handle_chat_request(body_bytes: bytes) -> dict | None:
     return None
 
 
+def _handle_ask_request(body_bytes: bytes) -> dict | None:
+    """Handle the shared-runner Web ask transport."""
+    try:
+        from . import chat
+
+        if hasattr(chat, "ask_completion"):
+            return chat.ask_completion(body_bytes)
+    except ImportError:
+        pass
+    return None
+
+
 def _handle_chat_stream(body_bytes: bytes):
     """Return generator yielding SSE bytes for stream=true, or None for 501."""
     try:
@@ -924,6 +936,28 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 self._handle_loop_decision()
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
                 self._json_response({"error": str(e)}, 400)
+            return
+        if path == "/api/ask":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length) if content_length else b"{}"
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                if isinstance(payload, dict) and self.__class__._session_id is not None:
+                    payload["session_id"] = self.__class__._session_id
+                    payload["session_root"] = self.__class__._session_root
+                    body = json.dumps(payload).encode("utf-8")
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                pass
+            out = _handle_ask_request(body)
+            if out is None:
+                self.send_response(501)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b'{"error":"LLM not configured"}')
+                return
+            status = 400 if out.get("error") else 200
+            resp = json.dumps(out, default=str).encode("utf-8")
+            _send_body(self, resp, "application/json; charset=utf-8", status)
             return
         if path != "/api/chat":
             if path.startswith("/api/"):

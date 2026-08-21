@@ -972,6 +972,91 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     return {"content": content, "actions": actions, "findings": []}
 
 
+def ask_completion(body_bytes: bytes) -> dict:
+    """Handle the transport-neutral ``POST /api/ask`` contract.
+
+    Unlike the conversational chat endpoint, this route exposes the shared
+    deterministic runner directly: triage and registered skills produce the
+    evidence, then the runner shapes the answer.  An LLM is optional and is
+    limited to planner/synthesizer work when credentials are available.
+    """
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"error": "Invalid request body."}
+    if not isinstance(payload, dict):
+        return {"error": "JSON object required."}
+
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        return {"error": "question is required."}
+
+    profile_path = payload.get("profile_path")
+    session_id = payload.get("session_id")
+    session_root = payload.get("session_root") or ".nsys-ai/sessions"
+    if not profile_path and session_id:
+        try:
+            from .session_cli import resolve_session_location
+            from .session_store import SessionStore
+
+            location = resolve_session_location(session_id, root=session_root)
+            snapshot = SessionStore(location.root).load(location.session_id)
+            if snapshot.state.before_profile is None:
+                return {"error": "session has no before profile."}
+            profile_path = snapshot.state.before_profile.path
+            session_id = location.session_id
+            session_root = os.fspath(location.root)
+        except Exception as exc:
+            return {"error": f"could not load session: {exc}"}
+    if not profile_path:
+        return {"error": "ask requires profile_path or session_id."}
+
+    trim_kwargs = {}
+    trim_keys = ("trim_start_ns", "trim_end_ns")
+    supplied_trim = [key in payload for key in trim_keys]
+    if any(supplied_trim):
+        if not all(supplied_trim):
+            return {"error": "trim_start_ns and trim_end_ns must be provided together."}
+        try:
+            trim_kwargs = {key: int(payload[key]) for key in trim_keys}
+        except (TypeError, ValueError, OverflowError):
+            return {"error": "trim bounds must be integer nanoseconds."}
+        if trim_kwargs["trim_start_ns"] >= trim_kwargs["trim_end_ns"]:
+            return {"error": "trim_start_ns must be less than trim_end_ns."}
+
+    try:
+        model, api_key = _get_model_and_key(payload.get("model"))
+        use_llm = payload.get("use_llm", True) is not False and bool(model and api_key)
+        conn, _sqlite_path, _system_prompt, _query_runner = _prepare_session(
+            os.fspath(profile_path), [], {}
+        )
+    except Exception as exc:
+        return {"error": f"Profile error: {exc}"}
+
+    try:
+        from .agent.runner import answer_question
+
+        answer, evidence, selected = answer_question(
+            conn,
+            question,
+            profile_path=os.fspath(profile_path),
+            trim_kwargs=trim_kwargs,
+            use_llm=use_llm,
+        )
+        return {
+            "answer": answer,
+            "question": question,
+            "selected_skills": selected,
+            "evidence": evidence,
+            "session_id": session_id,
+        }
+    except Exception as exc:
+        _log.exception("Shared ask runner failed")
+        return {"error": f"Ask error: {exc}"}
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # SSE helper
 # ---------------------------------------------------------------------------

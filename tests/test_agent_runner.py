@@ -77,3 +77,39 @@ def test_runner_does_not_synthesize_without_usable_evidence(monkeypatch):
     assert runner.synthesize_evidence(
         "why?", {"top_kernels": [{"_abstained": True, "reason": "missing"}]}
     ) is None
+
+
+def test_runner_answer_question_is_the_shared_transport_contract(monkeypatch):
+    from nsys_ai.agent import runner
+
+    calls = {}
+
+    def fake_evidence(conn, question, *, trim_kwargs, use_llm):
+        calls["evidence"] = (conn, question, trim_kwargs, use_llm)
+        return {"root_cause_matcher": [{"pattern": "slow"}]}, ["top_kernels"]
+
+    def fake_format(question, evidence, selected, **kwargs):
+        calls["format"] = (question, evidence, selected, kwargs)
+        return "answer"
+
+    monkeypatch.setattr(runner, "run_question_evidence", fake_evidence)
+    monkeypatch.setattr(runner, "format_evidence_first_answer", fake_format)
+
+    answer, evidence, selected = runner.answer_question(
+        "conn",
+        "why?",
+        profile_path="profile.nsys-rep",
+        trim_kwargs={"trim_start_ns": 1, "trim_end_ns": 2},
+        use_llm=False,
+    )
+
+    assert answer == "answer"
+    assert evidence == {"root_cause_matcher": [{"pattern": "slow"}]}
+    assert selected == ["root_cause_matcher", "top_kernels"]
+    assert calls["evidence"] == (
+        "conn",
+        "why?",
+        {"trim_start_ns": 1, "trim_end_ns": 2},
+        False,
+    )
+    assert calls["format"][2] == ["root_cause_matcher", "top_kernels"]
