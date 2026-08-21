@@ -167,6 +167,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Docs
 
+- Migration guide for users upgrading from 0.2.3: [migrating to 0.3.0](docs/user/migrating-to-0.3.0.md),
+  including input, session, trim, CLI, and automation changes.
 - Guide for running CUTracer on Modal, plus a real `--trace-size-limit-mb` flag
   and a loud warning when SASS resolution fails.
 - Evidence-schema reference updated to v0.1, and the performance-budget guidance
