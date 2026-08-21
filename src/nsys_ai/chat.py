@@ -246,15 +246,25 @@ def _record_session_ask(
     return "logs/ask.jsonl"
 
 
-def _runner_prefill(system_prompt: str, conn, messages: list) -> tuple[str, bool]:
-    """Return the Web prompt plus whether usable runner evidence was found."""
-    question = next(
-        (str(message.get("content") or "") for message in reversed(messages)
-         if message.get("role") == "user"),
+def _last_user_question(messages: list) -> str:
+    """Return the latest user question shared by conversational transports."""
+    return next(
+        (
+            str(message.get("content") or "")
+            for message in reversed(messages)
+            if message.get("role") == "user"
+        ),
         "",
     )
+
+
+def _runner_prefill(
+    system_prompt: str, conn, messages: list
+) -> tuple[str, bool, dict[str, list[dict]], list[str]]:
+    """Return the prompt and the deterministic runner handoff metadata."""
+    question = _last_user_question(messages)
     if not question:
-        return system_prompt, False
+        return system_prompt, False, {}, []
     try:
         from .agent.runner import _is_usable_evidence_row, run_question_evidence
 
@@ -273,10 +283,10 @@ def _runner_prefill(system_prompt: str, conn, messages: list) -> tuple[str, bool
             any(_is_usable_evidence_row(row) for row in rows)
             for rows in evidence.values()
         )
-        return prompt, grounded
+        return prompt, grounded, evidence, ["root_cause_matcher", *selected]
     except Exception:
         _log.debug("Runner evidence prefill failed", exc_info=True)
-        return system_prompt, False
+        return system_prompt, False, {}, []
 
 
 def _add_runner_prefill(system_prompt: str, conn, messages: list) -> str:
@@ -911,7 +921,12 @@ def chat_completion(body_bytes: bytes) -> dict | None:
             api_messages.append({"role": m["role"], "content": m["content"]})
 
     if profile_path and conn:
-        system_prompt, prefill_grounded = _runner_prefill(system_prompt, conn, messages)
+        (
+            system_prompt,
+            prefill_grounded,
+            runner_evidence,
+            runner_selected,
+        ) = _runner_prefill(system_prompt, conn, messages)
         api_messages[0]["content"] = system_prompt
         dispatcher_events: list[dict] = []
         finding_sink = _session_finding_sink(
@@ -957,7 +972,30 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 for event in dispatcher_events
                 if event.get("type") == "finding" and isinstance(event.get("finding"), dict)
             ]
-            return {"content": content, "actions": actions, "findings": findings}
+            session_log = None
+            if session_id and runner_evidence:
+                try:
+                    session_log = _record_session_ask(
+                        session_id,
+                        session_root,
+                        question=_last_user_question(messages),
+                        answer=content,
+                        selected_skills=runner_selected,
+                        evidence=runner_evidence,
+                        profile_path=os.fspath(profile_path),
+                        trim_kwargs={},
+                    )
+                except Exception:
+                    _log.exception("Chat session handoff failed")
+            return {
+                "content": content,
+                "actions": actions,
+                "findings": findings,
+                "selected_skills": runner_selected,
+                "evidence": runner_evidence,
+                "session_id": session_id,
+                "session_log": session_log,
+            }
         except Exception as e:
             findings = [
                 event["finding"]
@@ -968,6 +1006,9 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                 "content": f"LLM error: {_friendly_error(model, e)}",
                 "actions": [],
                 "findings": findings,
+                "selected_skills": runner_selected,
+                "evidence": runner_evidence,
+                "session_id": session_id,
             }
         finally:
             conn.close()
@@ -1218,7 +1259,8 @@ def stream_agent_loop(
     * ``{"type": "text",   "content": str}``   — streamed text fragment
     * ``{"type": "system", "content": str}``   — status / warning message
     * ``{"type": "action", "action": dict}``   — navigation/zoom action
-    * ``{"type": "done",   "usage": dict}``    — final event with token usage
+    * ``{"type": "done",   "usage": dict, "selected_skills": list,
+      "evidence": dict}`` — final event with runner handoff metadata
 
     When *diff_context* is set, uses Phase C diff tools and no single-profile DB.
     *diff_paths* must be (before_path, after_path) for the system prompt.
@@ -1315,12 +1357,26 @@ def stream_agent_loop(
         if m.get("role") and m.get("content") is not None:
             api_messages.append({"role": m["role"], "content": m["content"]})
     prefill_grounded = False
+    runner_evidence: dict[str, list[dict]] = {}
+    runner_selected: list[str] = []
     if prefill_evidence and conn is not None:
-        api_messages[0]["content"], prefill_grounded = _runner_prefill(
-            api_messages[0]["content"], conn, messages
-        )
+        (
+            api_messages[0]["content"],
+            prefill_grounded,
+            runner_evidence,
+            runner_selected,
+        ) = _runner_prefill(api_messages[0]["content"], conn, messages)
 
     usage: dict = {}
+
+    def done_event() -> dict:
+        """Build one stable completion event for every normal exit path."""
+        return {
+            "type": "done",
+            "usage": dict(usage),
+            "selected_skills": list(runner_selected),
+            "evidence": runner_evidence,
+        }
     turn_count = 0
 
     # Centralized tool dispatcher (replaces if/elif chain)
@@ -1377,7 +1433,7 @@ def stream_agent_loop(
                 )
             except Exception as e:
                 yield {"type": "text", "content": f"LLM error: {_friendly_error(model, e)}"}
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
 
             content_parts: list[str] = []
@@ -1457,7 +1513,7 @@ def stream_agent_loop(
                         "Please start a new chat session to continue."
                     ),
                 }
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
 
             full_content = "".join(content_parts).strip() if content_parts else ""
@@ -1496,7 +1552,7 @@ def stream_agent_loop(
                     # Buffer the complete assistant turn until we know it has
                     # no later tool call whose failure would invalidate it.
                     yield {"type": "text", "content": full_content}
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
 
             batch_history_start = len(api_messages)
@@ -1615,17 +1671,17 @@ def stream_agent_loop(
                         grounding_failure or "a tool call was invalid or failed"
                     ),
                 }
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
             elif turn_grounding_succeeded:
                 evidence_ready = True
 
             if control_response is not None and not turn_tool_failed:
                 yield {"type": "text", "content": control_response}
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
             if has_external:
-                yield {"type": "done", "usage": usage}
+                yield done_event()
                 return
 
         if grounding_required and not evidence_ready:
@@ -1640,7 +1696,7 @@ def stream_agent_loop(
                     )
                 ),
             }
-            yield {"type": "done", "usage": usage}
+            yield done_event()
             return
 
         # Exhausted max_turns; last message was a tool result. One more LLM call with
@@ -1665,7 +1721,7 @@ def stream_agent_loop(
                     "type": "text",
                     "content": f"\n\n(Summary skipped: {_friendly_error(model, e)})",
                 }
-        yield {"type": "done", "usage": usage}
+        yield done_event()
 
     finally:
         if usage:
@@ -1729,6 +1785,7 @@ def chat_completion_stream(body_bytes: bytes):
     # to the system prompt as SESSION SKILL CONTEXT. Unknown paths are silently ignored.
     skill_context: list[str] | None = payload.get("skill_context") or None
     effective_profile = profile_path if profile_path else None
+    question = _last_user_question(messages)
 
     findings_count = 0
     raw_fc = payload.get("findings_count")
@@ -1736,6 +1793,7 @@ def chat_completion_stream(body_bytes: bytes):
         findings_count = raw_fc
 
     try:
+        answer_parts: list[str] = []
         for ev in stream_agent_loop(
             model=model,
             messages=messages,
@@ -1751,7 +1809,9 @@ def chat_completion_stream(body_bytes: bytes):
         ):
             t = ev.get("type")
             if t == "text":
-                yield _sse_event("text", {"chunk": ev.get("content", "")})
+                chunk = ev.get("content", "")
+                answer_parts.append(chunk)
+                yield _sse_event("text", {"chunk": chunk})
             elif t == "system":
                 yield _sse_event("system", {"content": ev.get("content", "")})
             elif t == "action":
@@ -1759,7 +1819,34 @@ def chat_completion_stream(body_bytes: bytes):
             elif t == "finding":
                 yield _sse_event("finding", ev.get("finding", {}))
             elif t == "done":
-                yield _sse_event("done", ev.get("usage") or {})
+                done_payload = dict(ev.get("usage") or {})
+                done_payload.update(
+                    {
+                        "selected_skills": ev.get("selected_skills", []),
+                        "evidence": ev.get("evidence", {}),
+                        "session_id": session_id,
+                    }
+                )
+                if session_id and effective_profile and ev.get("evidence"):
+                    try:
+                        done_payload["session_log"] = _record_session_ask(
+                            session_id,
+                            session_root,
+                            question=question,
+                            answer="".join(answer_parts),
+                            selected_skills=list(ev.get("selected_skills") or []),
+                            evidence=ev["evidence"],
+                            profile_path=os.fspath(effective_profile),
+                            trim_kwargs={},
+                        )
+                    except Exception:
+                        _log.exception("Chat stream session handoff failed")
+                        done_payload["session_log_error"] = (
+                            "chat completed but session handoff failed."
+                        )
+                else:
+                    done_payload["session_log"] = None
+                yield _sse_event("done", done_payload)
     except (BrokenPipeError, ConnectionResetError, OSError):
         pass
     except Exception as e:

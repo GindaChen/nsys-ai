@@ -517,6 +517,7 @@ class NsysChatApp(App):
             ui_context=ui_context,
             profile_path=self.profile_path,
             max_turns=5,
+            prefill_evidence=True,
         )
         try:
             for event in stream:

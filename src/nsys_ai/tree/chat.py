@@ -206,6 +206,7 @@ class ChatPanel(Widget):
                 max_turns=5,
                 session_id=self._session_id,
                 session_root=self._session_root,
+                prefill_evidence=True,
             )
             for ev in stream:
                 if self._cancel_event.is_set():
