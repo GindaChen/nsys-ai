@@ -61,10 +61,10 @@ Almost always the capture clock. `--trim` is measured on Nsight's clock, which d
 zero, so a window that looks reasonable can sit entirely before the first event. Run `nsys-ai info`
 to see the real window. [Time windows](./time-windows.md) covers this in full.
 
-Six commands do not perform this check and return an empty result instead of an error: `skill run`,
-`agent analyze`, `diff-web`, and the three `cutracer` sub-commands. If one of them comes back empty,
-re-run the same window through `diagnose`, which does check. See
-[Time windows](./time-windows.md#commands-that-do-not-check).
+These commands now reject an out-of-range `--trim` window before analysis starts. If a legitimate
+in-range request comes back empty, inspect the profile's activity coverage rather than treating the
+empty result as proof that the requested window was outside the capture. See
+[Time windows](./time-windows.md#commands-that-check).
 
 ### `This profile has no CUPTI_ACTIVITY_KIND_KERNEL table`
 

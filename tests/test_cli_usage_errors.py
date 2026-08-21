@@ -232,6 +232,39 @@ def test_session_verbs_reject_trim_outside_the_profile_window(command, extra):
         assert "before profile:" in result.stderr, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "needs_side_label"),
+    [
+        ("skill", ["run", "top_kernels"], False),
+        ("agent", ["analyze"], False),
+        ("cutracer", ["plan"], False),
+        ("cutracer", ["analyze", str(ROOT / "tests" / "fixtures" / "cutracer")], False),
+        ("cutracer", ["run", "--launch-cmd", "true", "--dry-run"], False),
+        ("diff-web", [str(PROFILE)], True),
+    ],
+)
+def test_every_trim_consumer_rejects_an_out_of_range_window(command, args, needs_side_label):
+    """Every profile-backed --trim entry point must share the range guard."""
+    if command == "skill":
+        argv = [command, *args, str(PROFILE), "--trim", "0", "1", "--format", "json"]
+    elif command == "agent":
+        argv = [command, *args, str(PROFILE), "--trim", "0", "1"]
+    elif command == "cutracer":
+        argv = [command, *args, str(PROFILE), "--trim", "0", "1"]
+        if args[0] == "analyze":
+            argv = [command, *args[:1], str(PROFILE), args[1], "--trim", "0", "1"]
+    else:
+        argv = [command, str(PROFILE), str(PROFILE), "--trim", "0", "1", "--no-browser"]
+
+    result = _run_cli(*argv, timeout=30.0)
+
+    assert result.returncode == 2, (argv, result.returncode, result.stdout, result.stderr)
+    assert "Traceback" not in result.stdout + result.stderr
+    assert "Error [TRIM_OUT_OF_RANGE]:" in result.stderr, result.stderr
+    if needs_side_label:
+        assert "before profile:" in result.stderr, result.stderr
+
+
 def test_optimize_checks_trim_before_starting_the_loop(monkeypatch):
     """An invalid optimize window must stop before the runner can capture."""
     from argparse import Namespace
