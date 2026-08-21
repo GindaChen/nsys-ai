@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,8 @@ from nsys_ai.timeline_benchmark import (
 )
 
 DISTCA_DIR = Path(__file__).resolve().parents[1] / "examples" / "example-20-megatron-distca"
-DISTCA_SQLITE = DISTCA_DIR / "output" / "megatron_distca.sqlite"
+_DEFAULT_DISTCA_SQLITE = DISTCA_DIR / "output" / "megatron_distca.sqlite"
+DISTCA_SQLITE = Path(os.environ.get("NSYS_DISTCA_SQLITE", _DEFAULT_DISTCA_SQLITE)).expanduser()
 BUDGET_JSON = DISTCA_DIR / "timeline_web_perf_budget.json"
 
 

@@ -1,9 +1,20 @@
 {
   "description": "Performance budget for timeline-web key phases on example-20 distca profile",
+  "measurement": {
+    "profile": "example-20-megatron-distca/output/megatron_distca.sqlite",
+    "runs": 3,
+    "observed_median_seconds": {
+      "html_shell_s": 0.0051,
+      "kernel_cache_build_full_s": 0.1651,
+      "tile_filter_kernels_s": 0.0030,
+      "tile_nvtx_gpu_s": 0.0739
+    },
+    "margin": "Budgets allow machine and cache-state variance while still catching multi-second regressions."
+  },
   "max_seconds": {
-    "html_shell_s": 0.5,
-    "kernel_cache_build_full_s": 10.0,
-    "tile_filter_kernels_s": 0.5,
-    "tile_nvtx_gpu_s": 40.0
+    "html_shell_s": 0.25,
+    "kernel_cache_build_full_s": 2.0,
+    "tile_filter_kernels_s": 0.25,
+    "tile_nvtx_gpu_s": 1.0
   }
 }

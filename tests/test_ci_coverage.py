@@ -42,7 +42,7 @@ ACCEPTED_SKIP_REASONS = (
     "Profile not found: data/nsys-hero",
     "requires duckdb",
     "parquet cache unavailable",
-    "real Nsight capture opt-in",
+    "real capture disabled by NSYS_REAL_CAPTURE=0",
     "requires nsys and nvcc",
     # Environment-shaped, not fixture-shaped: the read-only-directory test in
     # test_profile_modes.py cannot mean anything on Windows (no POSIX mode bits)

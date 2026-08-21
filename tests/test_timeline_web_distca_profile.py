@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from pathlib import Path
 
@@ -6,13 +7,14 @@ import pytest
 from nsys_ai.profile import Profile
 from nsys_ai.viewer import build_timeline_gpu_data
 
-DISTCA_SQLITE = (
+_DEFAULT_DISTCA_SQLITE = (
     Path(__file__).resolve().parents[1]
     / "examples"
     / "example-20-megatron-distca"
     / "output"
     / "megatron_distca.sqlite"
 )
+DISTCA_SQLITE = Path(os.environ.get("NSYS_DISTCA_SQLITE", _DEFAULT_DISTCA_SQLITE)).expanduser()
 
 
 @pytest.mark.skipif(not DISTCA_SQLITE.exists(), reason="distca example sqlite not found")

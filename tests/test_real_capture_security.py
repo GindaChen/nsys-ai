@@ -1,9 +1,10 @@
-"""Opt-in real Nsight capture checks for RunSpec security invariants.
+"""Real Nsight capture checks for RunSpec security invariants.
 
 The normal CI runners do not ship Nsight Systems or a CUDA compiler. Set
-``NSYS_REAL_CAPTURE=1`` on a CUDA-capable machine to compile a tiny workload,
-run it through ``LocalProfileRunner``, and make the produced report load-bearing
-for the no-persisted-environment contract.
+``NSYS_REAL_CAPTURE=0`` to explicitly disable this check. Otherwise, on a
+machine with ``nsys`` and ``nvcc``, compile a tiny workload, run it through
+``LocalProfileRunner``, and make the produced report load-bearing for the
+no-persisted-environment contract.
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ _NSYS = shutil.which("nsys")
 _NVCC = shutil.which("nvcc")
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("NSYS_REAL_CAPTURE") != "1",
-    reason="real Nsight capture opt-in (set NSYS_REAL_CAPTURE=1)",
+    os.environ.get("NSYS_REAL_CAPTURE") == "0",
+    reason="real capture disabled by NSYS_REAL_CAPTURE=0",
 )
 
 
