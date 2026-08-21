@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Sub-module re-exports — keep the public API stable for existing callers.
@@ -205,6 +206,44 @@ def _session_finding_sink(
             writer.publish_findings(report, before_profile=before)
 
     return publish
+
+
+def _record_session_ask(
+    session_id: str | None,
+    session_root: str | None,
+    *,
+    question: str,
+    answer: str,
+    selected_skills: list[str],
+    evidence: dict[str, list[dict]],
+    profile_path: str,
+    trim_kwargs: dict,
+) -> str | None:
+    """Persist one transport-neutral ask result for a Web session.
+
+    The log is deliberately additive and does not mutate the SessionStore
+    phase or findings artifact.  CLI/TUI analysis remains the owner of those
+    phase-bearing artifacts; Web ask contributes the conversational handoff
+    record that the next surface can inspect.
+    """
+    if not session_id:
+        return None
+    from .session_store import SessionStore
+
+    record = {
+        "schema_version": "0.1",
+        "kind": "ask",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "question": question,
+        "answer": answer,
+        "selected_skills": list(selected_skills),
+        "evidence": evidence,
+        "profile_path": profile_path,
+        "trim": dict(trim_kwargs),
+    }
+    with SessionStore(session_root or ".nsys-ai/sessions").writer(session_id) as writer:
+        writer.append_log("ask", record)
+    return "logs/ask.jsonl"
 
 
 def _runner_prefill(system_prompt: str, conn, messages: list) -> tuple[str, bool]:
@@ -1045,12 +1084,35 @@ def ask_completion(body_bytes: bytes) -> dict:
             trim_kwargs=trim_kwargs,
             use_llm=use_llm,
         )
+        try:
+            session_log = _record_session_ask(
+                session_id,
+                session_root,
+                question=question,
+                answer=answer,
+                selected_skills=selected,
+                evidence=evidence,
+                profile_path=os.fspath(profile_path),
+                trim_kwargs=trim_kwargs,
+            )
+        except Exception:
+            _log.exception("Ask session handoff failed")
+            return {
+                "error": "ask completed but session handoff failed.",
+                "answer": answer,
+                "question": question,
+                "selected_skills": selected,
+                "evidence": evidence,
+                "session_id": session_id,
+                "_http_status": 500,
+            }
         return {
             "answer": answer,
             "question": question,
             "selected_skills": selected,
             "evidence": evidence,
             "session_id": session_id,
+            "session_log": session_log,
         }
     except Exception:
         _log.exception("Shared ask runner failed")
@@ -1085,6 +1147,7 @@ def ask_completion_stream(body_bytes: bytes):
             "selected_skills": result.get("selected_skills", []),
             "evidence": result.get("evidence", {}),
             "session_id": result.get("session_id"),
+            "session_log": result.get("session_log"),
             "status": status,
         },
     )

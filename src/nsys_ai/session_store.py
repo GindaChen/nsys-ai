@@ -72,6 +72,7 @@ DECISIONS_SCHEMA_VERSION = "0.1"
 SessionPhase = Literal["diagnose", "propose", "reprofile", "diff", "accept"]
 _PHASES = frozenset({"diagnose", "propose", "reprofile", "diff", "accept"})
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_LOG_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _ARTIFACT_PATHS = {
     "runspec": "runspec.json",
     "findings": "findings.json",
@@ -718,6 +719,41 @@ class SessionWriter:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
+
+    def append_log(self, name: str, record: Mapping[str, Any]) -> None:
+        """Append one JSON record to a session log under the writer lease.
+
+        Logs are intentionally outside ``session.json`` and the artifact
+        manifest: they are an append-only conversational/audit trail, not a
+        source artifact that drives phase validation.  The writer lease makes
+        concurrent Web requests serialize their appends, while ``O_APPEND``
+        keeps each record at the end of the file after a process restart.
+        """
+        self._ensure_open()
+        if not isinstance(name, str) or not _LOG_NAME.fullmatch(name):
+            raise ValueError("session log name must be a lowercase identifier")
+        if not isinstance(record, Mapping):
+            raise TypeError("session log record must be a mapping")
+        _require_json_serializable(record, f"session log {name}")
+        payload = json.dumps(
+            dict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+        log_path = self.store._session_dir(self.session_id) / "logs" / f"{name}.jsonl"
+        descriptor = os.open(
+            log_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "ab", closefd=True) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            descriptor = -1
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
 
     def publish_runspec(
         self,

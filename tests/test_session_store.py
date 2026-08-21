@@ -368,6 +368,26 @@ def test_complete_session_round_trip_uses_exact_layout_and_local_references(tmp_
     )
 
 
+def test_session_writer_appends_private_jsonl_log_without_manifest_mutation(tmp_path):
+    session_dir = tmp_path / "sessions" / "ask-001"
+    profile = _profile_reference(tmp_path / "before.sqlite", "ask-before")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("ask-001", before_profile=profile)
+
+    with store.writer("ask-001") as writer:
+        writer.append_log("ask", {"schema_version": "0.1", "question": "why?"})
+        writer.append_log("ask", {"schema_version": "0.1", "question": "what next?"})
+
+    log_path = session_dir / "logs" / "ask.jsonl"
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    assert [json.loads(line) for line in log_path.read_text().splitlines()] == [
+        {"question": "why?", "schema_version": "0.1"},
+        {"question": "what next?", "schema_version": "0.1"},
+    ]
+    manifest = json.loads((session_dir / "session.json").read_text())
+    assert all(value is None for value in manifest["artifacts"].values())
+
+
 def test_rejected_finding_reopens_session_for_a_different_finding(tmp_path):
     before = _profile_reference(tmp_path / "before.sqlite", "before")
     after = _profile_reference(tmp_path / "after.sqlite", "after")
