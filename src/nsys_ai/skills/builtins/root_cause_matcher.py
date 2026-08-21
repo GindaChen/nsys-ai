@@ -539,17 +539,16 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 }
             )
         findings.append(
-            {
-                "pattern": "Excessive Synchronization (abstained)",
-                "severity": "info",
-                "evidence": sync_abstention["reason"],
-                "recommendation": (
+            abstain(
+                sync_abstention["reason"],
+                pattern="Excessive Synchronization (abstained)",
+                severity="info",
+                evidence=sync_abstention["reason"],
+                recommendation=(
                     "Attribute synchronization time per host thread, or use a "
                     "thread-aware denominator before ranking this pattern."
                 ),
-                "_abstained": True,
-                "reason": sync_abstention["reason"],
-            }
+            )[0]
         )
 
     if not findings:
