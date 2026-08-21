@@ -185,6 +185,9 @@ $ curl -s http://127.0.0.1:8144/api/ask \
 
 `use_llm` is optional. When enabled and a provider is configured, the model may triage or summarize
 the registered evidence; it never replaces the runner's skill execution or writes profile SQL.
+When the request is opened with a session, the response also returns `session_log: "logs/ask.jsonl"`;
+each completed ask is appended there as a handoff record without changing the session artifact
+manifest.
 
 The optional MCP transport exposes the same read-only handoff as `get_session`; it returns the
 SessionStore projection rather than a second MCP-specific session schema.

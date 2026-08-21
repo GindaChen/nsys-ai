@@ -1,5 +1,6 @@
 """Unit tests for nsys_ai.chat (AI Brain + Navigator)."""
 
+import hashlib
 import json
 import sys
 from unittest.mock import MagicMock, patch
@@ -305,6 +306,60 @@ def test_ask_completion_uses_shared_runner(monkeypatch):
     conn.close.assert_called_once()
 
 
+def test_ask_completion_persists_session_handoff_log(tmp_path, monkeypatch):
+    from nsys_ai.profile_reference import LocalProfileReference
+    from nsys_ai.session_store import SessionStore
+
+    profile = tmp_path / "profile.sqlite"
+    profile.write_bytes(b"profile")
+    reference = LocalProfileReference(
+        path=str(profile.absolute()),
+        profile_id="nsys2:sha256:" + hashlib.sha256(b"profile").hexdigest(),
+        schema_version="3.25.0",
+        product_version="2026.2.1.106",
+        kernel_count=1,
+    )
+    sessions = tmp_path / "sessions"
+    SessionStore(sessions).create("ask-001", before_profile=reference)
+
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, str(profile), "system", None),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: (None, None))
+    monkeypatch.setattr(
+        "nsys_ai.agent.runner.answer_question",
+        lambda *_args, **_kwargs: (
+            "grounded answer",
+            {"top_kernels": [{"name": "gemm"}]},
+            ["top_kernels"],
+        ),
+    )
+
+    out = chat_mod.ask_completion(
+        json.dumps(
+            {
+                "session_id": "ask-001",
+                "session_root": str(sessions),
+                "question": "why is this slow?",
+                "use_llm": False,
+            }
+        ).encode()
+    )
+
+    assert out["session_id"] == "ask-001"
+    assert out["session_log"] == "logs/ask.jsonl"
+    record = json.loads((sessions / "ask-001" / "logs" / "ask.jsonl").read_text())
+    assert record["kind"] == "ask"
+    assert record["question"] == "why is this slow?"
+    assert record["answer"] == "grounded answer"
+    assert record["selected_skills"] == ["top_kernels"]
+    assert record["evidence"]["top_kernels"][0]["name"] == "gemm"
+    conn.close.assert_called_once()
+
+
 def test_ask_completion_rejects_incomplete_trim():
     out = chat_mod.ask_completion(
         b'{"profile_path":"profile.sqlite","question":"why?","trim_start_ns":1}'
@@ -334,6 +389,7 @@ def test_ask_completion_stream_uses_the_json_runner_contract(monkeypatch):
     assert done["selected_skills"] == ["top_kernels"]
     assert done["evidence"]["top_kernels"][0]["name"] == "gemm"
     assert done["session_id"] == "s1"
+    assert done["session_log"] is None
 
 
 def test_ask_completion_stream_preserves_generic_errors(monkeypatch):
