@@ -740,9 +740,71 @@ def test_root_cause_sync_and_pageable_checks_honor_trim(minimal_nsys_conn):
 
     skill = get_skill("root_cause_matcher")
     rows = skill.execute(minimal_nsys_conn, trim_start_ns=0, trim_end_ns=1)
-    patterns = {row["pattern"] for row in rows}
+    patterns = {row.get("pattern") for row in rows}
     assert "Excessive Synchronization" not in patterns
     assert "Pageable Memory in Async Memcpy" not in patterns
+    assert rows[0]["_abstained"] is True
+    assert "No GPU kernel activity" in rows[0]["reason"]
+    assert "No Known Anti-Patterns Detected" not in patterns
+
+
+def test_root_cause_sync_abstains_for_overlapping_host_threads(minimal_nsys_conn):
+    """Overlapping host-thread sync intervals must not become a >100% warning."""
+    from nsys_ai.skills.base import is_abstention, is_abstention_row
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_sync_apis
+    from nsys_ai.skills.registry import get_skill
+
+    # Two different host threads block over the same interval.  Summing their
+    # durations is valid for a cost total, but not as a percentage of one
+    # global runtime wall span.
+    minimal_nsys_conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME "
+        "(globalTid, correlationId, start, end, nameId) VALUES (?, ?, ?, ?, ?)",
+        [
+            (101, 106, 5_000_000, 35_000_000, 20),
+            (102, 107, 5_000_000, 35_000_000, 20),
+        ],
+    )
+
+    direct_rows = _check_sync_apis(minimal_nsys_conn)
+    assert is_abstention(direct_rows)
+    assert direct_rows[0]["wall_pct"] > 100
+    assert "Concurrent host-thread intervals overlap" in direct_rows[0]["reason"]
+
+    rows = get_skill("root_cause_matcher").execute(minimal_nsys_conn)
+    assert not any(row.get("pattern") == "Excessive Synchronization" for row in rows)
+    composite = next(
+        row for row in rows if row.get("pattern") == "Excessive Synchronization (abstained)"
+    )
+    assert composite["severity"] == "info"
+    assert is_abstention_row(composite)
+
+
+def test_root_cause_sync_abstention_preserves_other_clean_checks(
+    minimal_nsys_conn, monkeypatch
+):
+    """A partial abstention must not make the whole composite skill unusable."""
+    from nsys_ai.skills.base import abstain, is_abstention, is_abstention_row
+    from nsys_ai.skills.builtins import root_cause_matcher
+
+    monkeypatch.setattr(root_cause_matcher, "_safe_execute", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        root_cause_matcher,
+        "_check_sync_apis",
+        lambda *_args, **_kwargs: abstain("overlapping host threads"),
+    )
+    monkeypatch.setattr(root_cause_matcher, "_check_sync_memcpy", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        root_cause_matcher, "_check_pageable_memcpy", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(root_cause_matcher, "_check_sync_memset", lambda *_args, **_kwargs: [])
+
+    rows = root_cause_matcher._execute(minimal_nsys_conn)
+
+    assert not is_abstention(rows)
+    assert rows[0]["pattern"] == "Root Cause Analysis Incomplete"
+    assert rows[1]["pattern"] == "Excessive Synchronization (abstained)"
+    assert is_abstention_row(rows[1])
 
 
 def test_root_cause_sync_percentage_names_wall_time_denominator(minimal_nsys_conn):
