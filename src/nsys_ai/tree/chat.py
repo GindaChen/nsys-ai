@@ -196,6 +196,9 @@ class ChatPanel(Widget):
 
         content = ""
         actions: list[dict] = []
+        runner_evidence: dict[str, list[dict]] = {}
+        runner_selected: list[str] = []
+        completed = False
         try:
             stream = chat_mod.stream_agent_loop(
                 model=model,
@@ -223,9 +226,34 @@ class ChatPanel(Widget):
                     if act:
                         actions.append(act)
                 elif t == "done":
+                    runner_evidence = ev.get("evidence") or {}
+                    runner_selected = list(ev.get("selected_skills") or [])
+                    completed = True
                     break
         except Exception as e:
             content = f"Error: {e}"
+
+        if completed and self._session_id and self._db_path and runner_evidence:
+            try:
+                session_log = chat_mod._record_session_ask(
+                    self._session_id,
+                    self._session_root,
+                    question=user_msg,
+                    answer=content,
+                    selected_skills=runner_selected,
+                    evidence=runner_evidence,
+                    profile_path=self._db_path,
+                    trim_kwargs={},
+                )
+                self.app.call_from_thread(
+                    self._on_system_event,
+                    f"Session handoff saved: {session_log}",
+                )
+            except Exception:
+                self.app.call_from_thread(
+                    self._on_system_event,
+                    "Session handoff failed; the chat response is still available.",
+                )
 
         # Distill history
         try:
