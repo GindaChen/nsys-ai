@@ -75,6 +75,28 @@ class TestPerGapFinding:
         assert f.severity == "warning"
         assert "Stream 3" in f.note
 
+    def test_immaterial_aggregate_share_demotes_per_gap_to_info(self):
+        """A visible gap is an observation when idle is a small share of the run."""
+        findings = _to_findings(
+            [
+                _per_gap_row(gap_ns=2_000_000),
+                _summary_row(pct_of_profile=0.9),
+            ]
+        )
+        assert len(findings) == 1
+        assert findings[0].severity == "info"
+
+    def test_material_aggregate_share_keeps_per_gap_warning(self):
+        findings = _to_findings(
+            [
+                _per_gap_row(gap_ns=2_000_000),
+                _summary_row(pct_of_profile=20.0),
+            ]
+        )
+        per_gap = [f for f in findings if f.provenance["row_kind"] == "per_gap"]
+        assert len(per_gap) == 1
+        assert per_gap[0].severity == "warning"
+
     def test_v01_fields_populated(self):
         findings = _to_findings(
             [_per_gap_row(gap_ns=12_500_000, start_ns=500, stream_id=7)],

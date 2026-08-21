@@ -118,6 +118,15 @@ underlying synchronization calls separately.
 when the sweep can compute it. A stream can be idle while another stream keeps the device busy, so
 the per-stream sum is not recoverable device time. Do not add per-stream percentages across streams.
 
+Severity also has an aggregate-share guard. A gap can be larger than the reporting floor and still
+be immaterial to the capture: for example, a 2 ms gap in a four-second run is evidence of an
+observation, not by itself a warning-level bottleneck. When the aggregate idle share is below the
+15% warning threshold, per-gap findings remain visible at `info`; the summary uses the same
+threshold. If the aggregate row is unavailable, the analyzer keeps the legacy warning severity
+because it has no denominator with which to make that demotion safely. This is a severity
+calibration rule, not a claim that the gap is recoverable; consult `headroom_ms` and the labelled
+percentage separately.
+
 ## 3. Device selection can change the population being analysed
 
 Multi-GPU profiles have two related but different choices:

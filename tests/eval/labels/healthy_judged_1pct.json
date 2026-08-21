@@ -19,14 +19,9 @@
     },
     {
       "category": "idle",
-      "min_severity": "critical",
-      "note": "0.99% idle must never reach critical. Warning-level idle findings ARE currently emitted here \u2014 see known_gaps \u2014 so the gate is set at critical to assert the real boundary rather than encode behaviour we think is wrong."
+      "min_severity": "warning",
+      "note": "0.99% idle must not reach warning severity. The gaps remain visible as informational observations, but must not compete with material bottlenecks."
     }
   ],
-  "known_gaps": [
-    {
-      "observation": "This profile produces 5 warning-severity 'GPU Idle Gap (2.00ms)' findings while claiming 0ms recoverable time. Severity is judged per gap against min_gap_ns, with no reference to what share of the run the gaps represent. So a healthy pipeline at 0.94% idle emits five warnings, which is the noise that buries real signal elsewhere in the corpus. Headroom is correctly zero, so the ROI ranking is unaffected \u2014 this is a severity calibration question, not a wrong number.",
-      "ref": "#284"
-    }
-  ]
+  "known_gaps": []
 }
