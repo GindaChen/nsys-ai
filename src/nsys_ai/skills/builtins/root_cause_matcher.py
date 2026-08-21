@@ -518,7 +518,26 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     if not is_abstention(memset_findings):
         findings += memset_findings
 
-    if sync_abstention and findings:
+    if sync_abstention:
+        # Preserve all other checks.  A synchronization denominator can be
+        # unavailable even when the remaining checks ran successfully; that
+        # must not collapse the composite skill into a list-level abstention.
+        if not findings:
+            findings.append(
+                {
+                    "pattern": "Root Cause Analysis Incomplete",
+                    "severity": "info",
+                    "evidence": (
+                        "Other root-cause checks found no patterns, but "
+                        "synchronization could not be scored: "
+                        f"{sync_abstention['reason']}"
+                    ),
+                    "recommendation": (
+                        "Attribute synchronization time per host thread before "
+                        "treating this profile as free of synchronization issues."
+                    ),
+                }
+            )
         findings.append(
             {
                 "pattern": "Excessive Synchronization (abstained)",
@@ -528,12 +547,10 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                     "Attribute synchronization time per host thread, or use a "
                     "thread-aware denominator before ranking this pattern."
                 ),
-                "abstained": True,
+                "_abstained": True,
                 "reason": sync_abstention["reason"],
             }
         )
-    elif sync_abstention:
-        findings = [sync_abstention]
 
     if not findings:
         findings.append(
