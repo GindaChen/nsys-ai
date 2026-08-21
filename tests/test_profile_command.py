@@ -331,6 +331,26 @@ def test_dry_run_is_structurally_redacted_and_does_not_create_output(
     assert not output.exists()
 
 
+def test_default_profile_output_uses_configured_artifact_root(tmp_path, fake_nsys, monkeypatch):
+    artifact_root = tmp_path / "ci-artifacts"
+    monkeypatch.setenv("NSYS_AI_ARTIFACT_ROOT", str(artifact_root))
+    args = _args(fake_nsys, tmp_path / "unused-output")
+    args.output = None
+
+    exit_code = run_profile_command(
+        args,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    profiles = list((artifact_root / "profiles").iterdir())
+    assert len(profiles) == 1
+    assert (profiles[0] / "profile.sqlite").is_file()
+    assert not (tmp_path / ".nsys-ai").exists()
+
+
 def test_fake_nsys_cli_preserves_tokens_python_shorthand_and_artifacts(
     tmp_path, fake_nsys
 ):

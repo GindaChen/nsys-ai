@@ -167,6 +167,10 @@ The wrapper combines child-process data before reporting. A plain
 do not run it from another working directory because CLI tests intentionally
 use temporary child directories.
 
+To keep local or CI runs from writing session and capture artifacts into the
+checkout, set `NSYS_AI_ARTIFACT_ROOT`; see the [artifact layout guide](docs/dev/artifact-layout.md)
+for the precedence rules and the separate input-keyed cache policy.
+
 ### Layer 4: lint and security
 
 These are required CI checks, not optional polish:

@@ -36,6 +36,7 @@ alongside them.
 | [dev/ingest-policy.md](./dev/ingest-policy.md) | How a profile path becomes an open backend, and why call sites must not bypass it |
 | [dev/skill-contract.md](./dev/skill-contract.md) | How to add a portable, deterministic, JSON-safe analysis skill |
 | [dev/surface-adapters.md](./dev/surface-adapters.md) | How CLI, TUI, Web, MCP, and chat delegate shared policy and analysis |
+| [dev/artifact-layout.md](./dev/artifact-layout.md) | Where invocation artifacts and input-keyed profile caches live |
 | [dev/testing.md](./dev/testing.md) | Test layers and subprocess-aware coverage |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI |
 

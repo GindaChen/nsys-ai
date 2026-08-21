@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
+from .artifact_root import profile_root
 from .exceptions import NsysAiError
 from .profile_runner import LocalProfileRunner, RunProgress, RunStatus
 from .runspec import EnvironmentSpec, NsysTraceOptions, RunSpec, RunSpecError
@@ -301,7 +302,7 @@ def discover_git_provenance(
 def default_output_leaf(cwd: Path) -> Path:
     """Choose a fresh, sortable local artifact leaf without creating it."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    return cwd / ".nsys-ai" / "profiles" / timestamp
+    return profile_root(cwd=cwd) / timestamp
 
 
 def _output_leaf(selected: str | None, cwd: Path) -> Path:

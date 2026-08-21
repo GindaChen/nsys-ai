@@ -1049,8 +1049,9 @@ def _build_parser():
         default=None,
         metavar="PATH",
         help="Where --accept/--reject writes the decision record "
-        "(default: diff.json in the working directory). Distinct from -o, which "
-        "writes the rendered report in --format",
+        "(default: diff.json in the working directory, or "
+        "$NSYS_AI_ARTIFACT_ROOT/decisions/diff.json when configured). Distinct "
+        "from -o, which writes the rendered report in --format",
     )
     p.add_argument(
         "--reason",
