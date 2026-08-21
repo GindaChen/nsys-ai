@@ -48,6 +48,30 @@ def test_tree_web_shell_does_not_embed_profile_data(minimal_nsys_db_path):
     assert "/api/tree" in html
 
 
+def test_tree_web_binds_before_background_tree_build(monkeypatch):
+    events = []
+
+    class FakeServer:
+        server_address = ("127.0.0.1", 9911)
+
+    def bind(_port, _handler):
+        events.append("bind")
+        return FakeServer()
+
+    def build(*_args):
+        events.append("build")
+        return []
+
+    monkeypatch.setattr(web, "_bind_local_server", bind)
+    monkeypatch.setattr(web, "_run_server", lambda *_args: events.append("serve"))
+    monkeypatch.setattr(web, "generate_html", lambda *_args, **_kwargs: "<html>")
+    monkeypatch.setattr("nsys_ai.nvtx_tree.build_nvtx_tree", build)
+
+    web.serve(object(), 0, (0, 1), port=9911, open_browser=False)
+
+    assert events.index("bind") < events.index("build")
+
+
 def test_tree_web_endpoint_returns_bounded_slices():
     old_data = web._ViewerHandler._tree_data
     old_configured = web._ViewerHandler._tree_configured
@@ -231,6 +255,25 @@ def test_viewer_returns_json_404_for_unknown_post_api():
     assert status == 404
     assert content_type.startswith("application/json")
     assert b"not found" in body
+
+
+def test_viewer_tree_reports_background_building_state():
+    old_configured = web._ViewerHandler._tree_configured
+    old_error = web._ViewerHandler._tree_build_error
+    web._ViewerHandler._tree_configured = False
+    web._ViewerHandler._tree_build_error = None
+    try:
+        status, body, content_type = _get(web._ViewerHandler, "/api/tree?depth=0")
+    finally:
+        web._ViewerHandler._tree_configured = old_configured
+        web._ViewerHandler._tree_build_error = old_error
+
+    assert status == 202
+    assert content_type.startswith("application/json")
+    assert json.loads(body) == {
+        "status": "building",
+        "message": "tree data is still building",
+    }
 
 
 def test_viewer_ask_route_delegates_to_shared_transport(monkeypatch):

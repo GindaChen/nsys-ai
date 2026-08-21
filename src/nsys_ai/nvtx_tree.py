@@ -148,53 +148,84 @@ def _build_single_thread_tree(
         """,
         (tid, rt_lo, rt_hi),
     )
-
-    # Build projected entries: each NVTX span → projected GPU bounds + child kernels
-    entries = []  # list of {name, gpu_start, gpu_end, cpu_start, cpu_end, kernels: [...]}
-
+    # Project runtime launches onto NVTX ranges with one chronological sweep.
+    # The old implementation restarted at runtime index zero for every NVTX
+    # row.  A parent range spanning a busy training step therefore revisited
+    # the same runtime prefix thousands of times.  Keeping the active NVTX
+    # stack means each runtime row is considered once per nesting level, which
+    # is the amount of information the final tree can actually represent.
+    nvtx_records = []
     for n in nvtx_rows:
-        text, cpu_start, cpu_end = n["text"], n["start"], n["end"]
-        if not text:
+        if n["text"]:
+            nvtx_records.append(
+                {
+                    "name": n["text"],
+                    "cpu_start": n["start"],
+                    "cpu_end": n["end"],
+                    "kernels": [],
+                    "gpu_start": None,
+                    "gpu_end": None,
+                }
+            )
+
+    active = []
+    next_nvtx = 0
+    for rt in rt_rows:
+        rt_start, rt_end = rt["start"], rt["end"]
+        while next_nvtx < len(nvtx_records) and nvtx_records[next_nvtx]["cpu_start"] <= rt_start:
+            active.append(nvtx_records[next_nvtx])
+            next_nvtx += 1
+        active = [record for record in active if record["cpu_end"] >= rt_end]
+        containing = [
+            record
+            for record in active
+            if record["cpu_start"] <= rt_start and record["cpu_end"] >= rt_end
+        ]
+        k = kmap.get(rt["correlationId"])
+        if not containing or not k:
             continue
 
-        # Find correlated kernels on this GPU
-        child_kernels = []
-        for rt in rt_rows:
-            if rt["start"] > cpu_end:
-                break
-            if rt["start"] >= cpu_start and rt["end"] <= cpu_end:
-                k = kmap.get(rt["correlationId"])
-                if k:
-                    child_kernels.append(
-                        dict(
-                            name=k["name"],
-                            demangled=k.get("demangled", ""),
-                            start=k["start"],
-                            end=k["end"],
-                            stream=k["stream"],
-                            type="kernel",
-                            children=[],
-                        )
-                    )
+        kernel = dict(
+            name=k["name"],
+            demangled=k.get("demangled", ""),
+            start=k["start"],
+            end=k["end"],
+            stream=k["stream"],
+            type="kernel",
+            children=[],
+        )
+        for record in containing:
+            record["gpu_start"] = (
+                k["start"]
+                if record["gpu_start"] is None
+                else min(record["gpu_start"], k["start"])
+            )
+            record["gpu_end"] = (
+                k["end"] if record["gpu_end"] is None else max(record["gpu_end"], k["end"])
+            )
+        # Only the innermost range needs a direct kernel child.  Ancestors are
+        # retained through their projected bounds and receive the nested node;
+        # this is equivalent to the old post-build deduplication without
+        # materialising the same kernel in every ancestor first.
+        innermost = max(containing, key=lambda record: record["cpu_start"])
+        innermost["kernels"].append(kernel)
 
-        if not child_kernels:
+    # Build projected entries: each NVTX span with direct or nested GPU work.
+    entries = []  # list of {name, gpu_start, gpu_end, cpu_start, cpu_end, kernels: [...]}
+    for record in nvtx_records:
+        if record["gpu_start"] is None:
             continue
-
-        gpu_start = min(k["start"] for k in child_kernels)
-        gpu_end = max(k["end"] for k in child_kernels)
-
-        if gpu_end < trim[0] or gpu_start > trim[1]:
+        if record["gpu_end"] < trim[0] or record["gpu_start"] > trim[1]:
             continue
-
         entries.append(
             dict(
-                name=text,
-                start=gpu_start,
-                end=gpu_end,
-                cpu_start=cpu_start,
-                cpu_end=cpu_end,
+                name=record["name"],
+                start=record["gpu_start"],
+                end=record["gpu_end"],
+                cpu_start=record["cpu_start"],
+                cpu_end=record["cpu_end"],
                 type="nvtx",
-                kernels=child_kernels,
+                kernels=record["kernels"],
                 children=[],
             )
         )
