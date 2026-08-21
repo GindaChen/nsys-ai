@@ -134,21 +134,78 @@ def run_question_evidence(
     *,
     trim_kwargs: Mapping | None = None,
     use_llm: bool = False,
+    skill_selector=None,
 ) -> tuple[dict[str, list[dict]], list[str]]:
-    """Run triage plus selected skills; return evidence and the selected list."""
+    """Run triage plus selected skills; return evidence and the selected list.
+
+    ``skill_selector`` is an optional transport-provided planner hook.  It
+    receives ``(question, triage_rows)`` and returns candidate skill names;
+    the runner still validates them against the registry and applies the
+    four-skill cap.
+    """
     triage = _execute_pack(conn, ["root_cause_matcher"], trim_kwargs)
-    selected = select_skills_for_question(
-        question,
-        triage.get("root_cause_matcher", []),
-        use_llm=use_llm,
-    )
-    selected = [skill for skill in selected if skill != "root_cause_matcher"]
+    triage_rows = triage.get("root_cause_matcher", [])
+    if skill_selector is None:
+        selected = select_skills_for_question(question, triage_rows, use_llm=use_llm)
+    else:
+        selected = skill_selector(question, triage_rows)
+    selected = [
+        skill
+        for skill in (selected if isinstance(selected, (list, tuple)) else [])
+        if skill and skill != "root_cause_matcher" and get_skill(skill) is not None
+    ][:4]
     if not selected:
         selected = list(ASK_FALLBACK)[:4]
     evidence = dict(triage)
     for skill_name, rows in _execute_pack(conn, selected, trim_kwargs).items():
         evidence[skill_name] = rows
     return evidence, selected
+
+
+def answer_question(
+    conn,
+    question: str,
+    *,
+    profile_path: str = "",
+    trim_kwargs: Mapping | None = None,
+    use_llm: bool = False,
+    profile=None,
+    triage_selector=None,
+    summary_provider=None,
+) -> tuple[str, dict[str, list[dict]], list[str]]:
+    """Run the canonical ask workflow and build its evidence-first answer.
+
+    This is the transport-neutral ask contract.  Callers provide a profile
+    connection and only choose presentation details; triage, the four-skill
+    cap, evidence collection, and answer shaping stay in this runner.
+    ``use_llm`` permits optional planner/synthesizer calls, but the returned
+    answer remains usable and deterministic when no provider is configured.
+    """
+    evidence, selected = run_question_evidence(
+        conn,
+        question,
+        trim_kwargs=trim_kwargs,
+        use_llm=use_llm,
+        skill_selector=triage_selector,
+    )
+    selected_with_triage = ["root_cause_matcher", *selected]
+    llm_summary = None
+    if use_llm:
+        if summary_provider is not None:
+            llm_summary = summary_provider(question, evidence, summary_only=True)
+        else:
+            llm_summary = synthesize_evidence(
+                question, evidence, summary_only=True, profile=profile
+            )
+    answer = format_evidence_first_answer(
+        question,
+        evidence,
+        selected_with_triage,
+        profile_path=profile_path,
+        trim_kwargs=trim_kwargs,
+        llm_summary=llm_summary,
+    )
+    return answer, evidence, selected_with_triage
 
 
 def _first_actionable_row(rows: list[dict]) -> dict | None:

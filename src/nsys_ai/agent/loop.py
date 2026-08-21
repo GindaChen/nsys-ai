@@ -93,35 +93,17 @@ class Agent:
             log.debug("LLM model/key resolution failed", exc_info=True)
             model, api_key = None, None
         has_llm = bool(model and api_key)
-
-        evidence = runner.run_diagnose_pack(
+        answer, _evidence, _selected = runner.answer_question(
             self.conn,
-            trim_kwargs=self._trim_kwargs,
-            skill_names=["root_cause_matcher"],
-        )
-        triage_rows = evidence.get("root_cause_matcher", [])
-        selected = (
-            self._try_llm_triage(question, triage_rows)
-            if has_llm
-            else self._select_skills(question)
-        )
-        selected = [skill for skill in selected if skill and skill != "root_cause_matcher"]
-        if not selected:
-            selected = list(runner.ASK_FALLBACK)
-        evidence.update(
-            runner.run_diagnose_pack(
-                self.conn, trim_kwargs=self._trim_kwargs, skill_names=selected
-            )
-        )
-        llm_summary = (
-            self._try_llm_synthesis(question, evidence, summary_only=True) if has_llm else None
-        )
-        return self._format_evidence_first_answer(
             question,
-            evidence,
-            selected_skills=["root_cause_matcher", *selected],
-            llm_summary=llm_summary,
+            profile_path=self.profile_path,
+            trim_kwargs=self._trim_kwargs,
+            use_llm=has_llm,
+            profile=self.profile,
+            triage_selector=self._try_llm_triage if has_llm else None,
+            summary_provider=self._try_llm_synthesis if has_llm else None,
         )
+        return answer
 
     def run_skill(self, skill_name: str, **kwargs) -> str:
         """Run one registered skill by name."""

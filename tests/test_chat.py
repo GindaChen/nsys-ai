@@ -269,6 +269,59 @@ def test_web_chat_import_failure_uses_not_configured_contract(monkeypatch):
     assert web._handle_chat_request(b"{}") is None
 
 
+def test_ask_completion_uses_shared_runner(monkeypatch):
+    conn = MagicMock()
+    monkeypatch.setattr(
+        chat_mod,
+        "_prepare_session",
+        lambda *_args: (conn, "/profile.sqlite", "system", None),
+    )
+    monkeypatch.setattr(chat_mod, "_get_model_and_key", lambda preferred=None: (None, None))
+
+    captured = {}
+
+    def fake_answer(conn_arg, question, **kwargs):
+        captured.update({"conn": conn_arg, "question": question, **kwargs})
+        return "grounded answer", {"top_kernels": [{"name": "gemm"}]}, ["top_kernels"]
+
+    monkeypatch.setattr("nsys_ai.agent.runner.answer_question", fake_answer)
+    out = chat_mod.ask_completion(
+        json.dumps(
+            {
+                "profile_path": "/profile.nsys-rep",
+                "question": "why is this slow?",
+                "trim_start_ns": 10,
+                "trim_end_ns": 20,
+                "use_llm": False,
+            }
+        ).encode()
+    )
+
+    assert out["answer"] == "grounded answer"
+    assert out["selected_skills"] == ["top_kernels"]
+    assert captured["conn"] is conn
+    assert captured["question"] == "why is this slow?"
+    assert captured["trim_kwargs"] == {"trim_start_ns": 10, "trim_end_ns": 20}
+    conn.close.assert_called_once()
+
+
+def test_ask_completion_rejects_incomplete_trim():
+    out = chat_mod.ask_completion(
+        b'{"profile_path":"profile.sqlite","question":"why?","trim_start_ns":1}'
+    )
+    assert out == {"error": "trim_start_ns and trim_end_ns must be provided together."}
+
+
+def test_web_ask_import_failure_uses_not_configured_contract(monkeypatch):
+    from nsys_ai import chat, web
+
+    def unavailable(_body):
+        raise ImportError("optional AI backend is unavailable")
+
+    monkeypatch.setattr(chat, "ask_completion", unavailable)
+    assert web._handle_ask_request(b"{}") is None
+
+
 def test_chat_completion_success_mock(monkeypatch):
     """With mocked litellm, returns content and actions from completion."""
     fake_message = MagicMock(content="Hello.", tool_calls=[])

@@ -173,6 +173,19 @@ The directory is the contract: its `session.json` and artifacts are opened by th
 TUI from any working directory. A bare value such as `--session run-001` remains supported and
 continues to mean `.nsys-ai/sessions/run-001` relative to the current directory.
 
+The Web viewer exposes the same ask workflow as JSON at `POST /api/ask`. Pass either a profile path
+or a session handoff directory; the response includes the selected registered skills, structured
+evidence, and the evidence-first answer:
+
+```console
+$ curl -s http://127.0.0.1:8144/api/ask \
+    -H 'Content-Type: application/json' \
+    -d '{"session_id":"run-001","session_root":"/tmp/nsys-run-001","question":"what is the bottleneck?","use_llm":false}'
+```
+
+`use_llm` is optional. When enabled and a provider is configured, the model may triage or summarize
+the registered evidence; it never replaces the runner's skill execution or writes profile SQL.
+
 The optional MCP transport exposes the same read-only handoff as `get_session`; it returns the
 SessionStore projection rather than a second MCP-specific session schema.
 
