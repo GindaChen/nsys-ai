@@ -94,6 +94,151 @@ def test_a_defaulted_parameter_shares_an_entry_with_an_explicit_one(fixture):
     assert len(calls) == 1, f"defaulted and explicit {default_limit} did not share an entry"
 
 
+@pytest.mark.parametrize(
+    ("skill_name", "expected"),
+    [
+        ("sync_cost_analysis", ("device", "trim_start_ns", "trim_end_ns")),
+        ("overlap_breakdown", ("device", "trim_start_ns", "trim_end_ns")),
+        (
+            "gpu_idle_gaps",
+            ("device", "trim_start_ns", "trim_end_ns", "min_gap_ns", "limit"),
+        ),
+        ("iteration_timing", ("device", "trim_start_ns", "trim_end_ns", "marker")),
+    ],
+)
+def test_composite_skill_memo_allowlist_is_explicit(skill_name, expected):
+    """The #350 audit is an allow-list, not an implicit name-only shortcut."""
+    skill = get_skill(skill_name)
+    assert skill.memo_key_params == expected
+
+    base = {
+        "device": 0,
+        "trim_start_ns": 100,
+        "trim_end_ns": 200,
+        "overhead_ns": 0,
+        "communicator_data": [{"_diagnostic": True}],
+    }
+    if skill_name == "gpu_idle_gaps":
+        base.update(min_gap_ns=1_000_000, limit=5)
+    if skill_name == "iteration_timing":
+        base["marker"] = "sample_0"
+
+    assert skill._resolved_memo_params(base) == {
+        name: base.get(name) for name in expected
+    }
+    changed_context = {**base, "overhead_ns": 123, "communicator_data": [{"rows": 99}]}
+    assert skill._resolved_memo_params(base) == skill._resolved_memo_params(changed_context)
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "first", "second"),
+    [
+        (
+            "sync_cost_analysis",
+            {"device": 0, "trim_start_ns": 100, "trim_end_ns": 200},
+            {
+                "device": 0,
+                "trim_start_ns": 100,
+                "trim_end_ns": 200,
+                "overhead_ns": 123,
+                "communicator_data": [{"rows": 99}],
+            },
+        ),
+        (
+            "overlap_breakdown",
+            {"device": 0, "trim_start_ns": 100, "trim_end_ns": 200},
+            {
+                "device": 0,
+                "trim_start_ns": 100,
+                "trim_end_ns": 200,
+                "overhead_ns": 123,
+                "communicator_data": [{"rows": 99}],
+            },
+        ),
+        (
+            "gpu_idle_gaps",
+            {"device": 0, "trim_start_ns": 100, "trim_end_ns": 200, "limit": 5},
+            {
+                "device": 0,
+                "trim_start_ns": 100,
+                "trim_end_ns": 200,
+                "limit": 5,
+                "overhead_ns": 123,
+                "communicator_data": [{"rows": 99}],
+            },
+        ),
+        (
+            "iteration_timing",
+            {"device": 0, "trim_start_ns": 100, "trim_end_ns": 200},
+            {
+                "device": 0,
+                "trim_start_ns": 100,
+                "trim_end_ns": 200,
+                "marker": "sample_0",
+                "overhead_ns": 123,
+                "communicator_data": [{"rows": 99}],
+            },
+        ),
+    ],
+)
+def test_audited_skills_reuse_rows_when_only_forwarded_context_differs(
+    skill_name, first, second, fixture
+):
+    """The omitted context values cannot recreate #350's duplicate execution."""
+    skill = get_skill(skill_name)
+    original = skill.execute_fn
+    calls = []
+
+    def counting(conn, **kwargs):
+        calls.append(kwargs)
+        return [{"call": len(calls)}]
+
+    skill.execute_fn = counting
+    conn = sqlite3.connect(fixture)
+    try:
+        first_rows = skill.execute(conn, **first)
+        second_rows = skill.execute(conn, **second)
+    finally:
+        skill.execute_fn = original
+        conn.close()
+
+    assert len(calls) == 1
+    assert first_rows == second_rows == [{"call": 1}]
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "first", "second"),
+    [
+        ("sync_cost_analysis", {"device": 0}, {"device": 1}),
+        ("overlap_breakdown", {"device": 0}, {"device": 1}),
+        ("gpu_idle_gaps", {"limit": 1}, {"limit": 5}),
+        ("iteration_timing", {"marker": "sample_0"}, {"marker": "other"}),
+    ],
+)
+def test_audited_skills_still_split_on_answer_affecting_parameters(
+    skill_name, first, second, fixture
+):
+    """The allow-list preserves the safety property of the original strict key."""
+    skill = get_skill(skill_name)
+    original = skill.execute_fn
+    calls = []
+
+    def counting(conn, **kwargs):
+        calls.append(kwargs)
+        return [{"call": len(calls)}]
+
+    skill.execute_fn = counting
+    conn = sqlite3.connect(fixture)
+    try:
+        skill.execute(conn, **first)
+        skill.execute(conn, **second)
+    finally:
+        skill.execute_fn = original
+        conn.close()
+
+    assert len(calls) == 2
+
+
 def test_a_cached_result_cannot_be_corrupted_by_its_consumer(fixture):
     """Rows are copied out, because consumers mutate them in place.
 

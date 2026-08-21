@@ -553,6 +553,13 @@ class Skill:
         required_tables: Activity-table resolver keys required before execution.
                          Used for execute_fn skills whose SQL is not visible to
                          the generic template guard.
+        memo_key_params: Optional allow-list of resolved parameters that affect
+                         the computation. When omitted, every resolved
+                         parameter remains part of the per-connection memo key.
+                         This is intentionally opt-in: a parameter may be
+                         forwarded by a composite skill without being read by
+                         the leaf skill, but dropping an actually-read
+                         parameter would return incorrect evidence.
     """
 
     name: str
@@ -566,6 +573,21 @@ class Skill:
     execute_fn: Callable | None = None
     to_findings_fn: Callable | None = None
     required_tables: tuple[str, ...] = ()
+    memo_key_params: tuple[str, ...] | None = None
+
+    def _resolved_memo_params(self, resolved: dict[str, object]) -> dict[str, object]:
+        """Return the computation-bearing subset of resolved parameters.
+
+        The default remains the strict, backwards-compatible behaviour: every
+        resolved value participates in the key. A skill may opt in to a named
+        subset only after a source-level audit proves that the omitted values
+        are transport/context inputs rather than computation inputs. Missing
+        allow-listed values are represented as ``None`` so an omitted optional
+        argument and an explicit ``None`` have the same computation identity.
+        """
+        if self.memo_key_params is None:
+            return dict(resolved)
+        return {name: resolved.get(name) for name in self.memo_key_params}
 
     def execute(self, conn: sqlite3.Connection, **kwargs) -> list[dict]:
         """Run the skill against a connection.
@@ -668,13 +690,23 @@ class Skill:
         # both directly and through the health manifest / root-cause matcher,
         # which re-run some analyses already requested by the pipeline.
         #
-        # The key includes the resolved parameters, not just the name. The
-        # repeats are mostly NOT identical — gpu_idle_gaps is called at limit=1
-        # and limit=5 in the same build, and those legitimately differ — so a
-        # name-only key would hand one caller another's results and silently
-        # change findings. Resolved rather than raw kwargs so an explicit
-        # limit=5 and a defaulted limit=5 share an entry.
-        cache_key = f"skill:{self.name}:{_params_key(resolved)}"
+        # The strict default includes every resolved parameter, not just the
+        # name. A name-only key would hand one caller another caller's rows and
+        # silently change findings: gpu_idle_gaps is called at limit=1 and
+        # limit=5 in one build, and those legitimately differ. Resolved rather
+        # than raw kwargs also means an explicit default shares an entry with
+        # an omitted default.
+        #
+        # Four composite-facing skills have an audited allow-list. Their
+        # callers forward ``overhead_ns`` and/or ``communicator_data`` through
+        # the shared path, but their execute functions do not read either
+        # value. Keeping those transport values out of the key joins calls
+        # that compute the same rows while retaining every answer-affecting
+        # parameter (device, trim, and the skill-specific limit/threshold or
+        # marker). The allow-list is opt-in on Skill so a future skill cannot
+        # accidentally inherit this assumption.
+        memo_params = self._resolved_memo_params(resolved)
+        cache_key = f"skill:{self.name}:{_params_key(memo_params)}"
         cached = cached_skill_rows(conn, cache_key)
         if cached is not SKILL_CACHE_MISS:
             # Copy on the way out as well, so two readers never share the row

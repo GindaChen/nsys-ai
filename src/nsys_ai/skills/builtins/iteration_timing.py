@@ -165,5 +165,8 @@ SKILL = Skill(
         SkillParam("device", "GPU device ID", "int", False, 0),
         SkillParam("marker", "NVTX text pattern for iteration boundary", "str", False, "sample_0"),
     ],
+    # Static audit for #350: detect_iterations reads device, marker, and trim.
+    # overhead_ns and communicator_data are forwarded context, not inputs.
+    memo_key_params=("device", "trim_start_ns", "trim_end_ns", "marker"),
     tags=["iteration", "timing", "variance", "nvtx", "training"],
 )

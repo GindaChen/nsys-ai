@@ -280,4 +280,8 @@ SKILL = Skill(
             None,
         ),
     ],
+    # Static audit for #350: the execute function reads device and the two
+    # trim bounds. ``overhead_ns`` is injected by Skill.execute but unused;
+    # composite callers may also forward communicator_data, which is unused.
+    memo_key_params=("device", "trim_start_ns", "trim_end_ns"),
 )
