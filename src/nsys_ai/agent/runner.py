@@ -134,15 +134,26 @@ def run_question_evidence(
     *,
     trim_kwargs: Mapping | None = None,
     use_llm: bool = False,
+    skill_selector=None,
 ) -> tuple[dict[str, list[dict]], list[str]]:
-    """Run triage plus selected skills; return evidence and the selected list."""
+    """Run triage plus selected skills; return evidence and the selected list.
+
+    ``skill_selector`` is an optional transport-provided planner hook.  It
+    receives ``(question, triage_rows)`` and returns candidate skill names;
+    the runner still validates them against the registry and applies the
+    four-skill cap.
+    """
     triage = _execute_pack(conn, ["root_cause_matcher"], trim_kwargs)
-    selected = select_skills_for_question(
-        question,
-        triage.get("root_cause_matcher", []),
-        use_llm=use_llm,
-    )
-    selected = [skill for skill in selected if skill != "root_cause_matcher"]
+    triage_rows = triage.get("root_cause_matcher", [])
+    if skill_selector is None:
+        selected = select_skills_for_question(question, triage_rows, use_llm=use_llm)
+    else:
+        selected = skill_selector(question, triage_rows)
+    selected = [
+        skill
+        for skill in (selected if isinstance(selected, (list, tuple)) else [])
+        if skill and skill != "root_cause_matcher" and get_skill(skill) is not None
+    ][:4]
     if not selected:
         selected = list(ASK_FALLBACK)[:4]
     evidence = dict(triage)
@@ -170,23 +181,13 @@ def answer_question(
     ``use_llm`` permits optional planner/synthesizer calls, but the returned
     answer remains usable and deterministic when no provider is configured.
     """
-    if triage_selector is None:
-        evidence, selected = run_question_evidence(
-            conn,
-            question,
-            trim_kwargs=trim_kwargs,
-            use_llm=use_llm,
-        )
-    else:
-        evidence = _execute_pack(conn, ["root_cause_matcher"], trim_kwargs)
-        selected = triage_selector(question, evidence.get("root_cause_matcher", []))
-        selected = [
-            skill for skill in selected
-            if skill and skill != "root_cause_matcher" and get_skill(skill) is not None
-        ][:4]
-        if not selected:
-            selected = list(ASK_FALLBACK)[:4]
-        evidence.update(_execute_pack(conn, selected, trim_kwargs))
+    evidence, selected = run_question_evidence(
+        conn,
+        question,
+        trim_kwargs=trim_kwargs,
+        use_llm=use_llm,
+        skill_selector=triage_selector,
+    )
     selected_with_triage = ["root_cause_matcher", *selected]
     llm_summary = None
     if use_llm:

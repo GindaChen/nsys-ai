@@ -950,12 +950,14 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
                 pass
             out = _handle_ask_request(body)
             if out is None:
-                self.send_response(501)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b'{"error":"LLM not configured"}')
+                _send_body(
+                    self,
+                    b'{"error":"ask transport unavailable"}',
+                    "application/json; charset=utf-8",
+                    501,
+                )
                 return
-            status = 400 if out.get("error") else 200
+            status = int(out.pop("_http_status", 400 if out.get("error") else 200))
             resp = json.dumps(out, default=str).encode("utf-8")
             _send_body(self, resp, "application/json; charset=utf-8", status)
             return

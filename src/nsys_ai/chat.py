@@ -1006,8 +1006,9 @@ def ask_completion(body_bytes: bytes) -> dict:
             profile_path = snapshot.state.before_profile.path
             session_id = location.session_id
             session_root = os.fspath(location.root)
-        except Exception as exc:
-            return {"error": f"could not load session: {exc}"}
+        except Exception:
+            _log.exception("Ask session setup failed")
+            return {"error": "could not load session."}
     if not profile_path:
         return {"error": "ask requires profile_path or session_id."}
 
@@ -1030,8 +1031,9 @@ def ask_completion(body_bytes: bytes) -> dict:
         conn, _sqlite_path, _system_prompt, _query_runner = _prepare_session(
             os.fspath(profile_path), [], {}
         )
-    except Exception as exc:
-        return {"error": f"Profile error: {exc}"}
+    except Exception:
+        _log.exception("Ask profile setup failed")
+        return {"error": "could not load profile."}
 
     try:
         from .agent.runner import answer_question
@@ -1050,9 +1052,9 @@ def ask_completion(body_bytes: bytes) -> dict:
             "evidence": evidence,
             "session_id": session_id,
         }
-    except Exception as exc:
+    except Exception:
         _log.exception("Shared ask runner failed")
-        return {"error": f"Ask error: {exc}"}
+        return {"error": "ask failed.", "_http_status": 500}
     finally:
         conn.close()
 

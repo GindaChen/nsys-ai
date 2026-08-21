@@ -55,6 +55,42 @@ def test_runner_does_not_repeat_root_cause_triage(monkeypatch):
     assert "root_cause_matcher" not in selected
 
 
+def test_runner_validates_transport_skill_selector_and_caps_it(monkeypatch):
+    from nsys_ai.agent import runner
+
+    calls = []
+
+    def fake_execute(_conn, names, _trim):
+        calls.append(names)
+        return {name: [{"value": 1}] for name in names}
+
+    monkeypatch.setattr(runner, "_execute_pack", fake_execute)
+    evidence, selected = runner.run_question_evidence(
+        "conn",
+        "why?",
+        skill_selector=lambda _question, _rows: [
+            "unknown_skill",
+            "top_kernels",
+            "gpu_idle_gaps",
+            "memory_transfers",
+            "overlap_breakdown",
+            "nccl_breakdown",
+        ],
+    )
+
+    assert selected == [
+        "top_kernels",
+        "gpu_idle_gaps",
+        "memory_transfers",
+        "overlap_breakdown",
+    ]
+    assert "unknown_skill" not in evidence
+    assert calls == [
+        ["root_cause_matcher"],
+        ["top_kernels", "gpu_idle_gaps", "memory_transfers", "overlap_breakdown"],
+    ]
+
+
 def test_runner_formats_abstention_as_unavailable_evidence():
     from nsys_ai.agent.runner import format_evidence_first_answer
 
@@ -84,8 +120,8 @@ def test_runner_answer_question_is_the_shared_transport_contract(monkeypatch):
 
     calls = {}
 
-    def fake_evidence(conn, question, *, trim_kwargs, use_llm):
-        calls["evidence"] = (conn, question, trim_kwargs, use_llm)
+    def fake_evidence(conn, question, *, trim_kwargs, use_llm, skill_selector):
+        calls["evidence"] = (conn, question, trim_kwargs, use_llm, skill_selector)
         return {"root_cause_matcher": [{"pattern": "slow"}]}, ["top_kernels"]
 
     def fake_format(question, evidence, selected, **kwargs):
@@ -111,5 +147,6 @@ def test_runner_answer_question_is_the_shared_transport_contract(monkeypatch):
         "why?",
         {"trim_start_ns": 1, "trim_end_ns": 2},
         False,
+        None,
     )
     assert calls["format"][2] == ["root_cause_matcher", "top_kernels"]
