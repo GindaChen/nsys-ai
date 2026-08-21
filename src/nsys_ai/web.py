@@ -288,6 +288,18 @@ def _handle_ask_request(body_bytes: bytes) -> dict | None:
     return None
 
 
+def _handle_ask_stream_request(body_bytes: bytes):
+    """Return the shared-runner ask SSE generator, or None when unavailable."""
+    try:
+        from . import chat
+
+        if hasattr(chat, "ask_completion_stream"):
+            return chat.ask_completion_stream(body_bytes)
+    except ImportError:
+        pass
+    return None
+
+
 def _handle_chat_stream(body_bytes: bytes):
     """Return generator yielding SSE bytes for stream=true, or None for 501."""
     try:
@@ -940,14 +952,39 @@ class _ViewerHandler(_HeadRequestMixin, BaseHTTPRequestHandler):
         if path == "/api/ask":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length) if content_length else b"{}"
+            stream_requested = False
             try:
                 payload = json.loads(body.decode("utf-8"))
                 if isinstance(payload, dict) and self.__class__._session_id is not None:
+                    stream_requested = payload.get("stream") is True
                     payload["session_id"] = self.__class__._session_id
                     payload["session_root"] = self.__class__._session_root
                     body = json.dumps(payload).encode("utf-8")
+                elif isinstance(payload, dict):
+                    stream_requested = payload.get("stream") is True
             except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
                 pass
+            if stream_requested:
+                gen = _handle_ask_stream_request(body)
+                if gen is None:
+                    _send_body(
+                        self,
+                        b'{"error":"ask transport unavailable"}',
+                        "application/json; charset=utf-8",
+                        501,
+                    )
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                for chunk in gen:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                self.close_connection = True
+                return
             out = _handle_ask_request(body)
             if out is None:
                 _send_body(

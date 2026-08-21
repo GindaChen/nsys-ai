@@ -1059,6 +1059,37 @@ def ask_completion(body_bytes: bytes) -> dict:
         conn.close()
 
 
+def ask_completion_stream(body_bytes: bytes):
+    """Yield the shared ask result through the transport-neutral SSE contract.
+
+    ``answer_question`` is a batch runner, so this adapter emits the complete
+    evidence-first answer as one ``text`` event after analysis finishes.  The
+    important invariant is that SSE and JSON call the same runner and expose
+    the same selected skills/evidence in ``done``; a later incremental runner
+    can add events without creating another analysis path.
+    """
+    result = ask_completion(body_bytes)
+    status = int(result.pop("_http_status", 400 if result.get("error") else 200))
+    if result.get("error"):
+        yield _sse_event("text", {"chunk": result["error"]})
+        yield _sse_event("done", {"error": result["error"], "status": status})
+        return
+
+    answer = str(result.get("answer") or "")
+    if answer:
+        yield _sse_event("text", {"chunk": answer})
+    yield _sse_event(
+        "done",
+        {
+            "question": result.get("question", ""),
+            "selected_skills": result.get("selected_skills", []),
+            "evidence": result.get("evidence", {}),
+            "session_id": result.get("session_id"),
+            "status": status,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # SSE helper
 # ---------------------------------------------------------------------------
