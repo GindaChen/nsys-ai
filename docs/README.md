@@ -31,6 +31,7 @@ alongside them.
 | Page | Topic |
 |------|-------|
 | [dev/ingest-policy.md](./dev/ingest-policy.md) | How a profile path becomes an open backend, and why call sites must not bypass it |
+| [dev/skill-contract.md](./dev/skill-contract.md) | How to add a portable, deterministic, JSON-safe analysis skill |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI |
 
 ## Nsight Systems reference
