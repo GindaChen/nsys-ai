@@ -264,6 +264,46 @@ def test_viewer_ask_route_delegates_to_shared_transport(monkeypatch):
     assert json.loads(body) == {"answer": "ok"}
 
 
+def test_viewer_ask_route_supports_shared_runner_sse(monkeypatch):
+    from nsys_ai import web
+
+    monkeypatch.setattr(
+        web,
+        "_handle_ask_stream_request",
+        lambda body: iter(
+            [
+                b'event: text\ndata: {"chunk":"ok"}\n\n',
+                b'event: done\ndata: {"selected_skills":[]}\n\n',
+            ]
+        ),
+    )
+    old_session = web._ViewerHandler._session_id
+    web._ViewerHandler._session_id = None
+    try:
+        server = web._ThreadedHTTPServer(("127.0.0.1", 0), web._ViewerHandler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        conn.request(
+            "POST",
+            "/api/ask",
+            body=json.dumps({"question": "why?", "stream": True}),
+            headers={"Content-Type": "application/json"},
+        )
+        response = conn.getresponse()
+        status, content_type, body = response.status, response.getheader("Content-Type"), response.read()
+        conn.close()
+        thread.join(timeout=5)
+        server.server_close()
+    finally:
+        web._ViewerHandler._session_id = old_session
+
+    assert status == 200
+    assert content_type.startswith("text/event-stream")
+    assert body.startswith(b"event: text\n")
+    assert b'event: done\ndata: {"selected_skills":[]}' in body
+
+
 def test_timeline_canvas_reads_the_shared_token_palette():
     javascript = open("src/nsys_ai/templates/timeline.js", encoding="utf-8").read()
     tokens = open("src/nsys_ai/templates/tokens.css", encoding="utf-8").read()

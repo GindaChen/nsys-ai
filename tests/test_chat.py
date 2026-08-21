@@ -312,6 +312,42 @@ def test_ask_completion_rejects_incomplete_trim():
     assert out == {"error": "trim_start_ns and trim_end_ns must be provided together."}
 
 
+def test_ask_completion_stream_uses_the_json_runner_contract(monkeypatch):
+    monkeypatch.setattr(
+        chat_mod,
+        "ask_completion",
+        lambda _body: {
+            "answer": "grounded answer",
+            "question": "why?",
+            "selected_skills": ["top_kernels"],
+            "evidence": {"top_kernels": [{"name": "gemm"}]},
+            "session_id": "s1",
+        },
+    )
+
+    events = list(chat_mod.ask_completion_stream(b'{"question":"why?"}'))
+
+    assert events[0].startswith(b"event: text\n")
+    assert json.loads(events[0].split(b"data: ", 1)[1]) == {"chunk": "grounded answer"}
+    assert events[1].startswith(b"event: done\n")
+    done = json.loads(events[1].split(b"data: ", 1)[1])
+    assert done["selected_skills"] == ["top_kernels"]
+    assert done["evidence"]["top_kernels"][0]["name"] == "gemm"
+    assert done["session_id"] == "s1"
+
+
+def test_ask_completion_stream_preserves_generic_errors(monkeypatch):
+    monkeypatch.setattr(
+        chat_mod,
+        "ask_completion",
+        lambda _body: {"error": "ask failed.", "_http_status": 500},
+    )
+
+    events = list(chat_mod.ask_completion_stream(b"{}"))
+    done = json.loads(events[-1].split(b"data: ", 1)[1])
+    assert done == {"error": "ask failed.", "status": 500}
+
+
 def test_web_ask_import_failure_uses_not_configured_contract(monkeypatch):
     from nsys_ai import chat, web
 
