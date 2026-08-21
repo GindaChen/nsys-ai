@@ -14,6 +14,7 @@ Operating the tool.
 |------|-------|
 | [user-guide.md](./user-guide.md) | nsys-ai end to end: capture, diagnose, propose, diff, decide |
 | [user/profile-inputs.md](./user/profile-inputs.md) | The three inputs it accepts, and what conversion happens |
+| [user/migrating-to-0.3.0.md](./user/migrating-to-0.3.0.md) | Upgrade actions for users coming from 0.2.3 |
 | [user/time-windows.md](./user/time-windows.md) | Narrowing analysis with `--trim` and `--iteration` |
 | [user/reading-a-diff.md](./user/reading-a-diff.md) | What a diff verdict means, how to recover from low comparability, and which metrics to trust |
 | [user/troubleshooting.md](./user/troubleshooting.md) | Symptoms, what they mean, and what to change |
