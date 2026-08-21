@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 
@@ -21,6 +22,8 @@ from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
+
+_log = logging.getLogger(__name__)
 
 
 class ChatPanel(Widget):
@@ -228,32 +231,41 @@ class ChatPanel(Widget):
                 elif t == "done":
                     runner_evidence = ev.get("evidence") or {}
                     runner_selected = list(ev.get("selected_skills") or [])
-                    completed = True
+                    completed = ev.get("completed", True) is not False
                     break
         except Exception as e:
             content = f"Error: {e}"
 
-        if completed and self._session_id and self._db_path and runner_evidence:
-            try:
-                session_log = chat_mod._record_session_ask(
-                    self._session_id,
-                    self._session_root,
-                    question=user_msg,
-                    answer=content,
-                    selected_skills=runner_selected,
-                    evidence=runner_evidence,
-                    profile_path=self._db_path,
-                    trim_kwargs={},
-                )
+        if completed and self._session_id and self._db_path:
+            if not runner_evidence:
+                # A UI-context or action-only turn is a valid answer, but it is
+                # not grounded evidence and must not masquerade as an ask log.
                 self.app.call_from_thread(
                     self._on_system_event,
-                    f"Session handoff saved: {session_log}",
+                    "Session handoff skipped: this answer had no grounded evidence.",
                 )
-            except Exception:
-                self.app.call_from_thread(
-                    self._on_system_event,
-                    "Session handoff failed; the chat response is still available.",
-                )
+            else:
+                try:
+                    session_log = chat_mod._record_session_ask(
+                        self._session_id,
+                        self._session_root,
+                        question=user_msg,
+                        answer=content,
+                        selected_skills=runner_selected,
+                        evidence=runner_evidence,
+                        profile_path=self._db_path,
+                        trim_kwargs={},
+                    )
+                    self.app.call_from_thread(
+                        self._on_system_event,
+                        f"Session handoff saved: {session_log}",
+                    )
+                except Exception:
+                    _log.exception("Session handoff failed for %s", self._session_id)
+                    self.app.call_from_thread(
+                        self._on_system_event,
+                        "Session handoff failed; the chat response is still available.",
+                    )
 
         # Distill history
         try:
