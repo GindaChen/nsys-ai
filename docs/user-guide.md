@@ -180,8 +180,7 @@ evidence, and the evidence-first answer:
 ```console
 $ curl -s http://127.0.0.1:8144/api/ask \
     -H 'Content-Type: application/json' \
-    -d '{"session_id":"run-001","session_root":"/tmp/nsys-run-001",\
-         "question":"what is the bottleneck?","use_llm":false}'
+    -d '{"session_id":"run-001","session_root":"/tmp/nsys-run-001","question":"what is the bottleneck?","use_llm":false}'
 ```
 
 `use_llm` is optional. When enabled and a provider is configured, the model may triage or summarize
