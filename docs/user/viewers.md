@@ -14,6 +14,26 @@ The commands are separate transports over the same profile and diff contracts.
 The older `nsys-ai perfetto` server is not one of the choices; use
 `nsys-ai export` when you need a Chrome Trace Event JSON file instead.
 
+## See the difference
+
+The same committed fixture makes the three surfaces easy to compare:
+
+### NVTX tree: `web`
+
+![NVTX tree viewer](../images/web-tree.png)
+
+### Horizontal timeline: `timeline-web`
+
+![Progressive multi-GPU timeline](../images/timeline-web.png)
+
+### Pair comparison: `diff-web`
+
+![Before-and-after diff viewer](../images/diff-web.png)
+
+These are documentation captures, not terminal-output screenshots. See the
+[image capture notes](../images/README.md) for the fixture, viewport, and
+regeneration commands.
+
 ## NVTX tree: `web`
 
 Use this for hierarchy-first investigation:

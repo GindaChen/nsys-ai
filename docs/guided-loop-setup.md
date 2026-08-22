@@ -4,6 +4,12 @@ Step-by-step setup for the **diagnose → propose → re-profile → diff → ac
 
 For the same workflow on the command line, see the [User guide](user-guide.md).
 
+![Guided diagnose-to-decide workflow in timeline-web](images/guided-loop.png)
+
+This capture shows the workflow inspector at the first **Diagnose** step. The
+five-step handoff stays in the session directory as the browser advances through
+propose, re-profile, diff, and decide.
+
 ---
 
 ## What you need
