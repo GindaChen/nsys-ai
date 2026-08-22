@@ -131,6 +131,45 @@ language question and want several registered skills selected for you. Use
 the optional chat/agent dependencies. In every case, the underlying evidence
 should remain visible in the session or JSON output.
 
+## Use the agent command family
+
+The `agent` commands are the CLI-facing analysis family. They use the same
+registered skills and evidence-first runner, but expose different levels of
+automation:
+
+```console
+# Full deterministic report; --trim uses seconds.
+$ nsys-ai agent analyze PROFILE.sqlite
+$ nsys-ai agent analyze PROFILE.sqlite --trim 10 20 --evidence -o findings.json
+
+# Question-driven evidence, from a profile or a session handoff.
+$ nsys-ai agent ask PROFILE.sqlite "why is the GPU idle?"
+$ nsys-ai agent ask --session /tmp/nsys-run-001 "what should I verify next?"
+
+# Print the onboarding guide for an external agent or automation.
+$ nsys-ai agent-guide > agent-guide.txt
+```
+
+`agent analyze` runs the fixed analysis pack and can emit a findings JSON file;
+it does not need an LLM. `agent ask` selects up to four registered skills and
+returns an evidence-first answer. Without model credentials it uses the
+deterministic keyword selector and local synthesis, so the command remains
+usable in a core installation. The profile form and the session form were
+both tested against the same fixture and produced the same evidence shape.
+
+For optional LLM triage or synthesis, install the extra and configure a
+provider credential in the environment:
+
+```console
+$ pip install 'nsys-ai[agent]'
+$ export ANTHROPIC_API_KEY=...  # or the key for another supported provider
+```
+
+`NSYS_AI_MODEL` can select a model when its matching provider key is present;
+see [environment variables](environment-variables.md). Never put provider
+keys in a session directory, findings file, or issue report. `agent-guide` is
+static output for external agents and requires neither a profile nor a key.
+
 For authoring a new skill, switch to the developer
 [skill contract](../dev/skill-contract.md); this page is intentionally about
 operating the existing registry.

@@ -33,3 +33,17 @@ def test_every_runtime_nsis_ai_environment_variable_is_documented():
     assert not missing, "runtime environment variables missing from the reference: " + ", ".join(
         missing
     )
+
+
+def test_agent_command_family_is_documented_with_its_dependency_boundary():
+    docs = (ROOT / "docs/user/skills.md").read_text(encoding="utf-8")
+    required = (
+        "nsys-ai agent analyze",
+        "nsys-ai agent ask",
+        "nsys-ai agent-guide",
+        "nsys-ai[agent]",
+        "NSYS_AI_MODEL",
+        "provider credential",
+    )
+    missing = [target for target in required if target not in docs]
+    assert not missing, "agent command documentation is incomplete: " + ", ".join(missing)
