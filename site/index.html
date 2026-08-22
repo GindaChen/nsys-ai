@@ -34,11 +34,31 @@
             box-sizing: border-box;
         }
 
+        :where(a, button, [tabindex]):focus-visible {
+            outline: 3px solid var(--accent);
+            outline-offset: 3px;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                scroll-behavior: auto !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
         body {
             font-family: 'Inter', -apple-system, sans-serif;
             background: var(--bg);
             color: var(--text);
             line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        html {
             overflow-x: hidden;
         }
 
@@ -207,6 +227,9 @@
             font-size: 1.05rem;
             cursor: pointer;
             transition: border-color 0.2s, box-shadow 0.2s;
+            color: inherit;
+            text-align: left;
+            appearance: none;
         }
 
         .install-box:hover {
@@ -267,7 +290,11 @@
         }
 
         .feature-icon {
-            font-size: 2rem;
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
             margin-bottom: 12px;
         }
 
@@ -553,6 +580,60 @@
             text-align: center;
         }
 
+        /* Product workflow */
+        .workflow-section {
+            padding: 60px 0;
+            background: rgba(17, 24, 39, 0.42);
+            border-top: 1px solid rgba(148, 163, 184, 0.08);
+            border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+        }
+
+        .workflow-section h2 {
+            font-size: 2rem;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        .workflow-intro {
+            max-width: 700px;
+            margin: 0 auto 32px;
+            color: var(--text-dim);
+            text-align: center;
+        }
+
+        .workflow-steps {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 12px;
+            list-style: none;
+        }
+
+        .workflow-step {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px;
+        }
+
+        .workflow-step .step-number {
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            font-weight: 600;
+        }
+
+        .workflow-step h3 {
+            margin: 12px 0 8px;
+            font-size: 1rem;
+        }
+
+        .workflow-step p {
+            color: var(--text-dim);
+            font-size: 0.84rem;
+            line-height: 1.5;
+        }
+
         /* Footer */
         footer {
             padding: 40px 0;
@@ -595,7 +676,8 @@
             }
 
             .features-grid,
-            .keys-grid {
+            .keys-grid,
+            .workflow-steps {
                 grid-template-columns: 1fr;
             }
 
@@ -605,6 +687,11 @@
 
             .viewer-cards {
                 grid-template-columns: 1fr;
+            }
+
+            .quickstart .terminal-body {
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
             }
         }
     </style>
@@ -631,16 +718,15 @@
         <div class="container">
             <div class="hero-layout">
                 <div class="hero-left">
-                    <div class="hero-badge">🧠 Many entrances, one session · nsys-ai 0.3.0</div>
+                    <div class="hero-badge">Many entrances, one session · nsys-ai 0.3.0</div>
                     <h1>nsys-ai</h1>
                     <p>Open Nsight Systems profiles in the browser, terminal, or MCP and keep one evidence-first
                         diagnosis moving through a shared session.</p>
-                    <div class="install-box"
-                        onclick="navigator.clipboard.writeText('pip install nsys-ai').then(()=>this.querySelector('.copy').textContent='Copied!')">
+                    <button type="button" class="install-box" onclick="copyInstallCommand(this)">
                         <span class="dollar">$</span>
                         <span class="cmd">pip install nsys-ai</span>
                         <span class="copy">click to copy</span>
-                    </div>
+                    </button>
                     <div class="badges">
                         <a href="https://github.com/GindaChen/nsys-ai"><img
                                 src="https://img.shields.io/badge/GitHub-nsys--ai-181717?logo=github&logoColor=white"
@@ -665,7 +751,7 @@
 
     <section class="quickstart" style="padding: 0 0 60px;">
         <div class="container">
-            <h2 style="font-size: 2rem; font-weight: 700; text-align: center; margin-bottom: 12px;">🚀 Try It Now</h2>
+            <h2 style="font-size: 2rem; font-weight: 700; text-align: center; margin-bottom: 12px;">Try It Now</h2>
             <p style="text-align: center; color: var(--text-dim); margin-bottom: 32px;">Get started in 60 seconds with a
                 real GPU training profile</p>
             <div class="terminal" style="max-width: 780px; margin: 0 auto;">
@@ -702,53 +788,87 @@
         </div>
     </section>
 
+    <section class="workflow-section" aria-labelledby="workflow-title">
+        <div class="container">
+            <h2 id="workflow-title">One session, five steps</h2>
+            <p class="workflow-intro">Run the same handoff from CLI, Web, TUI, or MCP: deterministic evidence stays in one session while each surface does the job it is best at.</p>
+            <ol class="workflow-steps">
+                <li class="workflow-step">
+                    <span class="step-number">01</span>
+                    <h3>Diagnose</h3>
+                    <p>Run the default analysis pack and publish findings.</p>
+                </li>
+                <li class="workflow-step">
+                    <span class="step-number">02</span>
+                    <h3>Propose</h3>
+                    <p>Turn a finding into a concrete, inspectable change.</p>
+                </li>
+                <li class="workflow-step">
+                    <span class="step-number">03</span>
+                    <h3>Re-profile</h3>
+                    <p>Run the same workload and record a new RunSpec.</p>
+                </li>
+                <li class="workflow-step">
+                    <span class="step-number">04</span>
+                    <h3>Diff</h3>
+                    <p>Compare before and after with canonical metric direction.</p>
+                </li>
+                <li class="workflow-step">
+                    <span class="step-number">05</span>
+                    <h3>Decide</h3>
+                    <p>Accept or reject the change and keep the reason in session.</p>
+                </li>
+            </ol>
+        </div>
+    </section>
+
     <section class="features">
         <div class="container">
             <div class="features-grid">
                 <div class="feature-card">
-                    <div class="feature-icon">🌐</div>
+                    <div class="feature-icon">WEB</div>
                     <h3>Web Timeline</h3>
                     <p>Default experience: multi-GPU browser viewer with progressive rendering, NVTX hierarchy bars,
                         pinch-to-zoom, trackpad pan, and AI chat. No --trim required.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🖥️</div>
+                    <div class="feature-icon">TUI</div>
                     <h3>Timeline TUI</h3>
                     <p>Perfetto-style horizontal timeline with per-stream kernel visualization, NVTX hierarchy bars, and
                         time-cursor navigation. Zoom, pan, and bookmark positions.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🌲</div>
+                    <div class="feature-icon">TREE</div>
                     <h3>Tree TUI</h3>
                     <p>Interactive NVTX hierarchy browser. Expand/collapse nodes, see kernel durations, filter by name
                         or threshold, and navigate with vim-style keybindings.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🌐</div>
+                    <div class="feature-icon">HTML</div>
                     <h3>HTML Exports</h3>
                     <p>Generate interactive HTML viewers, Chrome Trace Event JSON files for Perfetto, and flat
                         CSV/JSON exports for scripting and sharing.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🔍</div>
+                    <div class="feature-icon">SEARCH</div>
                     <h3>Smart Search</h3>
                     <p>Search kernels and NVTX annotations by name, with hierarchical search support. Filter by GPU,
                         time window, and parent NVTX scope.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">📊</div>
+                    <div class="feature-icon">OVERLAP</div>
                     <h3>Overlap Analysis</h3>
                     <p>Compute vs NCCL overlap, collective breakdowns by type, and automatic training iteration
                         detection for distributed workloads.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🤖</div>
+                    <div class="feature-icon">AI</div>
                     <h3>AI Analysis</h3>
                     <p>Optional planner and synthesizer over registered evidence: ask a question, inspect the skills
                         that grounded it, and resume the answer from a shared session.</p>
                 </div>
                 <div class="feature-card">
-                    <div class="feature-icon">🔁</div>
+                    <div class="feature-icon">SESSION</div>
                     <h3>Session Handoff</h3>
                     <p>Move findings, proposals, RunSpecs, diffs, and decisions between CLI, Web, TUI, and MCP with
                         one inspectable directory.</p>
@@ -791,7 +911,7 @@
 
     <section class="docs-section">
         <div class="container">
-            <h2>📚 Documentation</h2>
+            <h2>Documentation</h2>
             <p class="subtitle">Comprehensive guides for Nsight Systems profiling</p>
             <div class="docs-grid">
                 <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/user/profile-inputs.md" class="doc-link">
@@ -913,12 +1033,12 @@
             <h3 class="showcase-subheading">More tools</h3>
             <div class="showcase-cards">
                 <a href="sqlite-explorer/" class="showcase-card">
-                    <h3>🔍 SQLite Schema Explorer</h3>
+                    <h3>SQLite Schema Explorer</h3>
                     <p>Interactive browser for the Nsight SQLite schema — tables, foreign keys, example queries, and
                         cross-highlighted concepts. Open right in your browser.</p>
                 </a>
                 <a href="https://github.com/GindaChen/nsys-ai/tree/main/examples" class="showcase-card">
-                    <h3>📊 NVTX Stack Visualizations</h3>
+                    <h3>NVTX Stack Visualizations</h3>
                     <p>Pre-built interactive HTML exports showing NVTX call stacks — full trace and single-iteration
                         views with expandable nodes.</p>
                 </a>
@@ -936,6 +1056,20 @@
             <p style="margin-top:8px">Built for GPU performance engineers.</p>
         </div>
     </footer>
+
+    <script>
+        function copyInstallCommand(button) {
+            const status = button.querySelector('.copy');
+            const command = 'pip install nsys-ai';
+            if (!navigator.clipboard) {
+                status.textContent = command;
+                return;
+            }
+            navigator.clipboard.writeText(command)
+                .then(() => { status.textContent = 'Copied!'; })
+                .catch(() => { status.textContent = command; });
+        }
+    </script>
 
 </body>
 

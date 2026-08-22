@@ -83,3 +83,15 @@ def test_site_references_the_committed_viewer_screenshots():
     site = (ROOT / "site/index.html").read_text(encoding="utf-8")
     missing = [name for name in DOCUMENTATION_IMAGES[:3] if f"docs/images/{name}" not in site]
     assert not missing, "landing page is missing viewer screenshots: " + ", ".join(missing)
+
+
+def test_landing_page_has_a_keyboard_safe_install_action_and_workflow():
+    site = (ROOT / "site/index.html").read_text(encoding="utf-8")
+    assert '<button type="button" class="install-box"' in site
+    assert "onclick=\"copyInstallCommand(this)\"" in site
+    assert '<div class="install-box"' not in site
+    assert ":focus-visible" in site
+    assert "prefers-reduced-motion" in site
+    for step in ("Diagnose", "Propose", "Re-profile", "Diff", "Decide"):
+        assert f">{step}<" in site
+    assert not re.search(r"[🚀📚🧠🌐🖥️🌲🔍📊🤖🔁]", site)
