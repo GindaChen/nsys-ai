@@ -48,6 +48,10 @@ async function main() {
   await guided.close();
 
   const timeline = await context.newPage();
+  // The one-second fixture only needs a short viewport. Keeping the timeline
+  // at 420px high makes its controls and GPU lanes fill the committed frame
+  // instead of putting the useful content in the top third of a 1000px image.
+  await timeline.setViewportSize({ width: 1440, height: 420 });
   await ready(timeline, timelineUrl, 5000);
   const closeButton = timeline.locator("#inspectorRail .inspector-close");
   if (await closeButton.isVisible()) await closeButton.click();
