@@ -77,3 +77,9 @@ def test_documentation_screenshots_are_present_small_pngs_and_referenced():
     assert "docs/images/timeline-web.png" in readme
     assert all(f"../images/{name}" in viewers for name in DOCUMENTATION_IMAGES[:3])
     assert "images/guided-loop.png" in guided_loop
+
+
+def test_site_references_the_committed_viewer_screenshots():
+    site = (ROOT / "site/index.html").read_text(encoding="utf-8")
+    missing = [name for name in DOCUMENTATION_IMAGES[:3] if f"docs/images/{name}" not in site]
+    assert not missing, "landing page is missing viewer screenshots: " + ", ".join(missing)
