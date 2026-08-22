@@ -319,6 +319,9 @@ coherent snapshot after an interrupted publication.
 
 - **A proposal needs a RunSpec to stand behind itself.** If you captured the baseline with plain
   `nsys`, there is no `runspec.json` and `propose` will abstain. Re-capture with `nsys-ai profile`.
+- **There are two installed entry points.** Use `nsys-ai` for the CLI and all TUI/Web subcommands;
+  use `nsys-ai-mcp` for the optional stdio MCP transport (`pip install 'nsys-ai[mcp]'`). There is no
+  separate `nsys-tui` executable in 0.3.0.
 - **The decision records your git `user.email`.** If you keep separate identities for separate work,
   check `git config user.email` in the directory you run from.
 - **`nsys-ai help` is a starting point, not the full command list.** `nsys-ai --help` is complete.

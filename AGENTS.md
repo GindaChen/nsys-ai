@@ -203,6 +203,7 @@ Before raising a PR, verify:
 ## Key Design Decisions
 
 - **Internal module = `nsys_ai`**, external package = `nsys-ai` (historical rename)
+- **Installed entry points:** `nsys-ai` is the main CLI (including `tui` and `timeline` subcommands); `nsys-ai-mcp` is the optional stdio MCP transport. There is no packaged `nsys-tui` executable in 0.3.0.
 - **Core runtime deps**: `duckdb` + `pyarrow` (Parquet cache) and `rich` + `textual` (TUI). SQL analysis and the web server stay on the stdlib (`sqlite3`, `http.server`)
 - **Optional deps**: `litellm` (+ `anthropic`) for AI features (`pip install 'nsys-ai[agent]'`), `pytest` for dev
 - **Profiles are `.sqlite` files** exported from NVIDIA Nsight Systems (`.nsys-rep` → `.sqlite`)

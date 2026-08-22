@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 nsys-ai is an AI-powered terminal UI for analyzing NVIDIA Nsight Systems GPU profiles (`.sqlite` files). It provides Textual-based TUI viewers, a local web timeline, HTML export, a skill-based analysis system, and an LLM agent for automated GPU performance diagnosis.
 
-**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). The CLI command is `nsys-ai`; the older `nsys-tui` entry point was dropped in the rename.
+**Naming:** The PyPI package is `nsys-ai`, but the internal Python module is `nsys_ai` (historical). The wheel exposes two console entry points: `nsys-ai` for the main CLI and `nsys-ai-mcp` for the optional stdio MCP transport. `nsys-tui` is not a 0.3.0 entry point; tree and timeline TUIs are subcommands of `nsys-ai`.
 
 ## Build & Development Commands
 
@@ -39,7 +39,7 @@ Core runtime dependencies are `duckdb` + `pyarrow` (Parquet cache acceleration) 
 
 ### Entry Point
 
-`src/nsys_ai/__main__.py` delegates to `nsys_ai.cli.app:main`; the argparse CLI is built in `cli/parsers.py` (~30 subcommands) and dispatched to `cli/handlers.py`. One entry point is registered in pyproject.toml: `nsys-ai`, pointing at `nsys_ai.__main__:main`.
+`src/nsys_ai/__main__.py` delegates to `nsys_ai.cli.app:main`; the argparse CLI is built in `cli/parsers.py` (~30 subcommands) and dispatched to `cli/handlers.py`. `pyproject.toml` registers `nsys-ai` (the main CLI, pointing at `nsys_ai.__main__:main`) and `nsys-ai-mcp` (the stdio MCP server, pointing at `nsys_ai.mcp_server:main`). The MCP entry point is optional at runtime and requires the `mcp` extra when it is used.
 
 ### Core Data Model
 

@@ -105,6 +105,27 @@ nsys-ai tui my_training.nsys-rep --gpu 0        # NVTX tree browser
 nsys-ai diff before.sqlite after.sqlite
 ```
 
+### 4. Keep the investigation in one session
+
+The 0.3.0 command surface is built around a session directory: findings,
+proposals, run specifications, diffs, and decisions can move between CLI, Web,
+TUI, and MCP without reconstructing state from terminal output.
+
+```bash
+SESSION=/tmp/nsys-ai/run-001
+
+nsys-ai doctor run-before/profile.sqlite --format json
+nsys-ai diagnose run-before/profile.sqlite --session "$SESSION"
+nsys-ai ask --session "$SESSION" "what is the main bottleneck?"
+nsys-ai diff run-before/profile.sqlite run-after/profile.sqlite \
+  --no-ai --session "$SESSION"
+nsys-ai review --session "$SESSION"
+```
+
+For a complete diagnose → propose → re-profile → diff → decision walkthrough,
+including the `RunSpec` required by `propose`, see the
+[user guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md).
+
 ## Web timeline
 
 A browser-based multi-GPU viewer with progressive rendering — no `--trim`
@@ -247,6 +268,8 @@ via `--against` or as the `before` positional.
 | `tui` | NVTX tree TUI |
 | `web` | Web viewer server |
 | `info` | Profile metadata and GPU hardware |
+| `doctor` | Check environment, ingest, cache, and profile health |
+| `profile` | Capture a workload and write a reproducible RunSpec |
 | `warm` | Build the Parquet cache and NVTX kernel map up front |
 | `summary` | Top kernels and stream breakdown |
 | `analyze` | Full auto-report (`--format json` emits evidence findings) |
@@ -259,6 +282,10 @@ via `--against` or as the `before` positional.
 | `diff` | Before/after profile comparison |
 | `diff-web` | Side-by-side comparison web viewer |
 | `baseline` | Manage named baseline snapshots (`tag`, `list`, `show`) |
+| `diagnose` | Run the default evidence pack and publish findings |
+| `propose` | Turn one finding into a verifiable proposal |
+| `review` | Compare a pair or resume a session decision path |
+| `optimize` | Run diagnose → propose → re-profile → diff as one session |
 | `chat` | AI chat TUI for a profile |
 | `ask` | One-shot AI question about a profile |
 | `agent` | Agent auto-analysis (`analyze`, `ask`) |
@@ -426,6 +453,7 @@ interactive HTML explorer for the Nsight SQLite schema — open
 pip install nsys-ai              # core: CLI, TUIs, skills, web/diff viewers
 pip install 'nsys-ai[agent]'     # + LLM-backed agent (anthropic + litellm)
 pip install 'nsys-ai[chat]'      # + chat TUI
+pip install 'nsys-ai[mcp]'       # + stdio MCP transport (`nsys-ai-mcp`)
 pip install 'nsys-ai[cutracer]'  # + CUTracer instruction-level workflow
 pip install 'nsys-ai[all]'       # everything
 ```

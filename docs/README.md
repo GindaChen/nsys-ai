@@ -40,6 +40,7 @@ alongside them.
 | [dev/skill-memo-fingerprint.md](./dev/skill-memo-fingerprint.md) | How answer-affecting parameters define a skill memo identity |
 | [dev/diff-findings.md](./dev/diff-findings.md) | How baseline diffs seed candidate-owned findings and proposals |
 | [dev/testing.md](./dev/testing.md) | Test layers and subprocess-aware coverage |
+| [dev/architecture.md](./dev/architecture.md) | Layered architecture, shared runner, session contracts, and release checklist |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI |
 
 ## Nsight Systems reference

@@ -566,10 +566,10 @@
         <div class="container">
             <div class="hero-layout">
                 <div class="hero-left">
-                    <div class="hero-badge">🌐 Web UI First · v0.2.1 on PyPI</div>
+                    <div class="hero-badge">🧠 Many entrances, one session · nsys-ai 0.3.0</div>
                     <h1>nsys-ai</h1>
-                    <p>Open Nsight Systems profiles directly in a browser-first timeline UI, then drill into terminal
-                        tools when you need them.</p>
+                    <p>Open Nsight Systems profiles in the browser, terminal, or MCP and keep one evidence-first
+                        diagnosis moving through a shared session.</p>
                     <div class="install-box"
                         onclick="navigator.clipboard.writeText('pip install nsys-ai').then(()=>this.querySelector('.copy').textContent='Copied!')">
                         <span class="dollar">$</span>
@@ -664,11 +664,12 @@
                     <span class="t-dim"># 3. Open the web viewer (default command)</span>
                     <span class="t-green">$</span> nsys-ai output/megatron_distca.nsys-rep
 
-                    <span class="t-dim"># 4. Optional: profile overview in terminal</span>
-                    <span class="t-green">$</span> nsys-ai info output/megatron_distca.sqlite
+                    <span class="t-dim"># 4. Check profile health before analysis</span>
+                    <span class="t-green">$</span> nsys-ai doctor output/megatron_distca.nsys-rep
 
-                    <span class="t-dim"># 5. Optional: terminal timeline TUI</span>
-                    <span class="t-green">$</span> nsys-ai timeline output/megatron_distca.sqlite --gpu 4 --trim 39 42
+                    <span class="t-dim"># 5. Publish deterministic findings to a handoff session</span>
+                    <span class="t-green">$</span> nsys-ai diagnose output/megatron_distca.nsys-rep \
+                        --session /tmp/nsys-ai/demo
                 </div>
             </div>
         </div>
@@ -703,8 +704,8 @@
                 <div class="feature-card">
                     <div class="feature-icon">🌐</div>
                     <h3>HTML Exports</h3>
-                    <p>Generate interactive HTML viewers, Perfetto JSON traces for ui.perfetto.dev, and flat CSV/JSON
-                        exports for scripting and sharing.</p>
+                    <p>Generate interactive HTML viewers, Chrome Trace Event JSON files for Perfetto, and flat
+                        CSV/JSON exports for scripting and sharing.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">🔍</div>
@@ -721,8 +722,14 @@
                 <div class="feature-card">
                     <div class="feature-icon">🤖</div>
                     <h3>AI Analysis</h3>
-                    <p>Optional AI module for auto-commentary on kernel distributions, NVTX annotation suggestions, and
-                        bottleneck detection.</p>
+                    <p>Optional planner and synthesizer over registered evidence: ask a question, inspect the skills
+                        that grounded it, and resume the answer from a shared session.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🔁</div>
+                    <h3>Session Handoff</h3>
+                    <p>Move findings, proposals, RunSpecs, diffs, and decisions between CLI, Web, TUI, and MCP with
+                        one inspectable directory.</p>
                 </div>
             </div>
         </div>
@@ -818,6 +825,9 @@
                 </a>
                 <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/dev/testing.md" class="doc-link">
                     <span class="doc-num">dev</span><span class="doc-title">Testing &amp; coverage</span>
+                </a>
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/dev/architecture.md" class="doc-link">
+                    <span class="doc-num">dev</span><span class="doc-title">Architecture &amp; release guide</span>
                 </a>
                 <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/01-cli-reference.md" class="doc-link">
                     <span class="doc-num">01</span><span class="doc-title">CLI Reference</span>

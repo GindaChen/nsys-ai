@@ -8,8 +8,9 @@ runs the canonical diff, prints the result to stdout and the next command to
 stderr, and leaves ``.nsys-ai/`` untouched. Diff analysis and the all-GPU shape
 stay in :func:`nsys_ai.diff.diff_profiles` /
 :func:`nsys_ai.diff.diff_profiles_all_gpus`; rendering stays in
-:mod:`nsys_ai.diff_render`. ``review <before> <after>`` stdout is byte-identical
-to ``diff <before> <after> --no-ai``.
+:mod:`nsys_ai.diff_render`. ``review <before> <after>`` uses the same canonical
+renderer as ``diff <before> <after> --no-ai``; stdout is byte-identical and the
+two next-step hints are deliberately written to stderr.
 """
 
 from __future__ import annotations
@@ -67,11 +68,12 @@ def run_review(
     ``nsys-ai optimize``.
     Internal diff uses the same limit=15 and sort=delta defaults as ``diff``.
 
-    The pair form prints the terminal report ``diff`` prints, with no LLM call:
-    stdout equals ``diff <before> <after> --no-ai`` byte for byte, including the
-    all-GPU shape (executive summary, per-GPU overview, per-GPU top regressions)
-    when ``gpu`` is ``None``. Next-step hints are written to ``stderr`` so a
-    redirected stdout is exactly that report.
+    The pair form prints the terminal report ``diff`` prints, with no LLM call.
+    Its stdout equals ``diff <before> <after> --no-ai`` byte for byte, including
+    the all-GPU shape (executive summary, per-GPU overview, per-GPU top
+    regressions) when ``gpu`` is ``None``. ``review`` also writes two next-step
+    hints to ``stderr``; a shell that combines both streams therefore shows
+    those hints after the report.
     """
     requested_session = session_id
     if session_id is not None:
@@ -126,11 +128,11 @@ def _compare_pair(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
-    """Print the canonical diff report for a pair, byte-for-byte as ``diff --no-ai``.
+    """Print the canonical diff report and handoff hints for a pair.
 
     The profile paths are opened with the caller's spelling (as ``diff`` does)
     because that spelling is echoed in the report header. Next-step hints go to
-    ``stderr`` so redirected stdout stays exactly the diff report.
+    ``stderr`` so redirected stdout stays exactly the canonical diff report.
     """
     from .ai.diff_narrative import offline_diff_narrative
     from .diff import STEP_TIME_REGRESSION_PCT, diff_profiles, diff_profiles_all_gpus
