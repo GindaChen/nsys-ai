@@ -279,6 +279,11 @@ in an unreleaseable state. The live roadmap records the promotion criteria.
 
 ## 8. Release-maintainer checklist
 
+For the reusable release procedure, including candidate branches, artifact
+verification, publishing, patch backports, and post-release handoff, see the
+[release process](./release.md). The checklist below remains the short
+architecture-specific gate for this release boundary.
+
 Run this sequence from a clean checkout of the release candidate. Do not place
 credentials or tokens in logs, release notes, or issue comments.
 
