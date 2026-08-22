@@ -24,7 +24,7 @@ nsys-ai/
 │   ├── skills/            # 🧩 Analysis skill system
 │   │   ├── base.py        # Skill dataclass + execution
 │   │   ├── registry.py    # Auto-discovery + lookup
-│   │   └── builtins/      # 37 built-in analysis skills
+│   │   └── builtins/      # built-in analysis skills (see `skill list`)
 │   ├── agent/             # 🤖 AI agent
 │   │   ├── persona.py     # System prompt + identity
 │   │   └── loop.py        # Analysis loop + skill selection

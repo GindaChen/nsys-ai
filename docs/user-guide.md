@@ -197,6 +197,40 @@ The NVTX tree viewer loads bounded slices from `GET /api/tree`. `depth` controls
 The optional MCP transport exposes the same read-only handoff as `get_session`; it returns the
 SessionStore projection rather than a second MCP-specific session schema.
 
+For an interactive terminal conversation instead of one question, use the chat TUI:
+
+```console
+$ nsys-ai chat run-before/profile.sqlite --session /tmp/nsys-run-001
+```
+
+`chat` needs a real terminal and the optional `[chat]` / `[agent]` dependencies. The one-shot
+`ask` path is easier to script; `agent ask` is the deterministic agent front door when you want a
+natural-language answer without opening a TUI. Both still ground their answer in registered skill
+evidence.
+
+For the three browser choices, see [Choosing a Web viewer](user/viewers.md). The short rule is:
+`web` for an NVTX tree, `timeline-web` for a progressive multi-GPU timeline and session, and
+`diff-web` for a before/after comparison.
+
+### Browse root-cause patterns
+
+The root-cause catalog is useful when you want the symptom, mechanism, detection skill, and fix
+guidance before asking the agent to summarize a profile:
+
+```console
+$ nsys-ai root-cause list
+$ nsys-ai root-cause show "GPU Bubbles"
+```
+
+To submit a personal markdown pattern, start from
+[`docs/root-causes/TEMPLATE.md`](root-causes/TEMPLATE.md) and pass the completed file:
+
+```console
+$ nsys-ai root-cause submit my-root-cause.md
+```
+
+The file is validated and copied to the user-local root; it does not modify the built-in catalog.
+
 Two lower-level entry points remain available when you want them: `nsys-ai evidence build <profile>`
 runs the same analyzers and writes findings JSON to stdout or `-o` (add `--session` to publish, and
 `--analyzers` to pick a subset), and `nsys-ai skill list` / `nsys-ai skill run <name> <profile>` run a
@@ -272,6 +306,44 @@ Useful variants:
   `nsys-ai baseline --help`.
 - `nsys-ai diff-web <before> <after>` opens the same comparison in a browser.
 
+### Named baselines
+
+If a profile is the reference for several comparisons, give it a stable local name instead of
+copying its path through every job:
+
+```console
+$ nsys-ai baseline tag main run-before/profile.sqlite --reason "green main"
+$ nsys-ai baseline list
+$ nsys-ai baseline show main
+$ nsys-ai diff --against baseline:main run-after/profile.sqlite --format json --no-ai
+```
+
+`baseline list` is the compact inventory; `baseline show NAME` includes the profile identity,
+source path, reason, timestamp, and any recorded RunSpec. The store is local. Set
+`NSYS_AI_BASELINE_ROOT` to an absolute shared directory when separate CI steps must see the same
+names.
+
+## 6a. Run the composed loop with `optimize`
+
+When the baseline was captured with `nsys-ai profile`, the complete loop can be composed into one
+command:
+
+```console
+$ nsys-ai optimize run-before/profile.sqlite \
+    --repo /path/to/your/checkout -- ./profile-workload.sh
+```
+
+The arguments after `--` are the verification workload. `--repo` is recorded in the RunSpec and
+must be a directory the capture can run from. The command diagnoses the baseline, proposes the top
+actionable finding, runs the recorded workload through the local `nsys` executable, diffs the new
+capture, and records an accept/reject decision in the session.
+
+The workload must actually produce a valid Nsight Systems profile. A command such as `true` is a
+useful smoke test for the failure path, but it stops at capture validation because it produces no
+profile; `optimize` reports that failure and leaves `findings.json`, `proposal.json`, `runspec.json`,
+and `session.json` so the attempted handoff is inspectable. If the proposal abstains because the
+baseline has no reproducible RunSpec, it stops before re-profiling instead.
+
 ## 7. Record the decision
 
 A comparison you do not act on is a comparison you will re-run next month. Record the outcome with
@@ -331,6 +403,8 @@ coherent snapshot after an interrupted publication.
 | Topic | Page |
 |-------|------|
 | Driving the same loop in a browser | [Guided loop setup](guided-loop-setup.md) |
+| Choosing between browser surfaces | [Choosing a Web viewer](user/viewers.md) |
+| Running one deterministic analysis | [Analysis skills](user/skills.md) |
 | What `doctor` checks, and why | [doctor](doctor.md) |
 | Annotating your code so iteration analysis works | [NVTX annotations](03-nvtx-annotations.md) |
 | Capturing a representative window of a long run | [Focused profiling](08-focused-profiling.md) |

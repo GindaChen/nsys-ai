@@ -385,7 +385,8 @@ No required parameters. Supports `--trim`.
 | **Total** | **37** | |
 
 > **Note**: `memory_transfers.py` registers 2 skills (`memory_transfers` + `h2d_distribution`).
-> There are 37 registered builtin skills. Run `nsys-ai skill list` for the live catalog.
+> The registry is the live catalog. Run `nsys-ai skill list` to see the skills shipped by this
+> installation; the count is not a compatibility contract.
 
 ---
 
