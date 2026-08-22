@@ -685,13 +685,12 @@ def _build_parser():
         ),
         description=(
             "Compare before/after profiles, or resume a session decision path. "
-            "The pair form is the canonical diff: stdout is byte-identical to "
-            "'nsys-ai diff <before> <after> --no-ai', including the per-GPU "
-            "overview and per-GPU regressions when --gpu is omitted. review "
-            "never calls an LLM, so the executive summary is the deterministic "
-            "one that --no-ai produces. Next-step hints are written to stderr, "
-            "so a redirected stdout holds exactly the diff report. review does "
-            "not create a session; --session resumes one."
+            "The pair form uses the canonical diff renderer: stdout is "
+            "byte-identical to 'nsys-ai diff <before> <after> --no-ai', including "
+            "the per-GPU overview and per-GPU regressions when --gpu is omitted. "
+            "review never calls an LLM, so the executive summary is the "
+            "deterministic one that --no-ai produces. It writes two next-step "
+            "hints to stderr, and does not create a session; --session resumes one."
         ),
     )
     p.add_argument(

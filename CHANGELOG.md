@@ -32,8 +32,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   evidence pack and the canonical diff. `diagnose` publishes findings to a
   session and prints the next command with its arguments filled in; `review`
   resumes a session and reports where its decision stands, or compares a pair
-  without owning a session. `review`'s pair output is byte-identical to
-  `diff --no-ai`.
+  without owning a session. Its pair report is rendered by the same canonical
+  diff path as `diff --no-ai`; the report on stdout is identical, while
+  `review` adds two next-step hints on stderr for an interactive shell.
 - `nsys-ai diff --session --accept/--reject --reason TEXT` records the decision
   on the session's own `diff.json`, so a session that has findings, a proposal
   and a diff can reach a decision without leaving the command line.
@@ -90,6 +91,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   ranks, and communicator IDs.
 - A labeled-profile evaluation harness under `tests/eval/` (expected and
   forbidden findings) to keep skill outputs honest as they change.
+- Memoized skill execution keyed by the profile identity and every
+  answer-affecting parameter, so repeated evidence requests can reuse results
+  without confusing a changed window or GPU selection with the old answer.
+- Candidate-anchored regression Findings from `diagnose --against`, giving the
+  proposal workflow a stable finding ID and evidence window to act on.
 
 ### Changed
 
@@ -102,6 +108,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   leaf NVTX label, and ancestor-path containment is temporal, not lexical, so
   matching on a path substring can pick up kernels whose enclosing scope merely
   happened to still be open.
+- Idle findings calibrate their severity against the aggregate profile share,
+  while retaining conservative warning severity when the aggregate denominator
+  is unavailable.
+
+### Scope boundaries
+
+- The persisted pair-level `DiffIndex` memo remains deferred. The canonical diff
+  and session handoff are shipped; promotion of pair reuse requires a measured
+  checkpoint on real before/after captures.
+- Remote verification providers and a separate diagnostics artifact remain
+  follow-up work. The 0.3.0 session is the local, inspectable handoff boundary.
 
 ### Fixed
 
