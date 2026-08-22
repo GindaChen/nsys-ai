@@ -1,8 +1,9 @@
 # Documentation screenshots
 
-These PNGs are committed screenshots of the browser surfaces, captured from
-`tests/fixtures/h100_2gpu_1s.sqlite`. They are intentionally small: each file
-must remain below **300 KiB** and use a 1440×1000 viewport.
+These PNGs are committed screenshots of the browser surfaces. The tree,
+guided-loop, and diff captures use a 1440×1000 viewport; the timeline capture
+uses 1440×420 so its controls and GPU lanes fill the frame instead of leaving
+most of the image empty. Each file must remain below **300 KiB**.
 
 The images are referenced by the README, [`user/viewers.md`](../user/viewers.md),
 and [`guided-loop-setup.md`](../guided-loop-setup.md). Keep the four captures in
@@ -23,12 +24,14 @@ Start each local surface in a separate terminal from the repository root:
 
 ```bash
 PROFILE=tests/fixtures/h100_2gpu_1s.sqlite
+BEFORE=tests/fixtures/mfu_2gpu_before.sqlite
+AFTER=tests/fixtures/mfu_2gpu_after.sqlite
 
 nsys-ai web "$PROFILE" --port 18242 --no-browser
 nsys-ai timeline-web "$PROFILE" --port 18244 --no-browser
 
-cp "$PROFILE" /tmp/nsys-ai-docs-capture/before.sqlite
-cp "$PROFILE" /tmp/nsys-ai-docs-capture/after.sqlite
+cp "$BEFORE" /tmp/nsys-ai-docs-capture/before.sqlite
+cp "$AFTER" /tmp/nsys-ai-docs-capture/after.sqlite
 nsys-ai diff-web \
   /tmp/nsys-ai-docs-capture/before.sqlite \
   /tmp/nsys-ai-docs-capture/after.sqlite \
