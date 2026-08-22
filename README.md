@@ -28,6 +28,11 @@ viewers, a before/after diff that reports whether a change actually helped, and
 a set of deterministic analysis skills an LLM agent can drive. `.nsys-rep` files
 use a Parquet cache by default; `.sqlite` remains the compatibility path.
 
+![nsys-ai timeline viewer](https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/timeline-web.png)
+
+The screenshot is captured from the committed H100 fixture; the other browser
+surfaces are shown in [Choosing a Web viewer](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md).
+
 ## Installation
 
 ```bash

@@ -8,6 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+DOCUMENTATION_IMAGES = (
+    "web-tree.png",
+    "timeline-web.png",
+    "diff-web.png",
+    "guided-loop.png",
+)
+MAX_DOCUMENTATION_IMAGE_BYTES = 300 * 1024
+
+
 def test_readme_points_new_users_to_the_documentation_index_and_entry_pages():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     required = (
@@ -47,3 +56,24 @@ def test_agent_command_family_is_documented_with_its_dependency_boundary():
     )
     missing = [target for target in required if target not in docs]
     assert not missing, "agent command documentation is incomplete: " + ", ".join(missing)
+
+
+def test_documentation_screenshots_are_present_small_pngs_and_referenced():
+    images = ROOT / "docs/images"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    viewers = (ROOT / "docs/user/viewers.md").read_text(encoding="utf-8")
+    guided_loop = (ROOT / "docs/guided-loop-setup.md").read_text(encoding="utf-8")
+
+    missing = [name for name in DOCUMENTATION_IMAGES if not (images / name).is_file()]
+    assert not missing, "documentation screenshot files are missing: " + ", ".join(missing)
+
+    for name in DOCUMENTATION_IMAGES:
+        path = images / name
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", f"{path} is not a PNG"
+        assert path.stat().st_size < MAX_DOCUMENTATION_IMAGE_BYTES, (
+            f"{path} exceeds the {MAX_DOCUMENTATION_IMAGE_BYTES // 1024} KiB screenshot budget"
+        )
+
+    assert "docs/images/timeline-web.png" in readme
+    assert all(f"../images/{name}" in viewers for name in DOCUMENTATION_IMAGES[:3])
+    assert "images/guided-loop.png" in guided_loop
