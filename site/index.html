@@ -174,6 +174,27 @@
             font-size: 0.72rem;
         }
 
+        .hero-screenshot {
+            margin: 0;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25);
+        }
+
+        .hero-screenshot img {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+
+        .hero-screenshot figcaption {
+            padding: 10px 14px;
+            color: var(--text-dim);
+            font-size: 0.78rem;
+        }
+
         .install-box {
             display: inline-flex;
             align-items: center;
@@ -492,6 +513,46 @@
             font-size: 0.9rem;
         }
 
+        .showcase-subtitle {
+            color: var(--text-dim);
+            text-align: center;
+            margin: -24px auto 32px;
+            max-width: 680px;
+        }
+
+        .viewer-cards {
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .viewer-card {
+            padding: 0 0 24px;
+            overflow: hidden;
+        }
+
+        .viewer-card img {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            object-fit: cover;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .viewer-card h3,
+        .viewer-card p {
+            margin-left: 24px;
+            margin-right: 24px;
+        }
+
+        .viewer-card h3 {
+            margin-top: 20px;
+        }
+
+        .showcase-subheading {
+            font-size: 1.25rem;
+            margin: 48px 0 20px;
+            text-align: center;
+        }
+
         /* Footer */
         footer {
             padding: 40px 0;
@@ -541,6 +602,10 @@
             .showcase-cards {
                 grid-template-columns: 1fr;
             }
+
+            .viewer-cards {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -588,54 +653,11 @@
                     </div>
                 </div>
                 <div class="hero-right">
-                    <div class="terminal">
-                        <div class="terminal-bar">
-                            <div class="terminal-dot r"></div>
-                            <div class="terminal-dot y"></div>
-                            <div class="terminal-dot g"></div>
-                            <span class="terminal-title">nsys-ai profile.nsys-rep</span>
-                        </div>
-                        <div class="terminal-body"><span class="t-dim">GPU 0 | 39.0s – 42.0s</span> <span
-                                class="t-dim">39.127s</span> <span class="t-dim">39.532s</span> <span
-                                class="t-dim">39.937s</span>
-
-                            <span class="t-dim">N0</span> <span class="t-cyan">[───────── Iteration 142
-                                ──────────────────────────────────────────────────]</span>
-                            <span class="t-dim">N1</span> <span class="t-accent">[── forward ──────────]</span> <span
-                                class="t-accent">[── backward ─────────────────────────────────]</span>
-                            <span class="t-dim">N2</span> <span class="t-yellow">[Attn]</span> <span
-                                class="t-yellow">[MLP]</span> <span class="t-yellow">[Norm]</span> <span
-                                class="t-yellow">[Attn▸bwd]</span> <span class="t-yellow">[MLP▸bwd]</span> <span
-                                class="t-yellow">[AllReduce]</span>
-                            <span class="t-dim">───────────────────────────────────────────────────────</span>
-                            <span class="t-green t-bold">S7 </span> <span class="t-green">flash_fwd 26ms</span>
-                            <span class="t-green">████████</span><span class="t-dim">░░</span><span
-                                class="t-green">████████████</span><span class="t-dim">░</span><span
-                                class="t-green">██</span><span class="t-dim">░░░</span><span
-                                class="t-green">████████████████</span><span class="t-dim">░░</span><span
-                                class="t-green">██████████████████████</span>
-
-                            <span class="t-cyan">S12</span> <span class="t-cyan">██</span><span
-                                class="t-dim">░░</span><span class="t-cyan">████</span><span
-                                class="t-dim">░░░░░░░░</span><span class="t-cyan">██</span><span
-                                class="t-dim">░░░░░░</span><span class="t-cyan">████████</span><span
-                                class="t-dim">░░░░░░░░░░░░░░░</span><span class="t-cyan">██████</span>
-
-                            <span class="t-magenta">S15</span> <span
-                                class="t-magenta">█████████████████████████</span><span
-                                class="t-dim">░░░░░░░░░</span><span
-                                class="t-magenta">███████████████████████████████</span>
-
-                            <span class="t-dim">───────────────────────────────────────────────────────</span>
-                            <span class="t-accent">39.128s→39.154s</span> │ <span class="t-green">26.2ms [S7]</span> │
-                            <span class="t-dim">flash_fwd_splitkv_kernel</span>
-
-                            <span class="t-dim">└─ 📁 Iteration 142</span>
-                            <span class="t-dim"> └─ 📁 forward</span>
-                            <span class="t-dim"> └─ ▸ Attention</span>
-                            <span class="t-green t-bold"> ▶ flash_fwd_splitkv_kernel 26.2ms</span>
-                        </div>
-                    </div>
+                    <figure class="hero-screenshot">
+                        <img src="https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/guided-loop.png"
+                            alt="nsys-ai timeline viewer with the guided optimization workflow open">
+                        <figcaption>Carry one profile from diagnose through propose, re-profile, diff, and decide.</figcaption>
+                    </figure>
                 </div>
             </div>
         </div>
@@ -866,7 +888,29 @@
 
     <section class="showcase">
         <div class="container">
-            <h2>Interactive Tools</h2>
+            <h2>Interactive viewers</h2>
+            <p class="showcase-subtitle">Choose the surface that matches the question: hierarchy, timeline, or before-and-after change.</p>
+            <div class="showcase-cards viewer-cards">
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md#nvtx-tree-web" class="showcase-card viewer-card">
+                    <img src="https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/web-tree.png"
+                        alt="nsys-ai NVTX tree viewer">
+                    <h3>NVTX tree</h3>
+                    <p>Browse nested ranges and the kernels attributed to each node.</p>
+                </a>
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md#horizontal-timeline-timeline-web" class="showcase-card viewer-card">
+                    <img src="https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/timeline-web.png"
+                        alt="nsys-ai progressive multi-GPU timeline">
+                    <h3>Progressive timeline</h3>
+                    <p>Follow streams, kernels, NVTX lanes, search, and session-backed workflow state.</p>
+                </a>
+                <a href="https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md#pair-comparison-diff-web" class="showcase-card viewer-card">
+                    <img src="https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/diff-web.png"
+                        alt="nsys-ai before-and-after diff viewer">
+                    <h3>Pair comparison</h3>
+                    <p>Inspect a real before-and-after result with verdict, comparability, regressions, and improvements.</p>
+                </a>
+            </div>
+            <h3 class="showcase-subheading">More tools</h3>
             <div class="showcase-cards">
                 <a href="sqlite-explorer/" class="showcase-card">
                     <h3>🔍 SQLite Schema Explorer</h3>
