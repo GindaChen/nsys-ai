@@ -18,6 +18,7 @@ ignored rather than fatal — some warn, most are silent.
 
 | Variable | Default | Description |
 |---|---|---|
+| `NSYS_AI_ARTIFACT_ROOT` | `.nsys-ai` (relative to the working directory) | Root for invocation-owned artifacts: derived sessions, profile capture outputs, locks, and default decision files. Relative values resolve against the command working directory. It does not move input-keyed Parquet/SQLite caches; an explicit `--session` or `--decision-out` still wins. |
 | `NSYS_AI_INGEST` | `auto` | Which storage a profile is read from. `auto` converts `.nsys-rep` to a parquetdir and reads `.sqlite` in place; `parquetdir` refuses `.sqlite` inputs; `sqlite` converts `.nsys-rep` to `.sqlite`, refuses parquetdir inputs, and forces the cache mode to `direct` — see the note below. See [What to hand nsys-ai](./profile-inputs.md). |
 | `NSYS_AI_CACHE_MODE` | `auto` | Whether the SQLite path builds a Parquet query cache. `direct` queries the `.sqlite` in place with no cache; `parquet` forces the cache even when it is judged unaffordable; `auto` decides on free disk and profile size. Ignored once the parquetdir backend is in use, and overridden entirely by `NSYS_AI_INGEST=sqlite`. An unrecognised value warns and falls back to `auto`. |
 | `NSYS_AI_BASELINE_ROOT` | `.nsys-ai-baselines` (relative to the working directory) | Where the local baseline store lives. Point CI jobs at one absolute path so `baseline tag` and `diff --against baseline:X` agree regardless of which directory the job ran from. An explicit `--root` still wins. |
@@ -84,6 +85,12 @@ before concluding it does not work.
 is read; the second chooses whether the SQLite path builds a query cache. Setting the second has no
 effect once the first has selected a parquetdir. See [Ingest policy](../dev/ingest-policy.md) for
 where each is consumed.
+
+**`NSYS_AI_ARTIFACT_ROOT` and `NSYS_AI_BASELINE_ROOT` relocate different stores.** The artifact root
+holds invocation handoffs and default outputs; the baseline root holds named profile snapshots. Set
+both explicitly in CI when the job needs portable sessions and a shared baseline, or set only the
+one whose default location is unsuitable. A direct `--session` path is already an explicit handoff
+location and does not need the artifact-root default.
 
 ## Related
 

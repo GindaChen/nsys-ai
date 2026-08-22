@@ -20,6 +20,8 @@ Operating the tool.
 | [user/reading-a-diff.md](./user/reading-a-diff.md) | What a diff verdict means, how to recover from low comparability, and which metrics to trust |
 | [user/troubleshooting.md](./user/troubleshooting.md) | Symptoms, what they mean, and what to change |
 | [user/environment-variables.md](./user/environment-variables.md) | Every variable, its default, and when to change it |
+| [user/skills.md](./user/skills.md) | Discover and run deterministic analysis skills without an LLM |
+| [user/viewers.md](./user/viewers.md) | Choose between the Web, timeline-web, and diff-web surfaces |
 | [guided-loop-setup.md](./guided-loop-setup.md) | The same loop driven from the timeline web UI |
 | [doctor.md](./doctor.md) | Environment and profile health checks |
 | [ci-diff-gate.md](./ci-diff-gate.md) | Capture, compare, and gate performance regressions in CI |

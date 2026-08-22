@@ -348,9 +348,10 @@ still used, so delete the directory if you want the export read in place.
 
 ## Skills
 
-Skills are self-contained analysis units that run without an LLM. nsys-ai ships
-37 of them (kernels, memory, NCCL/communicators, NVTX, MFU, idle, root-cause,
-profile health, and more).
+Skills are self-contained analysis units that run without an LLM. The packaged
+registry covers kernels, memory, NCCL/communicators, NVTX, MFU, idle,
+root-cause, profile health, and more. Run `skill list` for the live catalog;
+the count is intentionally not a compatibility contract.
 
 ```bash
 nsys-ai skill list                                 # full catalog
@@ -425,6 +426,17 @@ and [docs/claude-plugin.md](https://github.com/GindaChen/nsys-ai/blob/main/docs/
 Start with the **[User guide](https://github.com/GindaChen/nsys-ai/blob/main/docs/user-guide.md)** — one workload from capture to a recorded
 decision, on the command line. To drive the same workflow in a browser instead, see
 [Guided loop setup](https://github.com/GindaChen/nsys-ai/blob/main/docs/guided-loop-setup.md).
+
+Useful entry points for the next question:
+
+- upgrading from 0.2.3 → [Migrating to 0.3.0](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/migrating-to-0.3.0.md)
+- something is not working → [Troubleshooting](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/troubleshooting.md)
+- checking an input before analysis → [Profile inputs](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/profile-inputs.md)
+- choosing a browser surface → [Choosing a Web viewer](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md)
+- running a focused, no-LLM analysis → [Analysis skills](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/skills.md)
+
+The complete, maintained documentation index is
+[docs/README.md](https://github.com/GindaChen/nsys-ai/blob/main/docs/README.md).
 
 The rest of the `docs/` directory mirrors the relevant NVIDIA Nsight Systems reference
 (capture, schema, NVTX, CUDA/NCCL trace) plus nsys-ai project guides:
