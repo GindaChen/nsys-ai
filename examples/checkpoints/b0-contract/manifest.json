@@ -1,0 +1,129 @@
+{
+  "analysis": {
+    "session_dir": ".nsys-ai/checkpoints/b0-contract-session",
+    "steps": [
+      {
+        "command": [
+          "python3",
+          "-m",
+          "nsys_ai",
+          "doctor",
+          "--format",
+          "json",
+          "{profile}"
+        ],
+        "expected_exit_codes": [
+          0
+        ],
+        "name": "doctor"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "nsys_ai",
+          "diagnose",
+          "{profile}",
+          "--format",
+          "json",
+          "--session",
+          "{session}"
+        ],
+        "expected_exit_codes": [
+          0
+        ],
+        "name": "diagnose"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "nsys_ai",
+          "ask",
+          "--session",
+          "{session}",
+          "What GPU activity is present in this profile?"
+        ],
+        "expected_exit_codes": [
+          0
+        ],
+        "name": "ask"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "nsys_ai",
+          "diff",
+          "{profile}",
+          "{profile}",
+          "--format",
+          "json",
+          "--no-ai"
+        ],
+        "expected_exit_codes": [
+          0
+        ],
+        "name": "diff"
+      },
+      {
+        "command": [
+          "python3",
+          "-m",
+          "nsys_ai",
+          "review",
+          "{profile}",
+          "{profile}"
+        ],
+        "expected_exit_codes": [
+          0
+        ],
+        "name": "review"
+      }
+    ]
+  },
+  "capture": {
+    "captured_at": "2026-08-02T15:53:57+08:00",
+    "format": "sqlite",
+    "output_paths": [
+      "tests/fixtures/h100_2gpu_1s.sqlite"
+    ],
+    "profile_path": "tests/fixtures/h100_2gpu_1s.sqlite",
+    "sha256": "36ad440e71a33725a672638da32d16e8dcab61e27fbc886b217f9d388fb02975"
+  },
+  "checkpoint": "B0-contract",
+  "environment": {
+    "cuda": "fixture metadata; capture host CUDA is not asserted",
+    "driver": "fixture metadata; capture host driver is not asserted",
+    "gpu": "H100 x2 fixture",
+    "nsys": "fixture metadata; no capture command is rerun in CI",
+    "python": ">=3.10"
+  },
+  "project": {
+    "name": "nsys-ai",
+    "repository": "https://github.com/GindaChen/nsys-ai",
+    "revision": "f0eecf4",
+    "revision_kind": "git_commit"
+  },
+  "schema_version": "checkpoint-v1",
+  "workload": {
+    "artifact": "tests/fixtures/h100_2gpu_1s.sqlite",
+    "capture_command": [
+      "fixture",
+      "tests/fixtures/h100_2gpu_1s.sqlite"
+    ],
+    "expected_signals": [
+      {
+        "description": "The profile contains GPU kernel activity and is not an empty capture.",
+        "id": "gpu-kernel-activity",
+        "verification": "Run doctor and inspect the profile health/kernel checks; compare with the SQLite fixture directly."
+      }
+    ],
+    "name": "h100_2gpu_1s contract fixture",
+    "parameters": {
+      "duration_seconds": 1,
+      "gpu_count": 2,
+      "source": "committed test fixture"
+    }
+  }
+}

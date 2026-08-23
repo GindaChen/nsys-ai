@@ -4,6 +4,21 @@ Developer utilities for local workflows. Some scripts under this directory are u
 (see `.github/workflows/plugin-smoke.yml` for `smoke_test.sh` and `build_fixture.py`).
 The CUDA axpy workload below is not.
 
+## Checkpoint manifests
+
+`checkpoint.py` validates and runs the versioned real-profile checkpoint
+recipes under `examples/checkpoints/`:
+
+```bash
+python3 scripts/checkpoint.py validate examples/checkpoints/b0-contract/manifest.json
+python3 scripts/checkpoint.py plan examples/checkpoints/b0-contract/manifest.json
+```
+
+Use `run ... --output /tmp/...` only after reviewing the manifest. The runner
+uses argv arrays and never invokes a shell; each step's stdout and stderr are
+written separately. GPU capture remains a manual or scheduled operation, while
+manifest structure and checksums can run in ordinary CI.
+
 ## CUDA axpy workload (`axpy.cu`)
 
 A tiny CUDA program that launches the same `axpy` kernel N times. It exists so a developer

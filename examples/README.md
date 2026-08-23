@@ -20,6 +20,13 @@ python download_data.py
 nsys-ai timeline output/fastvideo-wan21-1.3b-4gpu.sqlite --gpu 0
 ```
 
+## Real-project checkpoints
+
+The [checkpoint manifest guide](checkpoints/README.md) explains how to record
+project provenance, capture checksums, expected signals, and the shared
+`doctor → diagnose → ask → diff → review` contract. Large captures stay outside
+the repository.
+
 ## Adding New Examples
 
 Follow the convention:
