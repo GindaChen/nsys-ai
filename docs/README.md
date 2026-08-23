@@ -43,6 +43,7 @@ alongside them.
 | [dev/diff-findings.md](./dev/diff-findings.md) | How baseline diffs seed candidate-owned findings and proposals |
 | [dev/testing.md](./dev/testing.md) | Test layers and subprocess-aware coverage |
 | [dev/architecture.md](./dev/architecture.md) | Layered architecture, shared runner, session contracts, and release checklist |
+| [dev/release.md](./dev/release.md) | Repeatable release checklist, artifact verification, and patch/backport policy |
 | [support-matrix.md](./support-matrix.md) | Committed export schemas verified by CI |
 
 ## Nsight Systems reference
