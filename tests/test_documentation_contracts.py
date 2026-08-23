@@ -95,3 +95,14 @@ def test_landing_page_has_a_keyboard_safe_install_action_and_workflow():
     for step in ("Diagnose", "Propose", "Re-profile", "Diff", "Decide"):
         assert f">{step}<" in site
     assert not re.search(r"[🚀📚🧠🌐🖥️🌲🔍📊🤖🔁]", site)
+
+
+def test_claude_release_process_points_to_the_canonical_release_guide():
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    release = (ROOT / "docs/dev/release.md").read_text(encoding="utf-8")
+
+    assert "docs/dev/release.md" in claude
+    assert "git push origin main --tags" not in claude
+    assert "git push upstream v0.4.0" in release
+    assert re.search(r"`origin`\s+is\s+the\s+fork", release)
+    assert re.search(r"`upstream`\s+is\s+the\s+canonical", release)
