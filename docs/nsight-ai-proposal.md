@@ -1,5 +1,9 @@
 # Nsight AI: Agentic Kernel-to-Source Mapping via Iterative NVTX Annotation
 
+> **Status: proposal, not implemented.** This records a design that was explored and not
+> built. The module layout below never shipped. For where the project went instead, see
+> [the architecture overview](./dev/architecture.md).
+
 ## Problem
 
 When analyzing GPU profiles, users want to know **which line of source code** produced a given GPU kernel. Today, the options are:

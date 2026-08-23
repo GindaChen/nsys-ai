@@ -41,7 +41,7 @@ graph TD
 - `tui` and `tree` show NVTX → kernel mapping
 - `search` finds kernels by name pattern
 - `timeline` shows NVTX hierarchy bars above kernel lanes
-- AI `annotator.py` suggests NVTX annotations for un-annotated code
+- `nsys-ai profile --pytorch` asks Nsight to annotate an un-annotated PyTorch workload at capture time
 
 ---
 
@@ -94,7 +94,7 @@ graph TD
 | NCCL overhead | ✅ | `overlap`, `nccl` |
 | Stream visualization | ✅ | `timeline` |
 | AI auto-commentary | ✅ | `summary` (with `[ai]` extra) |
-| NVTX annotation suggestions | ✅ | AI `annotator` module |
+| NVTX for an un-annotated PyTorch workload | ✅ | `profile --pytorch` (capture-time, no source change) |
 | Backtrace resolution | 🔴 | Not yet — needs profile-time flags |
 | Kernel efficiency vs peak | 🔴 | Not yet — needs GPU metrics |
 | Multi-rank alignment | 🔴 | Not yet — needs multi-file loading |
