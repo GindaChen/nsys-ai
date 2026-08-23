@@ -153,6 +153,18 @@ def _register_profile_parser(sub):
         default="none",
     )
     p.add_argument("--cuda-memory-usage", action="store_true")
+    p.add_argument(
+        "--pytorch",
+        default=None,
+        metavar="MODE[,MODE]",
+        help=(
+            "Ask nsys to annotate PyTorch without editing the workload: "
+            "autograd-nvtx, autograd-shapes-nvtx, functions-trace, "
+            "functions-trace-shapes, or none (default). One autograd mode may be "
+            "combined with one functions-trace mode. Adds capture overhead, so it "
+            "is off unless asked for"
+        ),
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
         "workload",

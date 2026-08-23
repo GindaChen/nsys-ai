@@ -30,6 +30,10 @@ _ENV_POLICIES = frozenset({"inherit", "clean"})
 _CAPTURE_RANGES = frozenset({"none", "cudaProfilerApi", "nvtx", "hotkey"})
 _SAMPLE_MODES = frozenset({"none", "process-tree", "system-wide"})
 _CPUCTXSW_MODES = frozenset({"none", "process-tree", "system-wide"})
+# nsys accepts one autograd mode and/or one functions-trace mode, comma-joined.
+_PYTORCH_AUTOGRAD_MODES = frozenset({"autograd-nvtx", "autograd-shapes-nvtx"})
+_PYTORCH_FUNCTIONS_MODES = frozenset({"functions-trace", "functions-trace-shapes"})
+_PYTORCH_MODES = _PYTORCH_AUTOGRAD_MODES | _PYTORCH_FUNCTIONS_MODES
 
 
 class RunSpecError(NsysAiError):
@@ -54,6 +58,48 @@ def _reject_unknown_keys(payload: Mapping[str, Any], allowed: set[str], label: s
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise RunSpecError(f"{label} has unknown field(s): {', '.join(unknown)}")
+
+
+def normalize_pytorch_modes(
+    value: Any, *, label: str = "trace_options.pytorch"
+) -> tuple[str, ...]:
+    """Validate the requested nsys PyTorch annotation modes and canonicalize order.
+
+    Returns an empty tuple for "not requested", which is also what an explicit
+    ``none`` means, so the two spell the same thing on disk and in the argv.
+
+    Public because the CLI must reach the same verdict *before* it decides whether
+    to build a RunSpec at all: ``--dry-run`` exists to show a plan that would run,
+    so it has to reject the same values the real capture would. ``label`` names the
+    thing the caller's user actually typed, so the CLI can say ``--pytorch`` while a
+    persisted spec says ``trace_options.pytorch``.
+    """
+    if isinstance(value, str):
+        raise RunSpecError(f"{label} must be an array, not a comma-joined string")
+    if not isinstance(value, (list, tuple)):
+        raise RunSpecError(f"{label} must be an array")
+    modes = tuple(value)
+    for mode in modes:
+        if not isinstance(mode, str) or (mode != "none" and mode not in _PYTORCH_MODES):
+            raise RunSpecError(f"unsupported {label} mode: {mode!r}")
+    if len(set(modes)) != len(modes):
+        raise RunSpecError(f"{label} must not contain duplicates")
+    if "none" in modes:
+        if len(modes) > 1:
+            raise RunSpecError(f"{label} cannot combine 'none' with a mode")
+        return ()
+    selected = set(modes)
+    if len(selected & _PYTORCH_AUTOGRAD_MODES) > 1:
+        raise RunSpecError(
+            f"{label} accepts at most one autograd mode: "
+            "'autograd-nvtx' or 'autograd-shapes-nvtx'"
+        )
+    if len(selected & _PYTORCH_FUNCTIONS_MODES) > 1:
+        raise RunSpecError(
+            f"{label} accepts at most one functions-trace mode: "
+            "'functions-trace' or 'functions-trace-shapes'"
+        )
+    return tuple(sorted(modes))
 
 
 def _validate_string(value: Any, label: str, *, allow_empty: bool = False) -> str:
@@ -162,6 +208,7 @@ class NsysTraceOptions:
     cpuctxsw: str = "none"
     capture_range: str = "none"
     cuda_memory_usage: bool = False
+    pytorch: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.trace, (list, tuple)):
@@ -188,9 +235,10 @@ class NsysTraceOptions:
         if not isinstance(self.cuda_memory_usage, bool):
             raise RunSpecError("trace_options.cuda_memory_usage must be a boolean")
         object.__setattr__(self, "trace", tuple(sorted(trace)))
+        object.__setattr__(self, "pytorch", normalize_pytorch_modes(self.pytorch))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "trace": list(self.trace),
             "sample": self.sample,
             "cpuctxsw": self.cpuctxsw,
@@ -199,6 +247,12 @@ class NsysTraceOptions:
             # Reports must not capture the runner's resolved environment.
             "discard_environment": True,
         }
+        # Emitted only when requested. This mapping is hashed into
+        # ``RunSpec.compatibility_key``, so an unconditional key would change the
+        # identity of every spec written before the option existed.
+        if self.pytorch:
+            payload["pytorch"] = list(self.pytorch)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> NsysTraceOptions:
@@ -209,6 +263,7 @@ class NsysTraceOptions:
             "cpuctxsw",
             "capture_range",
             "cuda_memory_usage",
+            "pytorch",
             "discard_environment",
         }
         _reject_unknown_keys(data, allowed, "trace_options")
@@ -220,6 +275,7 @@ class NsysTraceOptions:
             cpuctxsw=data.get("cpuctxsw", "none"),
             capture_range=data.get("capture_range", "none"),
             cuda_memory_usage=data.get("cuda_memory_usage", False),
+            pytorch=data.get("pytorch", ()),
         )
 
 
@@ -461,6 +517,8 @@ def build_nsys_profile_argv(
         argv.append(f"--capture-range={options.capture_range}")
     if options.cuda_memory_usage:
         argv.append("--cuda-memory-usage=true")
+    if options.pytorch:
+        argv.append(f"--pytorch={','.join(options.pytorch)}")
     argv.extend(spec.argv)
     return argv
 

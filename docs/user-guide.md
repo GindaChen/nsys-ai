@@ -89,6 +89,32 @@ capture, so you never have to name sessions yourself.
 activity is an error, not a silent empty file. Add `--dry-run` to print the plan without running
 anything.
 
+### Annotating a PyTorch workload you have not instrumented
+
+A capture with no NVTX still shows kernels, but the analysis that maps GPU time back to a region of
+your model has nothing to attribute to, so it abstains. `doctor` warns when this is the case.
+
+Nsight Systems can annotate PyTorch itself, with no change to your source. Pass `--pytorch`:
+
+```console
+$ nsys-ai profile --pytorch autograd-nvtx -o run-before -- python train.py
+```
+
+| Mode | What it annotates |
+|------|-------------------|
+| `autograd-nvtx` | Autograd operations, via `emit_nvtx()` |
+| `autograd-shapes-nvtx` | The same, plus tensor shapes |
+| `functions-trace` | One range per `torch.Module.forward()` call |
+| `functions-trace-shapes` | The same, plus shapes as payloads |
+
+One autograd mode may be combined with one functions-trace mode:
+`--pytorch autograd-nvtx,functions-trace`. Anything else is refused before the capture starts, as is
+an Nsight Systems too old to offer the option.
+
+Annotation is off unless you ask for it, because it adds overhead and changes what the capture
+measures. For the same reason, do not compare an annotated capture against an un-annotated one — a
+before/after pair should be captured the same way.
+
 If you already have a `.nsys-rep`, a `.sqlite` or a `parquetdir` from `nsys` directly, skip this step.
 Every command below accepts any of them; see [what to hand nsys-ai](./user/profile-inputs.md) for how
 each is read.

@@ -28,6 +28,7 @@ from nsys_ai.profile_runner import (
     RunTimings,
     build_local_profile_reference,
 )
+from nsys_ai.runspec import build_nsys_profile_argv
 from nsys_ai.session_cli import publish_session_findings
 from nsys_ai.session_store import SessionStore
 
@@ -434,3 +435,23 @@ def test_decision_reason_names_the_verdict_it_came_from(verdict, expected):
 def test_decision_reason_is_explicit_when_step_time_is_not_comparable():
     _decision, reason = _decision_for_verdict("inconclusive", None)
     assert "step time was not comparable" in reason
+
+
+def test_the_verification_capture_never_gains_pytorch_annotation(tmp_path):
+    """Before and after must be the same kind of capture. optimize builds its own
+    RunSpec, so a new capture option must not leak into it by default: annotating
+    only the after-profile would change what the diff is comparing."""
+    _seed_findings(tmp_path)
+    runner = _succeeding_runner(build_local_profile_reference(AFTER))
+
+    code, _out, err = _run(tmp_path, runner)
+
+    assert code == 0, err
+    spec = runner.specs[0]
+    assert spec.trace_options.pytorch == ()
+    assert "pytorch" not in spec.trace_options.to_dict()
+    assert not [
+        token
+        for token in build_nsys_profile_argv(spec, tmp_path / "after")
+        if token.startswith("--pytorch")
+    ]
