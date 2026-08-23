@@ -61,6 +61,17 @@ trustworthy queue.
 Never put API keys, PyPI tokens, provider credentials, or secret-bearing
 environment dumps in the issue, PR, release notes, or command transcript.
 
+### Remote convention
+
+The commands below assume the normal contributor checkout: `origin` is the
+fork and `upstream` is the canonical `GindaChen/nsys-ai` repository. Release
+branches and tags must be pushed to `upstream`; pushing a tag only to a fork
+does not trigger the canonical publish workflow. Before starting, verify the
+mapping with `git remote -v`. If the canonical repository is named `origin` in
+your checkout, substitute `origin` for `upstream` consistently. The `gh`
+commands below always target the canonical repository explicitly with
+`-R GindaChen/nsys-ai`.
+
 ## The six release phases
 
 Every release passes through these gates:
@@ -110,9 +121,9 @@ work to this issue; do not rely on a search for PR titles after publishing.
 From a clean checkout:
 
 ```bash
-git fetch origin --tags
+git fetch upstream --tags
 git status --short --branch
-git log --oneline --decorate -20 origin/main
+git log --oneline --decorate -20 upstream/main
 gh issue list -R GindaChen/nsys-ai --state open --label "release/0.4.0"
 gh pr list -R GindaChen/nsys-ai --state open --base main
 ```
@@ -131,9 +142,9 @@ development:
 
 ```bash
 git switch main
-git pull --ff-only origin main
+git pull --ff-only upstream main
 git switch -c release/0.4
-git push -u origin release/0.4
+git push -u upstream release/0.4
 ```
 
 For a small release that is intentionally cut from `main`, record the exact
@@ -278,7 +289,7 @@ public tag:
 
 ```bash
 git status --short --branch
-git diff origin/main...HEAD --stat
+git diff upstream/main...HEAD --stat
 python -c 'from importlib.metadata import version; print(version("nsys-ai"))'
 python -m build
 python -m twine check dist/*
@@ -311,7 +322,7 @@ artifacts were checked.
 git status --porcelain
 git rev-parse HEAD
 git tag -a v0.4.0 -m "Release v0.4.0"
-git push origin v0.4.0
+git push upstream v0.4.0
 ```
 
 Replace the version in every command. Never move an existing published tag.
@@ -419,14 +430,14 @@ commit into the release branch.
 
 ```bash
 git switch main
-git pull --ff-only origin main
+git pull --ff-only upstream main
 # merge and verify the fix on main first
 
 git switch release/0.3
-git pull --ff-only origin release/0.3
+git pull --ff-only upstream release/0.3
 git cherry-pick -x FIX_COMMIT_SHA
 python -m pytest tests/ -v --tb=short -rs
-git push origin release/0.3
+git push upstream release/0.3
 ```
 
 The `-x` record makes the origin of the backport visible. Resolve conflicts by
