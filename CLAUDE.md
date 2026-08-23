@@ -87,10 +87,25 @@ Skills are self-contained SQL-based analysis units that don't require an LLM. Ea
 
 ## Release Process
 
-1. Bump `version` in `pyproject.toml`
-2. Commit and tag: `git tag vX.Y.Z`
-3. Push: `git push origin main --tags`
-4. GitHub Actions auto-publishes to PyPI via trusted publisher (no tokens needed)
+Follow the complete [release guide](docs/dev/release.md) for scope/freeze,
+candidate verification, packaging, publishing, PyPI verification, and handoff.
+It is the source of truth for every release; do not replace its gates with a
+shorter tag-only procedure.
+
+For a quick orientation:
+
+1. Create the release tracking issue and record the exact candidate commit.
+2. Run the guide's source, full-suite, packaging, and product smoke checks.
+3. After review, push only the tested version tag to the canonical repository.
+4. Monitor the publish workflow and verify the package from a fresh PyPI
+   environment before closing the release issue.
+
+In the normal contributor checkout, `origin` is the fork and `upstream` is
+`GindaChen/nsys-ai`; verify that mapping with `git remote -v`. Push release
+branches and tags to the canonical remote (`upstream` in that setup), never
+by pushing the fork's `main` branch together with every tag. GitHub Actions
+publishes to PyPI through the trusted publisher; no package token belongs in
+the repository.
 
 ## Project Labels & Workflow
 
