@@ -81,9 +81,8 @@ Skills are self-contained SQL-based analysis units that don't require an LLM. Ea
 
 ### AI Module (`src/nsys_ai/ai/`)
 
-- `analyzer.py` — LLM-based NVTX analysis
-- `annotator.py` — NVTX annotation utilities
-- `gate.py` — Cost gating for LLM API calls
+- `backend/` — read-only profile database tooling the agent queries
+- `diff_narrative.py` — LLM narrative over a computed diff
 
 ## Release Process
 
