@@ -97,6 +97,18 @@ def _execute(conn, **kwargs):
     if unavailable is not None:
         return unavailable
 
+    try:
+        kernel_columns = {
+            str(column).lower(): str(column)
+            for column in adapter.get_table_columns(kernel_table)
+        }
+    except Exception:  # noqa: BLE001 - required-table validation already ran
+        kernel_columns = {}
+    graph_node_column = kernel_columns.get("graphnodeid") or kernel_columns.get("graph_node_id")
+    graph_id_column = kernel_columns.get("graphid") or kernel_columns.get("graph_id")
+    graph_node_expr = f'k."{graph_node_column}"' if graph_node_column else "NULL"
+    graph_id_expr = f'k."{graph_id_column}"' if graph_id_column else "NULL"
+
     trim_clause = ""
     params: list[int] = [device]
     if trim_start is not None and trim_end is not None:
@@ -131,6 +143,8 @@ def _execute(conn, **kwargs):
                 k.start AS kernel_start_ns,
                 k."end" AS kernel_end_ns,
                 k.shortName AS short_name,
+                {graph_node_expr} AS graph_node_id,
+                {graph_id_expr} AS graph_id,
                 r.global_tid,
                 r.api_start_ns,
                 r.api_end_ns,
@@ -163,7 +177,15 @@ def _execute(conn, **kwargs):
                 process_id, device_id, stream_id, correlation_id,
                 kernel_start_ns, kernel_end_ns, short_name, global_tid,
                 api_start_ns, api_end_ns, api_duration_ns,
-                queue_duration_ns, kernel_duration_ns
+                queue_duration_ns, kernel_duration_ns, graph_node_id, graph_id,
+                CASE
+                    WHEN ROW_NUMBER() OVER (
+                        PARTITION BY global_tid, correlation_id, api_start_ns, api_end_ns
+                        ORDER BY kernel_start_ns, kernel_end_ns, short_name
+                    ) = 1
+                    THEN api_duration_ns
+                    ELSE 0
+                END AS api_charge_ns
             FROM launch_candidates
             WHERE match_rank = 1
         )
@@ -171,14 +193,16 @@ def _execute(conn, **kwargs):
             s_kernel.value AS kernel_name,
             l.device_id,
             COUNT(*) AS launch_count,
-            ROUND(SUM(l.api_duration_ns) / 1e6, 3) AS total_api_ms,
-            ROUND(AVG(l.api_duration_ns) / 1e3, 1) AS avg_api_us,
-            ROUND(MAX(l.api_duration_ns) / 1e3, 1) AS max_api_us,
+            ROUND(SUM(l.api_charge_ns) / 1e6, 3) AS total_api_ms,
+            ROUND(AVG(NULLIF(l.api_charge_ns, 0)) / 1e3, 1) AS avg_api_us,
+            ROUND(MAX(l.api_charge_ns) / 1e3, 1) AS max_api_us,
             COUNT(l.queue_duration_ns) AS queue_count,
             ROUND(COALESCE(SUM(l.queue_duration_ns), 0) / 1e6, 3) AS total_queue_ms,
             ROUND(COALESCE(AVG(l.queue_duration_ns), 0) / 1e3, 1) AS avg_queue_us,
             ROUND(SUM(l.kernel_duration_ns) / 1e6, 3) AS total_kernel_ms,
             ROUND(AVG(l.kernel_duration_ns) / 1e3, 3) AS avg_kernel_us,
+            COUNT(DISTINCT l.graph_node_id) AS graph_node_count,
+            COUNT(DISTINCT l.graph_id) AS graph_id_count,
             MIN(l.kernel_start_ns) AS span_start_ns,
             MAX(l.kernel_end_ns) AS span_end_ns
         FROM launches l
@@ -186,7 +210,7 @@ def _execute(conn, **kwargs):
         GROUP BY s_kernel.value, l.device_id
         HAVING COUNT(*) >= ?
            AND AVG(l.kernel_duration_ns) < {_SMALL_KERNEL_AVG_US_THRESHOLD * 1000}
-        ORDER BY SUM(l.api_duration_ns) DESC,
+        ORDER BY SUM(l.api_charge_ns) DESC,
                  COUNT(*) DESC,
                  s_kernel.value ASC,
                  l.device_id ASC
@@ -254,6 +278,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 "queue_count": int(row["queue_count"]),
                 "avg_queue_us": float(row["avg_queue_us"]),
                 "total_queue_ms": float(row["total_queue_ms"]),
+                "graph_node_count": int(row.get("graph_node_count", 0) or 0),
+                "graph_id_count": int(row.get("graph_id_count", 0) or 0),
             },
             units={
                 "launch_count": "count",
@@ -264,6 +290,8 @@ def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
                 "queue_count": "count",
                 "avg_queue_us": "microseconds",
                 "total_queue_ms": "ms",
+                "graph_node_count": "count",
+                "graph_id_count": "count",
             },
             selection_id=selection.id,
             provenance={

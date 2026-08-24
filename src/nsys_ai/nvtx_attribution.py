@@ -40,7 +40,7 @@ def _sort_merge_attribute(
     Overall complexity is O(N+M) per thread (each NVTX is pushed and
     popped at most once; each runtime call is processed once).
     """
-    from .connection import wrap_connection
+    from .connection import DB_ERRORS, wrap_connection
 
     adapter = wrap_connection(conn)
     resolved_tables = adapter.resolve_activity_tables()
@@ -48,6 +48,17 @@ def _sort_merge_attribute(
     kernel_table = resolved_tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
     runtime_table = resolved_tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
     nvtx_table = resolved_tables.get("nvtx", "NVTX_EVENTS")
+    try:
+        kernel_columns = {
+            str(column).lower(): str(column)
+            for column in adapter.get_table_columns(kernel_table)
+        }
+    except DB_ERRORS:
+        kernel_columns = {}
+    graph_node_column = kernel_columns.get("graphnodeid") or kernel_columns.get("graph_node_id")
+    graph_id_column = kernel_columns.get("graphid") or kernel_columns.get("graph_id")
+    graph_node_expr = f'k."{graph_node_column}"' if graph_node_column else "NULL"
+    graph_id_expr = f'k."{graph_id_column}"' if graph_id_column else "NULL"
 
     # Trim clause for SQL queries
     trim_sql = ""
@@ -59,7 +70,9 @@ def _sort_merge_attribute(
     kr_rows = adapter.execute(
         f"""
         SELECT r.globalTid, r.start, r.[end],
-               k.start AS ks, k.[end] AS ke, k.shortName
+               k.start AS ks, k.[end] AS ke, k.shortName,
+               {graph_node_expr} AS graph_node_id,
+               {graph_id_expr} AS graph_id
         FROM {kernel_table} k
         JOIN {runtime_table} r ON r.correlationId = k.correlationId
         WHERE 1=1 {trim_sql}
@@ -137,7 +150,7 @@ def _sort_merge_attribute(
 
     kr_by_tid: dict[int, list[tuple]] = defaultdict(list)
     for r in kr_rows:
-        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
+        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5], r[6], r[7]))
         # r_start, r_end, k_start, k_end, shortName
 
     results = []
@@ -155,7 +168,7 @@ def _sort_merge_attribute(
         nvtx_idx = 0
         open_stack: list[tuple[int, int, str]] = []  # (start, end, text)
 
-        for r_start, r_end, k_start, k_end, short_name in kr_by_tid[tid]:
+        for r_start, r_end, k_start, k_end, short_name, graph_node_id, graph_id in kr_by_tid[tid]:
             # 1. Pop NVTX ranges that have already closed before this runtime starts
             # Because NVTX ranges are assumed strictly nested per thread, O(1) amortized
             while open_stack and open_stack[-1][1] < r_start:
@@ -197,6 +210,8 @@ def _sort_merge_attribute(
                         "k_start": k_start,
                         "k_end": k_end,
                         "k_dur_ns": k_end - k_start,
+                        "graph_node_id": graph_node_id,
+                        "graph_id": graph_id,
                     }
                 )
 
@@ -271,8 +286,7 @@ def attribute_kernels_to_nvtx(
                         extra_params.append(f"%{kernel_name_substring}%")
                     cur = adapter.execute(
                         f"""
-                        SELECT m.nvtx_text, m.nvtx_depth, d.nvtx_path, m.kernel_name,
-                               m.k_start, m.k_end, m.k_dur_ns
+                        SELECT m.*, d.nvtx_path
                         FROM nvtx_kernel_map m
                         JOIN nvtx_path_dict d ON m.path_id = d.path_id
                         {where_m}
@@ -302,6 +316,17 @@ def attribute_kernels_to_nvtx(
             kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
             runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
             nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+            try:
+                kernel_columns = {
+                    str(column).lower(): str(column)
+                    for column in adapter.get_table_columns(kernel_table)
+                }
+            except DB_ERRORS:
+                kernel_columns = {}
+            graph_node_column = kernel_columns.get("graphnodeid") or kernel_columns.get("graph_node_id")
+            graph_id_column = kernel_columns.get("graphid") or kernel_columns.get("graph_id")
+            graph_node_expr = f'k."{graph_node_column}"' if graph_node_column else "NULL"
+            graph_id_expr = f'k."{graph_id_column}"' if graph_id_column else "NULL"
             has_textid = adapter.detect_nvtx_text_id()
             if has_textid:
                 text_expr = "COALESCE(n.text, ns.value)"
@@ -329,7 +354,9 @@ def attribute_kernels_to_nvtx(
                     SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
                            k.start AS k_start, k."end" AS k_end,
                            COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
-                           r.correlationId
+                           r.correlationId,
+                           {graph_node_expr} AS graph_node_id,
+                           {graph_id_expr} AS graph_id
                     FROM {kernel_table} k
                     JOIN {runtime_table} r ON r.correlationId = k.correlationId
                     LEFT JOIN StringIds ks ON k.shortName = ks.id
@@ -339,6 +366,7 @@ def attribute_kernels_to_nvtx(
                 enclosing AS (
                     SELECT kr.k_start, kr.k_end, kr.kernel_name,
                            kr.r_start, kr.r_end, kr.globalTid, kr.correlationId,
+                           kr.graph_node_id, kr.graph_id,
                            {text_expr} AS nvtx_text,
                            (n."end" - n.start) AS n_dur, n.start AS n_start
                     FROM kr
@@ -360,11 +388,15 @@ def attribute_kernels_to_nvtx(
                         kernel_name,
                         k_start,
                         k_end,
-                        (k_end - k_start) AS k_dur_ns
+                        (k_end - k_start) AS k_dur_ns,
+                        graph_node_id,
+                        graph_id
                     FROM enclosing
-                    GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
+                    GROUP BY k_start, k_end, globalTid, kernel_name, correlationId,
+                             graph_node_id, graph_id
                 )
-                SELECT nvtx_text, nvtx_depth, nvtx_path, kernel_name, k_start, k_end, k_dur_ns
+                SELECT nvtx_text, nvtx_depth, nvtx_path, kernel_name, k_start, k_end, k_dur_ns,
+                       graph_node_id, graph_id
                 FROM grouped
                 {trim_clause}
                 ORDER BY k_start

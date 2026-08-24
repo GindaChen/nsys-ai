@@ -613,6 +613,39 @@ def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
         else:
             checks.append(CheckResult("Schema compatibility", "ok", f"export schema {sv}"))
 
+        graph = getattr(schema, "cuda_graph", {})
+        graph_tables = graph.get("tables", {})
+        graph_columns = graph.get("kernel_columns", {})
+        if graph.get("kernel_attribution"):
+            checks.append(
+                CheckResult(
+                    "CUDA Graph attribution",
+                    "ok",
+                    "kernel rows expose " + ", ".join(sorted(graph_columns)),
+                )
+            )
+        elif graph_tables:
+            checks.append(
+                CheckResult(
+                    "CUDA Graph attribution",
+                    "warn",
+                    "graph metadata present, kernel graph IDs absent",
+                    hint=(
+                        "Graph metadata can be inspected, but kernel-level graph "
+                        "attribution is unavailable in this export; nsys-ai will "
+                        "not infer it."
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                CheckResult(
+                    "CUDA Graph attribution",
+                    "skipped",
+                    "not present (capture may predate CUDA Graph export or graph tracing was disabled)",
+                )
+            )
+
     checks.append(CheckResult("Duration", "ok", f"{span_ns / 1e9:.1f}s"))
     # GPUs — COUNT(DISTINCT deviceId), not the fingerprint heuristic.
     checks.append(CheckResult("GPUs", "ok", str(len(devices))))

@@ -81,6 +81,35 @@ ACTIVITY_TABLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
     "sync_type_table": ("sync_type", "ENUM_CUPTI_SYNC_TYPE"),
 }
 
+
+def _kernel_graph_sql(adapter, kernel_table: str | None) -> dict[str, str]:
+    """Resolve optional graph columns for SQL skills.
+
+    The expressions are intentionally nullable SQL, not hard requirements:
+    pre-graph exports must continue to run the same launch/pattern skills.
+    """
+    columns: dict[str, str] = {}
+    if kernel_table:
+        try:
+            actual = {
+                str(column).lower(): str(column)
+                for column in adapter.get_table_columns(kernel_table)
+            }
+        except DB_ERRORS:
+            actual = {}
+        for placeholder, candidates in (
+            ("graph_node_expr", ("graphNodeId", "graph_node_id")),
+            ("graph_id_expr", ("graphId", "graph_id")),
+        ):
+            column = next(
+                (actual[candidate.lower()] for candidate in candidates if candidate.lower() in actual),
+                None,
+            )
+            columns[placeholder] = f'k."{column}"' if column else "NULL"
+    else:
+        columns = {"graph_node_expr": "NULL", "graph_id_expr": "NULL"}
+    return columns
+
 _DEVICE_INVENTORY_CACHE_KEY = "skill:device_inventory"
 
 
@@ -777,6 +806,8 @@ class Skill:
         # CUPTI_ACTIVITY_KIND_KERNEL which may be _KERNEL_V2/_V3 in
         # newer Nsight Systems versions.
         tables = adapter.resolve_activity_tables()
+        if "{graph_node_expr}" in self.sql or "{graph_id_expr}" in self.sql:
+            resolved.update(_kernel_graph_sql(adapter, tables.get("kernel")))
         unresolved: list[str] = []
         for placeholder, (key, canonical) in ACTIVITY_TABLE_PLACEHOLDERS.items():
             if placeholder in resolved:

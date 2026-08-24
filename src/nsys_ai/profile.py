@@ -25,6 +25,7 @@ if typing.TYPE_CHECKING:
 
 from nsys_ai import parquet_cache
 from nsys_ai.connection import DB_ERRORS
+from nsys_ai.cuda_graph import graph_capability, kernel_graph_columns
 from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
@@ -130,6 +131,20 @@ class NsightSchema:
         self.schema_version: str | None = self._meta.get("EXPORT_SCHEMA_VERSION") or None
         kt = self._detect_kernel_table()
         self.kernel_table: str | None = _validate_table_name(kt) if kt else None
+        self.graph_events_table = self._resolve_table("CUDA_GRAPH_EVENTS")
+        self.graph_node_events_table = self._resolve_table("CUDA_GRAPH_NODE_EVENTS")
+        self.graph_trace_table = self._resolve_table("CUPTI_ACTIVITY_KIND_GRAPH_TRACE")
+        self.kernel_graph_columns: dict[str, str] = {}
+        if self.kernel_table:
+            try:
+                self.kernel_graph_columns = kernel_graph_columns(
+                    self._adapter.get_table_columns(self.kernel_table)
+                )
+            except DB_ERRORS:
+                # The required-column contract reports unreadable schemas. An
+                # optional graph probe must never make an otherwise readable
+                # pre-graph profile fail to open.
+                self.kernel_graph_columns = {}
 
     # ── Version detection ──────────────────────────────────────────────
 
@@ -280,6 +295,16 @@ class NsightSchema:
             if t.lower() == lname:
                 return t
         return None
+
+    @property
+    def cuda_graph(self) -> dict[str, object]:
+        """Optional CUDA Graph capability visible in this export.
+
+        This is deliberately informational. Missing graph tables/columns do
+        not enter :meth:`missing_required_columns`; pre-2026 captures remain
+        fully analyzable through the non-graph path.
+        """
+        return graph_capability(self.tables, self.kernel_graph_columns)
 
     def _missing_columns(self, table: str, required) -> list[str]:
         try:
@@ -638,13 +663,28 @@ class Profile:
 
     def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device (or all devices if None), optionally trimmed to a time window."""
+        graph_select = ",\n                   " + ",\n                   ".join(
+            f'k.{_validate_table_name(column)} AS {name}'
+            for name, column in self.schema.kernel_graph_columns.items()
+        )
+        # Stable nullable fields make the absence of graph attribution
+        # explicit to callers while preserving the old profile behaviour.
+        if not self.schema.kernel_graph_columns:
+            graph_select = ",\n                   NULL AS graph_node_id, NULL AS graph_id"
+        else:
+            present = set(self.schema.kernel_graph_columns)
+            missing = [name for name in ("graph_node_id", "graph_id") if name not in present]
+            if missing:
+                graph_select += ",\n                   " + ", ".join(
+                    f"NULL AS {name}" for name in missing
+                )
         sql = """
             SELECT k.start, k.[end], k.deviceId, k.streamId, k.correlationId,
-                   s.value as name, d.value as demangled
+                   s.value as name, d.value as demangled{graph_select}
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
             JOIN StringIds d ON k.demangledName = d.id"""
-        sql = sql.format(kernel_table=self.schema.kernel_table)
+        sql = sql.format(kernel_table=self.schema.kernel_table, graph_select=graph_select)
         params: list = []
         if device is not None:
             sql += "\n            WHERE k.deviceId = ?"
@@ -861,6 +901,17 @@ class Profile:
 
     def kernel_map(self, device: int) -> dict[int, dict]:
         """Build correlationId -> kernel info for ALL kernels on a device."""
+        graph_select = ", ".join(
+            f'k.{_validate_table_name(column)} AS {name}'
+            for name, column in self.schema.kernel_graph_columns.items()
+        )
+        if graph_select:
+            present = set(self.schema.kernel_graph_columns)
+            missing = [name for name in ("graph_node_id", "graph_id") if name not in present]
+            if missing:
+                graph_select += ", " + ", ".join(f"NULL AS {name}" for name in missing)
+        else:
+            graph_select = "NULL AS graph_node_id, NULL AS graph_id"
         return {
             r["correlationId"]: dict(
                 start=r["start"],
@@ -868,11 +919,13 @@ class Profile:
                 stream=r["streamId"],
                 name=r["name"],
                 demangled=r["demangled"],
+                graph_node_id=r["graph_node_id"],
+                graph_id=r["graph_id"],
             )
             for r in self._duckdb_query(
                 f"""
-                    SELECT k.start, k.[end], k.streamId, k.correlationId,
-                           s.value as name, d.value as demangled
+                SELECT k.start, k.[end], k.streamId, k.correlationId,
+                           s.value as name, d.value as demangled, {graph_select}
                     FROM {self.schema.kernel_table} k
                     JOIN StringIds s ON k.shortName = s.id
                     JOIN StringIds d ON k.demangledName = d.id

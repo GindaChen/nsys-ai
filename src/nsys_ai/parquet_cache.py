@@ -143,10 +143,11 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 17  # bumped: the Tensor Core name patterns now recognise cuBLAS's Hopper
-# ``nvjet`` GEMMs. is_tc_eligible/uses_tc are computed at build time and stored in
-# kernels.parquet, so a version 16 cache keeps answering that every nvjet kernel is neither
-# eligible nor active -- the exact blind spot this fixes -- until it is rebuilt.
+_CACHE_VERSION = 18  # bumped: CUDA Graph attribution normalizes graph_node_id/graph_id into
+# kernels and nvtx_kernel_map, so a cache without those columns cannot answer a graph question.
+# 18 rather than 17 because two invalidations landed independently and both have to apply: 17 was
+# the Tensor Core name patterns learning cuBLAS's Hopper ``nvjet`` GEMMs, and a version 17 cache
+# carries that fix but none of the graph columns.
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -170,6 +171,9 @@ _BASE_TABLES = [
     ("nvtx_payload_schema_entries", "NVTX_PAYLOAD_SCHEMA_ENTRIES"),
     ("nvtx_payload_enums", "NVTX_PAYLOAD_ENUMS"),
     ("nvtx_payload_enum_entries", "NVTX_PAYLOAD_ENUM_ENTRIES"),
+    ("cuda_graph_events", "CUDA_GRAPH_EVENTS"),
+    ("cuda_graph_node_events", "CUDA_GRAPH_NODE_EVENTS"),
+    ("graph_trace", "CUPTI_ACTIVITY_KIND_GRAPH_TRACE"),
 ]
 
 
@@ -461,6 +465,9 @@ _ALIASES: dict[str, list[str]] = {
     "nvtx_payload_schema_entries": ["NVTX_PAYLOAD_SCHEMA_ENTRIES"],
     "nvtx_payload_enums": ["NVTX_PAYLOAD_ENUMS"],
     "nvtx_payload_enum_entries": ["NVTX_PAYLOAD_ENUM_ENTRIES"],
+    "cuda_graph_events": ["CUDA_GRAPH_EVENTS"],
+    "cuda_graph_node_events": ["CUDA_GRAPH_NODE_EVENTS"],
+    "graph_trace": ["CUPTI_ACTIVITY_KIND_GRAPH_TRACE"],
 }
 
 _PARQUETDIR_BINARY_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -832,9 +839,14 @@ def _build_cache_into(
                 )
         else:
             _progress("kernels.parquet")
+            graph_projection = _optional_graph_projection(
+                db, f"src.{kernel_table}", alias="k"
+            )
+            graph_projection_sql = f",\n                           {graph_projection}" if graph_projection else ""
             db.execute(f"""
                 COPY (
-                    SELECT k.*, COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name, d.value AS demangled,
+                    SELECT k.*{graph_projection_sql},
+                           COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name, d.value AS demangled,
                            CAST(CASE
                    WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
                      OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
@@ -1290,9 +1302,40 @@ def _table_has_column(db: duckdb.DuckDBPyConnection, table: str, column: str) ->
     """Check whether a table/view has a specific column."""
     try:
         cols = db.execute(f"DESCRIBE {table}").fetchall()
-        return any(c[0] == column for c in cols)
+        return any(str(c[0]).lower() == column.lower() for c in cols)
     except duckdb.Error:
         return False
+
+
+def _optional_graph_projection(
+    db: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    *,
+    alias: str = "k",
+) -> str:
+    """Return stable nullable graph columns for an activity-table SELECT.
+
+    Nsight uses camelCase names (``graphNodeId``/``graphId``), while the
+    analysis/cache contract uses snake_case.  The aliases are added only when
+    the source does not already expose the normalized name, avoiding duplicate
+    DuckDB columns on a future export that adopts the contract itself.
+    """
+    try:
+        columns = {
+            str(row[0]).lower(): str(row[0])
+            for row in db.execute(f"DESCRIBE {table_ref}").fetchall()
+        }
+    except duckdb.Error:
+        columns = {}
+
+    expressions: list[str] = []
+    for normalized, source in (("graph_node_id", "graphNodeId"), ("graph_id", "graphId")):
+        if normalized in columns:
+            continue
+        actual = columns.get(source.lower())
+        expression = f'{alias}."{actual}"' if actual else "CAST(NULL AS BIGINT)"
+        expressions.append(f"{expression} AS {normalized}")
+    return ",\n                   ".join(expressions)
 
 
 def _create_existing_alias_views(db: duckdb.DuckDBPyConnection) -> None:
@@ -1344,10 +1387,14 @@ def _create_enriched_kernel_view(
         return
 
     try:
+        graph_projection = _optional_graph_projection(
+            db, f'"{kernel_table}"', alias="k"
+        )
+        graph_projection_sql = f",\n                   {graph_projection}" if graph_projection else ""
         db.execute(
             f'''
             CREATE VIEW "kernels" AS
-            SELECT k.*,
+            SELECT k.*{graph_projection_sql},
                    COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name,
                    d.value AS demangled,
                    CAST(CASE
@@ -1835,9 +1882,19 @@ def _build_nvtx_kernel_map_from_parquet(
     nvtx_cur = db.cursor()
     kernel_cur = db.cursor()
 
+    # Cache exports normalize these fields even when the source profile is a
+    # pre-graph report.  Probe once here rather than once per thread so the
+    # streamed builder keeps its per-thread cost unchanged.
+    cached_kernel_columns = {
+        str(row[0]).lower()
+        for row in db.execute(f"DESCRIBE SELECT * FROM read_parquet('{kps}')").fetchall()
+    }
+    graph_node_expr = 'k."graph_node_id"' if "graph_node_id" in cached_kernel_columns else "NULL"
+    graph_id_expr = 'k."graph_id"' if "graph_id" in cached_kernel_columns else "NULL"
+
     # Staged first, published second. The sweep cannot know the path dictionary
     # until it has seen every row, and the map's ``path_id`` column is defined
-    # against that dictionary — so the nine columns land in a scratch Parquet
+    # against that dictionary — so the eleven columns land in a scratch Parquet
     # carrying the path text itself, and the two published files are derived
     # from it in SQL. It also means a build that dies part-way leaves no
     # readable nvtx_kernel_map.parquet behind.
@@ -1850,7 +1907,11 @@ def _build_nvtx_kernel_map_from_parquet(
             buf: list[tuple] = []
             for tid in tids:
                 nvtx_rows = _stream_thread_nvtx(nvtx_cur, nps, tid)
-                kr_rows = _stream_thread_kernels(kernel_cur, kps, rps, tid)
+                kr_rows = _stream_thread_kernels(
+                    kernel_cur, kps, rps, tid,
+                    graph_node_expr=graph_node_expr,
+                    graph_id_expr=graph_id_expr,
+                )
                 try:
                     for row in _attribute_thread(kr_rows, nvtx_rows):
                         buf.append(row)
@@ -1906,6 +1967,8 @@ def _staged_map_schema() -> pa.Schema:
             ("k_start", pa.int64()),
             ("k_end", pa.int64()),
             ("k_dur_ns", pa.int64()),
+            ("graph_node_id", pa.int64()),
+            ("graph_id", pa.int64()),
             ("is_tc_eligible", pa.int32()),
             ("uses_tc", pa.int32()),
         ]
@@ -1955,7 +2018,8 @@ def _publish_nvtx_kernel_map_parquet(db, staged: Path, out_dir: Path) -> None:
     db.execute(f"""
         COPY (
             SELECT d.path_id, m.nvtx_text, m.nvtx_depth, m.kernel_name,
-                   m.k_start, m.k_end, m.k_dur_ns, m.is_tc_eligible, m.uses_tc
+                   m.k_start, m.k_end, m.k_dur_ns,
+                   m.graph_node_id, m.graph_id, m.is_tc_eligible, m.uses_tc
             FROM read_parquet('{sps}') m
             JOIN read_parquet('{dps}') d ON d.nvtx_path = m.nvtx_path
             ORDER BY m.k_start, m.k_end, m.kernel_name
@@ -2009,8 +2073,17 @@ def _stream_thread_nvtx(cur, nvtx_parquet: str, tid):
             yield starts[i], ends[i], text
 
 
-def _stream_thread_kernels(cur, kernels_parquet: str, runtime_parquet: str, tid):
-    """Yield one thread's ``(r_start, r_end, k_start, k_end, name, elig, used)``.
+def _stream_thread_kernels(
+    cur,
+    kernels_parquet: str,
+    runtime_parquet: str,
+    tid,
+    *,
+    graph_node_expr: str = "NULL",
+    graph_id_expr: str = "NULL",
+):
+    """Yield one thread's ``(r_start, r_end, k_start, k_end, name, graph_node,
+    graph_id, elig, used)``.
 
     Sorted by ``r_start``, which #318 and #327 removed from this query and this
     restores — per thread, and on ``r.start`` only. Those removals were right for
@@ -2035,6 +2108,8 @@ def _stream_thread_kernels(cur, kernels_parquet: str, runtime_parquet: str, tid)
         cur,
         f"""
         SELECT r.start, r."end", k.start, k."end", k.name,
+               {graph_node_expr} AS graph_node_id,
+               {graph_id_expr} AS graph_id,
                COALESCE(CAST(k.is_tc_eligible AS INTEGER), 0) AS is_tc_eligible,
                COALESCE(CAST(k.uses_tc AS INTEGER), 0) AS uses_tc
         FROM read_parquet('{kernels_parquet}') k
@@ -2044,13 +2119,16 @@ def _stream_thread_kernels(cur, kernels_parquet: str, runtime_parquet: str, tid)
         """,
         [tid],
     ):
-        cols = [batch.column(i).to_pylist() for i in range(7)]
-        r_starts, r_ends, k_starts, k_ends, names, elig, used = cols
+        cols = [batch.column(i).to_pylist() for i in range(9)]
+        r_starts, r_ends, k_starts, k_ends, names, graph_nodes, graph_ids, elig, used = cols
         for i, name in enumerate(names):
             shared = pool.get(name)
             if shared is None:
                 shared = pool[name] = name
-            yield r_starts[i], r_ends[i], k_starts[i], k_ends[i], shared, elig[i], used[i]
+            yield (
+                r_starts[i], r_ends[i], k_starts[i], k_ends[i], shared,
+                graph_nodes[i], graph_ids[i], elig[i], used[i],
+            )
 
 
 def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
@@ -2064,7 +2142,7 @@ def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
     column in ``TestStreamedSweep.test_both_map_writers_emit_the_same_columns``
     (tests/test_parquet_cache.py); nothing else catches a divergence, because
     the row-for-row oracle in that class compares the *cached* map against
-    ``_sweep_nvtx_kernel_map``'s rows and never calls this function. All nine
+    ``_sweep_nvtx_kernel_map``'s rows and never calls this function. All eleven
     columns are
     emitted, including ``is_tc_eligible``/``uses_tc``: consumers probe for those
     two by presence (``connection.cached_nvtx_map_has_embedded_tc``), so a map
@@ -2085,6 +2163,8 @@ def _nvtx_map_arrow_tables(results: list[dict]) -> tuple[pa.Table, pa.Table]:
             "k_start": pa.array([r["k_start"] for r in results], pa.int64()),
             "k_end": pa.array([r["k_end"] for r in results], pa.int64()),
             "k_dur_ns": pa.array([r["k_dur_ns"] for r in results], pa.int64()),
+            "graph_node_id": pa.array([r.get("graph_node_id") for r in results], pa.int64()),
+            "graph_id": pa.array([r.get("graph_id") for r in results], pa.int64()),
             "is_tc_eligible": pa.array([r.get("is_tc_eligible", 0) for r in results], pa.int32()),
             "uses_tc": pa.array([r.get("uses_tc", 0) for r in results], pa.int32()),
         }
@@ -2197,7 +2277,7 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
 
     kr_by_tid: dict[int, list[tuple]] = defaultdict(list)
     for r in kr_rows:
-        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5]))
+        kr_by_tid[r[0]].append((r[1], r[2], r[3], r[4], r[5], *r[6:]))
 
     results: list[dict] = []
     for tid, kr_list in kr_by_tid.items():
@@ -2205,7 +2285,17 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
         if not nvtx_list:
             continue
         kr_list.sort(key=lambda x: x[0])
-        for text, depth, path, name, k_start, k_end, dur in _attribute_thread(kr_list, nvtx_list):
+        for attributed in _attribute_thread(kr_list, nvtx_list):
+            text, depth, path, name, k_start, k_end, dur, *extra = attributed
+            # Direct callers historically supplied only the six identifying
+            # fields. Accept that shape, the old ``(elig, used)`` extension,
+            # and the graph-aware ``(node, graph, elig, used)`` shape.
+            graph_node_id = graph_id = None
+            is_tc_eligible = uses_tc = 0
+            if len(extra) >= 4:
+                graph_node_id, graph_id, is_tc_eligible, uses_tc = extra[:4]
+            elif len(extra) >= 2:
+                is_tc_eligible, uses_tc = extra[:2]
             results.append(
                 {
                     "nvtx_text": text,
@@ -2215,6 +2305,10 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
                     "k_start": k_start,
                     "k_end": k_end,
                     "k_dur_ns": dur,
+                    "graph_node_id": graph_node_id,
+                    "graph_id": graph_id,
+                    "is_tc_eligible": is_tc_eligible,
+                    "uses_tc": uses_tc,
                 }
             )
     return results
@@ -2222,11 +2316,11 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
 
 def _materialize_nvtx_kernel_map(db, results: list[dict]) -> None:
     """Create the ``nvtx_kernel_map`` + ``nvtx_path_dict`` tables on a
-    DuckDB connection from sweep ``results``. Emits the full 9-column
+    DuckDB connection from sweep ``results``. Emits the full 11-column
     cache-built schema, including the embedded ``is_tc_eligible``/``uses_tc``,
     so consumers take their map-only fast path (a TC-less map would force
     nvtx_layer_breakdown into a (start,end) kernels-join that double-counts
-    timestamp-colliding kernels). The nine columns are listed in
+    timestamp-colliding kernels). The eleven columns are listed in
     ``_nvtx_map_arrow_tables`` above, and again in the cached builder's
     ``_publish_nvtx_kernel_map_parquet``; the two lists are separate and
     ``TestStreamedSweep.test_both_map_writers_emit_the_same_columns`` is what
@@ -2633,9 +2727,21 @@ def _ensure_nvtx_kernel_map_in_memory(adapter, db) -> bool:
     tc_elig = _TC_ELIGIBLE_PATTERN
     lname = "lower(COALESCE(sd.value, ss.value, ''))"
     try:
+        kernel_columns = {
+            str(column).lower(): str(column)
+            for column in adapter.get_table_columns(kernel_table)
+        }
+    except DB_ERRORS:
+        kernel_columns = {}
+    graph_node_column = kernel_columns.get("graphnodeid") or kernel_columns.get("graph_node_id")
+    graph_id_column = kernel_columns.get("graphid") or kernel_columns.get("graph_id")
+    graph_node_expr = f'k."{graph_node_column}"' if graph_node_column else "NULL"
+    graph_id_expr = f'k."{graph_id_column}"' if graph_id_column else "NULL"
+    try:
         kr_rows = db.execute(
             f'SELECT r.globalTid, r.start, r."end", k.start, k."end", '
             f"COALESCE(sd.value, ss.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name, "
+            f"{graph_node_expr} AS graph_node_id, {graph_id_expr} AS graph_id, "
             f"CAST(CASE WHEN regexp_matches({lname}, {tc_elig}) "
             f"OR regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS is_tc_eligible, "
             f"CAST(CASE WHEN regexp_matches({lname}, {tc_active}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc "
@@ -2659,14 +2765,9 @@ def _ensure_nvtx_kernel_map_in_memory(adapter, db) -> bool:
         log.debug("ensure_nvtx_kernel_map: source fetch failed (%s)", exc)
         return False
 
-    # Per-kernel TC flags (by k_start, k_end, name) to attach after the
-    # name-agnostic sweep, which only reads the first six fields.
-    tc_by_kernel = {(r[3], r[4], r[5]): (r[6], r[7]) for r in kr_rows}
+    # The name-agnostic sweep carries graph IDs and TC flags through its
+    # optional tail, so no second lookup is needed after attribution.
     results = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
-    for r in results:
-        r["is_tc_eligible"], r["uses_tc"] = tc_by_kernel.get(
-            (r["k_start"], r["k_end"], r["kernel_name"]), (0, 0)
-        )
     # Materialize even when empty: the existence check then passes and consumers
     # take the (empty) map path rather than re-entering the hanging IEJoin.
     with _CATALOG_DDL_LOCK:

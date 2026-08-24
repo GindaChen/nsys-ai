@@ -68,10 +68,27 @@ Enable with: `--cudabacktrace=all --python-backtrace=cuda`
 
 | Table | Key Columns |
 |-------|-------------|
-| `CUPTI_ACTIVITY_KIND_KERNEL` | `demangledName`→StringIds, `start`, `end`, `streamId`, `deviceId`, `gridX/Y/Z`, `blockX/Y/Z` |
+| `CUPTI_ACTIVITY_KIND_KERNEL` | `demangledName`→StringIds, `start`, `end`, `streamId`, `deviceId`, `gridX/Y/Z`, `blockX/Y/Z`, optional `graphNodeId`/`graphId` |
 | `CUPTI_ACTIVITY_KIND_RUNTIME` | `nameId`→StringIds, `start`, `end`, `correlationId`, `globalTid` |
 | `CUPTI_ACTIVITY_KIND_MEMCPY` | `copyKind`, `bytes`, `start`, `end`, `srcKind`, `dstKind` |
 | `CUPTI_ACTIVITY_KIND_MEMSET` | `bytes`, `start`, `end`, `value` |
+
+### CUDA Graph attribution
+
+Recent Nsight Systems exports may include `CUDA_GRAPH_EVENTS`,
+`CUDA_GRAPH_NODE_EVENTS`, and graph identifiers on kernel rows. When
+`graphNodeId` or `graphId` is present, nsys-ai exposes the normalized
+`graph_node_id` and `graph_id` fields through kernel and NVTX attribution
+results. The launch skills retain per-kernel/node counts but charge one shared
+CUDA launch API interval once, so a single graph replay is not mistaken for a
+separate host launch for every node.
+
+These tables and columns are optional. Older captures, or captures without
+CUDA Graph tracing, keep the normal kernel analysis path and report graph
+attribution as unavailable rather than inferring it. A graph-node metadata
+table without kernel timing rows is not sufficient to manufacture kernel
+attribution; use a capture that includes `CUPTI_ACTIVITY_KIND_KERNEL` for
+kernel-level diagnosis.
 
 ## Skipped CUDA Functions
 
