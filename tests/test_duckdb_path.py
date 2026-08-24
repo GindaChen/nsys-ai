@@ -277,6 +277,11 @@ class TestDuckDBCompatibilityFixes:
 
         assert [row["tid"] for row in rows] == [100, 200]
         assert [float(row["cpu_pct"]) for row in rows] == [75.0, 25.0]
+        # The ranked-CTE rewrite replaced a correlated subquery, so the name it
+        # resolves is the half most likely to regress silently. 200 has no
+        # ThreadNames row, which is what the LEFT JOIN is for. The name itself is
+        # whatever string id 24 holds in the shared fixture.
+        assert [row["thread_name"] for row in rows] == ["cudaLaunchKernel", None]
 
     def test_thread_utilization_sqlite_compatibility(self):
         """The DuckDB fix must preserve the SQLite execution path."""
@@ -297,6 +302,30 @@ class TestDuckDBCompatibilityFixes:
 
             assert [row["tid"] for row in rows] == [100, 200]
             assert [float(row["cpu_pct"]) for row in rows] == [75.0, 25.0]
+            assert [row["thread_name"] for row in rows] == ["worker-a", "worker-b"]
+        finally:
+            conn.close()
+
+    def test_thread_utilization_picks_the_lowest_name_id_for_a_multi_named_thread(self):
+        """A thread can carry several names. The window function replaced an
+        explicit ORDER BY ... LIMIT 1, and nothing pinned which name wins."""
+        from nsys_ai.skills.registry import get_skill
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+                CREATE TABLE ThreadNames (globalTid INTEGER, nameId INTEGER);
+                INSERT INTO StringIds VALUES (2, 'chosen'), (5, 'later'), (9, 'latest');
+                INSERT INTO ThreadNames VALUES (100, 9), (100, 2), (100, 5);
+                """
+            )
+            self._seed_thread_utilization(conn)
+            rows = get_skill("thread_utilization").execute(conn)
+
+            assert rows[0]["tid"] == 100
+            assert rows[0]["thread_name"] == "chosen"
         finally:
             conn.close()
 
