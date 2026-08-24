@@ -23,19 +23,44 @@ from typing import Any, TextIO
 from .artifact_root import profile_root
 from .exceptions import NsysAiError
 from .profile_runner import LocalProfileRunner, RunProgress, RunStatus
-from .runspec import EnvironmentSpec, NsysTraceOptions, RunSpec, RunSpecError
+from .runspec import (
+    EnvironmentSpec,
+    NsysTraceOptions,
+    RunSpec,
+    RunSpecError,
+    normalize_pytorch_modes,
+)
 
 _PROBE_TIMEOUT_SECONDS = 10
 _GIT_TIMEOUT_SECONDS = 3
 _TRACE_HEADER_RE = re.compile(r"^\s*(?:-t,\s*)?--trace=")
 _OPTION_HEADER_RE = re.compile(r"^\s*(?:-[A-Za-z],\s*)?--[A-Za-z0-9-]+(?:=|<)")
 _QUOTED_VALUE_RE = re.compile(r"'([^']+)'")
+_PYTORCH_HEADER_RE = re.compile(r"^\s*(?:-[A-Za-z],\s*)?--pytorch(?:=|\s|$)", re.MULTILINE)
 
 
 class ProfileCommandError(NsysAiError):
     """The public profiling command could not build or execute its plan."""
 
     error_code = "PROFILE_COMMAND_FAILED"
+
+
+def parse_pytorch_modes(value: str | None) -> tuple[str, ...]:
+    """Split the ``--pytorch`` CLI value and validate it with the RunSpec rules.
+
+    The rules live in RunSpec so there is one copy of them, but its messages name
+    the persisted field. Someone who typed ``--pytorch`` should be told about
+    ``--pytorch``, which is what ``--trace`` and ``--sample`` already do.
+    """
+    if value is None:
+        return ()
+    modes = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not modes:
+        raise ProfileCommandError("--pytorch requires at least one mode")
+    try:
+        return normalize_pytorch_modes(modes, label="--pytorch")
+    except RunSpecError as exc:
+        raise ProfileCommandError(str(exc)) from exc
 
 
 def normalize_workload(tokens: Sequence[str]) -> tuple[str, ...]:
@@ -108,6 +133,41 @@ def detect_supported_trace_domains(nsys_executable: str) -> tuple[str, ...]:
             f"nsys trace capability probe failed with exit code {completed.returncode}"
         )
     return parse_supported_trace_domains(completed.stdout + "\n" + completed.stderr)
+
+
+def parse_pytorch_support(help_text: str) -> bool:
+    """Report whether this nsys advertises the ``--pytorch`` option."""
+    return _PYTORCH_HEADER_RE.search(help_text) is not None
+
+
+def detect_pytorch_support(nsys_executable: str) -> bool:
+    """Run the bounded PyTorch-annotation capability probe.
+
+    ``nsys`` has no ``--help=pytorch`` tag, so this reads the full profile help.
+    Only called when ``--pytorch`` was actually requested, so the ordinary
+    capture path spawns no extra process.
+    """
+    try:
+        completed = subprocess.run(  # nosec B603
+            [nsys_executable, "profile", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProfileCommandError(
+            f"nsys pytorch capability probe timed out after {_PROBE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise ProfileCommandError(
+            f"nsys pytorch capability probe could not start: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise ProfileCommandError(
+            f"nsys pytorch capability probe failed with exit code {completed.returncode}"
+        )
+    return parse_pytorch_support(completed.stdout + "\n" + completed.stderr)
 
 
 def select_trace_domains(
@@ -322,8 +382,9 @@ def _dry_run_payload(
     workload: Sequence[str],
     environment: EnvironmentSpec,
     trace: Sequence[str],
+    pytorch: Sequence[str],
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "mode": "dry-run",
         "nsys_executable": nsys_executable,
         "output": str(output),
@@ -335,6 +396,10 @@ def _dry_run_payload(
         "environment_policy": environment.policy,
         "trace": list(trace),
     }
+    # Present only when asked for, so an unchanged invocation keeps its output.
+    if pytorch:
+        payload["pytorch"] = list(pytorch)
+    return payload
 
 
 def run_profile_command(
@@ -348,6 +413,7 @@ def run_profile_command(
     """Execute the public command and return its documented process exit code."""
     working_directory = (cwd or Path.cwd()).resolve()
     workload = normalize_workload(args.workload)
+    pytorch = parse_pytorch_modes(args.pytorch)
     environment = parse_environment(args.public_env, args.secret_env)
     environment = EnvironmentSpec(
         policy=args.env_policy,
@@ -362,6 +428,14 @@ def run_profile_command(
         supported,
         warning=lambda message: print(f"Warning: {message}", file=stderr),
     )
+    if pytorch and not detect_pytorch_support(nsys_executable):
+        # An unsupported --trace domain is refused before anything launches; without
+        # this, an unsupported --pytorch costs a whole workload run and surfaces only
+        # as "nsys returned non-zero" plus a log path.
+        raise ProfileCommandError(
+            f"{nsys_executable} does not support --pytorch; "
+            "annotate the workload with torch.cuda.nvtx, or upgrade Nsight Systems"
+        )
 
     if args.dry_run:
         print(
@@ -372,6 +446,7 @@ def run_profile_command(
                     workload=workload,
                     environment=environment,
                     trace=trace,
+                    pytorch=pytorch,
                 ),
                 sort_keys=True,
             ),
@@ -401,6 +476,7 @@ def run_profile_command(
             cpuctxsw=args.cpuctxsw,
             capture_range=args.capture_range,
             cuda_memory_usage=args.cuda_memory_usage,
+            pytorch=pytorch,
         ),
         timeout_seconds=args.timeout,
     )

@@ -508,3 +508,96 @@ def test_output_path_is_operational_not_persisted_or_comparable():
     assert left != right
     assert "/tmp/left" not in spec.canonical_json_bytes().decode("utf-8")
     assert "/tmp/right" not in json.dumps(spec.compatibility_payload())
+
+
+# ── nsys --pytorch annotation modes ────────────────────────────────────────
+
+
+def _minimal_spec(**trace_overrides):
+    return RunSpec(
+        argv=("python", "train.py"),
+        cwd=".",
+        environment=EnvironmentSpec(policy="inherit"),
+        trace_options=NsysTraceOptions(**trace_overrides),
+    )
+
+
+def test_pytorch_is_unset_by_default_and_changes_neither_argv_nor_identity():
+    """emit_nvtx costs overhead, so it is opt-in — and asking for nothing must
+    reproduce the pre-existing argv and compatibility key exactly."""
+    spec = _minimal_spec()
+
+    assert spec.trace_options.pytorch == ()
+    assert "pytorch" not in spec.trace_options.to_dict()
+    assert not any(token.startswith("--pytorch") for token in build_nsys_profile_argv(spec, "/tmp/o"))
+    assert spec.compatibility_key() == (
+        "runspec1:sha256:"
+        "b8d2b93c405c14419ef1bc2fbfb5da92a6f535cafd78588519fbce25405d0c73"
+    )
+
+
+def test_pytorch_mode_reaches_the_argv():
+    spec = _minimal_spec(pytorch=("autograd-nvtx",))
+
+    assert "--pytorch=autograd-nvtx" in build_nsys_profile_argv(spec, "/tmp/o")
+
+
+def test_pytorch_combines_one_autograd_mode_with_one_functions_mode():
+    options = NsysTraceOptions(pytorch=("functions-trace", "autograd-nvtx"))
+
+    assert options.pytorch == ("autograd-nvtx", "functions-trace")
+    spec = _minimal_spec(pytorch=("functions-trace", "autograd-nvtx"))
+    assert "--pytorch=autograd-nvtx,functions-trace" in build_nsys_profile_argv(spec, "/tmp/o")
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        ("autograd-nvtx", "autograd-shapes-nvtx"),
+        ("functions-trace", "functions-trace-shapes"),
+        ("none", "autograd-nvtx"),
+        ("autograd-nvtx", "autograd-nvtx"),
+        ("emit-nvtx",),
+    ],
+)
+def test_pytorch_rejects_combinations_nsys_would_reject(modes):
+    with pytest.raises(RunSpecError):
+        NsysTraceOptions(pytorch=modes)
+
+
+def test_pytorch_rejects_a_comma_joined_string():
+    """nsys spells it 'a,b'; the spec spells it as an array, so say so rather than
+    silently treating the whole string as one unknown mode."""
+    with pytest.raises(RunSpecError):
+        NsysTraceOptions(pytorch="autograd-nvtx,functions-trace")
+
+
+def test_pytorch_none_means_unset():
+    assert NsysTraceOptions(pytorch=("none",)).pytorch == ()
+    assert "pytorch" not in NsysTraceOptions(pytorch=("none",)).to_dict()
+
+
+def test_pytorch_round_trips_through_to_dict_and_from_dict():
+    options = NsysTraceOptions(pytorch=("autograd-shapes-nvtx", "functions-trace"))
+
+    assert NsysTraceOptions.from_dict(options.to_dict()).pytorch == options.pytorch
+
+
+def test_trace_options_written_before_pytorch_existed_still_load():
+    legacy = {
+        "trace": ["cuda", "nvtx"],
+        "sample": "none",
+        "cpuctxsw": "none",
+        "capture_range": "none",
+        "cuda_memory_usage": False,
+        "discard_environment": True,
+    }
+
+    assert NsysTraceOptions.from_dict(legacy).pytorch == ()
+
+
+def test_requesting_pytorch_changes_the_compatibility_key():
+    """Two runs that annotate differently are not the same capture."""
+    assert _minimal_spec().compatibility_key() != _minimal_spec(
+        pytorch=("autograd-nvtx",)
+    ).compatibility_key()

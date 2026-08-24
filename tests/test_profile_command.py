@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from nsys_ai import profile_command
 from nsys_ai.profile_command import (
     ProfileCommandError,
     discover_git_provenance,
     normalize_workload,
     parse_environment,
+    parse_pytorch_support,
     parse_supported_trace_domains,
     run_profile_command,
     select_trace_domains,
@@ -48,6 +50,16 @@ if sys.argv[1:] == ['profile', '--help=trace']:
     --trace-fork-before-exec=
        Possible values are 'true' or 'false'.
     """)
+    sys.exit(0)
+
+if sys.argv[1:] == ['profile', '--help']:
+    # The capability surface the real nsys advertises. FAKE_NO_PYTORCH models an
+    # Nsight old enough to predate the option.
+    print("usage: nsys profile\n")
+    print("\t--sample=\n\t   Possible values are 'none'.\n")
+    if not os.environ.get('FAKE_NO_PYTORCH'):
+        print("\t--pytorch=\n\t   Possible values are 'autograd-nvtx' or 'none'.\n")
+    print("\t--cuda-memory-usage=\n\t   Possible values are 'true' or 'false'.")
     sys.exit(0)
 
 if sys.argv[1] == 'profile':
@@ -109,6 +121,7 @@ def _args(fake_nsys, output, **overrides):
         "cpuctxsw": "none",
         "capture_range": "none",
         "cuda_memory_usage": False,
+        "pytorch": None,
         "timeout": None,
     }
     values.update(overrides)
@@ -668,3 +681,188 @@ def test_existing_bare_profile_shortcut_remains_viewer_routed():
         "timeline-web",
         "profile.sqlite",
     ]
+
+
+def test_pytorch_flag_reaches_the_nsys_command_line_and_the_runspec(tmp_path, fake_nsys):
+    """An un-annotated PyTorch repo gets NVTX from nsys itself, with no source edit."""
+    output = tmp_path / "artifacts"
+
+    result = _run_cli(
+        tmp_path,
+        "profile",
+        "--nsys",
+        str(fake_nsys),
+        "--output",
+        str(output),
+        "--pytorch",
+        "autograd-nvtx,functions-trace",
+        "--",
+        "train.py",
+    )
+
+    assert result.returncode == 0, result.stderr
+    capture_argv = json.loads((output / "stdout.log").read_text())
+    assert "--pytorch=autograd-nvtx,functions-trace" in capture_argv
+    spec = RunSpec.from_json_bytes((output / "runspec.json").read_bytes())
+    assert spec.trace_options.pytorch == ("autograd-nvtx", "functions-trace")
+
+
+def test_capture_without_the_flag_asks_nsys_for_no_pytorch_annotation(tmp_path, fake_nsys):
+    output = tmp_path / "artifacts"
+
+    result = _run_cli(
+        tmp_path, "profile", "--nsys", str(fake_nsys), "--output", str(output), "--", "train.py"
+    )
+
+    assert result.returncode == 0, result.stderr
+    capture_argv = json.loads((output / "stdout.log").read_text())
+    assert not [token for token in capture_argv if token.startswith("--pytorch")]
+    spec = RunSpec.from_json_bytes((output / "runspec.json").read_bytes())
+    assert spec.trace_options.pytorch == ()
+    assert "pytorch" not in json.loads((output / "runspec.json").read_text())["trace_options"]
+
+
+def test_dry_run_reports_the_requested_pytorch_modes(tmp_path, fake_nsys):
+    stdout = io.StringIO()
+
+    exit_code = run_profile_command(
+        _args(fake_nsys, tmp_path / "dry", dry_run=True, pytorch="autograd-shapes-nvtx"),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        cwd=tmp_path,
+        runner_factory=lambda *_: pytest.fail("dry-run must not construct the runner"),
+    )
+
+    assert exit_code == 0
+    assert json.loads(stdout.getvalue())["pytorch"] == ["autograd-shapes-nvtx"]
+
+
+def test_dry_run_omits_pytorch_when_it_was_not_requested(tmp_path, fake_nsys):
+    stdout = io.StringIO()
+
+    run_profile_command(
+        _args(fake_nsys, tmp_path / "dry", dry_run=True),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        cwd=tmp_path,
+        runner_factory=lambda *_: pytest.fail("dry-run must not construct the runner"),
+    )
+
+    assert "pytorch" not in json.loads(stdout.getvalue())
+
+
+def test_an_unsupported_pytorch_mode_is_refused_before_anything_runs(tmp_path, fake_nsys):
+    with pytest.raises(ProfileCommandError):
+        run_profile_command(
+            _args(fake_nsys, tmp_path / "artifacts", pytorch="emit-nvtx"),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            runner_factory=lambda *_: pytest.fail("an invalid mode must not reach the runner"),
+        )
+
+
+def test_an_empty_pytorch_value_is_refused(tmp_path, fake_nsys):
+    with pytest.raises(ProfileCommandError):
+        run_profile_command(
+            _args(fake_nsys, tmp_path / "artifacts", pytorch=" , "),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            runner_factory=lambda *_: pytest.fail("an empty value must not reach the runner"),
+        )
+
+
+def _dry_run(fake_nsys, tmp_path, **overrides):
+    stdout = io.StringIO()
+    exit_code = run_profile_command(
+        _args(fake_nsys, tmp_path / "dry", dry_run=True, **overrides),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        cwd=tmp_path,
+        runner_factory=lambda *_: pytest.fail("dry-run must not construct the runner"),
+    )
+    return exit_code, stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "emit-nvtx",
+        "autograd-nvtx,autograd-shapes-nvtx",
+        "functions-trace,functions-trace-shapes",
+        "autograd-nvtx,autograd-nvtx",
+        "none,autograd-nvtx",
+    ],
+)
+def test_dry_run_refuses_what_the_real_capture_would_refuse(tmp_path, fake_nsys, value):
+    """--dry-run exists to show a plan before running it. Printing a plan that the
+    capture would reject, and exiting 0, is worse than not offering the flag."""
+    with pytest.raises(ProfileCommandError) as caught:
+        _dry_run(fake_nsys, tmp_path, pytorch=value)
+
+    # Someone who typed --pytorch is told about --pytorch, as --trace already does.
+    assert "--pytorch" in str(caught.value)
+    assert "trace_options" not in str(caught.value)
+
+
+def test_dry_run_reports_the_modes_in_the_order_the_runspec_records(tmp_path, fake_nsys):
+    """The plan has to be the plan: canonical order, not the order they were typed."""
+    _exit_code, out = _dry_run(fake_nsys, tmp_path, pytorch="functions-trace,autograd-nvtx")
+
+    assert json.loads(out)["pytorch"] == ["autograd-nvtx", "functions-trace"]
+
+
+def test_dry_run_treats_an_explicit_none_as_unset(tmp_path, fake_nsys):
+    _exit_code, out = _dry_run(fake_nsys, tmp_path, pytorch="none")
+
+    assert "pytorch" not in json.loads(out)
+
+
+def test_pytorch_support_is_read_from_the_option_block():
+    advertises = "usage: nsys profile\n\n\t--pytorch=\n\t   Possible values are 'autograd-nvtx'."
+    silent = "usage: nsys profile\n\n\t--sample=\n\t   Possible values are 'none'."
+
+    assert parse_pytorch_support(advertises) is True
+    assert parse_pytorch_support(silent) is False
+    # A mention inside another option's prose is not an option header.
+    assert parse_pytorch_support("   see --pytorch for details") is False
+    # nsys prints a short form for some options ("-t, --trace="); a future one here
+    # must not read as "unsupported" and refuse a capable Nsight.
+    assert parse_pytorch_support("\t-y, --pytorch=\n\t   Possible values are 'none'.") is True
+    # A longer option that merely starts with the same letters is a different option.
+    assert parse_pytorch_support("\t--pytorch-extra=\n") is False
+
+
+def test_an_nsys_without_pytorch_is_refused_before_the_workload_runs(
+    tmp_path, fake_nsys, monkeypatch
+):
+    """An unsupported --trace domain is refused up front. Without the same check,
+    an unsupported --pytorch costs a whole workload run and surfaces only as
+    "nsys returned non-zero" plus a path to a log."""
+    monkeypatch.setenv("FAKE_NO_PYTORCH", "1")
+
+    with pytest.raises(ProfileCommandError, match="does not support --pytorch"):
+        run_profile_command(
+            _args(fake_nsys, tmp_path / "artifacts", pytorch="autograd-nvtx"),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            cwd=tmp_path,
+            runner_factory=lambda *_: pytest.fail("an unsupported flag must not reach the runner"),
+        )
+
+
+def test_a_capture_without_the_flag_never_runs_the_pytorch_probe(
+    tmp_path, fake_nsys, monkeypatch
+):
+    """The probe reads the whole profile help, so it must stay off the default path."""
+
+    def refuse(_executable):
+        raise AssertionError("the pytorch probe ran for a capture that did not ask for it")
+
+    monkeypatch.setattr(profile_command, "detect_pytorch_support", refuse)
+
+    exit_code, out = _dry_run(fake_nsys, tmp_path)
+
+    assert exit_code == 0
+    assert "pytorch" not in json.loads(out)
