@@ -25,19 +25,30 @@ def _execute(conn: Any, *, limit: int = 10, **_kwargs):
         )
 
     sql = f"""\
+WITH total_cycles AS (
+    SELECT CASE
+               WHEN COALESCE(SUM(cpuCycles), 0) < 1 THEN 1
+               ELSE SUM(cpuCycles)
+           END AS total_cpu_cycles
+    FROM COMPOSITE_EVENTS
+), named_threads AS (
+    SELECT tn.globalTid,
+           s.value AS thread_name,
+           ROW_NUMBER() OVER (
+               PARTITION BY tn.globalTid ORDER BY tn.nameId ASC
+           ) AS name_rank
+    FROM ThreadNames tn
+    LEFT JOIN StringIds s ON s.id = tn.nameId
+)
 SELECT ce.globalTid % 0x1000000 AS tid,
-       (SELECT s.value FROM StringIds s
-        WHERE s.id = (SELECT tn.nameId FROM ThreadNames tn
-                      WHERE tn.globalTid = ce.globalTid
-                      -- A thread may carry several names; without an order the
-                      -- displayed one is whichever row the engine reaches first.
-                      ORDER BY tn.nameId ASC LIMIT 1)
-       ) AS thread_name,
-       ROUND(100.0 * SUM(ce.cpuCycles) / (
-           SELECT MAX(1, SUM(cpuCycles)) FROM COMPOSITE_EVENTS
-       ), 2) AS cpu_pct
+       nt.thread_name,
+       ROUND(100.0 * SUM(ce.cpuCycles) / total_cycles.total_cpu_cycles, 2)
+           AS cpu_pct
 FROM COMPOSITE_EVENTS ce
-GROUP BY ce.globalTid
+CROSS JOIN total_cycles
+LEFT JOIN named_threads nt
+       ON nt.globalTid = ce.globalTid AND nt.name_rank = 1
+GROUP BY ce.globalTid, nt.thread_name, total_cycles.total_cpu_cycles
 -- globalTid, not the masked tid: the mask can collide across processes.
 ORDER BY cpu_pct DESC, ce.globalTid ASC
 LIMIT {int(limit)}"""

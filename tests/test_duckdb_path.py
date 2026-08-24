@@ -6,6 +6,7 @@ Profile-like object with ``db=duckdb_conn`` and ``conn=None``.  Any code path
 that accidentally touches ``self.conn`` will crash here — which is the point.
 """
 
+import sqlite3
 import threading
 
 import duckdb
@@ -255,6 +256,49 @@ class TestDuckDBCompatibilityFixes:
         rows = skill.execute(bad_conn)
         assert is_abstention(rows)
         assert "CUPTI_ACTIVITY_KIND_MEMCPY" in rows[0]["reason"]
+
+    @staticmethod
+    def _seed_thread_utilization(conn):
+        """Create the sampled CPU table used by ``thread_utilization``."""
+        conn.execute(
+            "CREATE TABLE COMPOSITE_EVENTS (globalTid INTEGER, cpuCycles INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO COMPOSITE_EVENTS VALUES (?, ?)",
+            [(100, 3), (200, 1)],
+        )
+
+    def test_thread_utilization_duckdb_avoids_nested_aggregate(self, duckdb_conn):
+        """The CPU percentage query must bind on DuckDB's aggregate rules."""
+        from nsys_ai.skills.registry import get_skill
+
+        self._seed_thread_utilization(duckdb_conn)
+        rows = get_skill("thread_utilization").execute(duckdb_conn)
+
+        assert [row["tid"] for row in rows] == [100, 200]
+        assert [float(row["cpu_pct"]) for row in rows] == [75.0, 25.0]
+
+    def test_thread_utilization_sqlite_compatibility(self):
+        """The DuckDB fix must preserve the SQLite execution path."""
+        from nsys_ai.skills.registry import get_skill
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+                CREATE TABLE ThreadNames (globalTid INTEGER, nameId INTEGER);
+                INSERT INTO StringIds VALUES (1, 'worker-a'), (2, 'worker-b');
+                INSERT INTO ThreadNames VALUES (100, 1), (200, 2);
+                """
+            )
+            self._seed_thread_utilization(conn)
+            rows = get_skill("thread_utilization").execute(conn)
+
+            assert [row["tid"] for row in rows] == [100, 200]
+            assert [float(row["cpu_pct"]) for row in rows] == [75.0, 25.0]
+        finally:
+            conn.close()
 
     def _make_textid_db(self, nvtx_rows: list[tuple], string_rows: list[tuple]):
         """Return a minimal DuckDB connection with textId-based NVTX schema."""
