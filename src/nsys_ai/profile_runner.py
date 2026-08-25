@@ -13,6 +13,7 @@ import signal
 import sqlite3
 import stat
 import subprocess  # nosec B404
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -189,6 +190,21 @@ def _assert_profile_descriptor_unchanged(
         raise ProfileError("local profile changed during validation")
 
 
+def _descriptor_uri(descriptor: int) -> str:
+    """SQLite URI that reopens an already-validated descriptor by identity.
+
+    ``read_local_profile_under_guard`` pins ``descriptor`` to the inode it
+    vetted; handing SQLite the raw path instead would let the file be swapped
+    between validation and the read. Every OS exposes a live descriptor as a
+    path under a per-process fd directory, but the mount point differs: Linux
+    uses ``/proc/self/fd``, while macOS and the BSDs use ``/dev/fd`` (and on
+    Linux ``/dev/fd`` is itself a symlink to ``/proc/self/fd``, so the two agree
+    there). The read stays bound to the vetted inode either way.
+    """
+    fd_dir = "/proc/self/fd" if sys.platform.startswith("linux") else "/dev/fd"
+    return f"file:{fd_dir}/{descriptor}?mode=ro&immutable=1"
+
+
 def read_local_profile_under_guard(
     path: str | os.PathLike[str],
     *,
@@ -285,7 +301,7 @@ def read_local_profile_under_guard(
     schema_version = None
     product_version = None
     try:
-        descriptor_uri = f"file:/proc/self/fd/{descriptor}?mode=ro&immutable=1"
+        descriptor_uri = _descriptor_uri(descriptor)
         connection = sqlite3.connect(
             descriptor_uri,
             uri=True,
