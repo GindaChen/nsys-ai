@@ -210,6 +210,42 @@ def test_capture_environment_guard_allows_machine_metadata(tmp_path):
     )
 
 
+def test_descriptor_uri_targets_the_platform_fd_directory(monkeypatch):
+    """The guarded read reopens the vetted descriptor by identity, and the fd
+    directory that exposes it is Linux-only (``/proc/self/fd``) versus
+    ``/dev/fd`` on macOS/BSD. Pin both so the non-Linux branch cannot be
+    silently dropped by a refactor that only ever runs on Linux CI.
+    """
+    import nsys_ai.profile_runner as profile_runner
+
+    monkeypatch.setattr(profile_runner.sys, "platform", "linux")
+    assert (
+        profile_runner._descriptor_uri(7)
+        == "file:/proc/self/fd/7?mode=ro&immutable=1"
+    )
+    monkeypatch.setattr(profile_runner.sys, "platform", "darwin")
+    assert (
+        profile_runner._descriptor_uri(7) == "file:/dev/fd/7?mode=ro&immutable=1"
+    )
+
+
+def test_guarded_read_opens_the_capture_on_non_linux(
+    tmp_path, fake_nsys, monkeypatch
+):
+    """Forcing the non-Linux branch must open a real capture, not just format a
+    string. ``/dev/fd`` is a symlink to ``/proc/self/fd`` on Linux, so this
+    exercises the macOS descriptor path on Linux CI as well as on macOS.
+    """
+    import nsys_ai.profile_runner as profile_runner
+
+    monkeypatch.setattr(profile_runner.sys, "platform", "darwin")
+    result = _run(tmp_path, fake_nsys)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.profile is not None
+    assert result.profile.kernel_count == 1
+
+
 def test_success_returns_validated_reference_and_artifacts(tmp_path, fake_nsys):
     stages = []
     runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
@@ -810,5 +846,9 @@ def test_the_capture_is_opened_once_for_reference_and_gpu_count(tmp_path, fake_n
     monkeypatch.setattr(profile_runner.sqlite3, "connect", _record)
     profile_runner.read_local_profile_under_guard(result.sqlite_path)
 
-    by_path = [target for target in opened if not target.startswith("file:/proc/self/fd/")]
+    # The guard reopens the vetted descriptor through the platform's per-process
+    # fd directory: /proc/self/fd on Linux, /dev/fd on macOS/BSD. Anything else
+    # is a by-path reopen outside the swap guard.
+    guarded_prefixes = ("file:/proc/self/fd/", "file:/dev/fd/")
+    by_path = [target for target in opened if not target.startswith(guarded_prefixes)]
     assert not by_path, f"the capture was reopened outside the descriptor guard: {by_path}"
