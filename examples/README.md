@@ -11,14 +11,21 @@ Hands-on examples for getting started with nsys-ai. Each example includes a down
 | 10 | [FastVideo Inference](example-10-fastvideo-inference/) | Inference (video generation) | 4× H100 | ⭐⭐ Intermediate |
 | 20 | [Megatron-LM DistCA](example-20-megatron-distca/) | Training (Transformer Engine) | 8× H200 | ⭐⭐⭐ Advanced |
 
-## Quick Start (Example 10)
+## Quick Start (Example 20)
+
+Example 20 is the one whose capture is published, so it runs end to end today.
+It downloads a `.nsys-rep`, so Nsight Systems must be on your `PATH` — nsys-ai
+converts the capture by shelling out to `nsys export`:
 
 ```bash
 pip install nsys-ai
-cd example-10-fastvideo-inference
+cd example-20-megatron-distca
 python download_data.py
-nsys-ai timeline output/fastvideo-wan21-1.3b-4gpu.sqlite --gpu 0
+nsys-ai open output/megatron_distca.nsys-rep
 ```
+
+Example 10 has no profile on HuggingFace yet; its download step fails until one
+is uploaded, or until you capture your own with the Modal script it documents.
 
 ## Adding New Examples
 

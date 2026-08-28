@@ -31,7 +31,7 @@ use a Parquet cache by default; `.sqlite` remains the compatibility path.
 ![nsys-ai timeline viewer](https://raw.githubusercontent.com/GindaChen/nsys-ai/main/docs/images/timeline-web.png)
 
 The screenshot is captured from the committed H100 fixture; the other browser
-surfaces are shown in [Choosing a Web viewer](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md).
+surfaces are shown in [Choosing a viewer](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/viewers.md).
 
 ## Installation
 
@@ -97,11 +97,13 @@ nsys-ai info my_training.nsys-rep
 nsys-ai summary my_training.nsys-rep --gpu 0
 ```
 
-Prefer the terminal? The TUIs work the same way:
+Prefer the terminal? `open --viewer tui` needs no window; the dedicated TUI
+commands render one window at a time, so they require `--trim`:
 
 ```bash
-nsys-ai timeline my_training.nsys-rep --gpu 0   # Perfetto-style horizontal timeline
-nsys-ai tui my_training.nsys-rep --gpu 0        # NVTX tree browser
+nsys-ai open my_training.nsys-rep --viewer tui              # NVTX tree browser, full span
+nsys-ai timeline my_training.nsys-rep --gpu 0 --trim 0 5    # Perfetto-style horizontal timeline
+nsys-ai tui my_training.nsys-rep --gpu 0 --trim 0 5         # NVTX tree browser, explicit window
 ```
 
 ### 3. Compare two runs
@@ -138,8 +140,12 @@ required. This is the default view when you run `nsys-ai <profile>`.
 
 ```bash
 nsys-ai my_training.nsys-rep                       # opens in your browser
-nsys-ai timeline-web my_training.nsys-rep --gpu 0 1 2 3
+nsys-ai timeline-web my_training.nsys-rep          # every GPU in the capture
+nsys-ai timeline-web my_training.nsys-rep --gpu 0  # restrict to one device
 ```
+
+`--gpu` takes a single device id. The stacked multi-GPU view is what you get by
+omitting it, not by listing several.
 
 - Multi-GPU stacked view with color-coded separators
 - Progressive rendering — pre-builds the NVTX tree at startup, then serves tiles
@@ -305,10 +311,14 @@ Run `nsys-ai <command> --help` for flags.
 
 ## Analysis cache
 
-The first command run against a profile builds a `<profile>.nsys-cache` directory
-next to it: the tables analysis needs, exported to Parquet and queried through
-DuckDB. Later commands reuse it and open in well under a second. The cache is
-rebuilt automatically when the profile changes; deleting the directory is safe.
+The first command run against a profile builds a Parquet working set next to it:
+the tables analysis needs, queried through DuckDB. Which directory appears
+depends on what you handed in — a `.sqlite` gets a `<profile>.nsys-cache` query
+cache beside it, while a `.nsys-rep` is converted once into `<profile>.parquetdir`
+and read from there. Later commands reuse either and open in well under a second.
+Both are rebuilt automatically when the profile changes; deleting the directory
+is safe. See [profile inputs](https://github.com/GindaChen/nsys-ai/blob/main/docs/user/profile-inputs.md)
+for the full table.
 
 Measured on the reference captures (12 cores, 15 GB RAM), running eight skills:
 `top_kernels`, `gpu_idle_gaps`, `overlap_breakdown`, `memory_transfers`,

@@ -1,14 +1,25 @@
-# Choosing a Web viewer
+# Choosing a viewer
 
-nsys-ai has three browser surfaces with similar names but different jobs. They
-all run locally and accept the same profile inputs; choose the surface that
-matches the question rather than starting every server.
+nsys-ai has one entry point and five surfaces behind it. They all run locally
+and accept the same profile inputs; choose the surface that matches the question
+rather than starting every server.
+
+Start with `open` when you do not yet know which surface you want:
+
+| Command | What it shows | Use it when |
+|---|---|---|
+| `nsys-ai open PROFILE` | The `web` viewer, browser launched for you | You just want to look at a capture and have no reason to pick |
+| `nsys-ai open PROFILE --viewer tui` | The NVTX tree TUI over the full span | You are on a remote shell, or a browser is not worth starting |
+
+The named surfaces, when the question is already specific:
 
 | Command | What it shows | Use it when |
 |---|---|---|
 | `nsys-ai web PROFILE` | NVTX tree viewer with lazy tree requests | You want to browse nested ranges and the kernels attributed to them |
 | `nsys-ai timeline-web PROFILE` | Progressive multi-GPU horizontal timeline | You want streams, kernels, NVTX lanes, search, and a session-backed workflow |
 | `nsys-ai diff-web BEFORE AFTER` | Before/after comparison shell with two timeline views | You want to inspect a change and its canonical diff side by side |
+| `nsys-ai tui PROFILE --gpu N --trim START_S END_S` | NVTX tree TUI | You want the tree in the terminal and already know the window |
+| `nsys-ai timeline PROFILE --trim START_S END_S` | Horizontal timeline TUI | You want the timeline in the terminal and already know the window |
 
 The commands are separate transports over the same profile and diff contracts.
 The older `nsys-ai perfetto` server is not one of the choices; use
@@ -90,6 +101,23 @@ CLI or the session loop rather than treating a browser colour as the decision.
 
 `--gpu` restricts both sides to one device. Without it, the comparison remains
 all-GPU, matching `nsys-ai diff`.
+
+## Terminal viewers: `tui` and `timeline`
+
+Both render one window at a time rather than streaming tiles, so both require
+`--trim`; `tui` also requires `--gpu`. They do not appear in the `nsys-ai --help`
+command table — they are listed under its `also available:` footer, along with
+the other text-report commands.
+
+```console
+$ nsys-ai tui PROFILE.sqlite --gpu 0 --trim 39 42
+$ nsys-ai timeline PROFILE.sqlite --gpu 0 --trim 39 42
+```
+
+`nsys-ai open PROFILE --viewer tui` is the same tree browser without the window
+arguments: it resolves the full profile span and the first GPU for you. Reach for
+the explicit commands when you want a specific window, and for `timeline-web`
+when the capture spans more GPUs than one terminal can usefully show.
 
 ## Shared operational rules
 

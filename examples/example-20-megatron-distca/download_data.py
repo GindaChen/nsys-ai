@@ -3,11 +3,13 @@
 Download the Megatron-LM DistCA profile from HuggingFace.
 
 Dataset: https://huggingface.co/datasets/GindaChen/nsys-hero
-Profile: distca-0/baseline.t128k.host-fs-mbz-gpu-899.sqlite
-         → saved locally as output/megatron_distca.sqlite
+Profile: distca-0/baseline.t128k.host-fs-mbz-gpu-899.nsys-rep
+         → saved locally as output/megatron_distca.nsys-rep
 
-Downloads the pre-converted .sqlite file so you can immediately use nsys-ai
-without needing nsys or Modal installed.
+Prefers a pre-converted .sqlite when the dataset carries one, and falls back to
+the .nsys-rep otherwise. The dataset currently publishes only the .nsys-rep, so
+the fallback is the normal path -- which means Nsight Systems has to be on PATH,
+because nsys-ai converts a .nsys-rep by shelling out to `nsys export`.
 """
 
 import os

@@ -243,14 +243,18 @@ session and analysis contracts.
 Replace the executable in scripts and documentation:
 
 ```console
-$ nsys-ai tui PROFILE
+$ nsys-ai tui PROFILE --gpu 0 --trim START_S END_S
 ```
 
 For the horizontal timeline mode, use:
 
 ```console
-$ nsys-ai timeline PROFILE
+$ nsys-ai timeline PROFILE --trim START_S END_S
 ```
+
+Both render one window rather than streaming tiles, so `--trim` is required on each and `--gpu` is
+required on `tui`. When you do not have a window in mind, `nsys-ai open PROFILE --viewer tui`
+resolves the full span and the first GPU for you.
 
 For browser automation or a remote workstation, use `timeline-web` instead. `nsys-ai open PROFILE`
 still opens the default Web viewer.
