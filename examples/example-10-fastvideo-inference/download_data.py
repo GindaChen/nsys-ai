@@ -66,7 +66,7 @@ def main():
         print()
         print("Next steps:")
         print(f"  nsys-ai info output/{SQLITE_FILE}")
-        print(f"  nsys-ai timeline output/{SQLITE_FILE} --gpu 0")
+        print(f"  nsys-ai timeline output/{SQLITE_FILE} --gpu 0 --trim 0 5")
     except Exception as e:
         print(f"✗ Download failed: {e}")
         print()

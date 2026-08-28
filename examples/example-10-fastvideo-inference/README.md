@@ -18,8 +18,10 @@ pip install nsys-ai
 python download_data.py
 ```
 
-> **Note:** This example requires a pre-captured profile. If none is available on HuggingFace yet,
-> you can capture your own using the Modal profiling script (requires Modal account + GPU access).
+> **Note:** This example requires a pre-captured profile, and one is not published on HuggingFace
+> yet — `download_data.py` will report the failure rather than produce a file. Capture your own with
+> the Modal profiling script below (requires a Modal account + GPU access), or start with
+> [example 20](../example-20-megatron-distca/), whose capture does download.
 
 ### Step 3: Explore the profile
 
@@ -30,11 +32,11 @@ nsys-ai info output/fastvideo_inference.sqlite
 # Kernel summary — see which kernels dominate inference
 nsys-ai summary output/fastvideo_inference.sqlite --gpu 0
 
-# NVTX tree — hierarchical view of the inference pipeline
-nsys-ai tree output/fastvideo_inference.sqlite --gpu 0
+# NVTX tree — hierarchical view of the inference pipeline (--gpu and --trim required)
+nsys-ai tree output/fastvideo_inference.sqlite --gpu 0 --trim 0 5
 
-# Interactive timeline TUI
-nsys-ai timeline output/fastvideo_inference.sqlite --gpu 0
+# Interactive timeline TUI (--trim required)
+nsys-ai timeline output/fastvideo_inference.sqlite --gpu 0 --trim 0 5
 ```
 
 ### Step 4: Web UI & Exports
@@ -43,8 +45,8 @@ nsys-ai timeline output/fastvideo_inference.sqlite --gpu 0
 # Web viewer
 nsys-ai web output/fastvideo_inference.sqlite --gpu 0
 
-# Perfetto trace
-nsys-ai perfetto output/fastvideo_inference.sqlite --gpu 0
+# Chrome Trace Event JSON — open the written file in ui.perfetto.dev
+nsys-ai export output/fastvideo_inference.sqlite --gpu 0 --trim 0 5 -o output/trace-export/
 ```
 
 ---

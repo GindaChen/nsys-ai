@@ -259,9 +259,13 @@ Check the result, not only the exit code:
 For a release that changes the optimization workflow, add the guided path:
 
 ```bash
-nsys-ai propose PROFILE --session SESSION_DIR --format json
-nsys-ai optimize PROFILE --session SESSION_DIR --format json
+nsys-ai propose --session SESSION_DIR --finding-id FINDING_ID
+nsys-ai optimize PROFILE --session SESSION_DIR --repo REPO_PATH
 ```
+
+Take `FINDING_ID` from the `diagnose` run above; `propose` selects one finding
+by its stable id and has no `--format` flag. `optimize` needs the repository it
+is allowed to change.
 
 ### 2.4 Surface and documentation checks
 
