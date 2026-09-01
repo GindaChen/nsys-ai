@@ -179,8 +179,12 @@ def format_report_markdown(data: dict, profile_path: str, trim: tuple[int, int])
         )
         lines.append("")
         lines.append(
-            f"Span: {t['span_ms']:.1f}ms | Compute: {t['compute_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%"
+            f"Span: {t['span_ms']:.1f}ms | Busy: {t['busy_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%"
         )
+        lines.append("")
+        # Both numbers, named for what they are. The sum exceeds the span when
+        # streams overlap, and the gap between the two is the overlap itself.
+        lines.append(f"Kernel time summed over streams: {t['compute_ms']:.1f}ms")
         lines.append("")
         lines.append("| % | Total ms | Count | Kernel |")
         lines.append("|---|----------|-------|-------|")
