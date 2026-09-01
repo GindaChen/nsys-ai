@@ -171,3 +171,45 @@ def test_a_formatter_that_renders_defaults_over_an_error_does_not_get_to(name):
     assert "no kernels found" in text
     assert "Device 9 is not present in this profile" in text
     assert "0.0ms" not in text
+
+
+def test_a_lone_data_row_with_an_empty_error_column_is_not_a_refusal():
+    """The column holding nothing is a result, not a refusal.
+
+    A skill can return one row whose ``error`` column is simply empty. Testing
+    for the key alone called that a refusal and printed ``: None`` over the
+    formatter's real output. The agent already reads these by truth rather than
+    by presence, so this does too.
+    """
+    recorder = _Recorder()
+    skill = _skill_with(recorder)
+
+    assert skill.format_rows([{"error": None, "gap_ns": 1}]) == "formatted"
+    assert recorder.called_with == [{"error": None, "gap_ns": 1}]
+    assert skill.format_rows([{"error": "", "gap_ns": 1}]) == "formatted"
+
+
+def test_a_structured_error_keeps_the_formatter_that_understands_it():
+    """``error`` is not always a sentence.
+
+    ``region_mfu`` returns ``{"code": ..., "message": ...}`` and renders the two
+    fields. Looking for ``str(mapping)`` in that output finds nothing, so the
+    check used to decide the formatter had ignored the error and replace a good
+    message with a raw dict repr.
+    """
+    row = {"error": {"code": "KERNEL_NOT_FOUND", "message": "no kernels in the region"}}
+
+    text = get_skill("region_mfu").format_rows([row])
+
+    assert text == "(MFU error: KERNEL_NOT_FOUND: no kernels in the region)"
+
+
+def test_a_structured_error_still_renders_when_no_formatter_handles_it():
+    """The fallback spells the mapping out rather than printing its repr."""
+    row = {"error": {"code": "KERNEL_NOT_FOUND", "message": "no kernels in the region"}}
+
+    text = get_skill("gpu_idle_gaps").format_rows([row])
+
+    assert "KERNEL_NOT_FOUND" in text
+    assert "no kernels in the region" in text
+    assert "{'code'" not in text

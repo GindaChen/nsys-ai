@@ -424,18 +424,35 @@ def _describe_event_type(adapter, event_type: int) -> str:
 def is_error_row(rows: list[dict] | None) -> bool:
     """True when *rows* is the single ``error`` row a skill returns to refuse.
 
-    Deliberately narrow. A skill's real results may well carry a per-row
-    ``error`` column, and truncating those to one rendered message would lose
-    the results — so only a lone row qualifies, which is the shape every
-    refusing skill in ``builtins/`` produces.
+    Deliberately narrow, in two ways. A skill's real results may well carry a
+    per-row ``error`` column, and truncating those to one rendered message would
+    lose the results — so only a lone row qualifies, which is the shape every
+    refusing skill in ``builtins/`` produces. And the column has to hold
+    something: a single data row with ``{"error": None}`` is a result whose error
+    column happens to be empty, not a refusal, which is the reading the agent
+    already takes when it tests ``row.get("error")`` for truth.
     """
     return (
         isinstance(rows, list)
         and len(rows) == 1
         and isinstance(rows[0], dict)
-        and "error" in rows[0]
+        and bool(rows[0].get("error"))
         and not is_abstention_row(rows[0])
     )
+
+
+def _error_signals(value) -> list[str]:
+    """Strings that identify *value* in rendered text.
+
+    An ``error`` is usually a sentence, but not always: ``region_mfu`` returns
+    ``{"code": ..., "message": ...}`` and its formatter renders the two fields
+    rather than the mapping. Matching on ``str(value)`` would miss that and
+    discard a better message than this module can write, so a mapping
+    contributes each of its scalar values instead of its repr.
+    """
+    if isinstance(value, dict):
+        return [str(v) for v in value.values() if isinstance(v, (str, int, float))]
+    return [str(value)]
 
 
 def _format_error(skill, row: dict) -> str:
@@ -445,7 +462,8 @@ def _format_error(skill, row: dict) -> str:
     the devices the profile does have, and that string never reached a reader
     while the formatters were crashing ahead of it.
     """
-    lines = [f"{skill.title}: {row['error']}"]
+    signals = [text for text in _error_signals(row["error"]) if text]
+    lines = [f"{skill.title}: {': '.join(signals) if signals else row['error']}"]
     hint = row.get("hint")
     if hint:
         lines += ["", str(hint)]
@@ -884,8 +902,10 @@ class Skill:
                 rendered = self.format_fn(rows)
             except (KeyError, IndexError, AttributeError, TypeError):
                 return _format_error(self, rows[0])
-            reason = str(rows[0].get("error", ""))
-            return rendered if reason and reason in rendered else _format_error(self, rows[0])
+            signals = [text for text in _error_signals(rows[0]["error"]) if text]
+            if any(text in rendered for text in signals):
+                return rendered
+            return _format_error(self, rows[0])
         return self.format_fn(rows)
 
     def run(self, conn: sqlite3.Connection, **kwargs) -> str:
