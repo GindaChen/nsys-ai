@@ -2140,14 +2140,20 @@ def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
     counting the summary among them made ``--max-rows 20`` on a 20-gap profile
     return 19 gaps.
 
-    A summary keeps its original position rather than being collected to one
-    end, because the skills disagree about where it goes: ``gpu_idle_gaps`` and
-    ``root_cause_matcher`` append theirs, while ``nccl_payload_breakdown`` and
-    ``nccl_compile_context_breakdown`` return ``[summary, *rows]`` and their
-    readers take ``rows[0]``. Relocating it would satisfy one convention by
-    breaking the other. The truncation marker goes after the last data row kept,
-    which leaves ``rows[0]`` a summary where it already was and ``rows[-1]`` a
-    summary where it already was.
+    A summary keeps its position relative to the data rather than being
+    collected to one end, because the skills disagree about where it goes:
+    ``gpu_idle_gaps`` and ``root_cause_matcher`` append theirs, while
+    ``nccl_payload_breakdown`` and ``nccl_compile_context_breakdown`` return
+    ``[summary, *rows]`` and their readers take ``rows[0]``. Relocating it would
+    satisfy one convention by breaking the other.
+
+    The truncation marker stays last, which is the one position already
+    promised: ``--max-rows``'s own help text says a final ``_truncated`` entry
+    is appended, and ``docs/user/skills.md`` says the same. An earlier revision
+    put the marker after the last data row so a trailing summary could stay at
+    ``rows[-1]``; that made the final element depend on the limit -- marker for
+    a positive one, but ``[summary, marker]`` at zero -- which is worse than
+    either convention, so the documented one wins.
     """
     if max_rows < 0:
         raise ValueError("--max-rows must be a non-negative integer")
@@ -2161,22 +2167,19 @@ def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
     # Convert to list to ensure we don't mutate an original view/tuple
     kept: list = []
     shown = 0
-    last_data_index = -1
     for row in rows:
         if _is_summary_row(row):
             kept.append(row)
         elif shown < max_rows:
             kept.append(row)
-            last_data_index = len(kept) - 1
             shown += 1
-    marker = {
-        "_truncated": True,
-        "_total_rows": total_data,
-        "_shown_rows": shown,
-    }
-    # With no data row kept there is no "after the data" to sit behind, so the
-    # marker goes last and a summary-first payload still reads at ``rows[0]``.
-    kept.insert(last_data_index + 1 if last_data_index >= 0 else len(kept), marker)
+    kept.append(
+        {
+            "_truncated": True,
+            "_total_rows": total_data,
+            "_shown_rows": shown,
+        }
+    )
     return kept
 
 

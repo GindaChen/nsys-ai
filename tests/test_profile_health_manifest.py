@@ -435,10 +435,10 @@ class TestMaxRowsTruncation:
         truncated = _apply_max_rows_truncation(rows, 3)
 
         assert summary in truncated
-        # Last, where an un-truncated result also puts it, so ``rows[-1]`` reads
-        # the same either way.
-        assert truncated[-1] is summary
-        assert truncated[-2]["_truncated"] is True
+        # The marker keeps the final slot its own help text promises, so a
+        # trailing summary sits just behind it.
+        assert truncated[-1]["_truncated"] is True
+        assert truncated[-2] is summary
 
     def test_the_summary_does_not_consume_the_row_budget(self):
         """Counting it among the data made --max-rows 20 return 19 findings."""
@@ -483,10 +483,33 @@ class TestMaxRowsTruncation:
         for limit in (0, 1, 3):
             truncated = _apply_max_rows_truncation(rows, limit)
             assert truncated[0] is summary, f"summary moved at --max-rows {limit}"
-            assert any(r.get("_truncated") for r in truncated)
+            assert truncated[-1]["_truncated"] is True
 
-    def test_the_marker_follows_the_data_it_describes(self):
-        """It sits after the last kept data row, not at a fixed end."""
+    def test_the_marker_is_last_whatever_the_limit_or_the_convention(self):
+        """One documented position, not one that moves with the limit.
+
+        ``--max-rows``'s help text and ``docs/user/skills.md`` both say a final
+        ``_truncated`` entry is appended. An earlier revision put it after the
+        last data row so a trailing summary could keep ``rows[-1]``, which made
+        the final element depend on the limit: the marker at ``--max-rows 3``
+        but ``[summary, marker]`` at 0. A consumer following either convention
+        misparsed one of those.
+        """
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "gap_count": 10}
+        data = [{"id": i} for i in range(10)]
+
+        for rows in ([summary] + data, data + [summary]):
+            for limit in (0, 1, 3):
+                truncated = _apply_max_rows_truncation(rows, limit)
+                assert truncated[-1]["_truncated"] is True, (
+                    f"marker not last at --max-rows {limit}"
+                )
+                assert summary in truncated
+
+    def test_the_summary_keeps_its_side_of_the_data(self):
+        """Position relative to the data is preserved; only the marker is fixed."""
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
 
         summary = {"_summary": True, "gap_count": 10}
@@ -494,12 +517,11 @@ class TestMaxRowsTruncation:
 
         first = _apply_max_rows_truncation([summary] + data, 3)
         assert [r.get("id") for r in first] == [None, 0, 1, 2, None]
-        assert first[-1]["_truncated"] is True
+        assert first[0] is summary
 
         last = _apply_max_rows_truncation(data + [summary], 3)
         assert [r.get("id") for r in last] == [0, 1, 2, None, None]
-        assert last[-2]["_truncated"] is True
-        assert last[-1] is summary
+        assert last[-2] is summary
 
     def test_several_summary_rows_are_all_kept(self):
         """Nothing says a skill may emit only one."""
