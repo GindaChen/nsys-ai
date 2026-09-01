@@ -2305,12 +2305,23 @@ def _sweep_nvtx_kernel_map(kr_rows, nvtx_rows) -> list[dict]:
                     "k_start": k_start,
                     "k_end": k_end,
                     "k_dur_ns": dur,
-                    "graph_node_id": graph_node_id,
-                    "graph_id": graph_id,
                     "is_tc_eligible": is_tc_eligible,
                     "uses_tc": uses_tc,
                 }
             )
+            # Sparse on purpose, and it is load-bearing. Every one of these
+            # dicts is held for the length of the build, so the key count is
+            # multiplied by the row count -- and CPython sizes a dict by that
+            # count, where 11 keys crosses the boundary 9 sits under: 272 bytes
+            # becomes 464. That 192-byte tax bought two fields that are null on
+            # every kernel not launched from a graph, which on a capture using
+            # no graphs is all of them, and it took the skills window from
+            # 6.63 MB to 7.54 MB past the 7.4 MB ceiling in CI. Absent means
+            # "not a graph node"; ``_nvtx_map_arrow_tables`` reads both with
+            # ``.get()`` and writes a null column.
+            if graph_node_id is not None or graph_id is not None:
+                results[-1]["graph_node_id"] = graph_node_id
+                results[-1]["graph_id"] = graph_id
     return results
 
 

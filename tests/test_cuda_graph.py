@@ -166,3 +166,63 @@ def test_cache_keeps_graph_tables_and_normalized_kernel_ids(tmp_path):
     assert cache_dir.joinpath("graph_trace.parquet").is_file()
     assert ids == [(101, 42), (102, 42)]
     assert mapped == [(101, 42), (102, 42)]
+
+
+def test_sweep_carries_graph_ids_only_for_kernels_that_have_them():
+    """The graph ids are sparse in the row dict, and that is load-bearing.
+
+    ``_sweep_nvtx_kernel_map`` builds one dict per attributed kernel and holds
+    every one of them for the length of the build, so the dict's key count is
+    multiplied by the row count. CPython sizes a dict by its key count, and 11
+    keys crosses the boundary that 9 keys sits under: 272 bytes becomes 464, a
+    192-byte tax on every row for two fields that are null on every kernel that
+    was not launched from a graph -- which, on a capture that uses no graphs, is
+    all of them. That is what took the skills window from 6.63 MB to 7.54 MB in
+    CI and broke ``test_running_skills_stays_under_the_python_heap_ceiling``.
+
+    Absent therefore means "not a graph node", and the one consumer reads the
+    fields with ``.get()``. Writing them unconditionally would restore the
+    regression without failing anything else, so it is pinned here.
+    """
+    from nsys_ai.parquet_cache import _sweep_nvtx_kernel_map
+
+    nvtx_rows = [(1, 0, 1000, "step")]
+    kr_rows = [
+        # (globalTid, r_start, r_end, k_start, k_end, name, node, graph, elig, used)
+        (1, 10, 20, 30, 40, "plain_kernel", None, None, 0, 0),
+        (1, 50, 60, 70, 80, "graph_kernel", 101, 42, 0, 0),
+    ]
+
+    rows = _sweep_nvtx_kernel_map(kr_rows, nvtx_rows)
+    by_name = {r["kernel_name"]: r for r in rows}
+
+    assert "graph_node_id" not in by_name["plain_kernel"]
+    assert "graph_id" not in by_name["plain_kernel"]
+    assert by_name["plain_kernel"].get("graph_node_id") is None
+
+    assert by_name["graph_kernel"]["graph_node_id"] == 101
+    assert by_name["graph_kernel"]["graph_id"] == 42
+
+
+def test_the_arrow_writer_reads_the_sparse_graph_fields():
+    """The consumer's contract: a missing key is a null column, not a KeyError."""
+    from nsys_ai.parquet_cache import _nvtx_map_arrow_tables
+
+    results = [
+        {
+            "nvtx_text": "step",
+            "nvtx_depth": 0,
+            "nvtx_path": "step",
+            "kernel_name": "plain_kernel",
+            "k_start": 30,
+            "k_end": 40,
+            "k_dur_ns": 10,
+            "is_tc_eligible": 0,
+            "uses_tc": 0,
+        }
+    ]
+
+    map_tbl, _ = _nvtx_map_arrow_tables(results)
+
+    assert map_tbl.column("graph_node_id").to_pylist() == [None]
+    assert map_tbl.column("graph_id").to_pylist() == [None]
