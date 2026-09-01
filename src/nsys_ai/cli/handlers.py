@@ -2115,26 +2115,72 @@ def _cmd_evidence(args, _profile):
             )
 
 
+def _is_summary_row(row) -> bool:
+    """True for the aggregate row five skills append to their results.
+
+    The ``_summary`` marker is the convention already read this way by
+    ``gpu_idle_gaps``, ``profile_health_manifest`` and ``root_cause_matcher``.
+    """
+    return isinstance(row, dict) and bool(row.get("_summary"))
+
+
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
-    """Truncate JSON rows array if it exceeds max_rows. Preserves original total count."""
+    """Bound the data rows in a JSON result, keeping the aggregate that describes them.
+
+    ``--max-rows`` is a token budget over findings, and a ``_summary`` row is not
+    one of the findings — it is the description of all of them, and the most
+    useful thing in the payload. Slicing the list positionally dropped it,
+    because the skills that emit one append it last: ``--max-rows 3`` on
+    ``gpu_idle_gaps`` returned three gaps and truncation metadata, and
+    ``total_idle_ms``, ``device_idle_ms`` and the gap histogram silently
+    vanished. Nothing in the output said an aggregate had ever existed.
+
+    So the limit applies to the data rows and the summary is carried through.
+    ``_total_rows`` and ``_shown_rows`` count data rows for the same reason:
+    counting the summary among them made ``--max-rows 20`` on a 20-gap profile
+    return 19 gaps.
+
+    A summary keeps its position relative to the data rather than being
+    collected to one end, because the skills disagree about where it goes:
+    ``gpu_idle_gaps`` and ``root_cause_matcher`` append theirs, while
+    ``nccl_payload_breakdown`` and ``nccl_compile_context_breakdown`` return
+    ``[summary, *rows]`` and their readers take ``rows[0]``. Relocating it would
+    satisfy one convention by breaking the other.
+
+    The truncation marker stays last, which is the one position already
+    promised: ``--max-rows``'s own help text says a final ``_truncated`` entry
+    is appended, and ``docs/user/skills.md`` says the same. An earlier revision
+    put the marker after the last data row so a trailing summary could stay at
+    ``rows[-1]``; that made the final element depend on the limit -- marker for
+    a positive one, but ``[summary, marker]`` at zero -- which is worse than
+    either convention, so the documented one wins.
+    """
     if max_rows < 0:
         raise ValueError("--max-rows must be a non-negative integer")
     # Preserve error payloads even if max_rows is 0.
     if len(rows) == 1 and isinstance(rows[0], dict) and "error" in rows[0]:
         return rows
-    if len(rows) > max_rows:
-        total = len(rows)
-        # Convert to list to ensure we don't mutate an original view/tuple
-        truncated = list(rows[:max_rows])
-        truncated.append(
-            {
-                "_truncated": True,
-                "_total_rows": total,
-                "_shown_rows": max_rows,
-            }
-        )
-        return truncated
-    return rows
+    total_data = sum(1 for r in rows if not _is_summary_row(r))
+    if total_data <= max_rows:
+        return rows
+
+    # Convert to list to ensure we don't mutate an original view/tuple
+    kept: list = []
+    shown = 0
+    for row in rows:
+        if _is_summary_row(row):
+            kept.append(row)
+        elif shown < max_rows:
+            kept.append(row)
+            shown += 1
+    kept.append(
+        {
+            "_truncated": True,
+            "_total_rows": total_data,
+            "_shown_rows": shown,
+        }
+    )
+    return kept
 
 
 def _open_skill_connection(profile_path: str, *, no_cache: bool):

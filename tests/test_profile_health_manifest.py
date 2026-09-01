@@ -418,6 +418,122 @@ class TestMaxRowsTruncation:
         assert len(truncated) == 3
         assert not any(r.get("_truncated") for r in truncated)
 
+    def test_the_summary_row_survives_truncation(self):
+        """``--max-rows`` bounds findings; the aggregate is not one of them.
+
+        Five skills append a ``_summary`` row carrying the values a reader is
+        usually after -- ``total_idle_ms``, ``device_idle_ms``, the gap
+        histogram. Slicing positionally dropped it, because it is appended last,
+        so a script that added ``--max-rows`` to bound its output silently lost
+        the most useful part and nothing in the payload said so.
+        """
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "total_idle_ms": 1733.77, "gap_count": 56}
+        rows = [{"id": i} for i in range(10)] + [summary]
+
+        truncated = _apply_max_rows_truncation(rows, 3)
+
+        assert summary in truncated
+        # The marker keeps the final slot its own help text promises, so a
+        # trailing summary sits just behind it.
+        assert truncated[-1]["_truncated"] is True
+        assert truncated[-2] is summary
+
+    def test_the_summary_does_not_consume_the_row_budget(self):
+        """Counting it among the data made --max-rows 20 return 19 findings."""
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "gap_count": 10}
+        rows = [{"id": i} for i in range(10)] + [summary]
+
+        truncated = _apply_max_rows_truncation(rows, 10)
+
+        # Ten data rows asked for, ten delivered, and no truncation marker.
+        assert [r for r in truncated if "id" in r] == rows[:10]
+        assert not any(r.get("_truncated") for r in truncated)
+        assert summary in truncated
+
+    def test_truncation_counts_report_data_rows(self):
+        """``_total_rows`` describes the findings, not the findings plus a summary."""
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        rows = [{"id": i} for i in range(10)] + [{"_summary": True, "gap_count": 10}]
+
+        marker = next(
+            r for r in _apply_max_rows_truncation(rows, 4) if r.get("_truncated")
+        )
+
+        assert marker["_total_rows"] == 10
+        assert marker["_shown_rows"] == 4
+
+    def test_a_summary_first_payload_still_reads_at_row_zero(self):
+        """The skills disagree about where the aggregate goes, so position is kept.
+
+        ``nccl_payload_breakdown`` returns ``[summary, *rows]`` and
+        ``nccl_compile_context_breakdown`` builds the same shape; their readers
+        take ``rows[0]`` for the ``total_*`` fields. Collecting summaries to the
+        end would satisfy the append-style skills by breaking these two.
+        """
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "total_nccl_kernels": 99}
+        rows = [summary] + [{"id": i} for i in range(10)]
+
+        for limit in (0, 1, 3):
+            truncated = _apply_max_rows_truncation(rows, limit)
+            assert truncated[0] is summary, f"summary moved at --max-rows {limit}"
+            assert truncated[-1]["_truncated"] is True
+
+    def test_the_marker_is_last_whatever_the_limit_or_the_convention(self):
+        """One documented position, not one that moves with the limit.
+
+        ``--max-rows``'s help text and ``docs/user/skills.md`` both say a final
+        ``_truncated`` entry is appended. An earlier revision put it after the
+        last data row so a trailing summary could keep ``rows[-1]``, which made
+        the final element depend on the limit: the marker at ``--max-rows 3``
+        but ``[summary, marker]`` at 0. A consumer following either convention
+        misparsed one of those.
+        """
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "gap_count": 10}
+        data = [{"id": i} for i in range(10)]
+
+        for rows in ([summary] + data, data + [summary]):
+            for limit in (0, 1, 3):
+                truncated = _apply_max_rows_truncation(rows, limit)
+                assert truncated[-1]["_truncated"] is True, (
+                    f"marker not last at --max-rows {limit}"
+                )
+                assert summary in truncated
+
+    def test_the_summary_keeps_its_side_of_the_data(self):
+        """Position relative to the data is preserved; only the marker is fixed."""
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summary = {"_summary": True, "gap_count": 10}
+        data = [{"id": i} for i in range(10)]
+
+        first = _apply_max_rows_truncation([summary] + data, 3)
+        assert [r.get("id") for r in first] == [None, 0, 1, 2, None]
+        assert first[0] is summary
+
+        last = _apply_max_rows_truncation(data + [summary], 3)
+        assert [r.get("id") for r in last] == [0, 1, 2, None, None]
+        assert last[-2] is summary
+
+    def test_several_summary_rows_are_all_kept(self):
+        """Nothing says a skill may emit only one."""
+        from nsys_ai.cli.handlers import _apply_max_rows_truncation
+
+        summaries = [{"_summary": True, "k": 1}, {"_summary": True, "k": 2}]
+        rows = [{"id": i} for i in range(10)] + summaries
+
+        truncated = _apply_max_rows_truncation(rows, 2)
+
+        assert [r for r in truncated if r.get("_summary")] == summaries
+
     def test_negative_max_rows_raises(self):
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
 
