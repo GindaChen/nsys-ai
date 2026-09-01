@@ -54,7 +54,15 @@ def gpu_summary(prof: Profile, device: int, trim: tuple[int, int] | None = None)
             idle_ns += k["start"] - max_end
         max_end = max(max_end, k["end"])
 
+    # Two different quantities, and conflating them is how utilization used to
+    # exceed 100%. The sum counts every kernel's duration, so two kernels running
+    # concurrently on different streams contribute twice -- on a capture where
+    # compute and NCCL overlap, the sum can exceed the wall span it is measured
+    # against. ``busy_ns`` is the union: the sweep above already computed the
+    # device-level idle time, so span minus idle is the time at least one kernel
+    # was resident, which is what a fraction of wall time has to be built from.
     total_compute_ns = sum(k["end"] - k["start"] for k in kernels)
+    busy_ns = span_ns - idle_ns
 
     # NCCL vs compute split across ALL kernels (not just top 10)
     nccl_ms_total = 0.0
@@ -75,9 +83,14 @@ def gpu_summary(prof: Profile, device: int, trim: tuple[int, int] | None = None)
         },
         "timing": {
             "span_ms": round(span_ns / 1e6, 2),
+            # Kept under its published name and its original meaning -- a sum over
+            # kernels, which may exceed span_ms -- because export-json ships it as
+            # part of a versioned payload. busy_ms is the union alongside it, and
+            # span_ms == busy_ms + idle_ms holds where compute_ms cannot.
             "compute_ms": round(total_compute_ns / 1e6, 2),
+            "busy_ms": round(busy_ns / 1e6, 2),
             "idle_ms": round(idle_ns / 1e6, 2),
-            "utilization_pct": round(100 * total_compute_ns / span_ns, 1) if span_ns else 0,
+            "utilization_pct": round(100 * busy_ns / span_ns, 1) if span_ns else 0,
         },
         "kernel_count": len(kernels),
         "top_kernels": [
@@ -107,7 +120,8 @@ def format_text(summary: dict) -> str:
     t = summary["timing"]
     lines = [
         f"{format_gpu_label(summary['device'], hw)}:",
-        f"  Span: {t['span_ms']:.1f}ms | Compute: {t['compute_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%",
+        f"  Span: {t['span_ms']:.1f}ms | Busy: {t['busy_ms']:.1f}ms | Idle: {t['idle_ms']:.1f}ms | Util: {t['utilization_pct']}%",
+        f"  Kernel time (sum over streams): {t['compute_ms']:.1f}ms",
         f"  Kernels: {summary['kernel_count']}",
         "",
         "  Top kernels:",
