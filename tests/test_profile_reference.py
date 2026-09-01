@@ -393,10 +393,15 @@ def test_profile_reference_factory_calls_shared_validator(
     ],
 )
 def test_shared_profile_reference_validator_rejects_invalid_fields(
-    field, value, message
+    field, value, message, tmp_path
 ):
+    # tmp_path, not a hardcoded /tmp: on macOS /tmp is a symlink to private/tmp,
+    # and the validator refuses to inspect a reference through one. That guard
+    # fired before any field was looked at, so five of these cases failed with
+    # "file parent cannot be inspected safely" on every Mac -- reporting the
+    # wrong reason for the right refusal, and only off Linux.
     reference = LocalProfileReference(
-        path="/tmp/profile.sqlite",
+        path=str(tmp_path / "profile.sqlite"),
         profile_id=VALID_PROFILE_ID,
         schema_version="3.25.0",
         product_version="2026.2.1.106",
