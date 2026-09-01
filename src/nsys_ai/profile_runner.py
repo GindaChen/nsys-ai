@@ -939,25 +939,37 @@ class LocalProfileRunner:
         return bool(cancellation.is_set())
 
     @staticmethod
-    def _signal_group(process_group: int, sig: int) -> bool:
-        """Signal the group; False when it can no longer be signalled by us.
+    def _signal_group(process: subprocess.Popen[bytes], sig: int) -> bool:
+        """Signal the group; False when there is nothing of ours left to stop.
 
-        ``ProcessLookupError`` is the group having gone. ``PermissionError`` is
-        it no longer being ours to signal, which was reaching callers as a crash:
-        every ``killpg`` here caught only the first, so an EPERM propagated out
-        of ``_capture_process`` and out of ``run()`` -- turning a capture that had
-        already finished into a raised exception. Observed on macOS, where a
-        reaped child's pid can be recycled into another session before the
-        teardown runs, so the pid names a group this process does not own.
+        ``ProcessLookupError`` is the group having gone, and there is nothing to
+        escalate against.
 
-        Both answers mean the same thing to a caller: there is nothing left here
-        to escalate against. A best-effort teardown has no business raising out
-        of a capture that otherwise succeeded, and the caller could not act on
-        the distinction anyway.
+        ``PermissionError`` is the harder one, because it means two opposite
+        things depending on our own child. This teardown runs from five call
+        sites: one after ``wait()`` has already returned, and four where stopping
+        the tree is the whole job -- timeout, cancellation, the leader-exit
+        sweep, and the ``BaseException`` handler.
+
+        When our child has already exited, EPERM says its pid no longer names
+        anything of ours: on macOS a reaped pid can be recycled into another
+        session before the teardown runs, so the group we would be signalling
+        belongs to someone else. Nothing of ours survives, and raising there
+        turned a finished capture into an exception -- the bug this fixes.
+
+        While our child is still alive, the same errno says the opposite: a tree
+        we were told to terminate and cannot. Swallowing it would let a timeout
+        or a cancellation report that it stopped the capture while the profiled
+        process kept running, which is a worse answer than the failure. So it
+        propagates, exactly as it did before this change.
         """
         try:
-            os.killpg(process_group, sig)
-        except (ProcessLookupError, PermissionError):
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            if process.poll() is None:
+                raise
             return False
         return True
 
@@ -966,9 +978,11 @@ class LocalProfileRunner:
         """Wait for our own child, bounded.
 
         Bounded rather than a bare ``wait()`` because the group is no longer
-        answering us: after a lookup failure the child is already gone and this
-        returns at once, but after a permission failure it may not be, and an
-        unbounded wait there would hang the capture instead of ending it.
+        answering us. Both paths that reach here have established the child is
+        gone -- a lookup failure, or a permission failure with ``poll()`` already
+        returning -- so this returns at once today; the bound is there so a
+        future caller that reaches it in another state ends the capture rather
+        than hanging it.
         """
         try:
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
@@ -978,20 +992,19 @@ class LocalProfileRunner:
     @classmethod
     def _terminate_process_group(cls, process: subprocess.Popen[bytes]) -> None:
         """Terminate the complete session, escalating after a bounded grace."""
-        process_group = process.pid
-        if not cls._signal_group(process_group, signal.SIGTERM):
+        if not cls._signal_group(process, signal.SIGTERM):
             cls._reap(process)
             return
 
         deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
         while time.monotonic() < deadline:
             process.poll()
-            if not cls._signal_group(process_group, 0):
+            if not cls._signal_group(process, 0):
                 cls._reap(process)
                 return
             time.sleep(_POLL_SECONDS)
 
-        cls._signal_group(process_group, signal.SIGKILL)
+        cls._signal_group(process, signal.SIGKILL)
         try:
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
         except subprocess.TimeoutExpired:

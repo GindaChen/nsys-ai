@@ -888,6 +888,36 @@ def test_teardown_survives_a_group_it_may_not_signal(monkeypatch):
     assert _FinishedProcess.waited, "the child was never reaped"
 
 
+def test_teardown_reports_a_live_tree_it_cannot_stop(monkeypatch):
+    """EPERM means the opposite thing while our child is still running.
+
+    The teardown runs from five call sites, and four of them exist to stop the
+    tree: timeout, cancellation, the leader-exit sweep, and the BaseException
+    handler. If the group refuses us while the child is alive, we have failed to
+    do the one thing those callers asked for. Reporting TIMED_OUT or CANCELLED
+    over a profiled process that is still running would be a worse answer than
+    the failure, so it propagates -- as it did before EPERM was handled at all.
+    """
+    import nsys_ai.profile_runner as profile_runner
+
+    class _LiveProcess:
+        pid = 4244
+
+        def poll(self):
+            return None  # still running
+
+        def wait(self, timeout=None):  # pragma: no cover - must not be reached
+            raise AssertionError("a live tree must not be reaped as if it stopped")
+
+    def _refuse(_pgid, _sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(profile_runner.os, "killpg", _refuse)
+
+    with pytest.raises(PermissionError):
+        profile_runner.LocalProfileRunner._terminate_process_group(_LiveProcess())
+
+
 def test_teardown_still_stops_at_a_group_that_has_gone(monkeypatch):
     """The pre-existing lookup path keeps its behaviour."""
     import nsys_ai.profile_runner as profile_runner
