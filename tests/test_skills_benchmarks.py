@@ -114,7 +114,7 @@ def test_pipeline_bubble_metrics_no_tables_graceful(minimal_nsys_conn):
 
 
 def _use_a100(conn):
-    """Point the fixture's GPU row at an A100 so the chipName lookup resolves.
+    """Point the fixture's GPU row at an A100 so the spec lookup resolves.
 
     TARGET_INFO_GPU already has id=0 from the fixture with chipName='TestChip',
     which is in no spec table.
@@ -150,6 +150,75 @@ def test_arithmetic_intensity_execute(minimal_nsys_conn):
     assert "achieved_tflops" in r
     assert "mfu_pct" in r
     assert r["peak_fp16_tflops"] == 312.0  # GA100 lookup
+
+
+def _use_h200(conn):
+    """An H200 as Nsight reports one: the marketing name, and the shared die.
+
+    H200 is the same GH100 die as H100, and GH100 is itself a spec-table key
+    carrying H100's 3350 GB/s. That is the whole trap -- both parts have the
+    same 989 TFLOPS peak, so a die-code match looks right until the bandwidth
+    is read.
+    """
+    conn.execute(
+        "UPDATE TARGET_INFO_GPU SET name='NVIDIA H200', "
+        "chipName='GH100', memoryBandwidth=0 WHERE id=0"
+    )
+
+
+def test_h200_gets_its_own_bandwidth_not_the_shared_die_s(minimal_nsys_conn):
+    """The GPU name is more specific than the die code, so it decides."""
+    from nsys_ai.skills.registry import get_skill
+
+    _use_h200(minimal_nsys_conn)
+
+    rows = get_skill("arithmetic_intensity").execute(
+        minimal_nsys_conn, theoretical_flops=200e12 * _FIXTURE_KERNEL_S
+    )
+
+    r = rows[0]
+    assert r["hbm_bw_gbps"] == 4800.0, "H200 is HBM3e at 4.8 TB/s, not H100's 3.35 TB/s"
+    assert r["ridge_point_flop_per_byte"] == 206.0  # 989e12 / 4800e9
+    assert r["peak_fp16_tflops"] == 989.0  # identical across the pair, and correct
+    assert r["hbm_bw_source"] == "gpu name"
+
+
+def test_the_die_code_still_answers_when_the_name_is_unknown(minimal_nsys_conn):
+    """The fallback is kept -- some exports carry no name this table recognises."""
+    from nsys_ai.skills.registry import get_skill
+
+    minimal_nsys_conn.execute(
+        "UPDATE TARGET_INFO_GPU SET name='Graphics Device', "
+        "chipName='GH100', memoryBandwidth=0 WHERE id=0"
+    )
+
+    rows = get_skill("arithmetic_intensity").execute(
+        minimal_nsys_conn, theoretical_flops=200e12 * _FIXTURE_KERNEL_S
+    )
+
+    r = rows[0]
+    assert r["peak_fp16_tflops"] == 989.0
+    assert r["hbm_bw_gbps"] == 3350.0
+    # Named in the row, and rendered, so a die-code match is not silent.
+    assert r["hbm_bw_source"] == "chip name GH100"
+    assert "matched on chip name GH100" in get_skill("arithmetic_intensity").format_rows(rows)
+
+
+def test_a_caller_supplied_bandwidth_outranks_both_lookups(minimal_nsys_conn):
+    """The documented override still wins, and is not labelled as a lookup."""
+    from nsys_ai.skills.registry import get_skill
+
+    _use_h200(minimal_nsys_conn)
+
+    rows = get_skill("arithmetic_intensity").execute(
+        minimal_nsys_conn,
+        theoretical_flops=200e12 * _FIXTURE_KERNEL_S,
+        hbm_bw_gbps=1234,
+    )
+
+    r = rows[0]
+    assert r["hbm_bw_gbps"] == 1234.0
+    assert r["hbm_bw_source"] is None
 
 
 def test_arithmetic_intensity_no_gpu_table(minimal_nsys_conn):

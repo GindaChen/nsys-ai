@@ -37,7 +37,10 @@ GPU_SPECS: dict[str, tuple[float, float]] = {
     "H100 PCIe": (756.0, 2039),  # H100 PCIe — BF16 dense, 2TB/s HBM2e
     "H100 NVL": (835.0, 3900),  # H100 NVL — BF16 dense, 3.9TB/s HBM3
     "H800": (989.0, 3350),  # H800 (China variant, same die)
-    "GH100": (989.0, 3350),  # ASIC code
+    # Die codes, not parts. One die ships as several SKUs with different memory
+    # (GH100 is both H100 and H200), so these are a last-resort fallback: callers
+    # must try the GPU name first or they will hand an H200 H100's bandwidth.
+    "GH100": (989.0, 3350),  # ASIC code — also the H200 die; H200 is 4800 GB/s
     # === Ada Lovelace (2022-2023) ===
     "L40S": (362.0, 864),  # L40S — BF16/FP16 dense, GDDR6
     "L40": (181.0, 864),  # L40 — BF16/FP16 dense, GDDR6
@@ -63,7 +66,7 @@ GPU_SPECS: dict[str, tuple[float, float]] = {
     "A100 80GB": (312.0, 2039),  # A100 80GB (SXM or PCIe) — BF16 dense
     "A100 PCIe": (312.0, 1555),
     "A100": (312.0, 2039),
-    "GA100": (312.0, 2039),  # ASIC code
+    "GA100": (312.0, 2039),  # ASIC code — spans A100 40GB (1555) and 80GB (2039)
     "A30": (165.0, 933),
     "A10G": (125.0, 600),
     "A10": (125.0, 600),

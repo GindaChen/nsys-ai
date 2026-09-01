@@ -67,17 +67,30 @@ def _execute(conn, **kwargs):
         else "from this package's hardware spec table"
     )
 
+    # The GPU name is tried before the chip name, and the order is the whole of
+    # this block. A die is not a part: H100 and H200 are the same GH100 die with
+    # different memory, so a die code cannot settle bandwidth. When chipName won,
+    # an H200 was given H100's 3350 GB/s -- the peak is identical across that
+    # pair, so only the bandwidth was wrong and only the ridge point showed it,
+    # 295.2 instead of 206.0 FLOP/Byte. The name is the specific end of the two,
+    # so it goes first and the die code stays as the fallback for exports that
+    # carry no name this table recognises.
+    spec_source = None
     if peak_tflops is None or hbm_bw_gbps is None:
-        if "error" not in spec1:
-            peak_tflops = peak_tflops if peak_tflops is not None else spec1.get("peak_tflops")
-            hbm_bw_gbps = hbm_bw_gbps if hbm_bw_gbps is not None else spec1.get("hbm_bw_gbps")
-        elif "error" not in spec2:
-            peak_tflops = peak_tflops if peak_tflops is not None else spec2.get("peak_tflops")
-            hbm_bw_gbps = hbm_bw_gbps if hbm_bw_gbps is not None else spec2.get("hbm_bw_gbps")
+        for spec, source in ((spec2, "gpu name"), (spec1, f"chip name {chip_name}")):
+            if "error" in spec:
+                continue
+            if peak_tflops is None:
+                peak_tflops = spec.get("peak_tflops")
+            if hbm_bw_gbps is None:
+                hbm_bw_gbps = spec.get("hbm_bw_gbps")
+                spec_source = source
+            break
 
     # If hbm_bw_gbps is still missing, attempt DB fallback
     if hbm_bw_gbps is None and hbm_bw_raw > 0:
         hbm_bw_gbps = hbm_bw_raw / 1e9
+        spec_source = "profile metadata"
 
     # No peak, no roofline: this is the "cannot run" case, so it abstains rather
     # than returning a row with an ``error`` key. Consumers distinguish the two —
@@ -343,6 +356,9 @@ def _execute(conn, **kwargs):
         {
             "gpu_name": gpu_name,
             "chip_name": chip_name,
+            # Which lookup supplied the bandwidth, so a die-code fallback is
+            # visible rather than silent. None when the caller passed it in.
+            "hbm_bw_source": spec_source,
             "peak_fp16_tflops": round(peak_tflops, 1),
             "hbm_bw_gbps": round(hbm_bw_gbps, 1),
             "ridge_point_flop_per_byte": round(ridge_point, 1),
@@ -372,7 +388,12 @@ def _format(rows):
         "── Arithmetic Intensity Assessment (Roofline) ──",
         f"  GPU:              {r['gpu_name']}",
         f"  Peak FP16:        {r['peak_fp16_tflops']} TFLOPS",
-        f"  HBM Bandwidth:    {r['hbm_bw_gbps']} GB/s",
+        f"  HBM Bandwidth:    {r['hbm_bw_gbps']} GB/s"
+        + (
+            f"  (matched on {r['hbm_bw_source']})"
+            if (r.get("hbm_bw_source") or "").startswith("chip name")
+            else ""
+        ),
         f"  Ridge Point:      {r['ridge_point_flop_per_byte']} FLOP/Byte",
         "",
         f"  Kernel Union Time:  {r['kernel_union_ms']:.2f} ms  ({r['kernel_count']} kernels)",
