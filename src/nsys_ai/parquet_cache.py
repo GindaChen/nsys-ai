@@ -143,10 +143,10 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 16  # bumped: nvtx_kernel_map is now built by the stack sweep. A cache from
-# version 15 holds the same rows for the SQL path, but one written by the old Python path carries
-# seven columns instead of nine (no is_tc_eligible/uses_tc), and reusing that silently reports
-# every kernel as non-Tensor-Core.
+_CACHE_VERSION = 17  # bumped: the Tensor Core name patterns now recognise cuBLAS's Hopper
+# ``nvjet`` GEMMs. is_tc_eligible/uses_tc are computed at build time and stored in
+# kernels.parquet, so a version 16 cache keeps answering that every nvjet kernel is neither
+# eligible nor active -- the exact blind spot this fixes -- until it is rebuilt.
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -402,9 +402,18 @@ _TABLE_PROJECTIONS: dict[str, str] = {
     "ENUM_CUPTI_SYNC_TYPE": "id, name",
 }
 
-_TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul|flash)'"
+# Kernel-name heuristics, and they go stale whenever a vendor renames a family.
+# ``nvjet`` is what recent cuBLAS calls its Hopper GEMMs -- names like
+# ``nvjet_tst_128x128_64x4_1x2_h_bz_coopA`` and ``nvjet_sm90_hss_320x128``. It
+# matched neither pattern, so on an H100/H200 capture the family that dominates
+# the profile scored is_tc_eligible = 0 and was dropped by tensor_core_usage's
+# own ``WHERE is_tc_eligible = 1`` before any analysis saw it. It is in both
+# patterns rather than only the first because these are warpgroup (wgmma)
+# kernels: eligible-only would report every Hopper GEMM as a Tensor Core
+# fallback, which is a louder wrong answer than the silence it replaced.
+_TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul|flash|nvjet)'"
 _TC_ACTIVE_PATTERN = (
-    "'(xmma|mma_sync|16816|1688|884|ampere_bf16|sm80_tensor_op|tensorop|flash)'"
+    "'(xmma|mma_sync|16816|1688|884|ampere_bf16|sm80_tensor_op|tensorop|flash|nvjet)'"
 )
 
 
