@@ -421,6 +421,55 @@ def _describe_event_type(adapter, event_type: int) -> str:
     return f"{event_type} ({row[0]})"
 
 
+def is_error_row(rows: list[dict] | None) -> bool:
+    """True when *rows* is the single ``error`` row a skill returns to refuse.
+
+    Deliberately narrow, in two ways. A skill's real results may well carry a
+    per-row ``error`` column, and truncating those to one rendered message would
+    lose the results — so only a lone row qualifies, which is the shape every
+    refusing skill in ``builtins/`` produces. And the column has to hold
+    something: a single data row with ``{"error": None}`` is a result whose error
+    column happens to be empty, not a refusal, which is the reading the agent
+    already takes when it tests ``row.get("error")`` for truth.
+    """
+    return (
+        isinstance(rows, list)
+        and len(rows) == 1
+        and isinstance(rows[0], dict)
+        and bool(rows[0].get("error"))
+        and not is_abstention_row(rows[0])
+    )
+
+
+def _error_signals(value) -> list[str]:
+    """Strings that identify *value* in rendered text.
+
+    An ``error`` is usually a sentence, but not always: ``region_mfu`` returns
+    ``{"code": ..., "message": ...}`` and its formatter renders the two fields
+    rather than the mapping. Matching on ``str(value)`` would miss that and
+    discard a better message than this module can write, so a mapping
+    contributes each of its scalar values instead of its repr.
+    """
+    if isinstance(value, dict):
+        return [str(v) for v in value.values() if isinstance(v, (str, int, float))]
+    return [str(value)]
+
+
+def _format_error(skill, row: dict) -> str:
+    """Render a refusal for a formatter that was not written for one.
+
+    ``hint`` is the field worth surfacing: the device-not-found row already names
+    the devices the profile does have, and that string never reached a reader
+    while the formatters were crashing ahead of it.
+    """
+    signals = [text for text in _error_signals(row["error"]) if text]
+    lines = [f"{skill.title}: {': '.join(signals) if signals else row['error']}"]
+    hint = row.get("hint")
+    if hint:
+        lines += ["", str(hint)]
+    return "\n".join(lines)
+
+
 def is_abstention(rows: list[dict] | None) -> bool:
     """True when ``rows`` is a skill saying it could not run.
 
@@ -813,12 +862,51 @@ class Skill:
         contract is defined in this module, so honouring it belongs here too —
         and a per-skill formatter that forgot would crash on the missing data
         columns instead of printing the reason.
+
+        The same argument covers an error row, and it was not being honoured. A
+        skill that cannot answer for the arguments it was given returns a single
+        ``{"error": ...}`` row — asking for a device the profile does not have
+        produces one carrying ``available_devices`` and a ``hint`` naming the
+        devices that do exist. That row has none of the data columns, so a
+        formatter that indexes them dies on it: handed that shape, 23 of the 37
+        builtins raise ``KeyError`` rather than printing the hint written for
+        exactly this case.
+
+        The central rendering is a *fallback*, not an interception. A formatter
+        written for its own error row renders it better than a generic message
+        can — ``code_attribution_candidates`` carries ``limitations`` that it
+        spells out, and ``tensor_core_usage`` explains which columns it needed.
+        So the skill's formatter is still tried first and only a formatter that
+        was never written for the shape, and says so by raising on a missing
+        column, falls through to the generic reason.
+
+        Raising is not the only way to mishandle the row, and it is not the worst
+        one. ``critical_path`` and ``profile_health_manifest`` render it without
+        complaint, as ``Bound class: None`` over a ``0.0ms`` critical path and a
+        manifest with a ``?`` for the GPU — a clean-looking report for a question
+        that was never answered, which beats a traceback only until someone reads
+        it. So a formatter has to say something about the refusal to keep it: its
+        output is used when it mentions the reason, and the generic rendering
+        takes over when it does not.
+
+        Swallowing an exception is worth naming: it is scoped to the error-row
+        branch, where there is no data to mis-render and the alternative on offer
+        is a traceback. A data row that raises still raises.
         """
         if is_abstention(rows):
             return f"{self.title}: not applicable to this profile.\n\n{rows[0]['reason']}"
-        if self.format_fn:
-            return self.format_fn(rows)
-        return _default_format(self, rows)
+        if not self.format_fn:
+            return _default_format(self, rows)
+        if is_error_row(rows):
+            try:
+                rendered = self.format_fn(rows)
+            except (KeyError, IndexError, AttributeError, TypeError):
+                return _format_error(self, rows[0])
+            signals = [text for text in _error_signals(rows[0]["error"]) if text]
+            if any(text in rendered for text in signals):
+                return rendered
+            return _format_error(self, rows[0])
+        return self.format_fn(rows)
 
     def run(self, conn: sqlite3.Connection, **kwargs) -> str:
         """Execute and format results as text."""
