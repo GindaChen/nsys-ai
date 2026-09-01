@@ -939,29 +939,59 @@ class LocalProfileRunner:
         return bool(cancellation.is_set())
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    def _signal_group(process_group: int, sig: int) -> bool:
+        """Signal the group; False when it can no longer be signalled by us.
+
+        ``ProcessLookupError`` is the group having gone. ``PermissionError`` is
+        it no longer being ours to signal, which was reaching callers as a crash:
+        every ``killpg`` here caught only the first, so an EPERM propagated out
+        of ``_capture_process`` and out of ``run()`` -- turning a capture that had
+        already finished into a raised exception. Observed on macOS, where a
+        reaped child's pid can be recycled into another session before the
+        teardown runs, so the pid names a group this process does not own.
+
+        Both answers mean the same thing to a caller: there is nothing left here
+        to escalate against. A best-effort teardown has no business raising out
+        of a capture that otherwise succeeded, and the caller could not act on
+        the distinction anyway.
+        """
+        try:
+            os.killpg(process_group, sig)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    @staticmethod
+    def _reap(process: subprocess.Popen[bytes]) -> None:
+        """Wait for our own child, bounded.
+
+        Bounded rather than a bare ``wait()`` because the group is no longer
+        answering us: after a lookup failure the child is already gone and this
+        returns at once, but after a permission failure it may not be, and an
+        unbounded wait there would hang the capture instead of ending it.
+        """
+        try:
+            process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+    @classmethod
+    def _terminate_process_group(cls, process: subprocess.Popen[bytes]) -> None:
         """Terminate the complete session, escalating after a bounded grace."""
         process_group = process.pid
-        try:
-            os.killpg(process_group, signal.SIGTERM)
-        except ProcessLookupError:
-            process.wait()
+        if not cls._signal_group(process_group, signal.SIGTERM):
+            cls._reap(process)
             return
 
         deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
         while time.monotonic() < deadline:
             process.poll()
-            try:
-                os.killpg(process_group, 0)
-            except ProcessLookupError:
-                process.wait()
+            if not cls._signal_group(process_group, 0):
+                cls._reap(process)
                 return
             time.sleep(_POLL_SECONDS)
 
-        try:
-            os.killpg(process_group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        cls._signal_group(process_group, signal.SIGKILL)
         try:
             process.wait(timeout=_TERMINATION_GRACE_SECONDS)
         except subprocess.TimeoutExpired:

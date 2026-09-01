@@ -852,3 +852,63 @@ def test_the_capture_is_opened_once_for_reference_and_gpu_count(tmp_path, fake_n
     guarded_prefixes = ("file:/proc/self/fd/", "file:/dev/fd/")
     by_path = [target for target in opened if not target.startswith(guarded_prefixes)]
     assert not by_path, f"the capture was reopened outside the descriptor guard: {by_path}"
+
+
+def test_teardown_survives_a_group_it_may_not_signal(monkeypatch):
+    """A best-effort teardown must not raise out of a finished capture.
+
+    Every ``killpg`` in ``_terminate_process_group`` caught ``ProcessLookupError``
+    and nothing else, so an ``EPERM`` propagated out of ``_capture_process`` and
+    out of ``run()`` — turning a capture that had already completed into a raised
+    ``PermissionError``. Observed on macOS; the caller cannot act on the
+    difference between "the group is gone" and "the group is no longer ours",
+    and neither is a reason to fail a capture.
+    """
+    import nsys_ai.profile_runner as profile_runner
+
+
+    class _FinishedProcess:
+        pid = 4242
+        waited = False
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            type(self).waited = True
+            return 0
+
+    def _refuse(_pgid, _sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(profile_runner.os, "killpg", _refuse)
+
+    profile_runner.LocalProfileRunner._terminate_process_group(_FinishedProcess())
+
+    assert _FinishedProcess.waited, "the child was never reaped"
+
+
+def test_teardown_still_stops_at_a_group_that_has_gone(monkeypatch):
+    """The pre-existing lookup path keeps its behaviour."""
+    import nsys_ai.profile_runner as profile_runner
+
+
+    class _GoneProcess:
+        pid = 4243
+        waited = False
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            type(self).waited = True
+            return 0
+
+    def _gone(_pgid, _sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(profile_runner.os, "killpg", _gone)
+
+    profile_runner.LocalProfileRunner._terminate_process_group(_GoneProcess())
+
+    assert _GoneProcess.waited
