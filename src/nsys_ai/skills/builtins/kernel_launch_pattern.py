@@ -26,6 +26,8 @@ WITH launch_gaps AS (
         k.start,
         k.[end],
         (k.[end] - k.start) AS dur_ns,
+        {graph_node_expr} AS graph_node_id,
+        {graph_id_expr} AS graph_id,
         LAG(k.[end]) OVER (
             PARTITION BY k.streamId ORDER BY k.start, k.correlationId
         ) AS prev_end,
@@ -49,7 +51,9 @@ stream_stats AS (
         ROUND(AVG(CASE WHEN prev_end IS NOT NULL AND start > prev_end THEN start - prev_end ELSE NULL END) / 1e3, 1)
             AS avg_gap_us,
         SUM(CASE WHEN prev_end IS NOT NULL AND (start - prev_end) > 1000000 THEN 1 ELSE 0 END)
-            AS sync_stalls
+            AS sync_stalls,
+        COUNT(DISTINCT graph_node_id) AS graph_node_count,
+        COUNT(DISTINCT graph_id) AS graph_id_count
     FROM launch_gaps
     GROUP BY streamId
 )
@@ -63,7 +67,9 @@ SELECT
     avg_kernel_us,
     max_gap_ms,
     avg_gap_us,
-    sync_stalls
+    sync_stalls,
+    graph_node_count,
+    graph_id_count
 FROM stream_stats
 ORDER BY kernel_count DESC, streamId ASC
 LIMIT {limit}""",
@@ -81,14 +87,16 @@ def _format(rows):
     lines = [
         "── Kernel Launch Patterns ──",
         f"{'Stream':>7s} {'Kernels':>8s} {'Span(ms)':>10s} "
-        f"{'Rate/ms':>8s} {'Occ%':>6s} {'MaxGap':>10s} {'Stalls':>7s}",
-        "─" * 65,
+        f"{'Rate/ms':>8s} {'Occ%':>6s} {'MaxGap':>10s} {'Stalls':>7s} "
+        f"{'GraphNodes':>10s} {'Graphs':>7s}",
+        "─" * 86,
     ]
     for r in rows:
         lines.append(
             f"s{r['streamId']:>5d} {r['kernel_count']:>8d} "
             f"{r['span_ms']:>10.2f} {r['dispatch_rate_per_ms']:>8.1f} "
             f"{r['occupancy_pct']:>5.1f}% {r['max_gap_ms']:>8.3f}ms "
-            f"{r['sync_stalls']:>7d}"
+            f"{r['sync_stalls']:>7d} {r['graph_node_count']:>10d} "
+            f"{r['graph_id_count']:>7d}"
         )
     return "\n".join(lines)

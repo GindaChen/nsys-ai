@@ -313,7 +313,7 @@ def test_the_direct_attach_builder_keeps_the_same_total_order():
     # Pinned as a literal on purpose: this is a tripwire, so a build change that
     # forgets to invalidate stops here rather than shipping a stale cache. Update
     # it in the same commit as the bump.
-    assert "_CACHE_VERSION = 17" in cache
+    assert "_CACHE_VERSION = 18" in cache
 
 
 # ── Cross-backend agreement ─────────────────────────────────────────────────

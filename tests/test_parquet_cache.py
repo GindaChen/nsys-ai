@@ -831,7 +831,7 @@ class TestTensorCorePatterns:
         assert not re.search(active, name.lower())
 
 
-def test_the_map_is_built_by_the_sweep_and_carries_all_nine_columns(tmp_path):
+def test_the_map_is_built_by_the_sweep_and_carries_graph_attribution_columns(tmp_path):
     """NVTX attribution is a stack sweep, not a general inequality join.
 
     NVIDIA documents eventType 59 as a Push/Pop range maintaining an nvtxRange
@@ -842,11 +842,11 @@ def test_the_map_is_built_by_the_sweep_and_carries_all_nine_columns(tmp_path):
     twenty-plus minutes to 60.6 s.
 
     Output was compared row-for-row against the IEJoin's on that capture:
-    3,042,699 rows, zero differences either direction, all nine columns.
+    3,042,699 rows, zero differences either direction, across the full map schema.
 
-    Nine columns is the other half, and this is now the only guard on it. A
+    The map schema is the other half, and this is now the only guard on it. A
     second, unreachable builder used to exist alongside the sweep; unifying the
-    two on one nine-column writer fixed the shape but not the values — it went
+    two on one map writer fixed the shape but not the values — it went
     on filling is_tc_eligible/uses_tc with zeroes where the sweep writes 296/296
     on this fixture, and since consumers probe those columns by *presence*
     (connection.cached_nvtx_map_has_embedded_tc), nine zeroed columns read as
@@ -883,6 +883,8 @@ def test_the_map_is_built_by_the_sweep_and_carries_all_nine_columns(tmp_path):
         "k_start",
         "k_end",
         "k_dur_ns",
+        "graph_node_id",
+        "graph_id",
         "is_tc_eligible",
         "uses_tc",
     ], f"map schema drifted: {cols}"
@@ -930,7 +932,7 @@ class TestStreamedSweep:
     Peak memory then tracks the batch rather than the profile: measured on a
     3.5 GB capture (15.9 M ranges, 3.1 M kernel-runtime rows) the build went from
     6.95 GB peak / 51.2 s to 3.31 GB / 37.3 s, producing 3,042,699 rows with zero
-    differences in either direction across all nine columns and the path
+    differences in either direction across all map columns and the path
     dictionary.
 
     These tests assert *contents*, not that a build finished, because both known
@@ -960,7 +962,7 @@ class TestStreamedSweep:
 
     @staticmethod
     def _streamed(db, cache_dir, out_dir):
-        """Run the production builder into ``out_dir`` and read its nine columns
+        """Run the production builder into ``out_dir`` and read its map columns
         back with the path text joined in."""
         out_dir.mkdir(parents=True, exist_ok=True)
         built = parquet_cache._build_nvtx_kernel_map_from_parquet(db, cache_dir, out_dir)
