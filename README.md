@@ -506,6 +506,16 @@ policy, and pull-request checklist.
 
 ---
 
+## Community
+
+Contributions are welcome through issues and pull requests. Please read the
+[Code of Conduct](https://github.com/GindaChen/nsys-ai/blob/main/CODE_OF_CONDUCT.md)
+before participating, and
+[CONTRIBUTING.md](https://github.com/GindaChen/nsys-ai/blob/main/CONTRIBUTING.md)
+for the workflow a change goes through.
+
+---
+
 ## License
 
 MIT — see [LICENSE](https://github.com/GindaChen/nsys-ai/blob/main/LICENSE).
