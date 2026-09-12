@@ -268,3 +268,68 @@ def test_a_versioned_graph_activity_table_is_resolved():
         "CUPTI_ACTIVITY_KIND_GRAPH_TRACE_V3",
     ):
         assert graph_tables([name]), f"{name} was dropped"
+
+
+def _graph_launch_connection():
+    """A replay whose runtime row is named the way a graph launch really is.
+
+    ``_graph_connection`` names its replay ``cudaLaunchKernel``, so it exercises
+    the charge correction without ever exercising the API filter that decides
+    whether a graph replay is seen at all.
+    """
+    conn = _graph_connection()
+    conn.execute("INSERT INTO StringIds VALUES (20, 'cudaGraphLaunch_v10000')")
+    rows = [
+        (0x100000000, 0, 7, 7, 10_000, 10_005, 1, 2, 101, 42),
+        (0x100000000, 0, 7, 7, 10_020, 10_025, 1, 2, 102, 42),
+        (0x100000000, 0, 7, 7, 10_040, 10_045, 1, 2, 103, 42),
+    ]
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
+        "(globalPid, deviceId, streamId, correlationId, start, end, shortName, "
+        "demangledName, graphNodeId, graphId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?, ?, ?)",
+        (0x100000007, 7, 8_000, 9_000, 20),
+    )
+    conn.commit()
+    return conn
+
+
+def test_a_graph_replay_is_measured_not_silently_dropped():
+    """cudaGraphLaunch matches neither 'cudaLaunch%' nor 'cuLaunch%'.
+
+    Those kernels had no runtime row to join to and fell out of
+    launch_candidates before any aggregation, so a workload dispatching through
+    CUDA graphs was absent from the skill whose whole subject is dispatch cost.
+    """
+    rows = OVERHEAD.execute_fn(_graph_launch_connection(), min_launches=1, device=0)
+
+    assert rows, "the graph replay produced no rows at all"
+    assert rows[0]["launch_count"] == 3
+    assert rows[0]["graph_id_count"] == 1
+
+
+def test_one_graph_launch_is_charged_once_for_all_its_nodes():
+    """The #569 correction, on rows that can now actually reach it.
+
+    One 1ms cudaGraphLaunch driving three kernel nodes costs 1ms of dispatch,
+    not 3ms: the charge belongs to the call, not to each node it replayed.
+    """
+    rows = OVERHEAD.execute_fn(_graph_launch_connection(), min_launches=1, device=0)
+
+    assert rows[0]["total_api_ms"] == 0.001
+    assert rows[0]["api_calls_charged"] == 1
+
+
+def test_a_capture_without_graph_launches_is_unchanged():
+    """The complement: the widened filter must not alter ordinary captures."""
+    conn = _graph_connection()
+    _insert_graph_replay(conn)
+
+    rows = OVERHEAD.execute_fn(conn, min_launches=1, device=0)
+
+    assert rows[0]["launch_count"] == 2
+    assert rows[0]["total_api_ms"] == 0.001

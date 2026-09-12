@@ -130,8 +130,25 @@ def _execute(conn, **kwargs):
                 r."end" - r.start AS api_duration_ns
             FROM {runtime_table} r
             JOIN {string_table} s_api ON r.nameId = s_api.id
+            -- cudaGraphLaunch/cuGraphLaunch begin 'cudaGraph'/'cuGraph' and so
+            -- matched neither prefix. Kernels dispatched by a graph replay had
+            -- no runtime row to join to and dropped out before any aggregation:
+            -- absent entirely from the one skill whose subject is dispatch
+            -- cost, on exactly the workloads that dispatch through graphs.
+            --
+            -- api_charge_ns below already charges one API call once across all
+            -- the kernels sharing its correlation id, which is the correction a
+            -- graph replay needs -- it was written for these rows and could not
+            -- engage while they were filtered out.
+            --
+            -- Nsight records these names with an optional version suffix
+            -- ('cudaLaunchKernel_v7000' beside a bare 'cuLaunchKernelEx'), so
+            -- the prefix match covers both spellings. A capture with no graph
+            -- launches matches nothing extra and is unchanged.
             WHERE (s_api.value LIKE 'cudaLaunch%'
-                   OR s_api.value LIKE 'cuLaunch%')
+                   OR s_api.value LIKE 'cuLaunch%'
+                   OR s_api.value LIKE 'cudaGraphLaunch%'
+                   OR s_api.value LIKE 'cuGraphLaunch%')
               AND r."end" >= r.start
         ),
         launch_candidates AS (
