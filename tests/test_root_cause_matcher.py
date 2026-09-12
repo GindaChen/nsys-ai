@@ -210,3 +210,78 @@ class TestTheIdleLabelNamesItsMeasurement:
         })
 
         assert "270.0ms total GPU idle" in evidence, evidence
+
+
+class TestTheSyncShareNeedsAWallClockDenominator:
+    """The over-synchronisation share divided by whichever figure was available.
+
+    ``total_idle_ms`` is the device measurement when the device sweep ran and
+    the per-stream sum when it did not, and the sum exceeds wall-clock idle by
+    roughly the stream count. One profile with one synchronisation cost
+    therefore answered differently depending on whether an unrelated sweep
+    succeeded.
+    """
+
+    SPAN = {"profile_start_ns": 0, "profile_end_ns": 310_000_000}
+
+    @staticmethod
+    def _over_sync(summary, sync_ms, density):
+        import sqlite3
+        from unittest.mock import patch
+
+        from nsys_ai.skills.builtins import root_cause_matcher as rcm
+
+        gaps = [
+            {"gap_ns": 30_000_000, "attribution": {"category": "synchronization"}}
+            for _ in range(9)
+        ]
+
+        def fake(name, conn, **kw):
+            if name == "gpu_idle_gaps":
+                return [summary, *gaps]
+            if name == "sync_cost_analysis":
+                return [{"total_sync_wall_ms": sync_ms, "sync_density_pct": density}]
+            return []
+
+        with patch.object(rcm, "_safe_execute", side_effect=fake):
+            findings = rcm._execute(sqlite3.connect(":memory:"), _skip_device_validation=True)
+        rec = next(
+            (f["recommendation"] for f in findings if f["pattern"].startswith("GPU Bubbles")), ""
+        )
+        return "Critical Over-Synchronization" in rec
+
+    def test_the_stream_sum_is_not_used_as_the_denominator(self):
+        """500ms of sync over a stream sum of 810ms read as a 61% share.
+
+        The numbers are chosen so the two behaviours differ: a smaller sync cost
+        clears neither threshold and would pass whether or not the share is
+        computed, which would make this test prove nothing. Here the old code
+        declares critical over-synchronisation off a ratio whose denominator is
+        three streams' idle added together, and the profile is 310ms long.
+        """
+        assert not self._over_sync(
+            {"_summary": True, "total_idle_ms": 810.0, **self.SPAN}, 500.0, 5.0
+        )
+
+    def test_the_device_figure_still_drives_the_share(self):
+        """Complement guard: a real wall-clock share must still fire.
+
+        200ms of sync against 270ms of device idle is 74%. This holds before and
+        after the change by design -- it guards the fix against over-correcting
+        into silence, rather than demonstrating the defect.
+        """
+        assert self._over_sync(
+            {"_summary": True, "device_idle_ms": 270.0, "total_idle_ms": 810.0, **self.SPAN},
+            200.0,
+            5.0,
+        )
+
+    def test_density_still_carries_the_rule_without_a_device_figure(self):
+        """Complement guard: the share is withheld, the finding is not.
+
+        sync_density_pct is normalised against the profile, so it is unaffected
+        by which idle figure was available and still carries the rule.
+        """
+        assert self._over_sync(
+            {"_summary": True, "total_idle_ms": 810.0, **self.SPAN}, 200.0, 44.7
+        )

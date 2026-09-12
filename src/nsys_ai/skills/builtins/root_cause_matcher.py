@@ -290,7 +290,25 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 sync_ms = sync_data[0].get("total_sync_wall_ms", 0)
                 sync_density = sync_data[0].get("sync_density_pct", 0)
                 # If sync time accounts for more than half of the idle time, or > 15% of profile:
-                if (total_idle_ms > 0 and sync_ms / total_idle_ms > 0.5) or sync_density > 15.0:
+                # The share needs a wall-clock denominator. total_idle_ms is the
+                # device figure when the device sweep ran and the per-stream sum
+                # when it did not, and the sum exceeds wall-clock idle by roughly
+                # the stream count -- so one profile with one synchronisation
+                # cost answered differently depending on whether that sweep
+                # happened to succeed: 200ms of sync against 270ms of device idle
+                # is 74% and fires, the same 200ms against the 810ms those three
+                # streams summed to is 25% and does not.
+                #
+                # Where the device figure is absent there is no wall-clock idle
+                # to divide by, and bounding the per-stream sum by the profile
+                # span would be inventing one. sync_density_pct is normalised
+                # against the profile and carries the rule there.
+                sync_share = (
+                    sync_ms / total_idle_ms
+                    if device_measured and total_idle_ms > 0
+                    else None
+                )
+                if (sync_share is not None and sync_share > 0.5) or sync_density > 15.0:
                     rec = (
                         "Critical Over-Synchronization Detected. "
                         f"{sync_density:.1f}% of this profile is CPU-blocked by synchronization calls "
